@@ -23,6 +23,8 @@ import svg_layers from "ikonate/icons/layers.svg?raw";
 import svg_list from "ikonate/icons/list.svg?raw";
 import svg_settings from "ikonate/icons/settings.svg?raw";
 import { debounce } from "lodash-es";
+import { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
+import { AlignmentLinkTopbarButton } from "#src/alignment_link/ui/alignment_link_button.js";
 import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
@@ -303,6 +305,7 @@ class TrackableViewerState extends CompoundTrackable {
     this.add("toolPalettes", viewer.toolPalettes);
     this.add("editSession", viewer.editSessionHost.state);
     this.add("editPreferences", viewer.editSessionHost.editPreferences);
+    this.add("alignmentLink", viewer.alignmentLink.state);
   }
 
   restoreState(obj: any) {
@@ -440,6 +443,12 @@ export class Viewer extends RefCounted implements ViewerState {
    * fields that need to precede the constructor body.
    */
   editSessionHost!: EditSessionHost;
+  /**
+   * Annotation-linked side-by-side view sync. Constructed in the constructor
+   * body alongside `editSessionHost`; its layout hook attaches lazily since
+   * `this.layout` is only built inside `makeUI()`.
+   */
+  alignmentLink!: AlignmentLinkController;
   showAxisLines = new TrackableBoolean(true, true);
   wireFrame = new TrackableBoolean(false, false);
   enableAdaptiveDownsampling = new TrackableBoolean(true, true);
@@ -621,6 +630,10 @@ export class Viewer extends RefCounted implements ViewerState {
     // `host.sessionLock.isLayerDataSourceLocked(...)` without taking a
     // direct Viewer dependency.
     this.layerSpecification.editSessionHost = this.editSessionHost;
+
+    this.alignmentLink = this.registerDisposer(
+      new AlignmentLinkController(this),
+    );
 
     this.registerDisposer(
       display.updateStarted.add(() => {
@@ -986,6 +999,20 @@ export class Viewer extends RefCounted implements ViewerState {
       const anchor = mousePositionWidget.element.nextSibling;
       topRow.insertBefore(topbarMount, anchor);
       topRow.insertBefore(editingTopbarRightSpacer, anchor);
+    }
+
+    {
+      // Alignment-link button (annotation-linked side-by-side view sync):
+      // appended at the right edge of the top row, after the standard icon
+      // buttons. Settings live in the button's popover.
+      const alignmentLinkMount = document.createElement("div");
+      alignmentLinkMount.style.display = "contents";
+      this.registerDisposer(
+        mountComponent(alignmentLinkMount, AlignmentLinkTopbarButton, {
+          controller: this.alignmentLink,
+        }),
+      );
+      topRow.appendChild(alignmentLinkMount);
     }
 
     {
