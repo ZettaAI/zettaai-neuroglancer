@@ -275,6 +275,7 @@ export class AlignmentLinkController extends RefCounted {
   private lastMirrored = false;
   private error: string | undefined;
   private armedSubscriptions: Array<[AlignmentSignal, () => void]> = [];
+  private annotationSourceSubscription: (() => void) | undefined;
   private rearmTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(public host: AlignmentLinkHost) {
@@ -284,7 +285,16 @@ export class AlignmentLinkController extends RefCounted {
     this.registerDisposer(() => this.state.changed.remove(onStateChanged));
     // Layers restore asynchronously; retry arming as they appear.
     const onLayersChanged = () => {
-      if (this.state.enabled && !this.armed) this.applyState();
+      if (!this.state.enabled) return;
+      if (!this.armed) {
+        this.applyState();
+        return;
+      }
+      // A late-restoring layer may be the real line layer (shared-URL load).
+      if (this.maybeRebindAnnotationSource()) {
+        this.syncFollowerFromLeader();
+        this.updateStatus();
+      }
     };
     this.host.layerManager.layersChanged.add(onLayersChanged);
     this.registerDisposer(() =>
@@ -536,6 +546,49 @@ export class AlignmentLinkController extends RefCounted {
     orientation.changed.dispatch();
   }
 
+  private bindAnnotationSource(info: {
+    name: string;
+    source: AlignmentAnnotationSource;
+  }) {
+    this.unbindAnnotationSource();
+    this.annotationSource = info.source;
+    this.annotationLayerName = info.name;
+    const handler = () => this.onAnnotationsChanged();
+    info.source.changed.add(handler);
+    this.annotationSourceSubscription = () =>
+      info.source.changed.remove(handler);
+  }
+
+  private unbindAnnotationSource() {
+    this.annotationSourceSubscription?.();
+    this.annotationSourceSubscription = undefined;
+    this.annotationSource = undefined;
+    this.annotationLayerName = undefined;
+  }
+
+  /**
+   * On a fresh load of a shared URL, layers restore asynchronously: arming
+   * can happen while the line layer is still loading, leaving the source
+   * bound to a lineless fallback (e.g. a point-annotation layer that
+   * restored first). Whenever the bound source has no usable lines, look for
+   * a layer that does and rebind.
+   */
+  private maybeRebindAnnotationSource(): boolean {
+    if (!this.armed) return false;
+    const current = this.annotationSource;
+    if (current !== undefined && this.countLines(current) > 0) return false;
+    const candidate = this.findAnnotationSource();
+    if (
+      candidate === undefined ||
+      candidate.source === current ||
+      this.countLines(candidate.source) === 0
+    ) {
+      return false;
+    }
+    this.bindAnnotationSource(candidate);
+    return true;
+  }
+
   /**
    * Picks the endpoint->view assignment that best predicts where the
    * follower currently is. Commits only when the two assignments are clearly
@@ -588,6 +641,7 @@ export class AlignmentLinkController extends RefCounted {
    * syncing must not run yet.
    */
   private pairsForSync(): AlignmentPair[] | undefined {
+    this.maybeRebindAnnotationSource();
     let pairs = this.linePairs(this.effectiveReversed());
     this.lastCount = pairs.length;
     if (this.directionPending && pairs.length > 0) {
@@ -818,8 +872,7 @@ export class AlignmentLinkController extends RefCounted {
 
     this.leader = leader;
     this.follower = follower;
-    this.annotationSource = annotationInfo.source;
-    this.annotationLayerName = annotationInfo.name;
+    this.bindAnnotationSource(annotationInfo);
     this.directionPending = this.state.reversed === undefined;
     this.directionWarned = false;
     if (this.state.reversed !== undefined) {
@@ -852,10 +905,6 @@ export class AlignmentLinkController extends RefCounted {
         this.syncLeaderFromFollower(),
       );
     }
-    this.subscribe(this.annotationSource.changed, () =>
-      this.onAnnotationsChanged(),
-    );
-
     this.armed = true;
     this.syncFollowerFromLeader();
   }
@@ -896,8 +945,7 @@ export class AlignmentLinkController extends RefCounted {
     this.armed = false;
     this.leader = undefined;
     this.follower = undefined;
-    this.annotationSource = undefined;
-    this.annotationLayerName = undefined;
+    this.unbindAnnotationSource();
     this.prevFollowerPositionLink = undefined;
     this.prevFollowerOrientationLink = undefined;
     this.lastFitMode = undefined;

@@ -672,6 +672,54 @@ describe("AlignmentLinkController", () => {
     expect(pos(follower)[1]).toBeCloseTo(70);
   });
 
+  it("rebinds from a lineless fallback layer once the line layer restores (shared-URL load order)", () => {
+    const leader = makeLgv([100, 100, 10]);
+    const follower = makeLgv([340, 110, 11], 1);
+    // The host starts with only a point-annotation layer ready (the line
+    // layer restores later, as happens on a fresh load of a shared URL).
+    const fake = makeHost([leader, follower], []);
+    const managedLayers = fake.host.layerManager.managedLayers as Array<{
+      name: string;
+      layer: object | null;
+    }>;
+    managedLayers[0] = {
+      name: "Slab Transitions",
+      layer: managedLayers[0].layer,
+    };
+    managedLayers.push({ name: "annotation", layer: null });
+
+    controller = new AlignmentLinkController(fake.host);
+    controller.state.restoreState({});
+    // Armed, but bound to the lineless fallback.
+    let status = controller.status.value;
+    expect(status.enabled).toBe(true);
+    expect(status.error).toBeUndefined();
+    expect(status.lineCount).toBe(0);
+
+    // The line layer finishes restoring.
+    const lineSource = {
+      annotationMap: new Map<string, Annotation>([
+        ["l1", makeLine("l1", [100, 100, 10], [350, 120, 11])],
+      ]),
+      pending: new Set<string>(),
+      changed: new FakeSignal(),
+    };
+    managedLayers[1] = {
+      name: "annotation",
+      layer: { localAnnotations: lineSource },
+    };
+    (fake.host.layerManager.layersChanged as FakeSignal).dispatch();
+
+    status = controller.status.value;
+    expect(status.annotationLayerName).toBe("annotation");
+    expect(status.lineCount).toBe(1);
+    // Rebinding also snapped the follower onto the correspondence.
+    expect(pos(follower)[0]).toBeCloseTo(350);
+    // Live edits on the rebound source are picked up.
+    moveTo(leader, [110, 105, 10]);
+    expect(pos(follower)[0]).toBeCloseTo(360);
+  });
+
   it("arms automatically when the state is restored from a shared URL", () => {
     const leader = makeLgv([100, 100, 10]);
     const follower = makeLgv([340, 110, 11], 1);
