@@ -87,6 +87,31 @@ export function AlignmentLinkMenuSection({
         />
       </div>
       <label class="neuroglancer-alignment-link-row">
+        <span>Lines from</span>
+        <select
+          value={status.configuredLayerName ?? ""}
+          disabled={!status.enabled}
+          onChange={(event) => {
+            const value = (event.target as HTMLSelectElement).value;
+            controller.setLayerName(value === "" ? undefined : value);
+          }}
+        >
+          <option value="">Auto (first layer with lines)</option>
+          {[
+            ...new Set([
+              ...controller.annotationLayerNames(),
+              ...(status.configuredLayerName !== undefined
+                ? [status.configuredLayerName]
+                : []),
+            ]),
+          ].map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label class="neuroglancer-alignment-link-row">
         <span>Transform</span>
         <select
           value={status.model}

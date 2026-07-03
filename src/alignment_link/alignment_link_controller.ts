@@ -163,7 +163,10 @@ export interface AlignmentLinkStatus {
    * positions sync with mirrored motion, orientation stays untouched.
    */
   mirrored: boolean;
+  /** Layer the fit is currently bound to. */
   annotationLayerName: string | undefined;
+  /** Explicit layer selection from the state; undefined = auto. */
+  configuredLayerName: string | undefined;
 }
 
 const DISABLED_STATUS: AlignmentLinkStatus = {
@@ -177,6 +180,7 @@ const DISABLED_STATUS: AlignmentLinkStatus = {
   rotationDeg: undefined,
   mirrored: false,
   annotationLayerName: undefined,
+  configuredLayerName: undefined,
 };
 
 /**
@@ -189,6 +193,7 @@ export class TrackableAlignmentLinkState implements Trackable {
   private enabled_ = false;
   private model_: AlignmentModel = "local";
   private reversed_: boolean | undefined = undefined;
+  private layerName_: string | undefined = undefined;
 
   get enabled() {
     return this.enabled_;
@@ -217,11 +222,22 @@ export class TrackableAlignmentLinkState implements Trackable {
     this.changed.dispatch();
   }
 
+  /** Annotation layer to fit from; undefined = first layer with lines. */
+  get layerName() {
+    return this.layerName_;
+  }
+  set layerName(value: string | undefined) {
+    if (this.layerName_ === value) return;
+    this.layerName_ = value;
+    this.changed.dispatch();
+  }
+
   toJSON() {
     if (!this.enabled_) return undefined;
-    const json: { model?: string; reversed?: boolean } = {};
+    const json: { model?: string; reversed?: boolean; layer?: string } = {};
     if (this.model_ !== "local") json.model = this.model_;
     if (this.reversed_ !== undefined) json.reversed = this.reversed_;
+    if (this.layerName_ !== undefined) json.layer = this.layerName_;
     return json;
   }
 
@@ -229,6 +245,7 @@ export class TrackableAlignmentLinkState implements Trackable {
     this.enabled_ = false;
     this.model_ = "local";
     this.reversed_ = undefined;
+    this.layerName_ = undefined;
     this.changed.dispatch();
   }
 
@@ -248,6 +265,7 @@ export class TrackableAlignmentLinkState implements Trackable {
       "reversed",
       verifyBoolean,
     );
+    this.layerName_ = verifyOptionalObjectProperty(obj, "layer", verifyString);
     this.enabled_ = true;
     this.changed.dispatch();
   }
@@ -313,6 +331,26 @@ export class AlignmentLinkController extends RefCounted {
 
   setModel(model: AlignmentModel) {
     this.state.model = model;
+  }
+
+  /** Selects the annotation layer to fit from; undefined = auto-detect. */
+  setLayerName(name: string | undefined) {
+    this.state.layerName = name;
+  }
+
+  /** Names of layers with local annotations, for the layer selector UI. */
+  annotationLayerNames(): string[] {
+    const names: string[] = [];
+    for (const managedLayer of this.host.layerManager.managedLayers) {
+      const source = (
+        managedLayer.layer as
+          | { localAnnotations?: AlignmentAnnotationSource }
+          | null
+          | undefined
+      )?.localAnnotations;
+      if (source?.annotationMap !== undefined) names.push(managedLayer.name);
+    }
+    return names;
   }
 
   /** Flips the line-endpoint assignment, overriding auto-detection. */
@@ -438,6 +476,7 @@ export class AlignmentLinkController extends RefCounted {
   private findAnnotationSource():
     | { name: string; source: AlignmentAnnotationSource }
     | undefined {
+    const forced = this.state.layerName;
     let fallback:
       | { name: string; source: AlignmentAnnotationSource }
       | undefined;
@@ -449,12 +488,20 @@ export class AlignmentLinkController extends RefCounted {
           | undefined
       )?.localAnnotations;
       if (source?.annotationMap === undefined) continue;
+      if (forced !== undefined) {
+        // An explicit selection binds regardless of line count (the user may
+        // be about to draw into it).
+        if (managedLayer.name === forced) {
+          return { name: managedLayer.name, source };
+        }
+        continue;
+      }
       if (this.countLines(source) > 0) {
         return { name: managedLayer.name, source };
       }
       fallback ??= { name: managedLayer.name, source };
     }
-    return fallback;
+    return forced !== undefined ? undefined : fallback;
   }
 
   private linePairs(reversed: boolean): AlignmentPair[] {
@@ -575,7 +622,19 @@ export class AlignmentLinkController extends RefCounted {
    */
   private maybeRebindAnnotationSource(): boolean {
     if (!this.armed) return false;
+    const forced = this.state.layerName;
     const current = this.annotationSource;
+    if (forced !== undefined) {
+      if (current !== undefined && this.annotationLayerName === forced) {
+        return false;
+      }
+      const candidate = this.findAnnotationSource();
+      if (candidate === undefined || candidate.source === current) {
+        return false;
+      }
+      this.bindAnnotationSource(candidate);
+      return true;
+    }
     if (current !== undefined && this.countLines(current) > 0) return false;
     const candidate = this.findAnnotationSource();
     if (
@@ -844,7 +903,11 @@ export class AlignmentLinkController extends RefCounted {
 
     const annotationInfo = this.findAnnotationSource();
     if (annotationInfo === undefined) {
-      this.fail("no local annotation layer found");
+      this.fail(
+        this.state.layerName !== undefined
+          ? `annotation layer "${this.state.layerName}" not found`
+          : "no local annotation layer found",
+      );
       return;
     }
 
@@ -966,6 +1029,7 @@ export class AlignmentLinkController extends RefCounted {
       rotationDeg: this.lastRotationDeg,
       mirrored: this.lastMirrored,
       annotationLayerName: this.annotationLayerName,
+      configuredLayerName: this.state.layerName,
     };
     const prev = this.status.value;
     for (const key of Object.keys(next) as (keyof AlignmentLinkStatus)[]) {

@@ -318,6 +318,27 @@ function makeViewerMenu(parent: HTMLElement, viewer: LayerGroupViewer) {
     label.textContent = name;
     label.appendChild(widget.element);
     menu.appendChild(label);
+    // While the annotation alignment link is active it owns the position and
+    // cross-section orientation links (forcing the follower's to unlinked and
+    // driving the values), so manual changes here would be overridden —
+    // disable the selectors to make that explicit.
+    const { alignmentLink } = viewer.viewerState;
+    if (
+      alignmentLink !== undefined &&
+      (name === "Position" || name === "Cross-section orientation")
+    ) {
+      const updateDisabled = () => {
+        const active = alignmentLink.status.value.enabled;
+        widget.element.disabled = active;
+        widget.element.title = active
+          ? "Managed by the annotation alignment link"
+          : "";
+      };
+      updateDisabled();
+      contextMenu.registerDisposer(
+        alignmentLink.status.changed.add(updateDisabled),
+      );
+    }
   }
   const { alignmentLink } = viewer.viewerState;
   if (alignmentLink !== undefined) {

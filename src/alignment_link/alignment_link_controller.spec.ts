@@ -167,9 +167,11 @@ describe("TrackableAlignmentLinkState", () => {
     controller.state.enabled = true;
     controller.state.model = "affine";
     controller.state.reversed = true;
+    controller.state.layerName = "my lines";
     expect(controller.state.toJSON()).toEqual({
       model: "affine",
       reversed: true,
+      layer: "my lines",
     });
 
     const restored = new AlignmentLinkController(makeHost([], []).host);
@@ -177,6 +179,7 @@ describe("TrackableAlignmentLinkState", () => {
     expect(restored.state.enabled).toBe(true);
     expect(restored.state.model).toBe("affine");
     expect(restored.state.reversed).toBe(true);
+    expect(restored.state.layerName).toBe("my lines");
 
     restored.state.restoreState(undefined);
     expect(restored.state.enabled).toBe(false);
@@ -670,6 +673,47 @@ describe("AlignmentLinkController", () => {
     moveTo(leader, [130, 110, 10]);
     expect(pos(follower)[0]).toBeCloseTo(50);
     expect(pos(follower)[1]).toBeCloseTo(70);
+  });
+
+  it("honors an explicit annotation layer selection", () => {
+    const leader = makeLgv([100, 100, 10]);
+    const follower = makeLgv([340, 110, 11], 1);
+    const fake = makeHost(
+      [leader, follower],
+      [makeLine("l1", [100, 100, 10], [350, 120, 11])],
+    );
+    // A second line layer with a different mapping (+1000 x offset).
+    const otherSource = {
+      annotationMap: new Map<string, Annotation>([
+        ["o1", makeLine("o1", [100, 100, 10], [1350, 120, 11])],
+      ]),
+      pending: new Set<string>(),
+      changed: new FakeSignal(),
+    };
+    (
+      fake.host.layerManager.managedLayers as Array<{
+        name: string;
+        layer: object | null;
+      }>
+    ).push({ name: "other", layer: { localAnnotations: otherSource } });
+
+    controller = new AlignmentLinkController(fake.host);
+    controller.setEnabled(true);
+    // Auto mode binds the first layer with lines.
+    expect(controller.status.value.annotationLayerName).toBe("annotation");
+    expect(controller.annotationLayerNames()).toEqual(["annotation", "other"]);
+
+    controller.setLayerName("other");
+    expect(controller.status.value.annotationLayerName).toBe("other");
+    expect(controller.status.value.configuredLayerName).toBe("other");
+    // Resynced using the selected layer's mapping.
+    expect(pos(follower)[0]).toBeCloseTo(1350);
+
+    // A selection that matches no layer surfaces an arm error.
+    controller.setEnabled(false);
+    controller.state.layerName = "missing";
+    controller.setEnabled(true);
+    expect(controller.status.value.error).toMatch(/missing/);
   });
 
   it("rebinds from a lineless fallback layer once the line layer restores (shared-URL load order)", () => {
