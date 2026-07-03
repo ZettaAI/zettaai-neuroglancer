@@ -3,75 +3,38 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  *
- * Styling for the alignment-link topbar button and its settings popover.
- * Mirrors the editing topbar's button treatment; values resolve against the
- * --nge-* design tokens in editing_theme.css.
+ * Styling for the alignment-link section of the layer-group viewer context
+ * menu. Values resolve against the --nge-* design tokens in editing_theme.css
+ * with fallbacks matching neuroglancer's dark menu styling.
  */
 
-.neuroglancer-alignment-link {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  align-self: center;
-  font-family: var(--nge-font);
-  font-size: var(--nge-text-size);
-  color: var(--nge-text-muted);
-}
-
-.neuroglancer-alignment-link-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid var(--nge-divider);
-  border-radius: var(--nge-radius, 4px);
-  background: transparent;
-  color: var(--nge-text-muted);
-  font: inherit;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.neuroglancer-alignment-link-button:hover {
-  color: var(--nge-text);
-  background: var(--nge-hover, rgba(255, 255, 255, 0.08));
-}
-
-.neuroglancer-alignment-link-button.active {
-  color: var(--nge-accent, #4a9eff);
-  border-color: var(--nge-accent, #4a9eff);
-}
-
-.neuroglancer-alignment-link-popover {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 100;
+.neuroglancer-alignment-link-menu-section {
   display: flex;
   flex-direction: column;
-  gap: var(--nge-space-2, 8px);
-  min-width: 240px;
-  max-width: 320px;
-  padding: var(--nge-space-3, 12px);
-  border: 1px solid var(--nge-divider);
-  border-radius: var(--nge-radius, 4px);
-  background: var(--nge-surface, #1e1e1e);
-  color: var(--nge-text);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  gap: 6px;
+  max-width: 280px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--nge-divider, rgba(255, 255, 255, 0.2));
+  font-family: var(--nge-font, inherit);
+}
+
+.neuroglancer-alignment-link-title {
+  font-weight: 600;
 }
 
 .neuroglancer-alignment-link-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--nge-space-2, 8px);
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .neuroglancer-alignment-link-row select {
   background: var(--nge-surface-raised, #2a2a2a);
-  color: var(--nge-text);
-  border: 1px solid var(--nge-divider);
+  color: var(--nge-text, #fff);
+  border: 1px solid var(--nge-divider, rgba(255, 255, 255, 0.2));
   border-radius: var(--nge-radius, 4px);
   padding: 2px 4px;
   font: inherit;
@@ -80,16 +43,16 @@
 .neuroglancer-alignment-link-swap {
   align-self: flex-start;
   padding: 2px 8px;
-  border: 1px solid var(--nge-divider);
+  border: 1px solid var(--nge-divider, rgba(255, 255, 255, 0.2));
   border-radius: var(--nge-radius, 4px);
   background: transparent;
-  color: var(--nge-text-muted);
+  color: var(--nge-text-muted, #ccc);
   font: inherit;
   cursor: pointer;
 }
 
 .neuroglancer-alignment-link-swap:hover:not(:disabled) {
-  color: var(--nge-text);
+  color: var(--nge-text, #fff);
   background: var(--nge-hover, rgba(255, 255, 255, 0.08));
 }
 
@@ -99,12 +62,13 @@
 }
 
 .neuroglancer-alignment-link-status {
-  font-size: calc(var(--nge-text-size) - 1px);
+  font-size: 90%;
   line-height: 1.4;
+  white-space: normal;
 }
 
 .neuroglancer-alignment-link-status-muted {
-  color: var(--nge-text-muted);
+  color: var(--nge-text-muted, #aaa);
 }
 
 .neuroglancer-alignment-link-status-warn {

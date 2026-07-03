@@ -20,6 +20,8 @@
 
 import "#src/layer_group_viewer.css";
 import { debounce } from "lodash-es";
+import type { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
+import { attachAlignmentLinkMenuSection } from "#src/alignment_link/ui/alignment_link_menu.js";
 import type { InputEventBindings as DataPanelInputEventBindings } from "#src/data_panel_layout.js";
 import { DataPanelLayoutContainer } from "#src/data_panel_layout.js";
 import type { DisplayContext } from "#src/display_context.js";
@@ -85,6 +87,8 @@ declare let NEUROGLANCER_SHOW_LAYER_BAR_EXTRA_BUTTONS: boolean | undefined;
 
 export interface LayerGroupViewerState {
   display: Borrowed<DisplayContext>;
+  /** Annotation-linked view sync controller (global; provided by the Viewer). */
+  alignmentLink?: Borrowed<AlignmentLinkController>;
   navigationState: Owned<NavigationState>;
   perspectiveNavigationState: Owned<NavigationState>;
   velocity: Owned<CoordinateSpacePlaybackVelocity>;
@@ -314,6 +318,12 @@ function makeViewerMenu(parent: HTMLElement, viewer: LayerGroupViewer) {
     label.textContent = name;
     label.appendChild(widget.element);
     menu.appendChild(label);
+  }
+  const { alignmentLink } = viewer.viewerState;
+  if (alignmentLink !== undefined) {
+    contextMenu.registerDisposer(
+      attachAlignmentLinkMenuSection(menu, alignmentLink),
+    );
   }
   return contextMenu;
 }

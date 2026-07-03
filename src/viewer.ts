@@ -24,7 +24,6 @@ import svg_list from "ikonate/icons/list.svg?raw";
 import svg_settings from "ikonate/icons/settings.svg?raw";
 import { debounce } from "lodash-es";
 import { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
-import { AlignmentLinkTopbarButton } from "#src/alignment_link/ui/alignment_link_button.js";
 import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
@@ -999,20 +998,6 @@ export class Viewer extends RefCounted implements ViewerState {
       const anchor = mousePositionWidget.element.nextSibling;
       topRow.insertBefore(topbarMount, anchor);
       topRow.insertBefore(editingTopbarRightSpacer, anchor);
-    }
-
-    {
-      // Alignment-link button (annotation-linked side-by-side view sync):
-      // appended at the right edge of the top row, after the standard icon
-      // buttons. Settings live in the button's popover.
-      const alignmentLinkMount = document.createElement("div");
-      alignmentLinkMount.style.display = "contents";
-      this.registerDisposer(
-        mountComponent(alignmentLinkMount, AlignmentLinkTopbarButton, {
-          controller: this.alignmentLink,
-        }),
-      );
-      topRow.appendChild(alignmentLinkMount);
     }
 
     {
