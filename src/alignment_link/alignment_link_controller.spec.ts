@@ -622,6 +622,30 @@ describe("AlignmentLinkController", () => {
     expect(newFollower.viewerNavigationState.position.link.value).toBe(1);
   });
 
+  it("disables itself when the side-by-side layout collapses while armed", async () => {
+    const leader = makeLgv([100, 100, 10]);
+    const follower = makeLgv([340, 110, 11], 1);
+    const fake = makeHost(
+      [leader, follower],
+      [makeLine("l1", [100, 100, 10], [350, 120, 11])],
+    );
+    controller = new AlignmentLinkController(fake.host);
+    controller.setEnabled(true);
+    expect(controller.status.value.enabled).toBe(true);
+
+    // User removes the second layer group: the stack collapses to a single
+    // view where no layer-group menu (the only alignment-link UI) exists, so
+    // an enabled-but-hidden state would silently re-arm on the next split.
+    fake.children.splice(1, 1);
+    fake.layoutChanged.dispatch();
+    await flushTimers();
+
+    expect(controller.state.enabled).toBe(false);
+    expect(controller.status.value.enabled).toBe(false);
+    // Link mode restored on disarm.
+    expect(follower.viewerNavigationState.position.link.value).toBe(1);
+  });
+
   it("waits for lines when the annotation layer is empty", () => {
     const leader = makeLgv([100, 100, 10]);
     const follower = makeLgv([40, 60, 11], 2);

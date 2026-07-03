@@ -720,6 +720,18 @@ export class AlignmentLinkController extends RefCounted {
       const prevPositionLink = this.prevFollowerPositionLink;
       const prevOrientationLink = this.prevFollowerOrientationLink;
       const wasArmed = this.armed;
+      // Collapsing the side-by-side layout while armed is treated as intent
+      // to stop linking: with the layer-group menu gone there would be no UI
+      // left to see or disable the still-enabled state, and it would silently
+      // re-arm on the next split. (Restore-from-URL is unaffected: arm
+      // attempts during restore never have wasArmed set.)
+      if (wasArmed && this.layerGroupViewers().length < 2) {
+        console.info(
+          "[alignment-link] side-by-side layout closed — alignment link disabled",
+        );
+        this.state.enabled = false;
+        return;
+      }
       this.arm();
       if (this.armed && wasArmed) {
         this.reversed = reversed;
