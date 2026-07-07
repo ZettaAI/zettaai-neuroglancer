@@ -13,11 +13,12 @@ import type {
   AlignmentLinkStatus,
 } from "#src/alignment_link/alignment_link_controller.js";
 import type { AlignmentModel } from "#src/alignment_link/alignment_link_math.js";
-import { mountComponent } from "#src/editing/ui/interop/component_mount.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { ToggleSwitch } from "#src/editing/ui/toggle_switch.js";
-import { invokeDisposer } from "#src/util/disposable.js";
 
+// Side effect: ensures the --nge-* tokens exist even when no editing panel is
+// mounted (same convention as the confirm dialog / session-entry modal).
+import "#src/editing/ui/editing_theme.css";
 import "#src/alignment_link/ui/alignment_link.css";
 
 const MODELS: Array<{ value: AlignmentModel; label: string }> = [
@@ -145,24 +146,4 @@ export function AlignmentLinkMenuSection({
       </div>
     </div>
   );
-}
-
-/**
- * Mounts the section into a layer-group context menu; returns a disposer that
- * unmounts it. Kept here so layer_group_viewer.ts needs no Preact/interop
- * imports.
- */
-export function attachAlignmentLinkMenuSection(
-  menu: HTMLElement,
-  controller: AlignmentLinkController,
-): () => void {
-  const container = document.createElement("div");
-  menu.appendChild(container);
-  const unmount = mountComponent(container, AlignmentLinkMenuSection, {
-    controller,
-  });
-  return () => {
-    invokeDisposer(unmount);
-    container.remove();
-  };
 }
