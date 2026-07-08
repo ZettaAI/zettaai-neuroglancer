@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Calcada AI / Zetta AI
+ * Copyright 2026 Zetta AI
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -10,7 +10,7 @@
 
 /**
  * Transform fitting for the annotation-linked view sync
- * (alignment_link_controller.ts).
+ * (alignment_link_session.ts).
  *
  * Fits a 2D (xy) transform T with a constant z offset from line-annotation
  * correspondences, mapping leader-view positions to follower-view positions:

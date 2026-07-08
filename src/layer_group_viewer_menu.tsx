@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Calcada AI / Zetta AI
+ * Copyright 2026 Zetta AI
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -17,10 +17,8 @@
  * Follows the edit-session UI conventions (Preact + `--nge-*` tokens).
  */
 
-import { useEffect, useState } from "preact/hooks";
-
-import type { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
 import { AlignmentLinkMenuSection } from "#src/alignment_link/ui/alignment_link_menu.js";
+import { useAlignmentLinkStatus } from "#src/alignment_link/ui/interop/use_alignment_link_status.js";
 import { mountComponent } from "#src/editing/ui/interop/component_mount.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import type { LayerGroupViewer } from "#src/layer_group_viewer.js";
@@ -32,25 +30,6 @@ import type { TrackableEnum } from "#src/util/trackable_enum.js";
 // mounted (same convention as the confirm dialog / session-entry modal).
 import "#src/editing/ui/editing_theme.css";
 import "#src/layer_group_viewer_menu.css";
-
-/** Unconditional-hook wrapper for the optional alignment-link controller. */
-function useAlignmentLinkEnabled(
-  controller: AlignmentLinkController | undefined,
-): boolean {
-  const [enabled, setEnabled] = useState(
-    controller?.status.value.enabled ?? false,
-  );
-  useEffect(() => {
-    if (controller === undefined) return;
-    const update = () => setEnabled(controller.status.value.enabled);
-    controller.status.changed.add(update);
-    update();
-    return () => {
-      controller.status.changed.remove(update);
-    };
-  }, [controller]);
-  return enabled;
-}
 
 /**
  * One navigation-link row: label left, link-mode select right. The options
@@ -94,11 +73,13 @@ function NavigationLinkRow({
 
 export function LayerGroupViewerMenu({ viewer }: { viewer: LayerGroupViewer }) {
   const { viewerNavigationState } = viewer;
-  const alignmentLink = viewer.viewerState.alignmentLink;
+  const alignmentLink = useAlignmentLinkStatus(
+    viewer.viewerState.alignmentLink,
+  );
   // While the alignment link is active it owns these links (forcing the
   // follower's to unlinked and driving the values), so manual changes would
   // be overridden — disable the selectors to make that explicit.
-  const ownedReason = useAlignmentLinkEnabled(alignmentLink)
+  const ownedReason = alignmentLink?.status.enabled
     ? "Managed by the annotation alignment link"
     : undefined;
 
@@ -170,7 +151,7 @@ export function LayerGroupViewerMenu({ viewer }: { viewer: LayerGroupViewer }) {
         />
       ))}
       {alignmentLink !== undefined && (
-        <AlignmentLinkMenuSection controller={alignmentLink} />
+        <AlignmentLinkMenuSection link={alignmentLink} />
       )}
     </div>
   );

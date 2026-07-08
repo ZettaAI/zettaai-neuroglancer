@@ -20,7 +20,7 @@
 
 import "#src/layer_group_viewer.css";
 import { debounce } from "lodash-es";
-import type { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
+import type { AlignmentLinkSession } from "#src/alignment_link/alignment_link_session.js";
 import type { InputEventBindings as DataPanelInputEventBindings } from "#src/data_panel_layout.js";
 import { DataPanelLayoutContainer } from "#src/data_panel_layout.js";
 import type { DisplayContext } from "#src/display_context.js";
@@ -86,7 +86,7 @@ declare let NEUROGLANCER_SHOW_LAYER_BAR_EXTRA_BUTTONS: boolean | undefined;
 export interface LayerGroupViewerState {
   display: Borrowed<DisplayContext>;
   /** Annotation-linked view sync controller (global; provided by the Viewer). */
-  alignmentLink?: Borrowed<AlignmentLinkController>;
+  alignmentLink?: Borrowed<AlignmentLinkSession>;
   navigationState: Owned<NavigationState>;
   perspectiveNavigationState: Owned<NavigationState>;
   velocity: Owned<CoordinateSpacePlaybackVelocity>;

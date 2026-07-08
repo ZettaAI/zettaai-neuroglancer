@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Calcada AI / Zetta AI
+ * Copyright 2026 Zetta AI
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -8,12 +8,11 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import type {
-  AlignmentLinkController,
-  AlignmentLinkStatus,
-} from "#src/alignment_link/alignment_link_controller.js";
 import type { AlignmentModel } from "#src/alignment_link/alignment_link_math.js";
-import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
+import type {
+  AlignmentLinkStatus,
+  AlignmentLinkUi,
+} from "#src/alignment_link/ui/interop/use_alignment_link_status.js";
 import { ToggleSwitch } from "#src/editing/ui/toggle_switch.js";
 
 // Side effect: ensures the --nge-* tokens exist even when no editing panel is
@@ -63,16 +62,22 @@ function statusText(status: AlignmentLinkStatus): {
 /**
  * Section of the layer-group viewer's context menu (the dropdown holding the
  * Position / Cross-section orientation / ... link selectors) that controls
- * the annotation-linked view sync. The link is global to the side-by-side
- * pair — the same section appears in every layer group's menu.
+ * the annotation-linked view sync. Purely presentational: depends only on the
+ * `AlignmentLinkUi` seam (use_alignment_link_status.ts), which the parent menu
+ * provides. The link is global to the side-by-side pair — the same section
+ * appears in every layer group's menu.
  */
-export function AlignmentLinkMenuSection({
-  controller,
-}: {
-  controller: AlignmentLinkController;
-}) {
-  const status = useWatchable(controller.status);
+export function AlignmentLinkMenuSection({ link }: { link: AlignmentLinkUi }) {
+  const { status } = link;
   const line = statusText(status);
+  const layerNames = [
+    ...new Set([
+      ...link.annotationLayerNames,
+      ...(status.configuredLayerName !== undefined
+        ? [status.configuredLayerName]
+        : []),
+    ]),
+  ];
 
   return (
     <div class="neuroglancer-alignment-link-menu-section">
@@ -84,7 +89,7 @@ export function AlignmentLinkMenuSection({
           checked={status.enabled}
           ariaLabel="Link views via alignment line annotations"
           tooltip="Sync both views through a transform fitted from the alignment line annotations"
-          onChange={(checked) => controller.setEnabled(checked)}
+          onChange={(checked) => link.setEnabled(checked)}
         />
       </div>
       <label class="neuroglancer-alignment-link-row">
@@ -94,18 +99,11 @@ export function AlignmentLinkMenuSection({
           disabled={!status.enabled}
           onChange={(event) => {
             const value = (event.target as HTMLSelectElement).value;
-            controller.setLayerName(value === "" ? undefined : value);
+            link.setLayerName(value === "" ? undefined : value);
           }}
         >
           <option value="">Auto (first layer with lines)</option>
-          {[
-            ...new Set([
-              ...controller.annotationLayerNames(),
-              ...(status.configuredLayerName !== undefined
-                ? [status.configuredLayerName]
-                : []),
-            ]),
-          ].map((name) => (
+          {layerNames.map((name) => (
             <option key={name} value={name}>
               {name}
             </option>
@@ -118,7 +116,7 @@ export function AlignmentLinkMenuSection({
           value={status.model}
           disabled={!status.enabled}
           onChange={(event) =>
-            controller.setModel(
+            link.setModel(
               (event.target as HTMLSelectElement).value as AlignmentModel,
             )
           }
@@ -135,7 +133,7 @@ export function AlignmentLinkMenuSection({
         class="neuroglancer-alignment-link-swap"
         disabled={!status.enabled}
         title="Flip which line endpoint belongs to which view"
-        onClick={() => controller.swapDirection()}
+        onClick={() => link.swapDirection()}
       >
         ⇄ Swap direction
       </button>

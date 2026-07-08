@@ -23,7 +23,7 @@ import svg_layers from "ikonate/icons/layers.svg?raw";
 import svg_list from "ikonate/icons/list.svg?raw";
 import svg_settings from "ikonate/icons/settings.svg?raw";
 import { debounce } from "lodash-es";
-import { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
+import { AlignmentLinkSession } from "#src/alignment_link/alignment_link_session.js";
 import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
@@ -447,7 +447,7 @@ export class Viewer extends RefCounted implements ViewerState {
    * body alongside `editSessionHost`; its layout hook attaches lazily since
    * `this.layout` is only built inside `makeUI()`.
    */
-  alignmentLink!: AlignmentLinkController;
+  alignmentLink!: AlignmentLinkSession;
   showAxisLines = new TrackableBoolean(true, true);
   wireFrame = new TrackableBoolean(false, false);
   enableAdaptiveDownsampling = new TrackableBoolean(true, true);
@@ -631,7 +631,7 @@ export class Viewer extends RefCounted implements ViewerState {
     this.layerSpecification.editSessionHost = this.editSessionHost;
 
     this.alignmentLink = this.registerDisposer(
-      new AlignmentLinkController(this),
+      new AlignmentLinkSession(this),
     );
 
     this.registerDisposer(

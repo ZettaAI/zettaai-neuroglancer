@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Calcada AI / Zetta AI
+ * Copyright 2026 Zetta AI
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -47,7 +47,7 @@
  *    every position change), so the handler re-arms only after verifying the
  *    armed viewers were actually disposed by a layout rebuild.
  *
- * The controller's `state` is a `Trackable` registered in the viewer state as
+ * The session's `state` is a `Trackable` registered in the viewer state as
  * "alignmentLink", so an armed link survives reloads and shared URLs.
  */
 
@@ -84,7 +84,7 @@ const ALIGNMENT_MODELS: readonly AlignmentModel[] = [
 ];
 
 /**
- * Structural views of the neuroglancer objects the controller touches. Typed
+ * Structural views of the neuroglancer objects the session touches. Typed
  * structurally (rather than importing Viewer/LayerGroupViewer) so the sync
  * logic is unit-testable against lightweight fakes; the real classes satisfy
  * these shapes.
@@ -271,7 +271,7 @@ export class TrackableAlignmentLinkState implements Trackable {
   }
 }
 
-export class AlignmentLinkController extends RefCounted {
+export class AlignmentLinkSession extends RefCounted {
   readonly state = new TrackableAlignmentLinkState();
   readonly status = new WatchableValue<AlignmentLinkStatus>(DISABLED_STATUS);
 

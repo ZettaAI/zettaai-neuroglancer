@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Calcada AI / Zetta AI
+ * Copyright 2026 Zetta AI
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -22,8 +22,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AlignmentAnnotationSource,
   AlignmentLinkHost,
-} from "#src/alignment_link/alignment_link_controller.js";
-import { AlignmentLinkController } from "#src/alignment_link/alignment_link_controller.js";
+} from "#src/alignment_link/alignment_link_session.js";
+import { AlignmentLinkSession } from "#src/alignment_link/alignment_link_session.js";
 import type { Annotation, Line } from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 
@@ -161,7 +161,7 @@ const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 15));
 describe("TrackableAlignmentLinkState", () => {
   it("serializes only when enabled and round-trips", () => {
     const { host } = makeHost([], []);
-    const controller = new AlignmentLinkController(host);
+    const controller = new AlignmentLinkSession(host);
     expect(controller.state.toJSON()).toBeUndefined();
 
     controller.state.enabled = true;
@@ -174,7 +174,7 @@ describe("TrackableAlignmentLinkState", () => {
       layer: "my lines",
     });
 
-    const restored = new AlignmentLinkController(makeHost([], []).host);
+    const restored = new AlignmentLinkSession(makeHost([], []).host);
     restored.state.restoreState(controller.state.toJSON());
     expect(restored.state.enabled).toBe(true);
     expect(restored.state.model).toBe("affine");
@@ -188,8 +188,8 @@ describe("TrackableAlignmentLinkState", () => {
   });
 });
 
-describe("AlignmentLinkController", () => {
-  let controller: AlignmentLinkController | undefined;
+describe("AlignmentLinkSession", () => {
+  let controller: AlignmentLinkSession | undefined;
 
   afterEach(async () => {
     controller?.dispose();
@@ -200,7 +200,7 @@ describe("AlignmentLinkController", () => {
 
   it("fails gracefully without a side-by-side layout", () => {
     const { host } = makeHost([makeLgv([0, 0, 0])], []);
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     const status = controller.status.value;
     expect(status.enabled).toBe(true);
@@ -211,7 +211,7 @@ describe("AlignmentLinkController", () => {
     const leader = makeLgv([0, 0, 0], 0, ["z", "y", "x"]);
     const follower = makeLgv([0, 0, 0], 1);
     const { host } = makeHost([leader, follower], []);
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     expect(controller.status.value.error).toMatch(/dimension order/);
   });
@@ -225,7 +225,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
 
     const status = controller.status.value;
@@ -260,7 +260,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     moveTo(leader, [110, 105, 10]);
     moveTo(leader, [120, 105, 10]);
@@ -287,7 +287,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
 
     // A freshly started line (first click): added uncommitted with
@@ -328,7 +328,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     expect(controller.status.value.reversed).toBe(true);
     moveTo(leader, [360, 120, 11]);
@@ -339,7 +339,7 @@ describe("AlignmentLinkController", () => {
     const leader = makeLgv([120, 100, 10]);
     const follower = makeLgv([40, 60, 11], 2);
     const { host, annotationSource } = makeHost([leader, follower], []);
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     // Line drawn from the follower's section to the leader's section.
     const line = makeLine("l1", [40, 60, 11], [120, 100, 10]);
@@ -367,7 +367,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     const status = controller.status.value;
     expect(status.error).toBeUndefined();
@@ -390,7 +390,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [350, 120, 11], [100, 100, 10])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.state.reversed = true;
     controller.setEnabled(true);
     const status = controller.status.value;
@@ -407,7 +407,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     expect(controller.status.value.reversed).toBe(false);
     controller.swapDirection();
@@ -426,7 +426,7 @@ describe("AlignmentLinkController", () => {
         makeLine("l2", [100, 0, 0], [1200, 0, 0]),
       ],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     expect(controller.status.value.fitMode).toBe("similarity");
     // Moving the leader by +50 in x moves the follower by +100.
@@ -444,7 +444,7 @@ describe("AlignmentLinkController", () => {
         makeLine("l2", [100, 0, 0], [1200, 0, 0]),
       ],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     controller.setModel("translation");
     expect(controller.status.value.fitMode).toBe("translation");
@@ -465,7 +465,7 @@ describe("AlignmentLinkController", () => {
         makeLine("l2", [100, 0, 0], [1000, 100, 0]),
       ],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     expect(controller.status.value.rotationDeg).toBeCloseTo(90, 0);
     expect(
@@ -494,7 +494,7 @@ describe("AlignmentLinkController", () => {
         makeLine("l2", [100, 0, 0], [1000, 100, 0]),
       ],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
 
     // User rotates the leader in-plane by 30 degrees: the follower ends up
@@ -517,7 +517,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     moveTo(leader, [110, 105, 10]);
     expect(quatOf(follower)).toEqual([0, 0, 0, 1]);
@@ -538,7 +538,7 @@ describe("AlignmentLinkController", () => {
         makeLine("l3", [0, 100, 0], [1000, 100, 1]),
       ],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     const status = controller.status.value;
     expect(status.error).toBeUndefined();
@@ -568,7 +568,7 @@ describe("AlignmentLinkController", () => {
     const leaderBaseline = leader.navigationState.position.changed.count;
     const followerBaseline = follower.navigationState.position.changed.count;
 
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     expect(
       follower.viewerNavigationState.crossSectionOrientation.link.value,
@@ -598,7 +598,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(fake.host);
+    controller = new AlignmentLinkSession(fake.host);
     controller.setEnabled(true);
 
     // Layout rebuild: neuroglancer replaces the layer-group viewers with new
@@ -632,7 +632,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(fake.host);
+    controller = new AlignmentLinkSession(fake.host);
     controller.setEnabled(true);
     expect(controller.status.value.enabled).toBe(true);
 
@@ -653,7 +653,7 @@ describe("AlignmentLinkController", () => {
     const leader = makeLgv([100, 100, 10]);
     const follower = makeLgv([40, 60, 11], 2);
     const { host, annotationSource } = makeHost([leader, follower], []);
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.setEnabled(true);
     const status = controller.status.value;
     expect(status.enabled).toBe(true);
@@ -697,7 +697,7 @@ describe("AlignmentLinkController", () => {
       }>
     ).push({ name: "other", layer: { localAnnotations: otherSource } });
 
-    controller = new AlignmentLinkController(fake.host);
+    controller = new AlignmentLinkSession(fake.host);
     controller.setEnabled(true);
     // Auto mode binds the first layer with lines.
     expect(controller.status.value.annotationLayerName).toBe("annotation");
@@ -732,7 +732,7 @@ describe("AlignmentLinkController", () => {
     };
     managedLayers.push({ name: "annotation", layer: null });
 
-    controller = new AlignmentLinkController(fake.host);
+    controller = new AlignmentLinkSession(fake.host);
     controller.state.restoreState({});
     // Armed, but bound to the lineless fallback.
     let status = controller.status.value;
@@ -771,7 +771,7 @@ describe("AlignmentLinkController", () => {
       [leader, follower],
       [makeLine("l1", [100, 100, 10], [350, 120, 11])],
     );
-    controller = new AlignmentLinkController(host);
+    controller = new AlignmentLinkSession(host);
     controller.state.restoreState({ model: "similarity" });
     const status = controller.status.value;
     expect(status.enabled).toBe(true);
