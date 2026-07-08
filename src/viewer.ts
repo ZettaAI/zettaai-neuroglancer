@@ -630,9 +630,7 @@ export class Viewer extends RefCounted implements ViewerState {
     // direct Viewer dependency.
     this.layerSpecification.editSessionHost = this.editSessionHost;
 
-    this.alignmentLink = this.registerDisposer(
-      new AlignmentLinkSession(this),
-    );
+    this.alignmentLink = this.registerDisposer(new AlignmentLinkSession(this));
 
     this.registerDisposer(
       display.updateStarted.add(() => {
