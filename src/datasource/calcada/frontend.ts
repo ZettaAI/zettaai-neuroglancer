@@ -15,7 +15,9 @@
  */
 
 import "#src/datasource/calcada/calcada.css";
+
 import { debounce } from "lodash-es";
+
 import {
   AnnotationDisplayState,
   AnnotationLayerState,
@@ -44,20 +46,20 @@ import type {
   MultiscaleMeshMetadata,
 } from "#src/datasource/calcada/base.js";
 import {
-  parseGrapheneError,
+  CALCADA_BULK_LINK_RPC_ID,
   CHUNKED_GRAPH_LAYER_RPC_ID,
   CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   ChunkedGraphSourceParameters,
   getGrapheneFragmentKey,
+  getHttpSource,
   GRAPHENE_MESH_NEW_SEGMENT_RPC_ID,
-  CALCADA_BULK_LINK_RPC_ID,
   isBaseSegmentId,
   makeChunkedGraphChunkSpecification,
   MeshSourceParameters,
+  parseGrapheneError,
   PYCG_APP_VERSION,
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
-  getHttpSource,
 } from "#src/datasource/calcada/base.js";
 import type {
   DataSource,
@@ -1614,6 +1616,11 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   ) {
     super(graph, layer.displayState.segmentationGroupState.value);
     const segmentsState = layer.displayState.segmentationGroupState.value;
+    // Calcada floods equivalences with per-chunk piece→root LUT trailers
+    // (millions of entries): opt in to the batched / worker-mirrored table
+    // maintenance in EquivalencesHashMap. Datasources that don't set this
+    // (graphene, local) keep the default immediate-update path.
+    segmentsState.segmentEquivalences.largeEquivalencesExpected = true;
     this.previousVisibleSegmentCount = segmentsState.visibleSegments.size;
     segmentsState.selectedSegments.changed.add(
       (segmentIds: bigint[] | bigint | null, add: boolean) => {
@@ -2413,9 +2420,7 @@ void main() {
                 loop(completed, failed);
                 failed = [];
                 checkDone();
-                wait(5000).then(() => {
-                  this.deleteMergeSubmission(submission);
-                });
+                this.deleteMergeSubmission(submission);
               })
               .catch(() => {
                 merges.changed.dispatch();
@@ -4045,12 +4050,6 @@ const maybeGetSelection = (
     segmentId: baseValue,
     position: point,
   };
-};
-
-const wait = (t: number) => {
-  return new Promise((f, _r) => {
-    setTimeout(f, t);
-  });
 };
 
 interface MergeSubmission {
