@@ -43,6 +43,12 @@ function getZfpcModulePromise() {
 }
 
 /**
+ * malloc takes a u32 byte count, so any size at or above 2^32 wraps as it
+ * crosses the JS/wasm boundary and quietly allocates the wrong amount.
+ */
+const MAX_ALLOCATION_BYTES = 2 ** 32;
+
+/**
  * Number of bytes per sample for each zfpc data type code. zfpc stores the
  * code in the low three bits of header byte 5.
  */
@@ -101,25 +107,44 @@ export async function decompressZfpc(
 
   const samples = sizeX * sizeY * sizeZ * numChannels;
   const nbytes = samples * bytesPerSample;
-  if (nbytes < 0) {
-    throw new Error(`zfpc: Failed to decode image size. image size: ${nbytes}`);
+  // The dimensions are unvalidated uint32s straight off the wire, so their
+  // product is never negative — it is either implausibly large or, past 2^53,
+  // imprecise. Sizes at or above MAX_ALLOCATION_BYTES silently wrap on the way
+  // into wasm, which would hand the decoder a tiny buffer while telling it the
+  // buffer is huge; reject them here instead.
+  if (
+    !Number.isInteger(nbytes) ||
+    nbytes <= 0 ||
+    nbytes >= MAX_ALLOCATION_BYTES
+  ) {
+    throw new Error(`zfpc: implausible decoded image size: ${nbytes} bytes`);
   }
 
   // heap must be referenced after creating bufPtr and imagePtr because
   // memory growth can detatch the buffer.
   const bufPtr = (m.exports.malloc as Function)(buffer.byteLength);
   const imagePtr = (m.exports.malloc as Function)(nbytes);
-  const heap = new Uint8Array((m.exports.memory as WebAssembly.Memory).buffer);
-  heap.set(buffer, bufPtr);
-
-  const code = (m.exports.zfpc_decompress as Function)(
-    bufPtr,
-    buffer.byteLength,
-    imagePtr,
-    nbytes,
-  );
 
   try {
+    // A size that fits in a u32 but exceeds available wasm memory makes malloc
+    // return null; writing at that offset would corrupt the start of the heap.
+    if (bufPtr === 0 || imagePtr === 0) {
+      throw new Error(
+        `zfpc: could not allocate ${nbytes} bytes to decode image`,
+      );
+    }
+
+    const heap = new Uint8Array(
+      (m.exports.memory as WebAssembly.Memory).buffer,
+    );
+    heap.set(buffer, bufPtr);
+
+    const code = (m.exports.zfpc_decompress as Function)(
+      bufPtr,
+      buffer.byteLength,
+      imagePtr,
+      nbytes,
+    );
     if (code !== 0) {
       throw new Error(`zfpc: Failed to decode image. decoder code: ${code}`);
     }
