@@ -30,6 +30,7 @@ import type {
 import {
   getGrapheneFragmentKey,
   GRAPHENE_MESH_NEW_SEGMENT_RPC_ID,
+  CALCADA_MESH_REFRESH_SEGMENT_RPC_ID,
   CALCADA_BULK_LINK_RPC_ID,
   ChunkedGraphSourceParameters,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
@@ -59,6 +60,7 @@ import type {
 } from "#src/render_layer_backend.js";
 import { RenderLayerBackend } from "#src/render_layer_backend.js";
 import { withSegmentationLayerBackendState } from "#src/segmentation_display_state/backend.js";
+import { getObjectKey } from "#src/segmentation_display_state/base.js";
 import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
 import type { SliceViewChunkSourceBackend } from "#src/sliceview/backend.js";
 import { deserializeTransformedSources } from "#src/sliceview/backend.js";
@@ -280,12 +282,19 @@ export class CalcadaVolumeChunkSource extends WithParameters(
     // Voxels: calcada _rp 302-redirects to the public bucket (base / per-branch
     // overlay / time-travel generation); fetchOkImpl follows the redirect to
     // GCS. The mapping comes from a parallel ?lut_only=true trailer.
-    const { timestampMs, branchId } = this.parameters;
+    const { timestampMs, branchId, generation } = this.parameters;
     const httpStore = kvStore.store as any;
     const q: string[] = [];
     if (timestampMs && timestampMs > 0)
       q.push(`timestamp=${timestampMs / 1000}`);
     if (branchId && branchId > 0) q.push(`branch_id=${branchId}`);
+    // Cache-bust: refreshChunkSources() bumps generation after every edit/undo.
+    // The redirect target is a specific (immutable, browser-cached) GCS
+    // generation, so without varying the request URL the browser reuses the
+    // stale redirect and 404s once the branch overlay is rewritten. calcada
+    // ignores this param and does not forward it to the bucket, so caching still
+    // works within a generation and only busts across edits.
+    if (generation > 0) q.push(`_g=${generation}`);
     const voxelUrl = `${httpStore.baseUrl}${kvStore.path}${chunkPath}${q.length ? `?${q.join("&")}` : ""}`;
     const lutQuery = q.length ? `&${q.join("&")}` : "";
     let voxelResp: Response;
@@ -392,6 +401,21 @@ export class GrapheneMeshSource extends WithParameters(
     }, TEN_MINUTES);
   }
 
+  // Force a re-download of a root whose manifest is already cached. A keep-whole
+  // piece split keeps the root id but changes its leaves, so addNewSegment alone
+  // (which only re-fetches manifests the mesh layer requests fresh) never
+  // refreshes it. Requeue the cached manifest chunk and mark it new so the
+  // backoff loop keeps re-fetching until the async per-piece mesh lands.
+  refreshSegment(segment: bigint) {
+    this.addNewSegment(segment);
+    const chunk = this.chunks.get(getObjectKey(segment)) as
+      | ManifestChunk
+      | undefined;
+    if (chunk !== undefined) {
+      this.chunkManager.queueManager.updateChunkState(chunk, ChunkState.QUEUED);
+    }
+  }
+
   async download(chunk: ManifestChunk, signal: AbortSignal) {
     const { parameters, newSegments, manifestRequestCount } = this;
     if (isBaseSegmentId(chunk.objectId, parameters.nBitsForLayerId)) {
@@ -436,6 +460,40 @@ export class GrapheneMeshSource extends WithParameters(
       );
     } else {
       manifestRequestCount.delete(chunkIdentifier);
+    }
+    // Link every piece the manifest lists to its root (chunk.objectId), so a 3D
+    // mesh pick anywhere on the mesh resolves piece->root even over a part with no
+    // loaded 2D chunk (whose LUT trailer would otherwise be the only source of the
+    // mapping). The manifest is fetched for a currently-visible root, so its
+    // piece->root is current; linkChunkEquivalences is link-once, so it never
+    // overrides a piece the authoritative LUT already mapped, and
+    // refreshChunkSources clears equivalences after every edit. Fragment ids are
+    // strings ("{piece}:0", per getFragmentPickId).
+    const fragments = (response as { fragments?: unknown })?.fragments;
+    if (Array.isArray(fragments) && fragments.length > 0) {
+      const pieces = new BigUint64Array(fragments.length);
+      const roots = new BigUint64Array(fragments.length);
+      let count = 0;
+      for (const frag of fragments) {
+        const fragmentString = String(frag);
+        const colon = fragmentString.indexOf(":");
+        try {
+          pieces[count] = BigInt(
+            colon === -1 ? fragmentString : fragmentString.slice(0, colon),
+          );
+          roots[count] = chunk.objectId;
+          count++;
+        } catch {
+          // skip malformed fragment id
+        }
+      }
+      if (count > 0) {
+        linkChunkEquivalences(
+          pieces.subarray(0, count),
+          roots.subarray(0, count),
+          branchId,
+        );
+      }
     }
     return decodeManifestChunk(chunk, response);
   }
@@ -888,4 +946,9 @@ registerRPC(CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID, function (x) {
 registerRPC(GRAPHENE_MESH_NEW_SEGMENT_RPC_ID, function (x) {
   const obj = <GrapheneMeshSource>this.get(x.rpcId);
   obj.addNewSegment(x.segment);
+});
+
+registerRPC(CALCADA_MESH_REFRESH_SEGMENT_RPC_ID, function (x) {
+  const obj = <GrapheneMeshSource>this.get(x.rpcId);
+  obj.refreshSegment(x.segment);
 });
