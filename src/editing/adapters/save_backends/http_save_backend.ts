@@ -111,13 +111,13 @@ export function buildCutoutParams(input: {
 }
 
 /** Copy a chunk's voxel buffer into a standalone `Uint8Array` (native dtype, X-fastest). */
-function chunkToBytes(chunk: SavedChunk): Uint8Array {
+function chunkToBytes(chunk: SavedChunk): Uint8Array<ArrayBuffer> {
   const view = chunk.bytes.asView();
   return new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
 }
 
 /** Gzip-compress a byte buffer, as `/cutout` requires (it always `gzip.decompress`es the body). */
-async function gzip(bytes: Uint8Array): Promise<ArrayBuffer> {
+async function gzip(bytes: Uint8Array<ArrayBuffer>): Promise<ArrayBuffer> {
   const cs = new CompressionStream("gzip");
   const writer = cs.writable.getWriter();
   void writer.write(bytes);

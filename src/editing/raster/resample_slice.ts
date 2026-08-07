@@ -46,7 +46,7 @@ export function resampleNearestXY(
   src: Uint8Array,
   from: Grid2D,
   to: Grid2D,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
   if (gridsMatch(from, to)) {
     // Identical grid (equal resolution + window) — no resampling to do.
     return src.slice();

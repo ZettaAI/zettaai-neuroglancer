@@ -30,11 +30,11 @@ export const PROPAGATE_MASK_PATH = "/segmentation/propagate_mask";
 
 export interface PropagateMaskInput {
   /** Image slice at the current Z, `uint8`, x-fastest (`y * width + x`). */
-  readonly currentImage: Uint8Array;
+  readonly currentImage: Uint8Array<ArrayBuffer>;
   /** Labelized mask slice at the current Z, same layout. */
-  readonly maskLabels: Uint8Array;
+  readonly maskLabels: Uint8Array<ArrayBuffer>;
   /** Image slice at the next Z (the propagation target), same layout. */
-  readonly nextImage: Uint8Array;
+  readonly nextImage: Uint8Array<ArrayBuffer>;
   readonly width: number;
   readonly height: number;
 }
@@ -84,7 +84,7 @@ function buildRequestForm(input: PropagateMaskInput): FormData {
   return form;
 }
 
-function octetStreamBlob(bytes: Uint8Array): Blob {
+function octetStreamBlob(bytes: Uint8Array<ArrayBuffer>): Blob {
   return new Blob([bytes], { type: "application/octet-stream" });
 }
 

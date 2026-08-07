@@ -201,7 +201,7 @@ export interface SegmentationDisplayState {
   segmentationGroupState: WatchableValueInterface<SegmentationGroupState>;
   segmentationColorGroupState: WatchableValueInterface<SegmentationColorGroupState>;
 
-  selectSegment: (id: bigint, pin: boolean | "toggle") => void;
+  selectSegment: (id: bigint, pin: boolean | "toggle" | "force-unpin") => void;
   filterBySegmentLabel: (id: bigint) => void;
   moveToSegment: (id: bigint) => void;
 
@@ -303,6 +303,8 @@ export function bindSegmentListWidth(
 const segmentWidgetTemplate = (() => {
   const template = document.createElement("div");
   template.classList.add("neuroglancer-segment-list-entry");
+  template.title =
+    "Right click to move to segment, alt+click to set color, alt+shift+click to unset color";
   const stickyContainer = document.createElement("div");
   stickyContainer.classList.add("neuroglancer-segment-list-entry-sticky");
   template.appendChild(stickyContainer);
@@ -446,6 +448,13 @@ function makeRegisterSegmentWidgetEventHandlers(
     );
   };
 
+  const unpinHandler = (event: Event) => {
+    const entryElement = event.currentTarget as HTMLElement;
+    const idString = entryElement.dataset.id!;
+    const id = BigInt(idString);
+    displayState.selectSegment(id, "force-unpin");
+  };
+
   const onMouseLeave = () => {
     displayState.segmentSelectionState.set(null);
   };
@@ -532,6 +541,7 @@ function makeRegisterSegmentWidgetEventHandlers(
     );
     children[template.filterIndex].addEventListener("click", filterHandler);
     element.addEventListener("action:select-position", selectHandler);
+    element.addEventListener("action:unpin-selected-position", unpinHandler);
 
     const starButton = stickyChildren[template.starIndex] as HTMLElement;
     starButton.addEventListener("click", (event: MouseEvent) => {
@@ -727,9 +737,14 @@ export class SegmentWidgetFactory<Template extends SegmentWidgetTemplate> {
   }
 }
 
-function setSegmentIdElementStyle(element: HTMLElement, color: vec3) {
+function setSegmentIdElementStyle(
+  element: HTMLElement,
+  color: vec3,
+  stated = false,
+) {
   element.style.backgroundColor = getCssColor(color);
   element.style.color = useWhiteBackground(color) ? "white" : "black";
+  element.classList.toggle("stated-color", stated);
 }
 
 function setColorWidgetColor(

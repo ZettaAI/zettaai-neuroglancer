@@ -56,8 +56,10 @@ import {
 import {
   ComputedWatchableValue,
   makeCachedLazyDerivedWatchableValue,
+  observeWatchable,
   WatchableValue,
 } from "#src/trackable_value.js";
+import { AnnotationSchemaTab } from "#src/ui/annotation_schema_tab.js";
 import type {
   AnnotationLayerView,
   MergedAnnotationStates,
@@ -173,6 +175,7 @@ const FILTER_BY_SEGMENTATION_JSON_KEY = "filterBySegmentation";
 const IGNORE_NULL_SEGMENT_FILTER_JSON_KEY = "ignoreNullSegmentFilter";
 const CODE_VISIBLE_KEY = "codeVisible";
 const SWAP_VISIBLE_SEGMENTS_ON_MOVE_JSON_KEY = "swapVisbleSegmentsOnMove";
+const HIDE_INACTIVE_SHADER_CONTROLS_JSON_KEY = "hideInactiveShaderControls";
 
 class LinkedSegmentationLayers extends RefCounted {
   changed = new NullarySignal();
@@ -684,6 +687,7 @@ const Base = UserLayerWithAnnotationsMixin(UserLayer);
 export class AnnotationUserLayer extends Base {
   localAnnotations: LocalAnnotationSource | undefined;
   codeVisible = new TrackableBoolean(true);
+  hideInactiveShaderControls = new TrackableBoolean(false);
   private localAnnotationProperties: WatchableValue<AnnotationPropertySpec[]> =
     new WatchableValue([]);
   private localAnnotationRelationships: string[];
@@ -713,6 +717,9 @@ export class AnnotationUserLayer extends Base {
       this.specificationChanged.dispatch,
     );
     this.codeVisible.changed.add(this.specificationChanged.dispatch);
+    this.hideInactiveShaderControls.changed.add(
+      this.specificationChanged.dispatch,
+    );
     this.annotationDisplayState.ignoreNullSegmentFilter.changed.add(
       this.specificationChanged.dispatch,
     );
@@ -748,6 +755,11 @@ export class AnnotationUserLayer extends Base {
       order: 10,
       getter: () => new TagsTab(this),
       hidden: hideTagsTab,
+    });
+    this.tabs.add("schema", {
+      label: "Schema",
+      order: 20,
+      getter: () => new AnnotationSchemaTab(this),
     });
     this.tabs.default = "annotations";
   }
@@ -801,10 +813,11 @@ export class AnnotationUserLayer extends Base {
     super.restoreState(specification);
     this.linkedSegmentationLayers.restoreState(specification);
     this.codeVisible.restoreState(specification[CODE_VISIBLE_KEY]);
+    this.hideInactiveShaderControls.restoreState(
+      specification[HIDE_INACTIVE_SHADER_CONTROLS_JSON_KEY],
+    );
     this.localAnnotationsJson = specification[ANNOTATIONS_JSON_KEY];
-    if (properties) {
-      this.localAnnotationProperties.value = properties || [];
-    }
+    this.localAnnotationProperties.value = properties ?? [];
     this.localAnnotationRelationships = verifyOptionalObjectProperty(
       specification,
       ANNOTATION_RELATIONSHIPS_JSON_KEY,
@@ -995,21 +1008,21 @@ export class AnnotationUserLayer extends Base {
       }
       loadedSubsource.deactivate("Not compatible with annotation layer");
     }
+    const prevAnnotationProperties =
+      this.annotationDisplayState.annotationProperties.value;
     if (
-      properties &&
-      stableStringify(
-        this.annotationDisplayState.annotationProperties.value,
-      ) !== stableStringify(properties?.value)
+      properties !== undefined &&
+      stableStringify(prevAnnotationProperties) !==
+        stableStringify(properties.value)
     ) {
       this.registerDisposer(
         properties.changed.add(() => {
-          this.annotationDisplayState.annotationProperties.value = [
-            ...properties!.value,
-          ];
+          this.annotationDisplayState.annotationProperties.value =
+            properties !== undefined ? [...properties.value] : [];
         }),
       );
       this.annotationDisplayState.annotationProperties.value = [
-        ...properties!.value,
+        ...properties.value,
       ];
     }
   }
@@ -1097,6 +1110,8 @@ export class AnnotationUserLayer extends Base {
     x[CROSS_SECTION_RENDER_SCALE_JSON_KEY] =
       this.annotationCrossSectionRenderScaleTarget.toJSON();
     x[CODE_VISIBLE_KEY] = this.codeVisible.toJSON();
+    x[HIDE_INACTIVE_SHADER_CONTROLS_JSON_KEY] =
+      this.hideInactiveShaderControls.toJSON();
     x[PROJECTION_RENDER_SCALE_JSON_KEY] =
       this.annotationProjectionRenderScaleTarget.toJSON();
     if (this.localAnnotations !== undefined) {
@@ -1124,8 +1139,37 @@ export class AnnotationUserLayer extends Base {
     return x;
   }
 
+  observeLayerColor(callback: () => void) {
+    const disposer = super.observeLayerColor(callback);
+    const subDisposer = observeWatchable(
+      callback,
+      this.annotationDisplayState.color,
+    );
+    const shaderDisposer = observeWatchable(
+      callback,
+      this.annotationDisplayState.shader,
+    );
+    return () => {
+      disposer();
+      subDisposer();
+      shaderDisposer();
+    };
+  }
+
+  get automaticLayerBarColors() {
+    const shaderHasDefaultColor =
+      this.annotationDisplayState.shader.value.includes("defaultColor");
+    if (shaderHasDefaultColor && this.annotationDisplayState.color.value) {
+      const [r, g, b] = this.annotationDisplayState.color.value;
+      return [`rgb(${r * 255}, ${g * 255}, ${b * 255})`];
+    }
+
+    return undefined;
+  }
+
   static type = "annotation";
   static typeAbbreviation = "ann";
+  static supportsLayerBarColorSyncOption = true;
 }
 
 function makeShaderCodeWidget(layer: AnnotationUserLayer) {
@@ -1224,7 +1268,10 @@ class RenderingOptionsTab extends Tab {
           layer.annotationDisplayState.shaderControls,
           this.layer.manager.root.display,
           this.layer,
-          { visibility: this.visibility },
+          {
+            visibility: this.visibility,
+            hideInactiveShaderControls: layer.hideInactiveShaderControls,
+          },
         ),
       ).element,
     );

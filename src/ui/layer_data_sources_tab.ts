@@ -24,6 +24,7 @@ import type { UserLayer, UserLayerConstructor } from "#src/layer/index.js";
 import {
   changeLayerName,
   changeLayerType,
+  makeLayer,
   NewUserLayer,
   USER_LAYER_TABS,
 } from "#src/layer/index.js";
@@ -32,6 +33,7 @@ import type {
   LoadedDataSubsource,
 } from "#src/layer/layer_data_source.js";
 import { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
+import { createImageLayerAsMultiChannel } from "#src/layer/multi_channel_setup.js";
 import { MeshSource, MultiscaleMeshSource } from "#src/mesh/frontend.js";
 import { SkeletonSource } from "#src/skeleton/frontend.js";
 import { MultiscaleVolumeChunkSource } from "#src/sliceview/volume/frontend.js";
@@ -519,6 +521,7 @@ export class LayerDataSourcesTab extends Tab {
     title: "Add additional data source",
   });
   private layerTypeDetection = document.createElement("div");
+  private multiChannelLayerCreate = document.createElement("div");
   private layerTypeElement = document.createElement("span");
   private dataSourcesContainer = document.createElement("div");
   private reRender: DebouncedFunction;
@@ -589,7 +592,8 @@ export class LayerDataSourcesTab extends Tab {
     }
     element.appendChild(this.dataSourcesContainer);
     if (layer instanceof NewUserLayer) {
-      const { layerTypeDetection, layerTypeElement } = this;
+      const { layerTypeDetection, layerTypeElement, multiChannelLayerCreate } =
+        this;
       layerTypeDetection.style.display = "none";
       layerTypeElement.classList.add(
         "neuroglancer-layer-data-sources-tab-type-detection-type",
@@ -604,6 +608,33 @@ export class LayerDataSourcesTab extends Tab {
       layerTypeDetection.addEventListener("click", () => {
         changeLayerTypeToDetected(layer);
       });
+      // Image layers provide a second option
+      multiChannelLayerCreate.classList.add(
+        "neuroglancer-layer-data-sources-tab-type-detection",
+      );
+      const multiChannelLayerCreateLabel = document.createElement("span");
+      multiChannelLayerCreateLabel.classList.add(
+        "neuroglancer-layer-data-sources-tab-type-detection-type",
+      );
+      multiChannelLayerCreateLabel.textContent = "multi-channel image";
+      multiChannelLayerCreate.appendChild(
+        document.createTextNode("Create as "),
+      );
+      multiChannelLayerCreate.appendChild(multiChannelLayerCreateLabel);
+      multiChannelLayerCreate.appendChild(document.createTextNode(" layer"));
+      multiChannelLayerCreate.addEventListener("click", () => {
+        changeLayerTypeToDetected(layer);
+        layer.managedLayer.registerDisposer(
+          layer.managedLayer.readyStateChanged.add(() => {
+            if (layer.managedLayer.isReady()) {
+              createImageLayerAsMultiChannel(layer.managedLayer, makeLayer);
+            }
+          }),
+        );
+      });
+      multiChannelLayerCreate.style.display = "none";
+      multiChannelLayerCreate.style.marginTop = "0.5em";
+      element.appendChild(multiChannelLayerCreate);
     }
     const reRender = (this.reRender = animationFrameDebounce(() =>
       this.updateView(),
@@ -627,7 +658,7 @@ export class LayerDataSourcesTab extends Tab {
       return layerConstructor;
     })();
     if (layerConstructor === this.detectedLayerConstructor) return;
-    const { layerTypeDetection } = this;
+    const { layerTypeDetection, multiChannelLayerCreate } = this;
     this.detectedLayerConstructor = layerConstructor;
     if (layerConstructor !== undefined) {
       const { layerTypeElement } = this;
@@ -636,8 +667,11 @@ export class LayerDataSourcesTab extends Tab {
         "Click here or press enter in the data source URL input box to create as " +
         `${layerConstructor.type} layer`;
       layerTypeDetection.style.display = "";
+      multiChannelLayerCreate.style.display =
+        layerConstructor.type === "image" ? "" : "none";
     } else {
       layerTypeDetection.style.display = "none";
+      multiChannelLayerCreate.style.display = "none";
     }
   }
 

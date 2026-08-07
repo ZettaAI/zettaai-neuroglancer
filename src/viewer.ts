@@ -28,6 +28,7 @@ import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
 } from "#src/coordinate_transform.js";
+
 import { getDefaultCredentialsManager } from "#src/credentials_provider/default_manager.js";
 import type { CredentialsManager } from "#src/credentials_provider/index.js";
 import { SharedCredentialsManager } from "#src/credentials_provider/shared.js";
@@ -114,11 +115,13 @@ import {
   MultiToolPaletteManager,
   MultiToolPaletteState,
 } from "#src/ui/tool_palette.js";
+import { encodeStateAsFragment } from "#src/ui/url_hash_binding.js";
 import {
   ViewerSettingsPanel,
   ViewerSettingsPanelState,
 } from "#src/ui/viewer_settings.js";
 import { AutomaticallyFocusedElement } from "#src/util/automatic_focus.js";
+import { setClipboard } from "#src/util/clipboard.js";
 import { TrackableRGB } from "#src/util/color.js";
 import type { Borrowed, Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
@@ -129,6 +132,7 @@ import { vec3 } from "#src/util/geom.js";
 import {
   parseFixedLengthArray,
   verifyFinitePositiveFloat,
+  verifyNonnegativeInt,
   verifyObject,
   verifyOptionalObjectProperty,
   verifyString,
@@ -150,6 +154,7 @@ import type {
 import { WatchableVisibilityPriority } from "#src/visibility_priority/frontend.js";
 import { AnnotationToolStatusWidget } from "#src/widget/annotation_tool_status.js";
 import { CheckboxIcon } from "#src/widget/checkbox_icon.js";
+import { makeCopyUrlButton } from "#src/widget/copy_button.js";
 import { makeIcon } from "#src/widget/icon.js";
 import {
   MousePositionWidget,
@@ -184,6 +189,7 @@ export const VIEWER_TOP_ROW_CONFIG_OPTIONS = [
   "showLayerSidePanelButton",
   "showLocation",
   "showAnnotationToolStatus",
+  "showCopyUrlButton",
 ] as const;
 
 export const VIEWER_UI_CONTROL_CONFIG_OPTIONS = [
@@ -197,20 +203,30 @@ export const VIEWER_UI_CONFIG_OPTIONS = [
   "showTopBar",
   "showUIControls",
   "showPanelBorders",
+  "showAllDimensionPlotBounds",
+  "pickRadius",
 ] as const;
 
-export type ViewerUIOptions = {
-  [Key in (typeof VIEWER_UI_CONFIG_OPTIONS)[number]]: boolean;
+export type ViewerUIConfiguration = {
+  [Key in (typeof VIEWER_UI_CONFIG_OPTIONS)[number]]: Key extends "pickRadius"
+    ? TrackableValue<number>
+    : TrackableBoolean;
 };
 
-export type ViewerUIConfiguration = {
-  [Key in (typeof VIEWER_UI_CONFIG_OPTIONS)[number]]: TrackableBoolean;
+export type ViewerUIOptions = {
+  [Key in keyof ViewerUIConfiguration]: ViewerUIConfiguration[Key]["value"];
 };
 
 export function makeViewerUIConfiguration(): ViewerUIConfiguration {
-  return Object.fromEntries(
-    VIEWER_UI_CONFIG_OPTIONS.map((key) => [key, new TrackableBoolean(true)]),
-  ) as ViewerUIConfiguration;
+  const config = {} as ViewerUIConfiguration;
+  for (const key of VIEWER_UI_CONFIG_OPTIONS) {
+    if (key === "pickRadius") {
+      (config as any)[key] = new TrackableValue(5, verifyNonnegativeInt);
+    } else {
+      (config as any)[key] = new TrackableBoolean(true);
+    }
+  }
+  return config;
 }
 
 function setViewerUiConfiguration(
@@ -372,6 +388,11 @@ class TrackableViewerState extends CompoundTrackable {
       viewer.perspectiveViewBackgroundColor,
     );
   }
+
+  reset() {
+    super.reset();
+    this.viewer.sidePanelManager.reset();
+  }
 }
 
 export class Viewer extends RefCounted implements ViewerState {
@@ -503,7 +524,9 @@ export class Viewer extends RefCounted implements ViewerState {
 
   uiConfiguration: ViewerUIConfiguration;
 
-  private makeUiControlVisibilityState(key: keyof ViewerUIOptions) {
+  private makeUiControlVisibilityState(
+    key: (typeof VIEWER_UI_CONTROL_CONFIG_OPTIONS)[number],
+  ) {
     const showUIControls = this.uiConfiguration.showUIControls;
     const showTopBar = this.uiConfiguration.showTopBar;
     const option = this.uiConfiguration[key];
@@ -747,6 +770,7 @@ export class Viewer extends RefCounted implements ViewerState {
         {
           velocity: this.velocity,
           getToolBinder: () => this.toolBinder,
+          showAllPlotBounds: this.uiConfiguration.showAllDimensionPlotBounds,
         },
       ),
     );
@@ -923,7 +947,27 @@ export class Viewer extends RefCounted implements ViewerState {
       );
       topRow.appendChild(button);
     }
-
+    {
+      const button = makeCopyUrlButton({
+        title: "Copy URL to clipboard",
+        onClick: () => {
+          const stateString = encodeStateAsFragment(this.state.toJSON());
+          const url = new URL(window.location.href);
+          url.hash = "#!" + stateString;
+          const result = setClipboard(url.href);
+          StatusMessage.showTemporaryMessage(
+            result ? "URL copied to clipboard" : "Failed to copy URL",
+          );
+        },
+      });
+      this.registerDisposer(
+        new ElementVisibilityFromTrackableBoolean(
+          this.uiControlVisibility.showCopyUrlButton,
+          button,
+        ),
+      );
+      topRow.appendChild(button);
+    }
     {
       const { helpPanelState } = this;
       const button = this.registerDisposer(

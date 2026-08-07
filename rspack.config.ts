@@ -1,12 +1,13 @@
 import path from "node:path";
 import process from "node:process";
+import { defineConfig } from "@rspack/cli";
 import {
   CopyRspackPlugin,
   HtmlRspackPlugin,
   ProgressPlugin,
 } from "@rspack/core";
 import { normalizeConfigurationWithDefine } from "./build_tools/rspack/configuration_with_define.js";
-import packageJson from "./package.json";
+import packageJson from "./package.json" with { type: "json" };
 
 // Load `.env` (if present) so the NEUROGLANCER_ZETTA_* defines below can be set
 // per-developer without editing this file or committing secrets. Node >=20.12
@@ -20,7 +21,7 @@ try {
 // Emit a DefinePlugin entry only when its env var is actually set, so an unset
 // var stays an undeclared global and the source-side `typeof … === "undefined"`
 // guards keep working. Value is JSON-stringified as DefinePlugin requires.
-function zettaDefine(name) {
+function zettaDefine(name: string) {
   const value = process.env[name];
   return value ? { [name]: JSON.stringify(value) } : {};
 }
@@ -40,7 +41,7 @@ const PYODIDE_CORE_FILES = [
   "pyodide-lock.json",
 ];
 
-export default (env, args) => {
+export default defineConfig((env, args) => {
   const mode = args.mode === "production" ? "production" : "development";
   const config = {
     mode,
@@ -221,4 +222,4 @@ export default (env, args) => {
   return env.NEUROGLANCER_CLI
     ? config
     : normalizeConfigurationWithDefine(config);
-};
+});

@@ -79,7 +79,7 @@ export function buildLabelMap(trackedIds: readonly bigint[]): LabelMap {
 export function labelizeMaskSlice(
   values: ArrayLike<number | bigint>,
   idToLabel: ReadonlyMap<bigint, number>,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
   const labels = new Uint8Array(values.length);
   for (let i = 0; i < values.length; i++) {
     const raw = values[i];

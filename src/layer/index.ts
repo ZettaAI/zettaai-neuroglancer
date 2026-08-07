@@ -43,6 +43,7 @@ import {
   LayerDataSource,
   layerDataSourceSpecificationFromJson,
 } from "#src/layer/layer_data_source.js";
+import { createImageLayerAsMultiChannel } from "#src/layer/multi_channel_setup.js";
 import type {
   DisplayDimensions,
   WatchableDisplayDimensionRenderInfo,
@@ -135,6 +136,8 @@ export interface UserLayerSelectionState {
   annotationBuffer: Uint8Array | undefined;
   annotationIndex: number | undefined;
   annotationCount: number | undefined;
+  annotationInstanceIndex: number | undefined;
+  annotationInstanceCount: number | undefined;
   annotationSourceIndex: number | undefined;
   annotationSubsource: string | undefined;
   annotationSubsubsourceId: string | undefined;
@@ -184,6 +187,7 @@ export class UserLayer extends RefCounted {
   }
 
   static supportsPickOption = false;
+  static supportsLayerBarColorSyncOption = false;
 
   pick = new TrackableBoolean(true, true);
 
@@ -217,6 +221,18 @@ export class UserLayer extends RefCounted {
     };
   }
 
+  observeLayerColor(_: () => void): () => void {
+    return () => {};
+  }
+
+  get automaticLayerBarColors(): string[] | undefined {
+    return [];
+  }
+
+  get layerBarColors(): string[] | undefined {
+    return this.automaticLayerBarColors;
+  }
+
   initializeSelectionState(state: this["selectionState"]) {
     state.generation = -1;
     state.localPositionValid = false;
@@ -230,6 +246,8 @@ export class UserLayer extends RefCounted {
     state.annotationSourceIndex = undefined;
     state.annotationSubsource = undefined;
     state.annotationPartIndex = undefined;
+    state.annotationInstanceIndex = undefined;
+    state.annotationInstanceCount = undefined;
     state.value = undefined;
   }
 
@@ -356,6 +374,8 @@ export class UserLayer extends RefCounted {
     dest.annotationBuffer = source.annotationBuffer;
     dest.annotationIndex = source.annotationIndex;
     dest.annotationCount = source.annotationCount;
+    dest.annotationInstanceCount = source.annotationInstanceCount;
+    dest.annotationInstanceIndex = source.annotationInstanceIndex;
     dest.annotationSourceIndex = source.annotationSourceIndex;
     dest.annotationSubsource = source.annotationSubsource;
     dest.annotationPartIndex = source.annotationPartIndex;
@@ -765,6 +785,28 @@ export class ManagedUserLayer extends RefCounted {
     }
   }
 
+  get layerBarColors(): string[] | undefined {
+    const userLayer = this.layer;
+    return userLayer?.layerBarColors;
+  }
+
+  observeLayerColor(callback: () => void): () => void {
+    const userLayer = this.layer;
+    if (userLayer !== null) {
+      return userLayer.observeLayerColor(callback);
+    }
+    return () => {};
+  }
+
+  get supportsLayerBarColorSyncOption() {
+    const userLayer = this.layer;
+    return (
+      userLayer !== null &&
+      (userLayer.constructor as typeof UserLayer)
+        .supportsLayerBarColorSyncOption
+    );
+  }
+
   /**
    * If layer is not null, tranfers ownership of a reference.
    */
@@ -1110,6 +1152,8 @@ export interface PickState {
   pickedAnnotationIndex: number | undefined;
   pickedAnnotationCount: number | undefined;
   pickedAnnotationType: AnnotationType | undefined;
+  pickedAnnotationInstanceIndex: number | undefined;
+  pickedAnnotationInstanceCount: number | undefined;
 }
 
 export class MouseSelectionState implements PickState {
@@ -1130,7 +1174,10 @@ export class MouseSelectionState implements PickState {
   pickedAnnotationBufferBaseOffset: number | undefined = undefined;
   // Index (out of a total of `pickedAnnotationCount`) of the picked annotation.
   pickedAnnotationIndex: number | undefined = undefined;
+  // Index (out of a total of `pickedAnnotationInstanceCount`) of the picked annotation
+  pickedAnnotationInstanceIndex: number | undefined = undefined;
   pickedAnnotationCount: number | undefined = undefined;
+  pickedAnnotationInstanceCount: number | undefined = undefined;
   pickedAnnotationType: AnnotationType | undefined = undefined;
   pageX: number;
   pageY: number;
@@ -1362,7 +1409,7 @@ export class TrackableDataSelectionState
   captureSingleLayerState<T extends UserLayer>(
     userLayer: Borrowed<T>,
     capture: (state: T["selectionState"]) => boolean,
-    pin: boolean | "toggle" = true,
+    pin: boolean | "toggle" | "force-unpin" = true,
   ) {
     if (pin === false && (!this.location.visible || this.pin.value)) return;
     const state = {} as UserLayerSelectionState;
@@ -1373,6 +1420,8 @@ export class TrackableDataSelectionState
         this.pin.value = true;
       } else if (pin === "toggle") {
         this.pin.value = !this.pin.value;
+      } else if (pin === "force-unpin") {
+        this.pin.value = false;
       }
       this.value = {
         layers: [{ layer: userLayer, state }],
@@ -1422,10 +1471,11 @@ export class TrackableDataSelectionState
   select() {
     const { pin } = this;
     this.location.visible = true;
-    pin.value = !pin.value;
-    if (pin.value) {
-      this.capture();
-    }
+    pin.value = true;
+    this.capture();
+  }
+  unpin() {
+    this.pin.value = false;
   }
   capture(canRetain = false) {
     const newValue = capturePersistentViewerSelectionState(
@@ -2503,6 +2553,15 @@ export class AutoUserLayer extends UserLayer {
       detectLayerTypeFromSubsources(subsources)?.layerConstructor;
     if (layerConstructor !== undefined) {
       changeLayerType(this.managedLayer, layerConstructor);
+      this.registerDisposer(
+        this.managedLayer.readyStateChanged.add(() => {
+          if (this.managedLayer.isReady()) {
+            // If you want to restore the old auto image setup, pass true here
+            // This will then make the previous image layer setup
+            createImageLayerAsMultiChannel(this.managedLayer, makeLayer);
+          }
+        }),
+      );
     }
   }
 }

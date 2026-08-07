@@ -27,6 +27,7 @@ import type {
   AnnotationSource,
   Line,
   Point,
+  PolyLine,
 } from "#src/annotation/index.js";
 import {
   AnnotationType,
@@ -185,7 +186,6 @@ import {
   verifyFiniteFloat,
   verifyFloatArray,
   verifyInt,
-  verifyIntegerArray,
   verifyNonnegativeInt,
   verifyObject,
   verifyObjectProperty,
@@ -1086,43 +1086,27 @@ class FindPathState extends RefCounted implements Trackable {
   }
 
   get path() {
-    const path: Line[] = [];
     const {
       source: { value: source },
       target: { value: target },
       centroids: { value: centroids },
     } = this;
     if (!source || !target || centroids.length === 0) {
-      return path;
+      return undefined;
     }
-    for (let i = 0; i < centroids.length - 1; i++) {
-      const pointA = centroids[i];
-      const pointB = centroids[i + 1];
-      const line: Line = {
-        pointA: vec3.fromValues(pointA[0], pointA[1], pointA[2]),
-        pointB: vec3.fromValues(pointB[0], pointB[1], pointB[2]),
-        id: "",
-        type: AnnotationType.LINE,
-        properties: [],
-      };
-      path.push(line);
-    }
-    const firstLine: Line = {
-      pointA: source.position,
-      pointB: path[0].pointA,
+    return {
       id: "",
-      type: AnnotationType.LINE,
+      type: AnnotationType.POLYLINE,
+      points: [
+        source.position,
+        ...centroids.map((centroid) =>
+          vec3.fromValues(centroid[0], centroid[1], centroid[2]),
+        ),
+        target.position,
+      ],
       properties: [],
-    };
-    const lastLine: Line = {
-      pointA: path[path.length - 1].pointB,
-      pointB: target.position,
-      id: "",
-      type: AnnotationType.LINE,
-      properties: [],
-    };
-
-    return [firstLine, ...path, lastLine];
+      description: "find path result",
+    } satisfies PolyLine;
   }
 
   replaceSegments(oldValues: Uint64Set, newValues: Uint64Set) {
@@ -1529,10 +1513,8 @@ class GraphConnection extends SegmentationGraphSourceConnection {
           annotationSource.delete(annotationSource.getReference(annotation.id));
         }
       }
-      for (const line of path) {
-        // line.id = ''; // TODO, is it a bug that this is necessary? annotationMap is empty if I
-        // step through it but logging shows it isn't empty
-        annotationSource.add(line);
+      if (path) {
+        annotationSource.add(path);
       }
     };
     this.registerDisposer(findPathState.changed.add(findPathChanged));
@@ -1991,7 +1973,6 @@ class GrapheneGraphServerInterface {
   async getRoot(segment: bigint, timestamp = 0) {
     const timestampEpoch = timestamp / 1000;
     const { fetchOkImpl, baseUrl } = this.httpSource;
-
     const jsonResp = await withErrorMessageHTTP(
       fetchOkImpl(
         `${baseUrl}/node/${String(segment)}/root?int64_as_str=1${
@@ -2238,7 +2219,7 @@ class GrapheneGraphSource extends SegmentationGraphSource {
         centroids = l2_path
           .map((id) => {
             return verifyOptionalObjectProperty(attributes, id, (x) => {
-              return verifyIntegerArray(x["rep_coord_nm"]);
+              return verifyFloatArray(x["rep_coord_nm"]);
             });
           })
           .filter((x): x is number[] => x !== undefined);
@@ -3247,8 +3228,13 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
     const annotationElements = document.createElement("div");
     annotationElements.classList.add("find-path-annotations");
     body.appendChild(annotationElements);
+    annotationElements.addEventListener("mouseleave", () => {
+      this.layer.annotationDisplayState.hoverState.value = undefined;
+    });
     const bindings = getDefaultAnnotationListBindings();
-    this.registerDisposer(new MouseEventBinder(annotationElements, bindings));
+    activation.registerDisposer(
+      new MouseEventBinder(annotationElements, bindings),
+    );
     const updateAnnotationElements = () => {
       removeChildren(annotationElements);
       const maxColumnWidths = [0, 0, 0];
@@ -3270,7 +3256,7 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
           localDimensionIndices,
         );
         for (const [column, width] of elementColumnWidths.entries()) {
-          maxColumnWidths[column] = width;
+          maxColumnWidths[column] = Math.max(maxColumnWidths[column], width);
         }
         annotationElements.appendChild(element);
       }
@@ -3281,7 +3267,9 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
         );
       }
     };
-    findPathState.changed.add(updateAnnotationElements);
+    activation.registerDisposer(
+      findPathState.changed.add(updateAnnotationElements),
+    );
     updateAnnotationElements();
     activation.bindInputEventMap(FIND_PATH_INPUT_EVENT_MAP);
     activation.bindAction("submit", (event) => {

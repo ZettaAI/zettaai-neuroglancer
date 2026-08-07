@@ -48,7 +48,7 @@ export class UnsupportedImageDataTypeError extends Error {
 export function imageScalarToUint8(
   values: ArrayLike<number>,
   dataType: VoxelDataType,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
   if (dataType === "uint8") {
     return Uint8Array.from(values);
   }
