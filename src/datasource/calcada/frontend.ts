@@ -5180,7 +5180,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // Result of a stepped split's first half, held until the second runs. Cleared
     // whenever the points change, since it names sub-pieces derived from them.
     let steppedSplit:
-      | { sources: bigint[]; sinks: bigint[]; branchId: number }
+      | { sources: bigint[]; sinks: bigint[]; branchId: number; rootId?: bigint }
       | undefined;
 
     let debugMode = false;
@@ -5537,9 +5537,16 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
     };
 
-    // Pick the root to debug: the focus piece if set, else the single visible
-    // segment.
+    // Pick the root to debug: the root step 1 produced if a stepped split is in
+    // flight, else the focus piece, else the single visible segment.
+    //
+    // Step 1 is checked first because it supersedes the pieces the points were
+    // placed on. currentFocusRoot() maps the first point's piece id through the
+    // equivalences, which keep resolving it to the pre-split root until the
+    // re-fetched chunks repopulate them — debugging that root returns an empty
+    // graph and reads as the split having wiped the segment's edges.
     const debugTargetRoot = (): bigint | undefined => {
+      if (steppedSplit?.rootId !== undefined) return steppedSplit.rootId;
       const focusRoot = currentFocusRoot();
       if (focusRoot !== undefined) return focusRoot;
       let only: bigint | undefined;
@@ -5696,16 +5703,21 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         for (const p of pieceSplitState.redPoints.value) {
           if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
         }
-        steppedSplit = {
-          sources: [...sources],
-          sinks: [...sinks],
-          branchId,
-        };
-
         // The segment stays whole but its pieces changed, so the rendered chunks
         // and the piece->root mapping are stale.
         const segmentsState = layer.displayState.segmentationGroupState.value;
         const newRoots = roots.filter((root) => root !== 0n);
+
+        steppedSplit = {
+          sources: [...sources],
+          sinks: [...sinks],
+          branchId,
+          // Step 1 keeps the segment whole, so it reports exactly one root; hold
+          // it so Debug inspects the post-split graph rather than resolving the
+          // now-superseded pieces the points still name.
+          rootId: newRoots.length === 1 ? newRoots[0] : undefined,
+        };
+
         const focus = currentFocusRoot();
         if (newRoots.length > 0 && focus !== undefined) {
           segmentsState.selectedSegments.delete(focus);
