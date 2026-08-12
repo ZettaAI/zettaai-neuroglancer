@@ -5180,7 +5180,12 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // Result of a stepped split's first half, held until the second runs. Cleared
     // whenever the points change, since it names sub-pieces derived from them.
     let steppedSplit:
-      | { sources: bigint[]; sinks: bigint[]; branchId: number; rootId?: bigint }
+      | {
+          sources: bigint[];
+          sinks: bigint[];
+          branchId: number;
+          rootId?: bigint;
+        }
       | undefined;
 
     let debugMode = false;
