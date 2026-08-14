@@ -502,6 +502,72 @@ describe("NgChunkSource.confirmChunkPersisted (read-back verify)", () => {
   });
 });
 
+const OTHER = Uint32Array.from([90, 91, 92, 93, 94, 95, 96, 97]);
+
+describe("NgChunkSource.confirmChunkPersisted (explicit expectedHash)", () => {
+  it("confirms with an explicit expectedHash when no baseline was recorded", async () => {
+    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
+
+    expect(
+      await chunkSource.confirmChunkPersisted(
+        LAYER,
+        RES_8,
+        CHUNK_ID,
+        CHUNK_COORD,
+        undefined,
+        contentRefFromBuffer(SAVED).hash,
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects an explicit expectedHash that does not match the read-back", async () => {
+    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
+
+    expect(
+      await chunkSource.confirmChunkPersisted(
+        LAYER,
+        RES_8,
+        CHUNK_ID,
+        CHUNK_COORD,
+        undefined,
+        contentRefFromBuffer(OTHER).hash,
+      ),
+    ).toBe(false);
+  });
+
+  it("prefers a matching expectedHash over a recorded baseline that differs", async () => {
+    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
+    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(OTHER));
+
+    expect(
+      await chunkSource.confirmChunkPersisted(
+        LAYER,
+        RES_8,
+        CHUNK_ID,
+        CHUNK_COORD,
+        undefined,
+        contentRefFromBuffer(SAVED).hash,
+      ),
+    ).toBe(true);
+  });
+
+  it("prefers a mismatching expectedHash over a recorded baseline that matches", async () => {
+    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
+    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
+
+    expect(
+      await chunkSource.confirmChunkPersisted(
+        LAYER,
+        RES_8,
+        CHUNK_ID,
+        CHUNK_COORD,
+        undefined,
+        contentRefFromBuffer(OTHER).hash,
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("NgChunkSource exit reconciliation (TM-352)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
