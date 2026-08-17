@@ -28,8 +28,8 @@ import type {
   HttpSource,
 } from "#src/datasource/calcada/base.js";
 import {
-  getGrapheneFragmentKey,
-  GRAPHENE_MESH_NEW_SEGMENT_RPC_ID,
+  getCalcadaFragmentKey,
+  CALCADA_MESH_NEW_SEGMENT_RPC_ID,
   CALCADA_MESH_REFRESH_SEGMENT_RPC_ID,
   CALCADA_BULK_LINK_RPC_ID,
   ChunkedGraphSourceParameters,
@@ -40,7 +40,7 @@ import {
   CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   RENDER_RATIO_LIMIT,
   isBaseSegmentId,
-  parseGrapheneError,
+  parseCalcadaError,
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
@@ -331,7 +331,7 @@ export class CalcadaVolumeChunkSource extends WithParameters(
 }
 
 @registerSharedObject()
-export class GrapheneMeshSource extends WithParameters(
+export class CalcadaMeshSource extends WithParameters(
   WithSharedKvStoreContextCounterpart(MeshSource),
   MeshSourceParameters,
 ) {
@@ -339,7 +339,7 @@ export class GrapheneMeshSource extends WithParameters(
   newSegments = new Uint64Set();
   // Live branch shared from the frontend. parameters.branchId is frozen at
   // datasource creation; the dropdown branch switch mutates the frontend's
-  // GrapheneState.branchId without recreating sources, so manifest requests
+  // CalcadaState.branchId without recreating sources, so manifest requests
   // must read the live value or branch-only roots resolve against main.
   branchId: SharedWatchableValue<number> | undefined;
 
@@ -384,7 +384,7 @@ export class GrapheneMeshSource extends WithParameters(
     // that 2D slice chunks use. Otherwise mesh chunks — which carry a far
     // higher chunk priority than slice chunks — monopolize the shared 100-slot
     // budget after an edit and stall the 2D data the user is looking at.
-    // Graphene's own mesh sources are a different class and stay on level 0.
+    // Calcada's own mesh sources are a different class and stay on level 0.
     this.sourceQueueLevel = 1;
     this.fragmentSource.sourceQueueLevel = 1;
     if (options.branchId !== undefined) {
@@ -623,7 +623,7 @@ export class GrapheneMeshSource extends WithParameters(
 
   getFragmentKey(objectKey: string | null, fragmentId: string) {
     objectKey;
-    return getGrapheneFragmentKey(fragmentId);
+    return getCalcadaFragmentKey(fragmentId);
   }
 }
 
@@ -696,7 +696,7 @@ class LeavesManyProxy {
 
 export class ChunkedGraphChunk extends Chunk {
   chunkGridPosition: Float32Array;
-  source: GrapheneChunkedGraphChunkSource | null = null;
+  source: CalcadaChunkedGraphChunkSource | null = null;
   segment: bigint;
   leaves: BigUint64Array = new BigUint64Array(0);
   chunkDataSize: Uint32Array | null;
@@ -758,7 +758,7 @@ function decodeChunkedGraphChunk(leaves: string[]) {
 }
 
 @registerSharedObject()
-export class GrapheneChunkedGraphChunkSource extends WithParameters(
+export class CalcadaChunkedGraphChunkSource extends WithParameters(
   WithSharedKvStoreContextCounterpart(ChunkSource),
   ChunkedGraphSourceParameters,
 ) {
@@ -818,7 +818,7 @@ export class GrapheneChunkedGraphChunkSource extends WithParameters(
   ): Promise<T> {
     return promise.catch(async (e) => {
       if (e instanceof HttpError && e.response) {
-        const msg = await parseGrapheneError(e);
+        const msg = await parseCalcadaError(e);
         throw new Error(`[${e.response.status}] ${errorPrefix}${msg ?? ""}`);
       }
       throw e;
@@ -830,7 +830,7 @@ interface ChunkedGraphRenderLayerAttachmentState {
   displayDimensionRenderInfo: DisplayDimensionRenderInfo;
   transformedSource?: TransformedSource<
     ChunkedGraphLayer,
-    GrapheneChunkedGraphChunkSource
+    CalcadaChunkedGraphChunkSource
   >;
 }
 
@@ -838,7 +838,7 @@ interface ChunkedGraphRenderLayerAttachmentState {
 export class ChunkedGraphLayer extends withSegmentationLayerBackendState(
   withSharedVisibility(withChunkManager(RenderLayerBackend)),
 ) {
-  source: GrapheneChunkedGraphChunkSource;
+  source: CalcadaChunkedGraphChunkSource;
   localPosition: SharedWatchableValue<Float32Array>;
   leafRequestsActive: SharedWatchableValue<boolean>;
   nBitsForLayerId: SharedWatchableValue<number>;
@@ -847,7 +847,7 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState(
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
     this.source = this.registerDisposer(
-      rpc.getRef<GrapheneChunkedGraphChunkSource>(options.source),
+      rpc.getRef<CalcadaChunkedGraphChunkSource>(options.source),
     );
     this.localPosition = rpc.get(options.localPosition);
     this.leafRequestsActive = rpc.get(options.leafRequestsActive);
@@ -937,18 +937,18 @@ registerRPC(CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID, function (x) {
     ChunkedGraphLayer
   >(this, x.sources, layer)[0][0] as unknown as TransformedSource<
     ChunkedGraphLayer,
-    GrapheneChunkedGraphChunkSource
+    CalcadaChunkedGraphChunkSource
   >;
   attachment.state!.displayDimensionRenderInfo = x.displayDimensionRenderInfo;
   layer.chunkManager.scheduleUpdateChunkPriorities();
 });
 
-registerRPC(GRAPHENE_MESH_NEW_SEGMENT_RPC_ID, function (x) {
-  const obj = <GrapheneMeshSource>this.get(x.rpcId);
+registerRPC(CALCADA_MESH_NEW_SEGMENT_RPC_ID, function (x) {
+  const obj = <CalcadaMeshSource>this.get(x.rpcId);
   obj.addNewSegment(x.segment);
 });
 
 registerRPC(CALCADA_MESH_REFRESH_SEGMENT_RPC_ID, function (x) {
-  const obj = <GrapheneMeshSource>this.get(x.rpcId);
+  const obj = <CalcadaMeshSource>this.get(x.rpcId);
   obj.refreshSegment(x.segment);
 });

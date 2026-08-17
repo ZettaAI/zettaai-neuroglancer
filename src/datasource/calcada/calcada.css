@@ -1,25 +1,25 @@
-.neuroglancer-graphene-tab .neuroglancer-annotation-toolbox {
+.neuroglancer-calcada-tab .neuroglancer-annotation-toolbox {
   display: none;
 }
 
-.neuroglancer-graphene-tab
+.neuroglancer-calcada-tab
   div[data-color="#ff0000"]
   > .neuroglancer-annotation-position {
   color: red;
 }
 
-.neuroglancer-graphene-tab
+.neuroglancer-calcada-tab
   div[data-color="#0000ff"]
   > .neuroglancer-annotation-position {
   color: #4444ff;
 }
 
-.graphene-tool-status {
+.calcada-tool-status {
   display: flex;
   gap: 10px;
 }
 
-.graphene-multicut > .activeGroupIndicator {
+.calcada-multicut > .activeGroupIndicator {
   padding: 2px;
   margin: auto 0;
   background-color: red;
@@ -27,33 +27,33 @@
   font-weight: 900;
 }
 
-.graphene-multicut > .activeGroupIndicator.blueGroup {
+.calcada-multicut > .activeGroupIndicator.blueGroup {
   background-color: blue;
 }
 
-.graphene-multicut > .activeGroupIndicator::after {
+.calcada-multicut > .activeGroupIndicator::after {
   content: "Red";
 }
 
-.graphene-multicut > .activeGroupIndicator.blueGroup::after {
+.calcada-multicut > .activeGroupIndicator.blueGroup::after {
   content: "Blue";
 }
 
-.graphene-merge-segments-merges {
+.calcada-merge-segments-merges {
   display: flex;
   flex-direction: column;
 }
 
-.graphene-merge-segments-submission {
+.calcada-merge-segments-submission {
   display: flex;
   gap: 10px;
 }
 
-.graphene-tool-status .neuroglancer-icon {
+.calcada-tool-status .neuroglancer-icon {
   height: 100%;
 }
 
-.graphene-merge-segments-status label {
+.calcada-merge-segments-status label {
   display: grid;
   grid-template-columns: min-content min-content;
   white-space: nowrap;
@@ -61,23 +61,22 @@
   align-content: center;
 }
 
-.graphene-merge-segments-point {
+.calcada-merge-segments-point {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.graphene-merge-segments-point
-  .neuroglancer-segment-list-entry-visible-checkbox,
-.graphene-merge-segments-point .neuroglancer-segment-list-entry-copy-container {
+.calcada-merge-segments-point .neuroglancer-segment-list-entry-visible-checkbox,
+.calcada-merge-segments-point .neuroglancer-segment-list-entry-copy-container {
   display: none;
 }
 
-.graphene-find-path > label {
+.calcada-find-path > label {
   display: flex;
 }
 
-.graphene-find-path > label > span {
+.calcada-find-path > label > span {
   display: flex;
   align-content: center;
   flex-wrap: wrap;
@@ -92,58 +91,67 @@
   background-color: black;
 }
 
-.graphene-piece-split {
+.calcada-piece-split {
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
   min-width: 28em;
 }
 
-.graphene-piece-split .piece-split-focus {
+.calcada-piece-split .piece-split-focus {
   font: 13px sans-serif;
   font-weight: 600;
 }
 
-.graphene-piece-split .piece-split-group-row {
+.calcada-piece-split .piece-split-group-row {
   font-weight: 700;
 }
 
-.graphene-piece-split .piece-split-points {
+.calcada-piece-split .piece-split-points {
   display: flex;
   gap: 12px;
   font: 12px monospace;
 }
 
-.graphene-piece-split .piece-split-blue > div:first-child,
-.graphene-piece-split .piece-split-red > div:first-child {
+.calcada-piece-split .piece-split-blue > div:first-child,
+.calcada-piece-split .piece-split-red > div:first-child {
   font-weight: 700;
   margin-bottom: 2px;
 }
 
-.graphene-piece-split .piece-split-point-row {
+.calcada-piece-split .piece-split-point-row {
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
-.graphene-piece-split .piece-split-preview-summary {
+.calcada-piece-split .piece-split-preview-summary {
   font: 12px sans-serif;
   background: rgba(255, 255, 255, 0.05);
   padding: 4px;
   border-radius: 2px;
 }
 
-.graphene-piece-split .piece-split-actions {
+.calcada-piece-split .piece-split-actions {
   display: flex;
   gap: 10px;
 }
 
-.graphene-piece-split .neuroglancer-icon.disabled {
+.calcada-piece-split .piece-split-use-image {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 12px sans-serif;
+  cursor: pointer;
+  user-select: none;
+}
+
+.calcada-piece-split .neuroglancer-icon.disabled {
   opacity: 0.4;
   pointer-events: none;
 }
 
-.graphene-piece-split .piece-split-spinner {
+.calcada-piece-split .piece-split-spinner {
   width: 14px;
   height: 14px;
   align-self: center;

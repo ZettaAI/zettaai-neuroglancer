@@ -50,14 +50,14 @@ import {
   CHUNKED_GRAPH_LAYER_RPC_ID,
   CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   ChunkedGraphSourceParameters,
-  getGrapheneFragmentKey,
+  getCalcadaFragmentKey,
   getHttpSource,
-  GRAPHENE_MESH_NEW_SEGMENT_RPC_ID,
+  CALCADA_MESH_NEW_SEGMENT_RPC_ID,
   CALCADA_MESH_REFRESH_SEGMENT_RPC_ID,
   isBaseSegmentId,
   makeChunkedGraphChunkSpecification,
   MeshSourceParameters,
-  parseGrapheneError,
+  parseCalcadaError,
   PYCG_APP_VERSION,
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
@@ -269,13 +269,13 @@ const DEBUG_PIECE_PALETTE: bigint[] = (
 const MULTICUT_OFF_COLOR = vec4.fromValues(0, 0, 0, 0.5);
 const WHITE_COLOR = vec3.fromValues(1, 1, 1);
 
-class GrapheneMeshSource extends WithParameters(
+class CalcadaMeshSource extends WithParameters(
   WithSharedKvStoreContext(MeshSource),
   MeshSourceParameters,
 ) {
   // Live branch value shared with the backend counterpart. parameters.branchId
   // only captures the branch at datasource-creation time; switching branches
-  // via the Graph-tab dropdown mutates GrapheneState.branchId on the same
+  // via the Graph-tab dropdown mutates CalcadaState.branchId on the same
   // datasource, and manifest requests must follow it or they resolve against
   // main and return empty piece lists for branch-only roots.
   private readonly liveBranchId: WatchableValueInterface<number> | undefined;
@@ -296,11 +296,11 @@ class GrapheneMeshSource extends WithParameters(
 
   getFragmentKey(objectKey: string | null, fragmentId: string) {
     objectKey;
-    return getGrapheneFragmentKey(fragmentId);
+    return getCalcadaFragmentKey(fragmentId);
   }
 
   // Calcada mesh fragments are per-piece (the manifest lists "{piece_id}:0" per
-  // supervoxel). Opt into per-fragment picking so a 3D mesh pick resolves to the
+  // piece). Opt into per-fragment picking so a 3D mesh pick resolves to the
   // clicked piece; the layer's equivalences then map that piece to its current
   // root, giving segmentSelectionState { baseValue: piece, value: root }. This
   // lets merge/split send the exact piece instead of a (possibly stale) root and
@@ -384,17 +384,17 @@ class GraphInfo {
   }
 }
 
-interface GrapheneMultiscaleVolumeInfo extends MultiscaleVolumeInfo {
+interface CalcadaMultiscaleVolumeInfo extends MultiscaleVolumeInfo {
   dataUrl: string;
   meshSourceUrl: string | undefined;
   app: AppInfo;
   graph: GraphInfo;
 }
 
-function parseGrapheneMultiscaleVolumeInfo(
+function parseCalcadaMultiscaleVolumeInfo(
   obj: unknown,
   url: string,
-): GrapheneMultiscaleVolumeInfo {
+): CalcadaMultiscaleVolumeInfo {
   const volumeInfo = parseMultiscaleVolumeInfo(obj);
   const dataUrl = verifyObjectProperty(obj, "data_dir", verifyString);
   const meshSourceUrl = verifyObjectProperty(
@@ -425,7 +425,7 @@ class CalcadaVolumeChunkSource extends WithParameters(
   CalcadaVolumeChunkSourceParameters,
 ) {}
 
-class GrapheneMultiscaleVolumeChunkSource extends PrecomputedMultiscaleVolumeChunkSource {
+class CalcadaMultiscaleVolumeChunkSource extends PrecomputedMultiscaleVolumeChunkSource {
   // URL for the /precomputed_rp/ endpoint (piece_ids + LUT trailer)
   private rpUrl: string;
 
@@ -439,7 +439,7 @@ class GrapheneMultiscaleVolumeChunkSource extends PrecomputedMultiscaleVolumeChu
 
   constructor(
     sharedKvStoreContext: SharedKvStoreContext,
-    public info: GrapheneMultiscaleVolumeInfo,
+    public info: CalcadaMultiscaleVolumeInfo,
   ) {
     super(sharedKvStoreContext, info.dataUrl, info);
     // Build /precomputed_rp/ URL from raw data URL
@@ -551,7 +551,7 @@ class GrapheneMultiscaleVolumeChunkSource extends PrecomputedMultiscaleVolumeChu
     }
     return {
       chunkSource: this.chunkManager.getChunkSource(
-        GrapheneChunkedGraphChunkSource,
+        CalcadaChunkedGraphChunkSource,
         {
           spec,
           sharedKvStoreContext: this.sharedKvStoreContext,
@@ -697,10 +697,10 @@ function getShardedMeshSource(
   parameters: MeshSourceParameters,
   branchId: WatchableValueInterface<number>,
 ) {
-  // branchId rides alongside the mixin-typed options; the GrapheneMeshSource
+  // branchId rides alongside the mixin-typed options; the CalcadaMeshSource
   // constructor picks it up, but the WithParameters options type doesn't know
   // about it, hence the cast.
-  return sharedKvStoreContext.chunkManager.getChunkSource(GrapheneMeshSource, {
+  return sharedKvStoreContext.chunkManager.getChunkSource(CalcadaMeshSource, {
     sharedKvStoreContext,
     parameters,
     branchId,
@@ -752,7 +752,7 @@ export function getJsonMetadata(
     async (options) => {
       const infoUrl = pipelineUrlJoin(url, "info");
       using _span = new ProgressSpan(options.progressListener, {
-        message: `Reading graphene metadata from ${infoUrl}`,
+        message: `Reading calcada metadata from ${infoUrl}`,
       });
       const response = await sharedKvStoreContext.kvStoreContext.read(infoUrl, {
         ...options,
@@ -780,12 +780,12 @@ async function getVolumeDataSource(
   options: ProgressOptions,
   stateJson: any,
 ): Promise<DataSource> {
-  const info = parseGrapheneMultiscaleVolumeInfo(metadata, url);
-  const volume = new GrapheneMultiscaleVolumeChunkSource(
+  const info = parseCalcadaMultiscaleVolumeInfo(metadata, url);
+  const volume = new CalcadaMultiscaleVolumeChunkSource(
     sharedKvStoreContext,
     info,
   );
-  const state = new GrapheneState();
+  const state = new CalcadaState();
   if (stateJson) {
     state.restoreState(stateJson);
   }
@@ -794,7 +794,7 @@ async function getVolumeDataSource(
   // out with branch_id=0 (the chunkSource default) and the user sees
   // main's view until refreshChunkSources() fires on a later UI toggle.
   volume.branchId = state.branchId.value;
-  const segmentationGraph = new GrapheneGraphSource(info, volume, state);
+  const segmentationGraph = new CalcadaGraphSource(info, volume, state);
   const { modelSpace } = info;
   const subsources: DataSubsourceEntry[] = [
     {
@@ -877,7 +877,7 @@ async function getVolumeDataSource(
   };
 }
 
-// Note: Graphene is not really a kvstore-based data source, since it relies on
+// Note: Calcada is not really a kvstore-based data source, since it relies on
 // making arbitrary HTTP requests rather than just kvstore. It fails if the
 // provided kvstore does not inherit from HttpKvStore.
 export class CalcadaDataSource implements KvStoreBasedDataSourceProvider {
@@ -897,7 +897,7 @@ export class CalcadaDataSource implements KvStoreBasedDataSourceProvider {
     // sharing the same URL but different per-source state (e.g. main layer
     // with state={} and branch layer with state={calcadaBranch:N}) get
     // independent DataSource instances. Without this the second layer
-    // silently reuses the first's GrapheneState/branchId and ignores its
+    // silently reuses the first's CalcadaState/branchId and ignores its
     // restored state — the diff-link branch layer ends up showing "main".
     const stateKey = JSON.stringify(options.state ?? null);
     return options.registry.chunkManager.memoize.getAsync(
@@ -1047,7 +1047,7 @@ const PRECISION_MODE_JSON_KEY = "precision";
 const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 
-class GrapheneState extends RefCounted implements Trackable {
+class CalcadaState extends RefCounted implements Trackable {
   changed = new NullarySignal();
 
   public multicutState = new MulticutState();
@@ -1485,7 +1485,7 @@ class MulticutState extends RefCounted implements Trackable {
     return this.blueGroup.value ? this.sources : this.sinks;
   }
 
-  // following three functions are used to render multicut supervoxels in 2d (color them red/blue)
+  // following three functions are used to render multicut pieces in 2d (color them red/blue)
   get segments() {
     return [...this.redSegments, ...this.blueSegments];
   }
@@ -1524,6 +1524,7 @@ interface PointEntry {
 
 const PIECE_SPLIT_BLUE_KEY = "blue";
 const PIECE_SPLIT_RED_KEY = "red";
+const PIECE_SPLIT_USE_IMAGE_KEY = "useImage";
 
 // PieceSplitState holds the working state of the point-driven piece split tool:
 // the two coloured point lists and the active colour. The focused segment is not
@@ -1535,6 +1536,10 @@ class PieceSplitState extends RefCounted implements Trackable {
   blueGroup = new WatchableValue<boolean>(true);
   bluePoints = new WatchableValue<PointEntry[]>([]);
   redPoints = new WatchableValue<PointEntry[]>([]);
+  // Price the cut from the EM image (dark membranes cheap to cut). Off by
+  // default: the image volume is then never read, which makes the split
+  // several seconds faster; the cut runs on geometry and the data term alone.
+  useImage = new WatchableValue<boolean>(false);
 
   constructor() {
     super();
@@ -1542,6 +1547,7 @@ class PieceSplitState extends RefCounted implements Trackable {
     this.registerDisposer(this.blueGroup.changed.add(reemit));
     this.registerDisposer(this.bluePoints.changed.add(reemit));
     this.registerDisposer(this.redPoints.changed.add(reemit));
+    this.registerDisposer(this.useImage.changed.add(reemit));
   }
 
   reset() {
@@ -1583,6 +1589,7 @@ class PieceSplitState extends RefCounted implements Trackable {
     return {
       [PIECE_SPLIT_BLUE_KEY]: this.bluePoints.value.map(entryToJSON),
       [PIECE_SPLIT_RED_KEY]: this.redPoints.value.map(entryToJSON),
+      [PIECE_SPLIT_USE_IMAGE_KEY]: this.useImage.value ? true : undefined,
     };
   }
 
@@ -1594,6 +1601,9 @@ class PieceSplitState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, PIECE_SPLIT_RED_KEY, (value) => {
       this.redPoints.value = parseArray(value, parseEntry);
+    });
+    verifyOptionalObjectProperty(x, PIECE_SPLIT_USE_IMAGE_KEY, (value) => {
+      this.useImage.value = verifyBoolean(value);
     });
   }
 }
@@ -1656,10 +1666,10 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public debugSiblingAnnotationState!: AnnotationLayerState;
 
   constructor(
-    public graph: GrapheneGraphSource,
+    public graph: CalcadaGraphSource,
     private layer: SegmentationUserLayer,
-    private chunkSource: GrapheneMultiscaleVolumeChunkSource,
-    public state: GrapheneState,
+    private chunkSource: CalcadaMultiscaleVolumeChunkSource,
+    public state: CalcadaState,
   ) {
     super(graph, layer.displayState.segmentationGroupState.value);
     const segmentsState = layer.displayState.segmentationGroupState.value;
@@ -1756,6 +1766,8 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     this.mergeAnnotationState = makeColoredAnnotationState(
       layer,
       loadedSubsource,
+      // Legacy id kept verbatim: it is a persisted subsource key, and
+      // renaming it would orphan the merge annotations in saved NG states.
       "grapheneMerge",
       RED_COLOR,
     );
@@ -2007,7 +2019,7 @@ void main() {
           mergeState.merges.value.length > 0
         ) {
           // remind me why want to add ourselves compared to keeping it empty
-          // if it is non empty, graphene knows there is a tool locking it
+          // if it is non empty, calcada knows there is a tool locking it
           segmentsState.timestampOwner.add(layer.managedLayer.name);
         } else {
           segmentsState.timestampOwner.delete(layer.managedLayer.name);
@@ -2360,7 +2372,7 @@ void main() {
       const { rpc, rpcId } = meshSource;
       if (!rpc || rpcId === undefined) return;
       for (const segment of segments) {
-        rpc.invoke(GRAPHENE_MESH_NEW_SEGMENT_RPC_ID, {
+        rpc.invoke(CALCADA_MESH_NEW_SEGMENT_RPC_ID, {
           rpcId,
           segment,
         });
@@ -2731,7 +2743,7 @@ async function withErrorMessageHTTP<T>(
   } catch (e) {
     if (e instanceof HttpError && e.response) {
       const { errorPrefix = "" } = options;
-      const msg = (await parseGrapheneError(e)) || "unknown error";
+      const msg = (await parseCalcadaError(e)) || "unknown error";
       if (!status) {
         status = new StatusMessage(true);
       }
@@ -2755,7 +2767,7 @@ const selectionInNanometers = (
   };
 };
 
-function defaultParentForNewBranch(graph: GrapheneGraphSource): number {
+function defaultParentForNewBranch(graph: CalcadaGraphSource): number {
   return graph.branchId.value;
 }
 
@@ -2763,7 +2775,7 @@ const BRANCH_CREATING_POLL_MS = 2000;
 const BRANCH_CREATING_POLL_LIMIT = 300;
 
 function watchBranchUntilActive(
-  graph: GrapheneGraphSource,
+  graph: CalcadaGraphSource,
   id: number,
   originBranchId: number,
   isCancelled: () => boolean,
@@ -2812,7 +2824,7 @@ function appendCoordParams(
   return `${url}${sep}${parts.join("&")}`;
 }
 
-class GrapheneGraphServerInterface {
+class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
 
   async getTimestampLimit() {
@@ -2908,6 +2920,7 @@ class GrapheneGraphServerInterface {
       affinity: number;
       area: number;
       status: string;
+      pos: [number, number, number];
     }[];
   }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -2942,12 +2955,14 @@ class GrapheneGraphServerInterface {
         affinity: number;
         area: number;
         status: string;
+        pos?: [number, number, number];
       }) => ({
         a: parseUint64(e.a),
         b: parseUint64(e.b),
         affinity: e.affinity,
         area: e.area,
         status: e.status,
+        pos: e.pos ?? ([0, 0, 0] as [number, number, number]),
       }),
     );
     return { pieces, edges };
@@ -2986,7 +3001,7 @@ class GrapheneGraphServerInterface {
       return { root, pieces, operationId };
     } catch (e) {
       if (e instanceof HttpError) {
-        const msg = await parseGrapheneError(e);
+        const msg = await parseCalcadaError(e);
         throw new Error(msg);
       }
       throw e;
@@ -3081,6 +3096,9 @@ class GrapheneGraphServerInterface {
     // left to a separate call. It exists to make that intermediate graph
     // inspectable, which is otherwise invisible.
     piecesOnly = false,
+    // useImage prices the voxel min-cut from the EM image. Off by default: the
+    // backend then skips the image read entirely and cuts on geometry alone.
+    useImage = false,
   ): Promise<{
     operationId: number;
     roots: bigint[];
@@ -3107,6 +3125,7 @@ class GrapheneGraphServerInterface {
               z: p.z,
               origin: p.origin,
             })),
+            use_image: useImage,
           }),
         },
       );
@@ -3220,11 +3239,9 @@ class GrapheneGraphServerInterface {
         errorPrefix: "Path finding failed: ",
       },
     );
-    const supervoxelCentroidsKey = "centroids_list";
-    const centroids = verifyObjectProperty(
-      jsonResp,
-      supervoxelCentroidsKey,
-      (x) => parseArray(x, verifyFloatArray),
+    const pieceCentroidsKey = "centroids_list";
+    const centroids = verifyObjectProperty(jsonResp, pieceCentroidsKey, (x) =>
+      parseArray(x, verifyFloatArray),
     );
     const missingL2IdsKey = "failed_l2_ids";
     const missingL2Ids = jsonResp[missingL2IdsKey];
@@ -3252,8 +3269,8 @@ export interface CalcadaLabeledTimestamp {
   visibility: string;
 }
 
-class GrapheneGraphSource extends SegmentationGraphSource {
-  public graphServer: GrapheneGraphServerInterface;
+class CalcadaGraphSource extends SegmentationGraphSource {
+  public graphServer: CalcadaGraphServerInterface;
   private l2CacheAvailable: boolean | undefined = undefined;
   private httpSource: HttpSource;
   public timestampLimit = new TrackableValue<number>(0, (x) => x);
@@ -3268,9 +3285,9 @@ class GrapheneGraphSource extends SegmentationGraphSource {
   }
 
   constructor(
-    public info: GrapheneMultiscaleVolumeInfo,
-    private chunkSource: GrapheneMultiscaleVolumeChunkSource,
-    public state: GrapheneState,
+    public info: CalcadaMultiscaleVolumeInfo,
+    private chunkSource: CalcadaMultiscaleVolumeChunkSource,
+    public state: CalcadaState,
   ) {
     super();
     const url = info.app!.segmentationUrl;
@@ -3278,7 +3295,7 @@ class GrapheneGraphSource extends SegmentationGraphSource {
       chunkSource.sharedKvStoreContext.kvStoreContext,
       url,
     );
-    this.graphServer = new GrapheneGraphServerInterface(this.httpSource);
+    this.graphServer = new CalcadaGraphServerInterface(this.httpSource);
     this.graphServer.getTimestampLimit().then((limit) => {
       this.timestampLimit.value = limit;
     });
@@ -3597,7 +3614,7 @@ class GrapheneGraphSource extends SegmentationGraphSource {
     );
     const tabElement = tab.element;
     tabElement.classList.add("neuroglancer-annotations-tab");
-    tabElement.classList.add("neuroglancer-graphene-tab");
+    tabElement.classList.add("neuroglancer-calcada-tab");
     return parent;
   }
 
@@ -3641,7 +3658,7 @@ class ChunkedGraphChunkSource
   }
 }
 
-class GrapheneChunkedGraphChunkSource extends WithParameters(
+class CalcadaChunkedGraphChunkSource extends WithParameters(
   WithSharedKvStoreContext(ChunkedGraphChunkSource),
   ChunkedGraphSourceParameters,
 ) {}
@@ -3911,12 +3928,14 @@ const getPoint = (
   return undefined;
 };
 
-const GRAPHENE_TIME_JSON_KEY = "grapheneTime";
+// Legacy value kept verbatim: this is the persisted tool id in saved NG
+// states, and renaming it would break every state with a timestamp tool.
+const CALCADA_TIME_JSON_KEY = "grapheneTime";
 
 const timeControl = {
   label: "Time",
   title: "View segmentation at earlier point of time",
-  toolJson: GRAPHENE_TIME_JSON_KEY,
+  toolJson: CALCADA_TIME_JSON_KEY,
   ...timeLayerControl(),
 };
 
@@ -3944,7 +3963,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         graph: { value: graph },
       } = segmentationGroupState;
       const branchId =
-        graph instanceof GrapheneGraphSource
+        graph instanceof CalcadaGraphSource
           ? graph.branchId
           : new TrackableValue<number>(0, (x) => x);
 
@@ -3958,7 +3977,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
 
       const renderOptions = () => {
         const branches =
-          graph instanceof GrapheneGraphSource ? graph.branches.value : [];
+          graph instanceof CalcadaGraphSource ? graph.branches.value : [];
         while (select.firstChild) {
           select.removeChild(select.firstChild);
         }
@@ -4007,7 +4026,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         }
         if (parsed === branchId.value) return;
         const targetBranch =
-          graph instanceof GrapheneGraphSource
+          graph instanceof CalcadaGraphSource
             ? graph.branches.value.find((branch) => branch.id === parsed)
             : undefined;
         if (targetBranch !== undefined && targetBranch.status === "creating") {
@@ -4026,7 +4045,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       });
 
       select.addEventListener("focus", () => {
-        if (graph instanceof GrapheneGraphSource) {
+        if (graph instanceof CalcadaGraphSource) {
           graph.triggerBranchRefresh();
         }
       });
@@ -4038,7 +4057,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         renderOptions();
       };
       context.registerDisposer(branchId.changed.add(sync));
-      if (graph instanceof GrapheneGraphSource) {
+      if (graph instanceof CalcadaGraphSource) {
         context.registerDisposer(graph.branches.changed.add(renderOptions));
       }
       controlElement.appendChild(select);
@@ -4063,7 +4082,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         mainOption.textContent = "from: main";
         parentSelect.appendChild(mainOption);
         const branches =
-          graph instanceof GrapheneGraphSource ? graph.branches.value : [];
+          graph instanceof CalcadaGraphSource ? graph.branches.value : [];
         for (const { id, name, status } of branches) {
           if (status !== "active") continue;
           const option = document.createElement("option");
@@ -4072,7 +4091,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
           parentSelect.appendChild(option);
         }
         const defaultValue = String(
-          graph instanceof GrapheneGraphSource
+          graph instanceof CalcadaGraphSource
             ? defaultParentForNewBranch(graph)
             : 0,
         );
@@ -4083,7 +4102,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         if (parentSelect.selectedIndex === -1) parentSelect.value = "0";
       };
       renderParentOptions(true);
-      if (graph instanceof GrapheneGraphSource) {
+      if (graph instanceof CalcadaGraphSource) {
         context.registerDisposer(
           graph.branches.changed.add(() => renderParentOptions(false)),
         );
@@ -4112,7 +4131,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       });
 
       const submitCreate = async () => {
-        if (!(graph instanceof GrapheneGraphSource)) return;
+        if (!(graph instanceof CalcadaGraphSource)) return;
         const name = String(nameInput.value).trim();
         if (name.length === 0) return;
         const originBranchId = graph.branchId.value;
@@ -4207,7 +4226,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       controlElement.appendChild(diffLink);
 
       const updateDiffLink = () => {
-        if (!(graph instanceof GrapheneGraphSource)) {
+        if (!(graph instanceof CalcadaGraphSource)) {
           diffLink.style.display = "none";
           return;
         }
@@ -4254,11 +4273,11 @@ function makeGuardedTimestampState(
     graph: { value: graph },
   } = segmentationGroupState;
   const timestamp =
-    graph instanceof GrapheneGraphSource
+    graph instanceof CalcadaGraphSource
       ? segmentationGroupState.timestamp
       : new WatchableValue<number | undefined>(undefined);
   const timestampOwner =
-    graph instanceof GrapheneGraphSource
+    graph instanceof CalcadaGraphSource
       ? segmentationGroupState.timestampOwner
       : new WatchableSet<string>();
   const intermediateTimestamp = new WatchableValue<number | undefined>(
@@ -4277,7 +4296,7 @@ function makeGuardedTimestampState(
       timestampOwner.delete(layer.managedLayer.name);
       return;
     }
-    if (graph instanceof GrapheneGraphSource) {
+    if (graph instanceof CalcadaGraphSource) {
       const selfLock = segmentationGroupState.timestampOwner.has(
         layer.managedLayer.name,
       );
@@ -4295,7 +4314,7 @@ function makeGuardedTimestampState(
         if (
           !nonLatestRoots.length ||
           confirm(
-            `Changing graphene time will clear ${nonLatestRoots.length} segment(s).`,
+            `Changing calcada time will clear ${nonLatestRoots.length} segment(s).`,
           )
         ) {
           timestamp.value = intermediateTimestamp.value;
@@ -4326,7 +4345,7 @@ function timeLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         context,
       );
       const timestampLimit =
-        graph instanceof GrapheneGraphSource
+        graph instanceof CalcadaGraphSource
           ? graph.timestampLimit
           : new WatchableValue<number>(0);
 
@@ -4367,7 +4386,7 @@ function labeledTimestampLayerControl(): LayerControlFactory<SegmentationUserLay
       const LIVE_VALUE = "";
       const renderLabelOptions = () => {
         const labels =
-          graph instanceof GrapheneGraphSource
+          graph instanceof CalcadaGraphSource
             ? graph.labeledTimestamps.value
             : [];
         while (labelSelect.firstChild) {
@@ -4405,7 +4424,7 @@ function labeledTimestampLayerControl(): LayerControlFactory<SegmentationUserLay
             : Number.parseInt(labelSelect.value, 10);
       });
       labelSelect.addEventListener("focus", () => {
-        if (graph instanceof GrapheneGraphSource) {
+        if (graph instanceof CalcadaGraphSource) {
           graph.triggerLabeledTimestampRefresh();
         }
       });
@@ -4413,7 +4432,7 @@ function labeledTimestampLayerControl(): LayerControlFactory<SegmentationUserLay
       context.registerDisposer(
         intermediateTimestamp.changed.add(renderLabelOptions),
       );
-      if (graph instanceof GrapheneGraphSource) {
+      if (graph instanceof CalcadaGraphSource) {
         context.registerDisposer(
           graph.labeledTimestamps.changed.add(renderLabelOptions),
         );
@@ -4487,7 +4506,7 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
     header.textContent = "Multicut segments";
-    body.classList.add("graphene-tool-status", "graphene-multicut");
+    body.classList.add("calcada-tool-status", "calcada-multicut");
     body.appendChild(
       makeIcon({
         text: "Swap",
@@ -4638,7 +4657,7 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
       }
       if (focusSegment.value !== rootId) {
         StatusMessage.showTemporaryMessage(
-          `The selected supervoxel has root segment ${rootId}, but the supervoxels already selected have root ${focusSegment.value}`,
+          `The selected piece has root segment ${rootId}, but the pieces already selected have root ${focusSegment.value}`,
           12000,
         );
         return;
@@ -4648,7 +4667,7 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
         for (const segment of segments) {
           if (segment === segmentId) {
             StatusMessage.showTemporaryMessage(
-              `Supervoxel ${segmentId} has already been selected`,
+              `Piece ${segmentId} has already been selected`,
               7000,
             );
             return;
@@ -4679,7 +4698,7 @@ const maybeGetSelection = (
   if (!baseValue || !value) return;
   if (!visibleSegments.has(value)) {
     StatusMessage.showTemporaryMessage(
-      "The selected supervoxel is of an unselected segment",
+      "The selected piece is of an unselected segment",
       7000,
     );
     return;
@@ -4809,7 +4828,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
     header.textContent = "Merge segments";
-    body.classList.add("graphene-tool-status", "graphene-merge-segments");
+    body.classList.add("calcada-tool-status", "calcada-merge-segments");
     activation.bindInputEventMap(MERGE_SEGMENTS_INPUT_EVENT_MAP);
     activation.bindAction("undo", (event) => {
       event.stopPropagation();
@@ -4856,7 +4875,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
     label.appendChild(checkbox.element);
     body.appendChild(label);
     const points = document.createElement("div");
-    points.classList.add("graphene-merge-segments-merges");
+    points.classList.add("calcada-merge-segments-merges");
     body.appendChild(points);
 
     const segmentWidgetFactory = SegmentWidgetFactory.make(
@@ -4871,7 +4890,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
 
     const createPointElement = (id: bigint) => {
       const containerEl = document.createElement("div");
-      containerEl.classList.add("graphene-merge-segments-point");
+      containerEl.classList.add("calcada-merge-segments-point");
       const widget = makeWidget(augmentSegmentId(this.layer.displayState, id));
       containerEl.appendChild(widget);
       return containerEl;
@@ -4879,7 +4898,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
 
     const createSubmissionElement = (submission: MergeSubmission) => {
       const containerEl = document.createElement("div");
-      containerEl.classList.add("graphene-merge-segments-submission");
+      containerEl.classList.add("calcada-merge-segments-submission");
       containerEl.appendChild(createPointElement(submission.sink.rootId));
       if (submission.source) {
         containerEl.appendChild(document.createElement("div")).textContent =
@@ -4900,7 +4919,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
       }
       if (submission.status) {
         const statusEl = document.createElement("div");
-        statusEl.classList.add("graphene-merge-segments-submission-status");
+        statusEl.classList.add("calcada-merge-segments-submission-status");
         statusEl.textContent = submission.status;
         containerEl.appendChild(statusEl);
       }
@@ -4955,7 +4974,7 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
     header.textContent = "Find Path";
-    body.classList.add("graphene-tool-status", "graphene-find-path");
+    body.classList.add("calcada-tool-status", "calcada-find-path");
     const submitAction = () => {
       findPathState.triggerPathUpdate.dispatch();
     };
@@ -5078,7 +5097,7 @@ const PIECE_SPLIT_INPUT_EVENT_MAP = EventActionMap.fromObject({
 // wrapCalcadaError turns an HttpError from a Calcada endpoint into a regular
 // Error whose message is the server's `error` field (or `message`, or the raw
 // body). Calcada's error envelope is `{"code":"X","error":"...","message":""}`,
-// which `parseGrapheneError` mis-handles because it only reads `.message`.
+// which `parseCalcadaError` mis-handles because it only reads `.message`.
 async function wrapCalcadaError(e: unknown): Promise<Error> {
   if (!(e instanceof HttpError)) {
     return e instanceof Error ? e : new Error(String(e));
@@ -5149,7 +5168,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
     header.textContent = "Piece split";
-    body.classList.add("graphene-tool-status", "graphene-piece-split");
+    body.classList.add("calcada-tool-status", "calcada-piece-split");
 
     // Dim the segmentation overlay (same mechanism as MulticutSegmentsTool) so
     // the bright point annotations stand out. The focus piece's root keeps
@@ -5166,7 +5185,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // 2D, and tinting each mesh fragment separately in 3D — is a debugging view,
     // so it is turned on only while Debug is active (see setPieceView).
 
-    // Pending post-apply mesh re-fetch timers, cleared when the tool deactivates
+    // Pending post-cut mesh re-fetch timers, cleared when the tool deactivates
     // so back-to-back splits don't leak timers that fire after the tool is gone.
     const meshRefetchTimers: ReturnType<typeof setTimeout>[] = [];
     activation.registerDisposer(() => {
@@ -5368,23 +5387,20 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         pieceSplitState.reset();
       },
     });
-    const applyButton = makeIcon({
-      text: "Apply",
-      title: "Apply the general split (shift+enter)",
-      onClick: () => void runApply(),
-    });
     // The split in two halves, for inspecting the graph between them: the first
     // writes the sub-pieces and their edges but leaves the segment whole, the
-    // second runs the ordinary multicut over what the first produced.
+    // second runs the ordinary multicut over what the first produced. Enter
+    // triggers whichever step is next.
     const splitPiecesButton = makeIcon({
       text: "1. Pieces",
       title:
-        "Step 1: split the pieces and add their edges, keeping one segment (inspect with Debug)",
+        "Step 1: split the pieces and add their edges, keeping one segment (inspect with Debug). Enter runs this while step 2 is not available.",
       onClick: () => void runSplitPieces(),
     });
     const cutButton = makeIcon({
       text: "2. Cut",
-      title: "Step 2: run the regular multicut over the pieces from step 1",
+      title:
+        "Step 2: run the regular multicut over the pieces from step 1. Enter runs this once step 1 is done.",
       onClick: () => void runCut(),
     });
     const undoButton = makeIcon({
@@ -5411,7 +5427,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     };
     actions.appendChild(swapButton);
     actions.appendChild(clearButton);
-    actions.appendChild(applyButton);
     actions.appendChild(splitPiecesButton);
     actions.appendChild(cutButton);
     actions.appendChild(undoButton);
@@ -5421,9 +5436,23 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     spinner.style.display = "none";
     actions.appendChild(spinner);
 
+    const useImageCheckbox = document.createElement("input");
+    useImageCheckbox.type = "checkbox";
+    useImageCheckbox.checked = pieceSplitState.useImage.value;
+    useImageCheckbox.addEventListener("change", () => {
+      pieceSplitState.useImage.value = useImageCheckbox.checked;
+    });
+    const useImageLabel = document.createElement("label");
+    useImageLabel.className = "piece-split-use-image";
+    useImageLabel.title =
+      "Price the cut from the EM image (dark membranes are cheap to cut). " +
+      "Slower — reads the image volume. Off: the cut uses geometry only.";
+    useImageLabel.appendChild(useImageCheckbox);
+    useImageLabel.appendChild(document.createTextNode("Use image for cut"));
+    body.appendChild(useImageLabel);
+
     let busy = false;
-    const setApplyEnabled = (enabled: boolean) => {
-      applyButton.classList.toggle("disabled", busy || !enabled);
+    const setStepButtonsEnabled = (enabled: boolean) => {
       splitPiecesButton.classList.toggle("disabled", busy || !enabled);
       // Step 2 only means anything once step 1 has produced pieces to cut.
       cutButton.classList.toggle(
@@ -5441,10 +5470,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const setBusy = (nextBusy: boolean) => {
       busy = nextBusy;
       spinner.style.display = busy ? "" : "none";
+      useImageCheckbox.disabled = busy;
       for (const button of [
         swapButton,
         clearButton,
-        applyButton,
         splitPiecesButton,
         cutButton,
         undoButton,
@@ -5513,8 +5542,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         "red",
       );
 
-      // Apply is enabled once both colours have at least one point.
-      setApplyEnabled(
+      useImageCheckbox.checked = pieceSplitState.useImage.value;
+      // Step 1 is enabled once both colours have at least one point.
+      setStepButtonsEnabled(
         pieceSplitState.bluePoints.value.length > 0 &&
           pieceSplitState.redPoints.value.length > 0,
       );
@@ -5613,6 +5643,14 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         const edgeLines: Line[] = [];
         const siblingLines: Line[] = [];
         let undrawable = 0;
+        let siblingEdgeCount = 0;
+        const lineBetween = (from: vec3, to: vec3): Line => ({
+          pointA: from,
+          pointB: to,
+          id: "",
+          type: AnnotationType.LINE,
+          properties: [],
+        });
         for (const edge of edges) {
           const centerA = centerById.get(edge.a);
           const centerB = centerById.get(edge.b);
@@ -5620,17 +5658,31 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             undrawable++;
             continue;
           }
-          const line: Line = {
-            pointA: vec3.fromValues(centerA[0], centerA[1], centerA[2]),
-            pointB: vec3.fromValues(centerB[0], centerB[1], centerB[2]),
-            id: "",
-            type: AnnotationType.LINE,
-            properties: [],
-          };
-          if (edge.affinity === 0 && edge.status === "enabled") {
-            siblingLines.push(line);
+          const pointA = vec3.fromValues(centerA[0], centerA[1], centerA[2]);
+          const pointB = vec3.fromValues(centerB[0], centerB[1], centerB[2]);
+          // Bend the line through the edge's stored contact position when the
+          // server provides one, so it marks where the pieces actually touch —
+          // bbox centres alone can put the whole line inside one mesh.
+          const hasContactPos = edge.pos.some((coordinate) => coordinate !== 0);
+          const segments: Line[] = [];
+          if (hasContactPos) {
+            const contactPos = vec3.fromValues(
+              edge.pos[0],
+              edge.pos[1],
+              edge.pos[2],
+            );
+            segments.push(
+              lineBetween(pointA, contactPos),
+              lineBetween(contactPos, pointB),
+            );
           } else {
-            edgeLines.push(line);
+            segments.push(lineBetween(pointA, pointB));
+          }
+          if (edge.affinity === 0 && edge.status === "enabled") {
+            siblingEdgeCount++;
+            siblingLines.push(...segments);
+          } else {
+            edgeLines.push(...segments);
           }
         }
         graphConnection.setDebugEdges(edgeLines, siblingLines);
@@ -5640,7 +5692,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         updatePieceSplitDisplay();
         StatusMessage.showTemporaryMessage(
           `Debug: ${pieces.length} pieces, ${edges.length} edges ` +
-            `(${siblingLines.length} green zero-affinity split edge(s)` +
+            `(${siblingEdgeCount} green zero-affinity split edge(s)` +
             (undrawable > 0 ? `, ${undrawable} not drawable` : "") +
             `). Press Debug again to hide.`,
           6000,
@@ -5689,6 +5741,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             points,
             branchId,
             true,
+            pieceSplitState.useImage.value,
           );
         graphConnection.pushUndo(operationId, branchId);
 
@@ -5725,11 +5778,28 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
         const focus = currentFocusRoot();
         if (newRoots.length > 0 && focus !== undefined) {
+          // Split-mode 2D renders raw piece ids through segmentEquivalences, so
+          // the links must follow the edit: chunks now hold the sub-piece ids
+          // and the root advanced — with the old links the segment renders
+          // blank until split mode is re-entered.
+          const newRoot = newRoots[0];
+          const oldPieces = [
+            ...segmentsState.segmentEquivalences.setElements(focus),
+          ].filter((id) => id !== focus && !wasSplit.has(id));
+          segmentsState.segmentEquivalences.deleteSet(focus);
+          for (const piece of oldPieces) {
+            segmentsState.segmentEquivalences.link(newRoot, piece);
+          }
+          for (const sp of splitPieces) {
+            segmentsState.segmentEquivalences.link(newRoot, sp.blue);
+            segmentsState.segmentEquivalences.link(newRoot, sp.red);
+          }
+          segmentsState.segmentEquivalences.changed.dispatch();
           segmentsState.selectedSegments.delete(focus);
           segmentsState.visibleSegments.delete(focus);
-          for (const newRoot of newRoots) {
-            segmentsState.selectedSegments.add(newRoot);
-            segmentsState.visibleSegments.add(newRoot);
+          for (const root of newRoots) {
+            segmentsState.selectedSegments.add(root);
+            segmentsState.visibleSegments.add(root);
           }
           graphConnection.meshAddNewSegments(newRoots);
         }
@@ -5758,7 +5828,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         return;
       }
       setBusy(true);
-      const { sources, sinks, branchId } = steppedSplit;
+      const { sources, sinks, branchId, rootId } = steppedSplit;
       try {
         const { roots, operationId } =
           await graphConnection.graph.graphServer.splitByPieces(
@@ -5777,10 +5847,17 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           segmentsState.selectedSegments.delete(piece);
           segmentsState.visibleSegments.delete(piece);
         }
-        const focus = currentFocusRoot();
-        if (focus !== undefined) {
-          segmentsState.selectedSegments.delete(focus);
-          segmentsState.visibleSegments.delete(focus);
+        // The post-pieces root is superseded by the two cut roots. rootId is
+        // the authoritative handle (currentFocusRoot maps the first point's
+        // piece, which the pieces step already retired). Its equivalence class
+        // must go too — stale piece links would union both new roots into one
+        // class when the re-fetched LUTs link those pieces again.
+        const oldRoot = rootId ?? currentFocusRoot();
+        if (oldRoot !== undefined) {
+          segmentsState.segmentEquivalences.deleteSet(oldRoot);
+          segmentsState.segmentEquivalences.changed.dispatch();
+          segmentsState.selectedSegments.delete(oldRoot);
+          segmentsState.visibleSegments.delete(oldRoot);
         }
         for (const newRoot of newRoots) {
           segmentsState.selectedSegments.add(newRoot);
@@ -5788,6 +5865,18 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         }
         graphConnection.meshAddNewSegments(newRoots);
         graphConnection.refreshChunkSources();
+        // A new root's sub-piece mesh may land after the first manifest fetch
+        // resolved it to a miss; re-fetch the new roots' manifests a few times
+        // so the 3D meshes appear without a manual reload. Timers are cleared
+        // on tool deactivation.
+        for (const delayMs of [1500, 4000, 9000, 20000]) {
+          meshRefetchTimers.push(
+            setTimeout(
+              () => graphConnection.meshRefreshSegments(newRoots),
+              delayMs,
+            ),
+          );
+        }
         clearDebug();
         steppedSplit = undefined;
         pieceSplitState.reset();
@@ -5798,112 +5887,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       } catch (e: unknown) {
         StatusMessage.showTemporaryMessage(
           `Step 2 failed: ${e instanceof Error ? e.message : String(e)}`,
-          8000,
-        );
-      } finally {
-        setBusy(false);
-      }
-    };
-
-    const runApply = async () => {
-      const focus = currentFocusRoot();
-      if (focus === undefined) {
-        StatusMessage.showTemporaryMessage(
-          "Place blue and red points first",
-          5000,
-        );
-        return;
-      }
-      if (
-        pieceSplitState.bluePoints.value.length === 0 ||
-        pieceSplitState.redPoints.value.length === 0
-      ) {
-        StatusMessage.showTemporaryMessage(
-          "Place at least one blue and one red point",
-          5000,
-        );
-        return;
-      }
-      if (
-        layer.displayState.segmentationGroupState.value.timestamp.value !==
-        undefined
-      ) {
-        StatusMessage.showTemporaryMessage(
-          "Apply disabled: segmentation is time-travelling (read-only).",
-          5000,
-        );
-        return;
-      }
-      setBusy(true);
-      const branchId = graphConnection.graph.branchId.value;
-      try {
-        // One atomic backend op: cut every multi-colour piece in two AND multicut
-        // the segment into two new roots. Returns the two roots — a single Ctrl+Z
-        // reverts the whole thing.
-        const toPayload = (p: PointEntry, color: "blue" | "red") => ({
-          color,
-          pieceId: p.pieceId,
-          x: p.voxel[0],
-          y: p.voxel[1],
-          z: p.voxel[2],
-          origin: p.origin,
-        });
-        const points = [
-          ...pieceSplitState.bluePoints.value.map((p) => toPayload(p, "blue")),
-          ...pieceSplitState.redPoints.value.map((p) => toPayload(p, "red")),
-        ];
-        const { roots, operationId } =
-          await graphConnection.graph.graphServer.generalSplit(
-            points,
-            branchId,
-          );
-        const newRoots = roots.filter((root) => root !== 0n);
-        if (newRoots.length === 0) {
-          // The backend produced no separation; leave the selection untouched.
-          StatusMessage.showTemporaryMessage("No split found.", 3000);
-          return;
-        }
-        graphConnection.pushUndo(operationId, branchId);
-
-        // Swap the old segment for the new roots. The split rewrote voxels in the
-        // overlay, so the cached 2D chunks are stale. refreshChunkSources re-fetches
-        // them AND re-reads the piece→root LUT (the backend bridged the ClickHouse
-        // MV lag via cache), so the two new roots render immediately instead of
-        // only after a manual reload.
-        const segmentsState = layer.displayState.segmentationGroupState.value;
-        segmentsState.selectedSegments.delete(focus);
-        segmentsState.visibleSegments.delete(focus);
-        for (const newRoot of newRoots) {
-          segmentsState.selectedSegments.add(newRoot);
-          segmentsState.visibleSegments.add(newRoot);
-        }
-        graphConnection.meshAddNewSegments(newRoots);
-        graphConnection.refreshChunkSources();
-        // A new root made mostly of a freshly-split sub-piece has no mesh yet —
-        // the sidecar generates it async. The first manifest fetch resolves that
-        // fragment to a miss; re-fetch the new roots' manifests a few times so
-        // their 3D meshes appear once generation lands, without a manual reload.
-        // Track the timers so a tool deactivation cancels any pending re-fetches.
-        for (const delayMs of [1500, 4000, 9000, 20000]) {
-          meshRefetchTimers.push(
-            setTimeout(
-              () => graphConnection.meshRefreshSegments(newRoots),
-              delayMs,
-            ),
-          );
-        }
-        StatusMessage.showTemporaryMessage(
-          `Split applied — segment separated into ${newRoots.length} root(s). Press Ctrl+Z to undo.`,
-          6000,
-        );
-        // The debug overlay (if on) now references superseded piece ids; drop it.
-        clearDebug();
-        // Keep the tool open (do NOT cancel) so the user can immediately place
-        // the next split or undo this one.
-        pieceSplitState.reset();
-      } catch (e: unknown) {
-        StatusMessage.showTemporaryMessage(
-          `Apply failed: ${e instanceof Error ? e.message : String(e)}`,
           8000,
         );
       } finally {
@@ -5976,9 +5959,15 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       event.stopPropagation();
       pieceSplitState.swapGroup();
     });
+    // Enter runs whichever step is next: the multicut once step 1 has produced
+    // pieces to cut, the piece split otherwise.
     activation.bindAction("apply", (event) => {
       event.stopPropagation();
-      void runApply();
+      if (steppedSplit !== undefined) {
+        void runCut();
+      } else {
+        void runSplitPieces();
+      }
     });
     activation.bindAction("undo", (event) => {
       event.stopPropagation();

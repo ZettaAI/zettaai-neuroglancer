@@ -41,7 +41,7 @@ export const PYCG_APP_VERSION = 1;
 // classes silently shadow graphene's for ALL layers — which broke graphene
 // segmentation slice coloring (calcada's leaves-less ChunkedGraphLayer stub
 // replaced graphene's real leaves-fetching one, so equivalences never loaded).
-export const GRAPHENE_MESH_NEW_SEGMENT_RPC_ID = "CalcadaMeshSource:NewSegment";
+export const CALCADA_MESH_NEW_SEGMENT_RPC_ID = "CalcadaMeshSource:NewSegment";
 // Force an already-cached root manifest to re-download so a keep-whole piece
 // split (root id unchanged, but its leaves changed) refreshes its 3D mesh.
 export const CALCADA_MESH_REFRESH_SEGMENT_RPC_ID =
@@ -121,7 +121,7 @@ export function isBaseSegmentId(segmentId: bigint, nBitsForLayerId: number) {
   return layerId == 1n;
 }
 
-export function getGrapheneFragmentKey(fragmentId: string) {
+export function getCalcadaFragmentKey(fragmentId: string) {
   const sharded = fragmentId.charAt(0) === "~";
 
   if (sharded) {
@@ -186,7 +186,7 @@ export interface ChunkedGraphChunkSource extends SliceViewChunkSource {
   spec: ChunkedGraphChunkSpecification;
 }
 
-export async function parseGrapheneError(e: HttpError) {
+export async function parseCalcadaError(e: HttpError) {
   if (e.response) {
     let msg: string;
     if (e.response.headers.get("content-type") === "application/json") {
