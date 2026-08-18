@@ -57,8 +57,8 @@ import {
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { makeCachedDerivedWatchableValue } from "#src/trackable_value.js";
 import type { Borrowed, RefCounted } from "#src/util/disposable.js";
-import { vec4 } from "#src/util/geom.js";
 import {
+  vec4,
   getFrustrumPlanes,
   mat3,
   mat3FromMat4,

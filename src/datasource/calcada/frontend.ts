@@ -15,6 +15,7 @@
  */
 
 import "#src/datasource/calcada/calcada.css";
+import "#src/ui/segment_list.css";
 
 import { debounce } from "lodash-es";
 
@@ -62,6 +63,11 @@ import {
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
+import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import {
+  dropDecided,
+  nextCandidate,
+} from "#src/datasource/calcada/candidate_ranking.js";
 import type {
   DataSource,
   DataSourceLookupResult,
@@ -178,16 +184,11 @@ import {
 } from "#src/ui/tool.js";
 import { Uint64Set } from "#src/uint64_set.js";
 import { transposeNestedArrays } from "#src/util/array.js";
-import { packColor } from "#src/util/color.js";
+import { setClipboard } from "#src/util/clipboard.js";
+import { packColor, useWhiteBackground } from "#src/util/color.js";
 import type { Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { removeChildren } from "#src/util/dom.js";
-import { setClipboard } from "#src/util/clipboard.js";
-import { useWhiteBackground } from "#src/util/color.js";
-import { makeCopyButton } from "#src/widget/copy_button.js";
-import { makeEyeButton } from "#src/widget/eye_button.js";
-import { Tab } from "#src/widget/tab_view.js";
-import "#src/ui/segment_list.css";
 import type { ValueOrError } from "#src/util/error.js";
 import { makeValueOrError, valueOrThrow } from "#src/util/error.js";
 import { EventActionMap } from "#src/util/event_action_map.js";
@@ -219,15 +220,18 @@ import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
 import { NullarySignal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
+import { makeCopyButton } from "#src/widget/copy_button.js";
 import { DateTimeInputWidget } from "#src/widget/datetime.js";
 import { makeDeleteButton } from "#src/widget/delete_button.js";
 import type { DependentViewContext } from "#src/widget/dependent_view_widget.js";
+import { makeEyeButton } from "#src/widget/eye_button.js";
 import { makeIcon } from "#src/widget/icon.js";
 import type { LayerControlFactory } from "#src/widget/layer_control.js";
 import {
   addLayerControlToOptionsTab,
   registerLayerControl,
 } from "#src/widget/layer_control.js";
+import { Tab } from "#src/widget/tab_view.js";
 import type { RPC } from "#src/worker_rpc.js";
 import { registerRPC } from "#src/worker_rpc.js";
 
@@ -2656,6 +2660,25 @@ void main() {
     );
   };
 
+  /**
+   * Merge two selections outside the merge-line UI, for Zetta Trace.
+   *
+   * Delegates to submitMerge so the display bookkeeping it does — equivalence
+   * replacement, mesh registration for the new root, retries — happens here too
+   * rather than being reimplemented.
+   */
+  mergeSelections = async (
+    sink: SegmentSelection,
+    source: SegmentSelection,
+  ): Promise<bigint> => {
+    return this.submitMerge({
+      id: `zetta-trace-${sink.segmentId}-${source.segmentId}`,
+      locked: false,
+      sink,
+      source,
+    });
+  };
+
   private submitMerge = async (
     submission: MergeSubmission,
     attempts = 1,
@@ -3184,6 +3207,70 @@ class CalcadaGraphServerInterface {
       }
       throw e;
     }
+  }
+
+  async fetchCandidates(
+    rootId: bigint,
+    opts: {
+      batch: string;
+      limit?: number;
+      minScore?: number;
+      branchId?: number;
+    },
+  ): Promise<EdgeCandidate[]> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    // batch is required by the server: with several contact waves in the same
+    // tables, silently serving the wrong one is worse than failing.
+    const params = new URLSearchParams({
+      int64_as_str: "1",
+      batch: opts.batch,
+    });
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.minScore !== undefined) {
+      params.set("min_score", String(opts.minScore));
+    }
+    if (opts.branchId) params.set("branch_id", String(opts.branchId));
+    const response = await fetchOkImpl(
+      `${baseUrl}/segment/${rootId}/candidates?${params.toString()}`,
+      { priority: "high" },
+    );
+    const jsonResp = await response.json();
+    return (jsonResp.candidates ?? []).map(
+      (c: any): EdgeCandidate => ({
+        lineId: parseUint64(c.line_id),
+        score: Number(c.score),
+        selfPieceId: parseUint64(c.self_piece_id),
+        partnerPieceId: parseUint64(c.partner_piece_id),
+        partnerRootId: parseUint64(c.partner_root_id),
+        pointA: Float32Array.from(c.point_a),
+        pointB: Float32Array.from(c.point_b),
+        nInterfaces: Number(c.n_interfaces),
+        modelDecision: String(c.model_decision),
+      }),
+    );
+  }
+
+  async postCandidateDecision(
+    lineId: bigint,
+    decision: "accept" | "reject" | "defer",
+    operationId?: number,
+    branchId = 0,
+  ): Promise<void> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams();
+    if (branchId) params.set("branch_id", String(branchId));
+    const query = params.toString();
+    await fetchOkImpl(
+      `${baseUrl}/candidates/decision${query ? `?${query}` : ""}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          line_id: String(lineId),
+          decision,
+          ...(operationId === undefined ? {} : { operation_id: operationId }),
+        }),
+      },
+    );
   }
 
   async splitSegments(
@@ -3770,6 +3857,13 @@ class CalcadaGraphSource extends SegmentationGraphSource {
         title: "Split a piece using blue/red points",
       }),
     );
+    toolbox.appendChild(
+      makeToolButton(context, layer.toolBinder, {
+        toolJson: CALCADA_ZETTA_TRACE_TOOL_ID,
+        label: "Zetta Trace",
+        title: "Trace a segment through AI merge candidates",
+      }),
+    );
     parent.appendChild(toolbox);
 
     const segmentationGroupStateValue =
@@ -3990,6 +4084,7 @@ const CALCADA_MULTICUT_SEGMENTS_TOOL_ID = "calcadaMulticutSegments";
 const CALCADA_MERGE_SEGMENTS_TOOL_ID = "calcadaMergeSegments";
 const CALCADA_FIND_PATH_TOOL_ID = "calcadaFindPath";
 const CALCADA_PIECE_SPLIT_TOOL_ID = "calcadaPieceSplit";
+const CALCADA_ZETTA_TRACE_TOOL_ID = "calcadaZettaTrace";
 
 class MulticutAnnotationLayerView extends AnnotationLayerView {
   declare private _annotationStates: MergedAnnotationStates;
@@ -6220,6 +6315,230 @@ registerTool(SegmentationUserLayer, CALCADA_MERGE_SEGMENTS_TOOL_ID, (layer) => {
 
 registerTool(SegmentationUserLayer, CALCADA_FIND_PATH_TOOL_ID, (layer) => {
   return new FindPathTool(layer, true);
+});
+
+// Stage 0 serves a single ingested contact wave. When several coexist this must
+// come from the datasource parameters instead.
+const DEFAULT_CANDIDATE_BATCH = "w2";
+const CANDIDATE_FETCH_LIMIT = 50;
+
+const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:arrowleft": { action: "reject-candidate" },
+  "at:arrowright": { action: "accept-candidate" },
+});
+
+/**
+ * Swipe through the AI's merge candidates for one segment.
+ *
+ * Click a point to seed; everything but that segment hides. The highest scoring
+ * candidate is shown as a line to its partner. Right arrow merges and refetches
+ * (the enlarged segment usually has more candidates), left arrow rejects and
+ * moves on. Esc restores the previous segment visibility.
+ */
+class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
+  activate(activation: ToolActivation<this>) {
+    const {
+      graphConnection: { value: graphConnection },
+    } = this.layer;
+    if (!graphConnection || !(graphConnection instanceof GraphConnection)) {
+      activation.cancel();
+      return;
+    }
+    const segmentsState = this.layer.displayState.segmentationGroupState.value;
+    if (checkSegmentationOld(segmentsState.timestamp, activation)) {
+      return;
+    }
+
+    const { body, header } =
+      makeToolActivationStatusMessageWithHeader(activation);
+    header.textContent = "Zetta Trace";
+    body.classList.add("calcada-tool-status", "calcada-zetta-trace");
+    body.textContent = "Click a point to seed the trace";
+
+    // Snapshot before the first mutation: restoring what the user was looking
+    // at is this tool's exit contract.
+    const savedVisible = [...segmentsState.visibleSegments];
+    const savedSelected = [...segmentsState.selectedSegments];
+    const { mergeAnnotationState } = graphConnection;
+    const annotationIds: string[] = [];
+
+    const clearAnnotation = () => {
+      // Synchronous on purpose: a lingering line reads as backend latency.
+      for (const id of annotationIds.splice(0)) {
+        const ref = mergeAnnotationState.source.getReference(id);
+        mergeAnnotationState.source.delete(ref);
+      }
+    };
+
+    activation.registerDisposer(() => {
+      clearAnnotation();
+      segmentsState.visibleSegments.clear();
+      segmentsState.selectedSegments.clear();
+      for (const id of savedSelected) segmentsState.selectedSegments.add(id);
+      for (const id of savedVisible) segmentsState.visibleSegments.add(id);
+    });
+
+    let seedRoot: bigint | undefined;
+    let candidates: EdgeCandidate[] = [];
+    let current: EdgeCandidate | undefined;
+    const decided = new Set<bigint>();
+
+    const showCurrent = () => {
+      clearAnnotation();
+      current = nextCandidate(candidates, decided);
+      if (current === undefined) {
+        body.textContent = "No candidates left for this segment";
+        return;
+      }
+      segmentsState.visibleSegments.add(current.partnerRootId);
+      segmentsState.selectedSegments.add(current.partnerRootId);
+
+      const line: Line = {
+        id: "",
+        type: AnnotationType.LINE,
+        pointA: vec3.fromValues(
+          current.pointA[0],
+          current.pointA[1],
+          current.pointA[2],
+        ),
+        pointB: vec3.fromValues(
+          current.pointB[0],
+          current.pointB[1],
+          current.pointB[2],
+        ),
+        properties: [],
+      };
+      const ref = mergeAnnotationState.source.add(line, true);
+      annotationIds.push(ref.id);
+
+      const midpoint = vec3.create();
+      vec3.add(midpoint, line.pointA as vec3, line.pointB as vec3);
+      vec3.scale(midpoint, midpoint, 0.5);
+      const position = this.layer.manager.root.globalPosition;
+      position.value = Float32Array.from(midpoint);
+
+      const remaining = dropDecided(candidates, decided).length;
+      body.textContent =
+        `score ${current.score.toFixed(2)} · ${current.nInterfaces} interface(s)` +
+        ` · partner ${current.partnerRootId} · ${remaining} left`;
+    };
+
+    const loadCandidates = async () => {
+      if (seedRoot === undefined) return;
+      body.textContent = "Fetching candidates…";
+      try {
+        candidates = await graphConnection.graph.graphServer.fetchCandidates(
+          seedRoot,
+          {
+            batch: DEFAULT_CANDIDATE_BATCH,
+            limit: CANDIDATE_FETCH_LIMIT,
+            branchId: graphConnection.graph.branchId.value,
+          },
+        );
+      } catch (e) {
+        body.textContent = `Failed to fetch candidates: ${e}`;
+        return;
+      }
+      showCurrent();
+    };
+
+    activation.bindInputEventMap(ZETTA_TRACE_INPUT_EVENT_MAP);
+
+    activation.bindAction("select", (event) => {
+      event.stopPropagation();
+      if (seedRoot !== undefined) return;
+      const selection = maybeGetSelection(this, segmentsState.visibleSegments);
+      if (selection === undefined) return;
+
+      seedRoot = selection.rootId;
+      segmentsState.visibleSegments.clear();
+      segmentsState.selectedSegments.clear();
+      segmentsState.visibleSegments.add(seedRoot);
+      segmentsState.selectedSegments.add(seedRoot);
+      void loadCandidates();
+    });
+
+    activation.bindAction("reject-candidate", (event) => {
+      event.stopPropagation();
+      if (current === undefined) return;
+      const rejected = current;
+      decided.add(rejected.lineId);
+      showCurrent();
+      graphConnection.graph.graphServer
+        .postCandidateDecision(
+          rejected.lineId,
+          "reject",
+          undefined,
+          graphConnection.graph.branchId.value,
+        )
+        .catch((e: unknown) => {
+          StatusMessage.showTemporaryMessage(
+            `Failed to record rejection: ${e}`,
+            5000,
+          );
+        });
+    });
+
+    activation.bindAction("accept-candidate", (event) => {
+      event.stopPropagation();
+      if (current === undefined || seedRoot === undefined) return;
+      const accepted = current;
+      const sinkRoot = seedRoot;
+      clearAnnotation();
+      body.textContent = "Merging…";
+
+      void (async () => {
+        let newRoot: bigint;
+        try {
+          newRoot = await graphConnection.mergeSelections(
+            {
+              rootId: sinkRoot,
+              segmentId: accepted.selfPieceId,
+              position: accepted.pointA,
+            },
+            {
+              rootId: accepted.partnerRootId,
+              segmentId: accepted.partnerPieceId,
+              position: accepted.pointB,
+            },
+          );
+        } catch (e) {
+          // The candidate stays current so the right arrow retries it; a locked
+          // root usually frees up within seconds.
+          body.textContent = `Merge failed: ${e}`;
+          return;
+        }
+        decided.add(accepted.lineId);
+        graphConnection.graph.graphServer
+          .postCandidateDecision(
+            accepted.lineId,
+            "accept",
+            undefined,
+            graphConnection.graph.branchId.value,
+          )
+          .catch((e: unknown) => {
+            StatusMessage.showTemporaryMessage(
+              `Failed to record acceptance: ${e}`,
+              5000,
+            );
+          });
+        seedRoot = newRoot;
+        await loadCandidates();
+      })();
+    });
+  }
+
+  get description() {
+    return "zetta trace";
+  }
+
+  toJSON() {
+    return CALCADA_ZETTA_TRACE_TOOL_ID;
+  }
+}
+
+registerTool(SegmentationUserLayer, CALCADA_ZETTA_TRACE_TOOL_ID, (layer) => {
+  return new ZettaTraceTool(layer, true);
 });
 
 const ANNOTATE_MERGE_LINE_TOOL_ID = "annotateMergeLine";
