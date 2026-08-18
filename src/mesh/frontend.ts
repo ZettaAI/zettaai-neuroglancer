@@ -57,7 +57,7 @@ import {
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { makeCachedDerivedWatchableValue } from "#src/trackable_value.js";
 import type { Borrowed, RefCounted } from "#src/util/disposable.js";
-import type { vec4 } from "#src/util/geom.js";
+import { vec4 } from "#src/util/geom.js";
 import {
   getFrustrumPlanes,
   mat3,
@@ -412,6 +412,8 @@ export interface MeshDisplayState extends SegmentationDisplayState3D {
   silhouetteRendering: WatchableValueInterface<number>;
 }
 
+const tempStatedColor = vec4.create();
+
 export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRenderLayerAttachmentState> {
   protected meshShaderManager;
   private getShader;
@@ -554,12 +556,40 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
               pickFragments || colorFragments
                 ? this.source.getFragmentPickId(fragmentId) || objectId
                 : objectId;
+            if (
+              colorFragments &&
+              this.source.hiddenFragmentSegments.size !== 0 &&
+              this.source.hiddenFragmentSegments.has(fragmentSegment)
+            ) {
+              continue;
+            }
             if (colorFragments) {
-              meshShaderManager.setColor(
-                gl,
-                shader,
-                getObjectColor(displayState, fragmentSegment, objectAlpha),
+              let fragmentColor = getObjectColor(
+                displayState,
+                fragmentSegment,
+                objectAlpha,
               );
+              // Piece-view tools tint pieces via the temporary stated colors;
+              // the 2D renderer honours them, so the mesh must too or the same
+              // piece shows one colour in 2D and a hash colour in 3D. Packed
+              // layout is (a<<24)|(b<<16)|(g<<8)|r, premultiplied like
+              // getObjectColor's output.
+              if (displayState.useTempSegmentStatedColors2d.value) {
+                const packed =
+                  displayState.tempSegmentStatedColors2d.value.get(
+                    fragmentSegment,
+                  );
+                if (packed !== undefined) {
+                  const c = Number(packed);
+                  tempStatedColor[0] = ((c & 0xff) / 255) * objectAlpha;
+                  tempStatedColor[1] = (((c >>> 8) & 0xff) / 255) * objectAlpha;
+                  tempStatedColor[2] =
+                    (((c >>> 16) & 0xff) / 255) * objectAlpha;
+                  tempStatedColor[3] = objectAlpha;
+                  fragmentColor = tempStatedColor;
+                }
+              }
+              meshShaderManager.setColor(gl, shader, fragmentColor);
             }
             if (pickFragments) {
               meshShaderManager.setPickID(
@@ -782,6 +812,13 @@ export class MeshSource extends ChunkSource {
   get colorFragmentsBySegment(): boolean {
     return false;
   }
+
+  // Fragment segments a split tool asked to hide while the piece view is
+  // active: thin connections often run INSIDE a neighbouring piece's mesh, so
+  // hiding chosen pieces is the only way to see them. Mutated in place by the
+  // tool; draw skips these fragments only when per-fragment colouring is on,
+  // so normal rendering is never affected.
+  readonly hiddenFragmentSegments = new Set<bigint>();
 }
 
 @registerSharedObjectOwner(FRAGMENT_SOURCE_RPC_ID)

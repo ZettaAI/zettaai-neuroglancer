@@ -220,3 +220,47 @@
   width: auto;
   max-width: 100%;
 }
+
+.piece-split-debug-pieces {
+  margin-top: 4px;
+}
+
+.piece-split-piece-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.4;
+}
+
+.piece-split-piece-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #888;
+  flex: none;
+}
+
+.piece-split-piece-eye {
+  margin-left: auto;
+  font-size: 90%;
+  cursor: pointer;
+}
+
+.calcada-debug-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.calcada-debug-tab-hint,
+.calcada-debug-tab-header {
+  color: #ccc;
+  margin-bottom: 4px;
+}
+
+.calcada-debug-piece-list {
+  display: flex;
+  flex-direction: column;
+}

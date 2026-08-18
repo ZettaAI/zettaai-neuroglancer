@@ -182,6 +182,12 @@ import { packColor } from "#src/util/color.js";
 import type { Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { removeChildren } from "#src/util/dom.js";
+import { setClipboard } from "#src/util/clipboard.js";
+import { useWhiteBackground } from "#src/util/color.js";
+import { makeCopyButton } from "#src/widget/copy_button.js";
+import { makeEyeButton } from "#src/widget/eye_button.js";
+import { Tab } from "#src/widget/tab_view.js";
+import "#src/ui/segment_list.css";
 import type { ValueOrError } from "#src/util/error.js";
 import { makeValueOrError, valueOrThrow } from "#src/util/error.js";
 import { EventActionMap } from "#src/util/event_action_map.js";
@@ -1047,6 +1053,103 @@ const PRECISION_MODE_JSON_KEY = "precision";
 const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 
+// CalcadaDebugTab is the layer's "Debug" tab: visible only while the
+// piece-split tool's debug mode is active, it lists the debugged root's pieces
+// with their overlay colours and per-piece mesh visibility — thin bridges
+// between sub-pieces often run INSIDE a neighbouring piece's mesh, and hiding
+// that piece is the only way to see them.
+class CalcadaDebugTab extends Tab {
+  constructor(private connection: GraphConnection) {
+    super();
+    this.element.classList.add("calcada-debug-tab");
+    this.registerDisposer(
+      connection.debugPiecesChanged.add(() => this.render()),
+    );
+    this.render();
+  }
+
+  private render() {
+    const { element } = this;
+    removeChildren(element);
+    const colors = this.connection.debugPiecesColors;
+    if (colors === undefined) {
+      const hint = document.createElement("div");
+      hint.className = "calcada-debug-tab-hint";
+      hint.textContent =
+        'Press "Debug" in the Piece split tool to inspect a segment\u2019s pieces here.';
+      element.appendChild(hint);
+      return;
+    }
+    const header = document.createElement("div");
+    header.className = "calcada-debug-tab-hint";
+    header.textContent =
+      `Root ${this.connection.debugPiecesRoot?.toString() ?? "?"} \u2014 ` +
+      `${colors.size} piece(s). Double-click a piece (in 3D or below) to ` +
+      "hide/show its mesh.";
+    element.appendChild(header);
+    const list = document.createElement("div");
+    list.className = "calcada-debug-piece-list";
+    element.appendChild(list);
+    for (const [piece, packedColor] of colors) {
+      // Mirror the native segment-list row (same classes and widgets) so the
+      // debug piece list reads exactly like the Seg. tab, with the eye wired
+      // to per-piece mesh visibility instead of visibleSegments.
+      const row = document.createElement("div");
+      row.classList.add("neuroglancer-segment-list-entry");
+      const sticky = document.createElement("div");
+      sticky.classList.add("neuroglancer-segment-list-entry-sticky");
+      row.appendChild(sticky);
+      const copyContainer = document.createElement("div");
+      copyContainer.classList.add(
+        "neuroglancer-segment-list-entry-copy-container",
+      );
+      const copyButton = makeCopyButton({
+        title: "Copy piece ID",
+        onClick: (copyEvent) => {
+          copyEvent.stopPropagation();
+          setClipboard(piece.toString());
+        },
+      });
+      copyButton.classList.add("neuroglancer-segment-list-entry-copy");
+      copyContainer.appendChild(copyButton);
+      sticky.appendChild(copyContainer);
+      const hidden = this.connection.pieceMeshHidden(piece);
+      const eye = makeEyeButton({
+        title: hidden
+          ? "Show this piece's mesh"
+          : "Hide this piece's mesh (reveals bridges behind it)",
+        onClick: (eyeEvent) => {
+          eyeEvent.stopPropagation();
+          this.connection.togglePieceMesh(piece);
+        },
+      });
+      eye.classList.add("neuroglancer-segment-list-entry-visible-checkbox");
+      eye.classList.toggle("neuroglancer-visible", !hidden);
+      sticky.appendChild(eye);
+      const idContainer = document.createElement("div");
+      idContainer.classList.add("neuroglancer-segment-list-entry-id-container");
+      sticky.appendChild(idContainer);
+      const idElement = document.createElement("div");
+      idElement.classList.add("neuroglancer-segment-list-entry-id");
+      idElement.textContent = piece.toString();
+      // packColor packs (a<<24)|(b<<16)|(g<<8)|r — red is the LOW byte, the
+      // same layout getBaseObjectColor decodes for stated colors.
+      const packed = Number(packedColor);
+      const r = packed & 0xff;
+      const g = (packed >> 8) & 0xff;
+      const b = (packed >> 16) & 0xff;
+      const color = vec3.fromValues(r / 255, g / 255, b / 255);
+      idElement.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+      idElement.style.color = useWhiteBackground(color) ? "white" : "black";
+      idContainer.appendChild(idElement);
+      row.addEventListener("dblclick", () =>
+        this.connection.togglePieceMesh(piece),
+      );
+      list.appendChild(row);
+    }
+  }
+}
+
 class CalcadaState extends RefCounted implements Trackable {
   changed = new NullarySignal();
 
@@ -1665,6 +1768,14 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public debugEdgeAnnotationState!: AnnotationLayerState;
   public debugSiblingAnnotationState!: AnnotationLayerState;
 
+  // Debug piece view shared between the piece-split tool (which enters/leaves
+  // debug mode) and the layer's "Debug" tab (which lists the pieces and drives
+  // per-piece mesh visibility).
+  readonly debugPiecesChanged = new NullarySignal();
+  readonly debugTabHidden = new WatchableValue<boolean>(true);
+  debugPiecesRoot: bigint | undefined;
+  debugPiecesColors: Map<bigint, bigint> | undefined;
+
   constructor(
     public graph: CalcadaGraphSource,
     private layer: SegmentationUserLayer,
@@ -1672,6 +1783,24 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     public state: CalcadaState,
   ) {
     super(graph, layer.displayState.segmentationGroupState.value);
+    layer.tabs.add("calcada-debug", {
+      label: "Debug",
+      order: -20,
+      getter: () => new CalcadaDebugTab(this),
+      hidden: this.debugTabHidden,
+    });
+    // The side panel snapshots the layer's tab list before this
+    // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
+    // and it only registers hidden-listeners for tabs it knew at init — so
+    // pull the new tab into the panels now and re-render the tab bar on every
+    // visibility flip ourselves.
+    layer.panels.updateTabs();
+    this.debugTabHidden.changed.add(() => {
+      layer.panels.updateTabs();
+      for (const panel of layer.panels.panels) {
+        panel.tabsChanged.dispatch();
+      }
+    });
     const segmentsState = layer.displayState.segmentationGroupState.value;
     // Calcada floods equivalences with per-chunk piece→root LUT trailers
     // (millions of entries): opt in to the batched / worker-mirrored table
@@ -2356,6 +2485,55 @@ void main() {
       `Undo applied — restored ${restoredRoots.length} root(s)`,
       5000,
     );
+  }
+
+  setDebugPieces(
+    rootId: bigint | undefined,
+    colors: Map<bigint, bigint> | undefined,
+  ) {
+    this.debugPiecesRoot = rootId;
+    this.debugPiecesColors = colors;
+    this.debugTabHidden.value = colors === undefined;
+    if (colors === undefined) {
+      const meshSource = this.getMeshSource();
+      if (
+        meshSource instanceof MeshSource &&
+        meshSource.hiddenFragmentSegments.size !== 0
+      ) {
+        meshSource.hiddenFragmentSegments.clear();
+        this.redrawRenderLayers();
+      }
+    }
+    this.debugPiecesChanged.dispatch();
+  }
+
+  pieceMeshHidden(piece: bigint): boolean {
+    const meshSource = this.getMeshSource();
+    return (
+      meshSource instanceof MeshSource &&
+      meshSource.hiddenFragmentSegments.has(piece)
+    );
+  }
+
+  // Toggles one piece's mesh in the debug piece view. MeshLayer skips hidden
+  // fragments only while per-fragment colouring is active, so normal rendering
+  // is unaffected.
+  togglePieceMesh(piece: bigint) {
+    const meshSource = this.getMeshSource();
+    if (!(meshSource instanceof MeshSource)) return;
+    if (meshSource.hiddenFragmentSegments.has(piece)) {
+      meshSource.hiddenFragmentSegments.delete(piece);
+    } else {
+      meshSource.hiddenFragmentSegments.add(piece);
+    }
+    this.redrawRenderLayers();
+    this.debugPiecesChanged.dispatch();
+  }
+
+  redrawRenderLayers() {
+    for (const renderLayer of this.layer.renderLayers) {
+      renderLayer.redrawNeeded.dispatch();
+    }
   }
 
   meshAddNewSegments(segments: bigint[]) {
@@ -5089,6 +5267,7 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
 
 const PIECE_SPLIT_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:shift?+control+mousedown0": { action: "place-point" },
+  "at:dblclick0": { action: "toggle-piece-mesh" },
   "at:shift?+keyg": { action: "swap-group" },
   "at:shift?+enter": { action: "apply" },
   "at:control+keyz": { action: "undo" },
@@ -5593,12 +5772,32 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       return only;
     };
 
+    // Selects `id` in whichever layer panel hosts it. With `onlyIfCurrent`
+    // set, switches only when that tab is the one currently selected (used to
+    // leave the debug tab when debug mode ends without hijacking the panel
+    // otherwise).
+    const selectLayerPanelTab = (id: string, onlyIfCurrent?: string) => {
+      for (const panel of layer.panels.panels) {
+        if (!panel.tabs.includes(id)) continue;
+        if (
+          onlyIfCurrent !== undefined &&
+          panel.selectedTab.value !== onlyIfCurrent
+        ) {
+          return;
+        }
+        panel.selectedTab.value = id;
+        return;
+      }
+    };
+
     const clearDebug = () => {
       if (!debugMode) return;
       debugMode = false;
       setPieceView(false);
       debugRootId = undefined;
       debugPieceColors = undefined;
+      graphConnection.setDebugPieces(undefined, undefined);
+      selectLayerPanelTab("segments", "calcada-debug");
       graphConnection.clearDebugEdges();
       setDebugButtonActive(false);
       updatePieceSplitDisplay();
@@ -5687,6 +5886,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         }
         graphConnection.setDebugEdges(edgeLines, siblingLines);
         debugMode = true;
+        graphConnection.setDebugPieces(debugRootId, debugPieceColors);
+        selectLayerPanelTab("calcada-debug");
         setDebugButtonActive(true);
         setPieceView(true);
         updatePieceSplitDisplay();
@@ -5951,6 +6152,31 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         origin,
       });
     };
+    activation.bindAction("toggle-piece-mesh", (event) => {
+      event.stopPropagation();
+      const { baseValue } = layer.displayState.segmentSelectionState;
+      if (
+        debugMode &&
+        baseValue !== undefined &&
+        baseValue !== null &&
+        baseValue !== 0n
+      ) {
+        graphConnection.togglePieceMesh(baseValue);
+        return;
+      }
+      // Outside debug mode keep the stock double-click behaviour: toggle the
+      // hovered segment's visibility.
+      const sss = layer.displayState.segmentSelectionState;
+      if (sss.hasSelectedSegment) {
+        const seg = sss.selectedSegment;
+        const group = segmentationGroupState;
+        if (group.visibleSegments.has(seg)) {
+          group.visibleSegments.delete(seg);
+        } else {
+          group.visibleSegments.add(seg);
+        }
+      }
+    });
     activation.bindAction("place-point", (event) => {
       event.stopPropagation();
       void placePoint();
