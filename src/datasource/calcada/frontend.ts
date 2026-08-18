@@ -1794,12 +1794,22 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     // pull the new tab into the panels now and re-render the tab bar on every
     // visibility flip ourselves.
     layer.panels.updateTabs();
-    this.debugTabHidden.changed.add(() => {
+    // The connection is created per subsource activation and disposed on
+    // deactivation, while layer.tabs lives with the layer: without cleanup a
+    // re-activation would re-add the tab (Option already defined) and leak
+    // the visibility listener.
+    this.registerDisposer(() => {
+      layer.tabs.remove("calcada-debug");
       layer.panels.updateTabs();
-      for (const panel of layer.panels.panels) {
-        panel.tabsChanged.dispatch();
-      }
     });
+    this.registerDisposer(
+      this.debugTabHidden.changed.add(() => {
+        layer.panels.updateTabs();
+        for (const panel of layer.panels.panels) {
+          panel.tabsChanged.dispatch();
+        }
+      }),
+    );
     const segmentsState = layer.displayState.segmentationGroupState.value;
     // Calcada floods equivalences with per-chunk piece→root LUT trailers
     // (millions of entries): opt in to the batched / worker-mirrored table
