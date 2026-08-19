@@ -16,3 +16,10 @@ export const TRACE_SEED_DIM_COLOR_PACKED = packRoleColor(TRACE_SEED_DIM_RGB);
 export const TRACE_CANDIDATE_DIM_COLOR_PACKED = packRoleColor(
   TRACE_CANDIDATE_DIM_RGB,
 );
+
+export function interceptedRemovals(
+  removedIds: readonly bigint[],
+  roleRoots: ReadonlySet<bigint>,
+): bigint[] {
+  return removedIds.filter((id) => roleRoots.has(id));
+}

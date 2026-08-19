@@ -69,6 +69,7 @@ import {
   nextCandidate,
 } from "#src/datasource/calcada/candidate_ranking.js";
 import {
+  interceptedRemovals,
   TRACE_CANDIDATE_COLOR_PACKED,
   TRACE_CANDIDATE_DIM_COLOR_PACKED,
   TRACE_SEED_COLOR_PACKED,
@@ -2042,6 +2043,28 @@ class ZettaTraceSession extends RefCounted {
     });
     bind("set-trace-seed", () => this.seedFromMouse());
 
+    // Toggling a role segment off would drop half the comparison. Put it back
+    // and record it as dimmed instead, so it renders faint rather than gone.
+    bindings.registerDisposer(
+      this.segmentsState.visibleSegments.changed.add((ids, add) => {
+        if (add !== false || ids === null) return;
+        const seedRoot = this.state.seedRoot.value;
+        if (seedRoot === undefined) return;
+        const roleRoots = new Set<bigint>([seedRoot]);
+        if (this.current !== undefined) {
+          roleRoots.add(this.current.partnerRootId);
+        }
+        const removedIds = typeof ids === "bigint" ? [ids] : Array.from(ids);
+        const removed = interceptedRemovals(removedIds, roleRoots);
+        if (removed.length === 0) return;
+        for (const id of removed) {
+          this.dimmed.add(id);
+          this.segmentsState.visibleSegments.add(id);
+        }
+        this.applyRoleColors(seedRoot, this.current?.partnerRootId);
+      }),
+    );
+
     this.showBanner();
     this.revealSegmentsTab();
     if (this.state.seedRoot.value !== undefined) {
@@ -2114,6 +2137,7 @@ class ZettaTraceSession extends RefCounted {
     this.seedPieceId = pieceId;
     this.current = undefined;
     this.candidates = [];
+    this.dimmed.clear();
     this.clearAnnotation();
     this.showOnly(rootId);
     void this.loadCandidates();
@@ -2170,6 +2194,7 @@ class ZettaTraceSession extends RefCounted {
     this.clearAnnotation();
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
+    this.dimmed.clear();
     this.current = nextCandidate(this.candidates, this.decided);
     this.remaining = dropDecided(this.candidates, this.decided).length;
     if (this.current === undefined) {

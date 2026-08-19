@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  interceptedRemovals,
   TRACE_SEED_COLOR_PACKED,
   TRACE_CANDIDATE_COLOR_PACKED,
   TRACE_SEED_DIM_COLOR_PACKED,
@@ -16,5 +17,16 @@ describe("role colors", () => {
     const dimAlpha = (TRACE_SEED_DIM_COLOR_PACKED >> 24n) & 0xffn;
     expect(dimAlpha).toBeLessThan(0x30n);
     expect(dimAlpha).toBeGreaterThan(0n);
+  });
+});
+
+describe("interceptedRemovals", () => {
+  it("keeps only ids that are seed or candidate roots", () => {
+    const roles = new Set([1n, 2n]);
+    expect(interceptedRemovals([1n, 3n], roles)).toEqual([1n]);
+  });
+  it("returns nothing when no removed id is a role root", () => {
+    const roles = new Set([1n, 2n]);
+    expect(interceptedRemovals([3n, 4n], roles)).toEqual([]);
   });
 });
