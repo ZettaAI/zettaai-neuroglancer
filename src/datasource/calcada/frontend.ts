@@ -191,7 +191,11 @@ import { RefCounted } from "#src/util/disposable.js";
 import { removeChildren } from "#src/util/dom.js";
 import type { ValueOrError } from "#src/util/error.js";
 import { makeValueOrError, valueOrThrow } from "#src/util/error.js";
-import { EventActionMap } from "#src/util/event_action_map.js";
+import type { ActionEvent } from "#src/util/event_action_map.js";
+import {
+  EventActionMap,
+  registerActionListener,
+} from "#src/util/event_action_map.js";
 import { mat4, vec3, vec4 } from "#src/util/geom.js";
 import { fetchOk, HttpError } from "#src/util/http_request.js";
 import {
@@ -278,6 +282,9 @@ const DEBUG_PIECE_PALETTE: bigint[] = (
 );
 const MULTICUT_OFF_COLOR = vec4.fromValues(0, 0, 0, 0.5);
 const WHITE_COLOR = vec3.fromValues(1, 1, 1);
+// Trace candidates get their own colour so they never read as pending merges,
+// which are red.
+const YELLOW_COLOR = vec3.fromValues(1, 1, 0);
 
 class CalcadaMeshSource extends WithParameters(
   WithSharedKvStoreContext(MeshSource),
@@ -1055,6 +1062,7 @@ const CENTROIDS_JSON_KEY = "centroids";
 const PRECISION_MODE_JSON_KEY = "precision";
 
 const PIECE_SPLIT_JSON_KEY = "pieceSplit";
+const ZETTA_TRACE_JSON_KEY = "zettaTrace";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 
 // CalcadaDebugTab is the layer's "Debug" tab: visible only while the
@@ -1161,6 +1169,7 @@ class CalcadaState extends RefCounted implements Trackable {
   public mergeState = new MergeState();
   public findPathState = new FindPathState();
   public pieceSplitState = new PieceSplitState();
+  public zettaTraceState = new ZettaTraceState();
   public branchId = new TrackableValue<number>(0, (x) =>
     typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : 0,
   );
@@ -1188,6 +1197,11 @@ class CalcadaState extends RefCounted implements Trackable {
       }),
     );
     this.registerDisposer(
+      this.zettaTraceState.changed.add(() => {
+        this.changed.dispatch();
+      }),
+    );
+    this.registerDisposer(
       this.branchId.changed.add(() => {
         this.changed.dispatch();
       }),
@@ -1199,6 +1213,7 @@ class CalcadaState extends RefCounted implements Trackable {
     this.mergeState.replaceSegments(oldValues, newValues);
     this.findPathState.replaceSegments(oldValues, newValues);
     this.pieceSplitState.replaceSegments(oldValues, newValues);
+    this.zettaTraceState.replaceSegments(oldValues, newValues);
   }
 
   reset() {
@@ -1206,6 +1221,7 @@ class CalcadaState extends RefCounted implements Trackable {
     this.mergeState.reset();
     this.findPathState.reset();
     this.pieceSplitState.reset();
+    this.zettaTraceState.reset();
   }
 
   toJSON() {
@@ -1214,6 +1230,7 @@ class CalcadaState extends RefCounted implements Trackable {
       [MERGE_JSON_KEY]: this.mergeState.toJSON(),
       [FIND_PATH_JSON_KEY]: this.findPathState.toJSON(),
       [PIECE_SPLIT_JSON_KEY]: this.pieceSplitState.toJSON(),
+      [ZETTA_TRACE_JSON_KEY]: this.zettaTraceState.toJSON(),
       [CALCADA_BRANCH_JSON_KEY]: this.branchId.toJSON(),
     };
   }
@@ -1230,6 +1247,9 @@ class CalcadaState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, PIECE_SPLIT_JSON_KEY, (value) => {
       this.pieceSplitState.restoreState(value);
+    });
+    verifyOptionalObjectProperty(x, ZETTA_TRACE_JSON_KEY, (value) => {
+      this.zettaTraceState.restoreState(value);
     });
     verifyOptionalObjectProperty(x, CALCADA_BRANCH_JSON_KEY, (value) => {
       this.branchId.restoreState(value);
@@ -1715,6 +1735,75 @@ class PieceSplitState extends RefCounted implements Trackable {
   }
 }
 
+const TRACE_ACTIVE_KEY = "active";
+const TRACE_SEED_KEY = "seedRoot";
+const TRACE_MIN_PIECE_VOXELS_KEY = "minPieceVoxels";
+
+/**
+ * Zetta Trace is a mode, not a tool: a proofreader stays in it while switching
+ * to merge or cut and back, so its state cannot live in a tool activation,
+ * which neuroglancer tears down the moment another tool takes the single
+ * active-tool slot.
+ *
+ * Only the durable knobs live here, and they are what a shared link restores.
+ * The candidate list is deliberately not among them — it is refetched, because
+ * a list saved minutes ago describes a graph that has since been edited.
+ */
+class ZettaTraceState extends RefCounted implements Trackable {
+  changed = new NullarySignal();
+
+  active = new WatchableValue<boolean>(false);
+  seedRoot = new WatchableValue<bigint | undefined>(undefined);
+  // Candidates whose partner piece is smaller than this are debris the model
+  // still scores highly. Zero offers everything.
+  minPieceVoxels = new WatchableValue<number>(0);
+
+  // Fires when a merge or a split has rewritten roots. The seed and the
+  // candidate are identified by piece from here on: their root ids have just
+  // changed, so anything holding a root id is stale.
+  graphEdited = new NullarySignal();
+
+  constructor() {
+    super();
+    const reemit = () => this.changed.dispatch();
+    this.registerDisposer(this.active.changed.add(reemit));
+    this.registerDisposer(this.seedRoot.changed.add(reemit));
+    this.registerDisposer(this.minPieceVoxels.changed.add(reemit));
+  }
+
+  reset() {
+    this.active.value = false;
+    this.seedRoot.value = undefined;
+  }
+
+  // The seed is re-resolved from its piece rather than remapped from the old
+  // root set: a cut splits one root into several, so the set alone cannot say
+  // which side the seed ended up on.
+  replaceSegments(_oldValues: Uint64Set, _newValues: Uint64Set) {
+    if (this.active.value) this.graphEdited.dispatch();
+  }
+
+  toJSON() {
+    return {
+      [TRACE_ACTIVE_KEY]: this.active.value ? true : undefined,
+      [TRACE_SEED_KEY]: this.seedRoot.value?.toString(),
+      [TRACE_MIN_PIECE_VOXELS_KEY]: this.minPieceVoxels.value || undefined,
+    };
+  }
+
+  restoreState(x: any) {
+    verifyOptionalObjectProperty(x, TRACE_ACTIVE_KEY, (value) => {
+      this.active.value = verifyBoolean(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_SEED_KEY, (value) => {
+      this.seedRoot.value = BigInt(verifyString(value));
+    });
+    verifyOptionalObjectProperty(x, TRACE_MIN_PIECE_VOXELS_KEY, (value) => {
+      this.minPieceVoxels.value = verifyInt(value);
+    });
+  }
+}
+
 const VOXEL_KEY = "voxel";
 const LAYER_KEY = "layer";
 
@@ -1762,6 +1851,502 @@ function parseEntry(value: any): PointEntry {
   return { voxel, layer, pieceId, origin };
 }
 
+const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:arrowleft": { action: "reject-candidate" },
+  "at:arrowright": { action: "accept-candidate" },
+  "at:arrowdown": { action: "skip-candidate" },
+  // Seeding is deliberate and plain click is not: a proofreader checking
+  // whether a candidate is right needs to select neighbouring segments to look
+  // at, and that must not move the trace.
+  "at:shift+mousedown0": { action: "set-trace-seed" },
+  "at:escape": { action: "exit-trace" },
+});
+
+// A merge is not instantly visible to a read that lands on another replica, so
+// the enlarged segment can come back empty for a moment. Asking the server for
+// a consistent read fixes that but measures 10x slower on this dataset
+// (1.2s -> 13s), which is unusable between swipes. Retrying an empty result
+// costs nothing in the common case.
+const EMPTY_RETRY_DELAYS_MS = [300, 700, 1500];
+
+/**
+ * Drives Zetta Trace: fetching candidates for the seed segment, drawing the
+ * one under review, and applying the proofreader's verdict.
+ *
+ * This lives on the GraphConnection rather than in a tool because the trace has
+ * to survive the user picking up the merge or cut tool mid-review — a tool
+ * activation would be torn down at that moment, taking the seed and the
+ * candidate list with it. The keys are bound for as long as the mode is on,
+ * over whatever tool happens to be active.
+ */
+class ZettaTraceSession extends RefCounted {
+  // The panel reads these; it re-renders on `changed`.
+  readonly changed = new NullarySignal();
+  status = "Shift+click a segment to seed the trace";
+  current: EdgeCandidate | undefined;
+  remaining = 0;
+
+  // The seed's own piece. Root ids die on every merge and cut; this does not,
+  // so it is what the trace re-resolves itself from afterwards.
+  private seedPieceId: bigint | undefined;
+  private candidates: EdgeCandidate[] = [];
+  // Rejections and skips both land here so neither comes back this session.
+  // Skips are memory-only by design: they mean "not now", and a proofreader
+  // starting a fresh session should see them again.
+  private decided = new Set<bigint>();
+  private savedVisible: bigint[] = [];
+  private savedSelected: bigint[] = [];
+  // A merge is not instant, and a candidate that has not visibly changed
+  // invites a second press that would submit the same merge twice.
+  private busy = false;
+  // Re-seeding while a fetch is in flight would otherwise let the older
+  // response land last and repopulate the list for the previous segment.
+  private fetchToken = 0;
+  private annotationIds: string[] = [];
+  private bindings: RefCounted | undefined;
+  private banner: HTMLElement | undefined;
+  private bannerStatus: HTMLElement | undefined;
+
+  constructor(
+    private connection: GraphConnection,
+    private layer: SegmentationUserLayer,
+    private state: ZettaTraceState,
+  ) {
+    super();
+    this.registerDisposer(
+      state.active.changed.add(() => {
+        if (state.active.value) {
+          this.enter();
+        } else {
+          this.exit();
+        }
+      }),
+    );
+    this.registerDisposer(state.graphEdited.add(() => this.onGraphEdited()));
+    this.registerDisposer(
+      state.minPieceVoxels.changed.add(() => {
+        if (state.active.value) void this.loadCandidates();
+      }),
+    );
+    if (state.active.value) this.enter();
+    this.registerDisposer(() => this.hideBanner());
+  }
+
+  private get segmentsState() {
+    return this.layer.displayState.segmentationGroupState.value;
+  }
+
+  private get graphServer() {
+    return this.connection.graph.graphServer;
+  }
+
+  private get branchId() {
+    return this.connection.graph.branchId.value;
+  }
+
+  private setStatus(text: string) {
+    this.status = text;
+    if (this.bannerStatus !== undefined) this.bannerStatus.textContent = text;
+    this.changed.dispatch();
+  }
+
+  /**
+   * A banner over the viewport, because the arrow keys stop panning while the
+   * mode is on and that has to be visible from wherever the proofreader is
+   * looking — which is the data, not the side panel.
+   *
+   * Hosted the way StatusMessage hosts itself: inside #neuroglancer-container
+   * when the viewer is embedded, so it cannot escape the widget.
+   */
+  private showBanner() {
+    if (this.banner !== undefined) return;
+    const banner = document.createElement("div");
+    banner.className = "calcada-zetta-trace-banner";
+
+    const badge = document.createElement("span");
+    badge.className = "calcada-zetta-trace-badge";
+    badge.textContent = "Trace mode";
+    banner.appendChild(badge);
+
+    const status = document.createElement("span");
+    status.className = "calcada-zetta-trace-banner-status";
+    status.textContent = this.status;
+    banner.appendChild(status);
+
+    const keys = document.createElement("span");
+    keys.className = "calcada-zetta-trace-banner-keys";
+    keys.textContent = "← reject · ↓ skip · → accept · Esc exit";
+    banner.appendChild(keys);
+
+    (
+      document.getElementById("neuroglancer-container") ?? document.body
+    ).appendChild(banner);
+    this.banner = banner;
+    this.bannerStatus = status;
+  }
+
+  private hideBanner() {
+    this.banner?.remove();
+    this.banner = undefined;
+    this.bannerStatus = undefined;
+  }
+
+  enter() {
+    if (this.bindings !== undefined) return;
+    // Snapshot before the first mutation: restoring what the user was looking
+    // at is this mode's exit contract.
+    this.savedVisible = [...this.segmentsState.visibleSegments];
+    this.savedSelected = [...this.segmentsState.selectedSegments];
+
+    const bindings = new RefCounted();
+    this.bindings = bindings;
+    // The same binder a tool activation uses, but scoped to the mode, so the
+    // keys keep working while merge or cut holds the active-tool slot. Arrows
+    // therefore review candidates instead of panning until the mode ends.
+    this.layer.toolBinder.globalBinder.inputEventMapBinder(
+      ZETTA_TRACE_INPUT_EVENT_MAP,
+      bindings,
+    );
+    const bind = (action: string, handler: () => void) => {
+      bindings.registerDisposer(
+        registerActionListener(
+          window,
+          action,
+          (event: ActionEvent<unknown>) => {
+            event.stopPropagation();
+            handler();
+          },
+        ),
+      );
+    };
+    bind("reject-candidate", () => this.reject());
+    bind("accept-candidate", () => void this.accept());
+    bind("skip-candidate", () => this.skip());
+    bind("exit-trace", () => {
+      this.state.active.value = false;
+    });
+    bind("set-trace-seed", () => this.seedFromMouse());
+
+    this.showBanner();
+    this.revealSegmentsTab();
+    if (this.state.seedRoot.value !== undefined) {
+      void this.loadCandidates();
+    } else {
+      this.setStatus("Shift+click a segment to seed the trace");
+    }
+  }
+
+  // The trace panel lives in the segments tab, so entering the mode from a
+  // keybinding or a restored link would otherwise leave the proofreader looking
+  // at a tab that says nothing about the trace they just started.
+  private revealSegmentsTab() {
+    for (const panel of this.layer.panels.panels) {
+      if (panel.tabs.includes("segments")) {
+        panel.selectedTab.value = "segments";
+      }
+    }
+  }
+
+  exit() {
+    if (this.bindings === undefined) return;
+    this.bindings.dispose();
+    this.bindings = undefined;
+    this.hideBanner();
+    this.clearAnnotation();
+    this.candidates = [];
+    this.current = undefined;
+    this.decided.clear();
+    this.seedPieceId = undefined;
+    ++this.fetchToken;
+
+    const { segmentsState } = this;
+    segmentsState.visibleSegments.clear();
+    segmentsState.selectedSegments.clear();
+    for (const id of this.savedSelected) segmentsState.selectedSegments.add(id);
+    for (const id of this.savedVisible) segmentsState.visibleSegments.add(id);
+    this.setStatus("");
+  }
+
+  private clearAnnotation() {
+    // Synchronous on purpose: a lingering line reads as backend latency.
+    const { source } = this.connection.traceAnnotationState;
+    for (const id of this.annotationIds.splice(0)) {
+      source.delete(source.getReference(id));
+    }
+  }
+
+  private seedFromMouse() {
+    const selection = maybeGetSelection(
+      {
+        layer: this.layer,
+        mouseState: this.layer.manager.root.layerSelectedValues.mouseState,
+      },
+      this.segmentsState.visibleSegments,
+    );
+    if (selection === undefined) return;
+    // Re-seeding mid-session is the point: a proofreader who reaches a dead end
+    // picks another segment and keeps going. Clicking the current seed again is
+    // a no-op rather than a pointless refetch.
+    if (selection.rootId === this.state.seedRoot.value) return;
+    this.setSeed(selection.rootId, selection.segmentId);
+  }
+
+  setSeed(rootId: bigint, pieceId?: bigint) {
+    this.state.seedRoot.value = rootId;
+    this.seedPieceId = pieceId;
+    this.current = undefined;
+    this.candidates = [];
+    this.clearAnnotation();
+    this.showOnly(rootId);
+    void this.loadCandidates();
+  }
+
+  // Accepting or rejecting clears whatever the proofreader had selected for
+  // context: the next candidate is a fresh question, and leaving the previous
+  // comparison on screen is what made merges look like they had done nothing.
+  private showOnly(...roots: bigint[]) {
+    const { segmentsState } = this;
+    segmentsState.visibleSegments.clear();
+    segmentsState.selectedSegments.clear();
+    for (const root of roots) {
+      segmentsState.visibleSegments.add(root);
+      segmentsState.selectedSegments.add(root);
+    }
+  }
+
+  private showCurrent() {
+    this.clearAnnotation();
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return;
+    this.current = nextCandidate(this.candidates, this.decided);
+    this.remaining = dropDecided(this.candidates, this.decided).length;
+    if (this.current === undefined) {
+      this.showOnly(seedRoot);
+      this.setStatus("No candidates left for this segment");
+      return;
+    }
+    const candidate = this.current;
+    this.showOnly(seedRoot, candidate.partnerRootId);
+
+    const line: Line = {
+      id: "",
+      type: AnnotationType.LINE,
+      pointA: vec3.fromValues(
+        candidate.pointA[0],
+        candidate.pointA[1],
+        candidate.pointA[2],
+      ),
+      pointB: vec3.fromValues(
+        candidate.pointB[0],
+        candidate.pointB[1],
+        candidate.pointB[2],
+      ),
+      // The source is built with one relationship ("associated segments"), so
+      // every annotation must carry a matching relatedSegments entry or the add
+      // throws while indexing it. Each side's root followed by its piece.
+      relatedSegments: [
+        BigUint64Array.of(
+          seedRoot,
+          candidate.selfPieceId,
+          candidate.partnerRootId,
+          candidate.partnerPieceId,
+        ),
+      ],
+      properties: [],
+    };
+    const { source } = this.connection.traceAnnotationState;
+    this.annotationIds.push(source.add(line, true).id);
+
+    const midpoint = vec3.create();
+    vec3.add(midpoint, line.pointA as vec3, line.pointB as vec3);
+    vec3.scale(midpoint, midpoint, 0.5);
+    // Assumes the layer's three dimensions are the global ones, which holds for
+    // a calcada layer. Position.value ignores an array whose length does not
+    // match the coordinate space rank, so on a higher-rank space this simply
+    // does not move rather than moving somewhere wrong.
+    this.layer.manager.root.globalPosition.value = Float32Array.from(midpoint);
+
+    this.setStatus(
+      `score ${candidate.score.toFixed(2)} · ${candidate.nInterfaces} interface(s)` +
+        ` · partner ${candidate.partnerRootId} · ${this.remaining} left`,
+    );
+  }
+
+  private fetchOnce(seedRoot: bigint) {
+    return this.graphServer.fetchCandidates(seedRoot, {
+      batch: DEFAULT_CANDIDATE_BATCH,
+      limit: CANDIDATE_FETCH_LIMIT,
+      minPieceVoxels: this.state.minPieceVoxels.value,
+      branchId: this.branchId,
+    });
+  }
+
+  private async loadCandidates(retryWhenEmpty = false) {
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return;
+    const token = ++this.fetchToken;
+    this.setStatus("Fetching candidates…");
+
+    let fetched: EdgeCandidate[];
+    try {
+      fetched = await this.fetchOnce(seedRoot);
+    } catch (e) {
+      if (token === this.fetchToken) {
+        this.setStatus(`Failed to fetch candidates: ${e}`);
+      }
+      return;
+    }
+    if (token !== this.fetchToken) return;
+
+    if (fetched.length === 0 && retryWhenEmpty) {
+      for (const delay of EMPTY_RETRY_DELAYS_MS) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (token !== this.fetchToken) return;
+        fetched = await this.fetchOnce(seedRoot).catch(
+          () => [] as EdgeCandidate[],
+        );
+        if (token !== this.fetchToken) return;
+        if (fetched.length > 0) break;
+      }
+    }
+
+    this.candidates = fetched;
+    this.showCurrent();
+  }
+
+  reject() {
+    if (this.busy || this.current === undefined) return;
+    const rejected = this.current;
+    this.decided.add(rejected.lineId);
+    this.showCurrent();
+    this.graphServer
+      .postCandidateDecision(
+        rejected.lineId,
+        "reject",
+        undefined,
+        this.branchId,
+      )
+      .catch((e: unknown) => {
+        StatusMessage.showTemporaryMessage(
+          `Failed to record rejection: ${e}`,
+          5000,
+        );
+      });
+  }
+
+  // A skip is this session's business only — nothing is written, and exiting
+  // the mode forgets it.
+  skip() {
+    if (this.busy || this.current === undefined) return;
+    this.decided.add(this.current.lineId);
+    this.showCurrent();
+  }
+
+  async accept() {
+    const seedRoot = this.state.seedRoot.value;
+    if (this.busy || this.current === undefined || seedRoot === undefined) {
+      return;
+    }
+    const accepted = this.current;
+    this.setBusy(true);
+    this.clearAnnotation();
+    this.setStatus("Merging…");
+
+    let merged: bigint;
+    try {
+      merged = await this.connection.mergeSelections(
+        {
+          rootId: seedRoot,
+          segmentId: accepted.selfPieceId,
+          position: accepted.pointA,
+        },
+        {
+          rootId: accepted.partnerRootId,
+          segmentId: accepted.partnerPieceId,
+          position: accepted.pointB,
+        },
+      );
+    } catch (e) {
+      // The candidate stays current so the right arrow retries it; a locked
+      // root usually frees up within seconds.
+      this.setStatus(`Merge failed: ${e}`);
+      this.setBusy(false);
+      return;
+    }
+    this.decided.add(accepted.lineId);
+    this.state.seedRoot.value = merged;
+    this.showOnly(merged);
+
+    this.graphServer
+      .postCandidateDecision(
+        accepted.lineId,
+        "accept",
+        // submitMerge returns only the new root, so the operation id the
+        // decision could be tied to is not available here.
+        undefined,
+        this.branchId,
+      )
+      .catch((e: unknown) => {
+        StatusMessage.showTemporaryMessage(
+          `Failed to record acceptance: ${e}`,
+          5000,
+        );
+      });
+
+    // The merge we just issued must be visible, or the enlarged segment reads
+    // back as having run out of candidates.
+    await this.loadCandidates(true);
+    this.setBusy(false);
+  }
+
+  private setBusy(value: boolean) {
+    this.busy = value;
+    this.changed.dispatch();
+  }
+
+  get isBusy() {
+    return this.busy;
+  }
+
+  /**
+   * Re-resolve the trace after someone edited the graph — a manual merge, or a
+   * cut of the candidate segment, which is the workflow when a candidate turns
+   * out to contain a merger. Both the seed and the partner get new root ids, so
+   * the trace follows their pieces, which survive re-rooting.
+   */
+  private async onGraphEdited() {
+    if (this.bindings === undefined || this.busy) return;
+    // Prefer the seed's own piece; the candidate's is the fallback for a trace
+    // restored from a link, which carries no piece.
+    const seedPiece = this.seedPieceId ?? this.current?.selfPieceId;
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return;
+    const token = ++this.fetchToken;
+    this.setStatus("Refreshing after edit…");
+    try {
+      // Resolving the seed's own piece is what makes a cut safe: whichever side
+      // of the cut that piece landed on is the segment the proofreader is on.
+      if (seedPiece !== undefined) {
+        const resolved = await this.graphServer.getRoot(
+          seedPiece,
+          0,
+          this.branchId,
+        );
+        if (token !== this.fetchToken) return;
+        this.state.seedRoot.value = resolved;
+      }
+    } catch (e) {
+      this.setStatus(`Failed to re-resolve the seed: ${e}`);
+      return;
+    }
+    if (token !== this.fetchToken) return;
+    this.current = undefined;
+    this.clearAnnotation();
+    this.showOnly(this.state.seedRoot.value!);
+    await this.loadCandidates(true);
+  }
+}
+
 class GraphConnection extends SegmentationGraphSourceConnection {
   public annotationLayerStates: AnnotationLayerState[] = [];
   public mergeAnnotationState: AnnotationLayerState;
@@ -1771,6 +2356,8 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   // split creates to keep the segment whole) render green so they stand out.
   public debugEdgeAnnotationState!: AnnotationLayerState;
   public debugSiblingAnnotationState!: AnnotationLayerState;
+  public traceAnnotationState!: AnnotationLayerState;
+  public traceSession!: ZettaTraceSession;
 
   // Debug piece view shared between the piece-split tool (which enters/leaves
   // debug mode) and the layer's "Debug" tab (which lists the pieces and drives
@@ -1920,6 +2507,16 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       loadedSubsource,
       "calcadaDebugEdges",
       WHITE_COLOR,
+    );
+    // Its own source, not the merge one. Anything added to the merge source is
+    // turned into a pending merge submission by the childAdded handler below,
+    // so borrowing it would both queue phantom merges and leave the lines
+    // behind when the trace clears them.
+    this.traceAnnotationState = makeColoredAnnotationState(
+      layer,
+      loadedSubsource,
+      "calcadaTraceCandidate",
+      YELLOW_COLOR,
     );
     this.debugSiblingAnnotationState = makeColoredAnnotationState(
       layer,
@@ -2171,6 +2768,10 @@ void main() {
     };
     this.registerDisposer(state.changed.add(updateEditTimestampLock));
     updateEditTimestampLock();
+
+    this.traceSession = this.registerDisposer(
+      new ZettaTraceSession(this, layer, state.zettaTraceState),
+    );
   }
 
   private graphRenderLayer: SliceViewPanelChunkedGraphLayer | undefined;
@@ -3225,6 +3826,8 @@ class CalcadaGraphServerInterface {
       batch: string;
       limit?: number;
       minScore?: number;
+      minPieceVoxels?: number;
+      rejectedBy?: string[];
       branchId?: number;
     },
   ): Promise<EdgeCandidate[]> {
@@ -3238,6 +3841,15 @@ class CalcadaGraphServerInterface {
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
     if (opts.minScore !== undefined) {
       params.set("min_score", String(opts.minScore));
+    }
+    if (opts.minPieceVoxels) {
+      params.set("min_piece_voxels", String(opts.minPieceVoxels));
+    }
+    // Omitted entirely when empty, which the server reads as "anyone's
+    // rejection counts" — an empty parameter would mean the same thing but
+    // relies on the server trimming blanks.
+    if (opts.rejectedBy?.length) {
+      params.set("rejected_by", opts.rejectedBy.join(","));
     }
     if (opts.branchId) params.set("branch_id", String(opts.branchId));
     const response = await fetchOkImpl(
@@ -3816,6 +4428,29 @@ class CalcadaGraphSource extends SegmentationGraphSource {
     return centroidsTransformed;
   }
 
+  // Zetta Trace sits with the segment list rather than with the editing tools:
+  // it is a mode that decides which segments are on screen, and a proofreader
+  // driving it is reading the list, not reaching for multicut.
+  segmentsTabContents(
+    layer: SegmentationUserLayer,
+    context: DependentViewContext,
+  ) {
+    const parent = document.createElement("div");
+    parent.style.display = "contents";
+    const toolbox = document.createElement("div");
+    toolbox.className = "neuroglancer-segmentation-toolbox";
+    toolbox.appendChild(
+      makeToolButton(context, layer.toolBinder, {
+        toolJson: CALCADA_ZETTA_TRACE_TOOL_ID,
+        label: "Zetta Trace",
+        title: "Trace a segment through AI merge candidates",
+      }),
+    );
+    parent.appendChild(toolbox);
+    parent.appendChild(makeZettaTracePanel(layer, context));
+    return parent;
+  }
+
   tabContents(
     layer: SegmentationUserLayer,
     context: DependentViewContext,
@@ -3865,13 +4500,6 @@ class CalcadaGraphSource extends SegmentationGraphSource {
         toolJson: CALCADA_PIECE_SPLIT_TOOL_ID,
         label: "Piece Split",
         title: "Split a piece using blue/red points",
-      }),
-    );
-    toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
-        toolJson: CALCADA_ZETTA_TRACE_TOOL_ID,
-        label: "Zetta Trace",
-        title: "Trace a segment through AI merge candidates",
       }),
     );
     parent.appendChild(toolbox);
@@ -4970,11 +5598,137 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
   }
 }
 
+// Takes the two things it actually reads rather than a tool, so a mode that has
+// no tool activation can ask the same question. LayerTool satisfies this shape
+// structurally, so its call sites are unchanged.
+/**
+ * The Zetta Trace panel, shown in the Graph tab while the mode is on.
+ *
+ * It lives in the tab rather than in a tool-activation status bubble because
+ * the mode outlives any tool: a proofreader who picks up the cut tool to clean
+ * up a candidate must still see which candidate they are on, and still be able
+ * to answer it.
+ */
+function makeZettaTracePanel(
+  layer: SegmentationUserLayer,
+  context: DependentViewContext,
+) {
+  const panel = document.createElement("div");
+  panel.className = "calcada-zetta-trace";
+
+  const header = document.createElement("div");
+  header.className = "calcada-zetta-trace-header";
+  const badge = document.createElement("span");
+  badge.className = "calcada-zetta-trace-badge";
+  badge.textContent = "Trace mode";
+  header.appendChild(badge);
+  panel.appendChild(header);
+
+  const status = document.createElement("div");
+  status.className = "calcada-zetta-trace-status";
+  panel.appendChild(status);
+
+  const sizeRow = document.createElement("label");
+  sizeRow.className = "calcada-zetta-trace-size";
+  sizeRow.textContent = "Min candidate size";
+  const sizeInput = document.createElement("input");
+  sizeInput.type = "number";
+  sizeInput.min = "0";
+  sizeInput.step = "100";
+  sizeInput.title =
+    "Skip candidates whose piece is smaller than this many voxels";
+  sizeRow.appendChild(sizeInput);
+  panel.appendChild(sizeRow);
+
+  const buttons = document.createElement("div");
+  buttons.className = "calcada-zetta-trace-buttons";
+  panel.appendChild(buttons);
+
+  const session = () => {
+    const { value: connection } = layer.graphConnection;
+    return connection instanceof GraphConnection ? connection : undefined;
+  };
+
+  const exitIcon = makeIcon({
+    text: "Exit",
+    title: "Leave trace mode (Esc)",
+    onClick: () => {
+      const traceState = session()?.state.zettaTraceState;
+      if (traceState !== undefined) traceState.active.value = false;
+    },
+  });
+  header.appendChild(exitIcon);
+
+  const rejectIcon = makeIcon({
+    text: "Reject",
+    title: "Reject this candidate (left arrow)",
+    onClick: () => session()?.traceSession.reject(),
+  });
+  const skipIcon = makeIcon({
+    text: "Skip",
+    title: "Skip for now, this session only (down arrow)",
+    onClick: () => session()?.traceSession.skip(),
+  });
+  const acceptIcon = makeIcon({
+    text: "Accept",
+    title: "Accept and merge (right arrow)",
+    onClick: () => void session()?.traceSession.accept(),
+  });
+  buttons.appendChild(rejectIcon);
+  buttons.appendChild(skipIcon);
+  buttons.appendChild(acceptIcon);
+
+  const render = () => {
+    const connection = session();
+    const traceState = connection?.state.zettaTraceState;
+    const active = traceState?.active.value === true;
+    panel.style.display = active ? "" : "none";
+    if (!active || connection === undefined) return;
+    status.textContent = connection.traceSession.status;
+    if (document.activeElement !== sizeInput) {
+      sizeInput.value = String(traceState!.minPieceVoxels.value);
+    }
+    const busy = connection.traceSession.isBusy;
+    const noCandidate = connection.traceSession.current === undefined;
+    for (const icon of [rejectIcon, skipIcon, acceptIcon]) {
+      icon.classList.toggle("disabled", busy || noCandidate);
+    }
+  };
+
+  sizeInput.addEventListener("change", () => {
+    const traceState = session()?.state.zettaTraceState;
+    if (traceState === undefined) return;
+    const parsed = Number.parseInt(sizeInput.value, 10);
+    traceState.minPieceVoxels.value =
+      Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  });
+
+  // The connection is rebuilt when the data source reloads, so the listeners
+  // are re-attached rather than bound once at construction.
+  const attachTo = new Map<GraphConnection, () => void>();
+  const syncListeners = () => {
+    const connection = session();
+    if (connection !== undefined && !attachTo.has(connection)) {
+      const dispose = [
+        connection.traceSession.changed.add(render),
+        connection.state.zettaTraceState.changed.add(render),
+      ];
+      attachTo.set(connection, () => dispose.forEach((fn) => fn()));
+      context.registerDisposer(() => attachTo.get(connection)?.());
+    }
+    render();
+  };
+  context.registerDisposer(layer.graphConnection.changed.add(syncListeners));
+  syncListeners();
+
+  return panel;
+}
+
 const maybeGetSelection = (
-  tool: LayerTool<SegmentationUserLayer>,
+  source: { layer: SegmentationUserLayer; mouseState: MouseSelectionState },
   visibleSegments: Uint64Set,
 ): SegmentSelection | undefined => {
-  const { layer, mouseState } = tool;
+  const { layer, mouseState } = source;
   const {
     segmentSelectionState: { value, baseValue },
   } = layer.displayState;
@@ -6334,23 +7088,14 @@ registerTool(SegmentationUserLayer, CALCADA_FIND_PATH_TOOL_ID, (layer) => {
 const DEFAULT_CANDIDATE_BATCH = "exp3_taper2_w2";
 const CANDIDATE_FETCH_LIMIT = 50;
 
-const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:arrowleft": { action: "reject-candidate" },
-  "at:arrowright": { action: "accept-candidate" },
-  // Seeding is deliberate and plain click is not: a proofreader checking
-  // whether a candidate is right needs to look at neighbouring segments, and
-  // that must not move the trace.
-  "at:shift+mousedown0": { action: "set-trace-seed" },
-  "at:escape": { action: "exit-trace" },
-});
-
 /**
- * Swipe through the AI's merge candidates for one segment.
+ * Turns Zetta Trace on and off.
  *
- * Click a point to seed; everything but that segment hides. The highest scoring
- * candidate is shown as a line to its partner. Right arrow merges and refetches
- * (the enlarged segment usually has more candidates), left arrow rejects and
- * moves on. Esc restores the previous segment visibility.
+ * The tool holds no trace state — that lives in ZettaTraceSession, so the mode
+ * outlives this activation and the proofreader can pick up merge or cut without
+ * losing the seed and the candidate under review. Activating deliberately does
+ * not deactivate: this is a toggle whose "off" is Esc or pressing the button
+ * again.
  */
 class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
   activate(activation: ToolActivation<this>) {
@@ -6365,317 +7110,12 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
     if (checkSegmentationOld(segmentsState.timestamp, activation)) {
       return;
     }
-
-    const { body, header } =
-      makeToolActivationStatusMessageWithHeader(activation);
-    header.textContent = "Zetta Trace";
-    body.classList.add("calcada-tool-status", "calcada-zetta-trace");
-    const status = document.createElement("div");
-    status.className = "calcada-zetta-trace-status";
-    status.textContent = "Shift+click a segment to seed the trace";
-    body.appendChild(status);
-
-    // A merge is not instant, and a candidate that has not visibly changed
-    // invites a second press that would submit the same merge twice. Everything
-    // that starts one goes through `busy`, and the buttons disable with it.
-    let busy = false;
-    const rejectIcon = makeIcon({
-      text: "Reject",
-      title: "Reject this candidate (left arrow)",
-      onClick: () => rejectCurrent(),
-    });
-    const acceptIcon = makeIcon({
-      text: "Accept",
-      title: "Accept and merge (right arrow)",
-      onClick: () => acceptCurrent(),
-    });
-    body.appendChild(rejectIcon);
-    body.appendChild(acceptIcon);
-
-    const setBusy = (value: boolean) => {
-      busy = value;
-      rejectIcon.classList.toggle("disabled", value);
-      acceptIcon.classList.toggle("disabled", value);
-    };
-
-    // Snapshot before the first mutation: restoring what the user was looking
-    // at is this tool's exit contract.
-    const savedVisible = [...segmentsState.visibleSegments];
-    const savedSelected = [...segmentsState.selectedSegments];
-    const { mergeAnnotationState } = graphConnection;
-    const annotationIds: string[] = [];
-
-    const clearAnnotation = () => {
-      // Synchronous on purpose: a lingering line reads as backend latency.
-      for (const id of annotationIds.splice(0)) {
-        const ref = mergeAnnotationState.source.getReference(id);
-        mergeAnnotationState.source.delete(ref);
-      }
-    };
-
-    activation.registerDisposer(() => {
-      clearAnnotation();
-      segmentsState.visibleSegments.clear();
-      segmentsState.selectedSegments.clear();
-      for (const id of savedSelected) segmentsState.selectedSegments.add(id);
-      for (const id of savedVisible) segmentsState.visibleSegments.add(id);
-    });
-
-    let seedRoot: bigint | undefined;
-    let candidates: EdgeCandidate[] = [];
-    let current: EdgeCandidate | undefined;
-    const decided = new Set<bigint>();
-    // Only the seed and the candidate under review may be visible. Without
-    // retiring the previous partner every candidate ever shown stays on screen
-    // in its own colour, which reads as "the merge did nothing".
-    let shownPartner: bigint | undefined;
-
-    const hideShownPartner = () => {
-      if (shownPartner === undefined) return;
-      if (shownPartner !== seedRoot) {
-        segmentsState.visibleSegments.delete(shownPartner);
-        segmentsState.selectedSegments.delete(shownPartner);
-      }
-      shownPartner = undefined;
-    };
-
-    const showCurrent = () => {
-      clearAnnotation();
-      hideShownPartner();
-      current = nextCandidate(candidates, decided);
-      if (current === undefined) {
-        status.textContent = "No candidates left for this segment";
-        return;
-      }
-      segmentsState.visibleSegments.add(current.partnerRootId);
-      segmentsState.selectedSegments.add(current.partnerRootId);
-      shownPartner = current.partnerRootId;
-
-      const line: Line = {
-        id: "",
-        type: AnnotationType.LINE,
-        pointA: vec3.fromValues(
-          current.pointA[0],
-          current.pointA[1],
-          current.pointA[2],
-        ),
-        pointB: vec3.fromValues(
-          current.pointB[0],
-          current.pointB[1],
-          current.pointB[2],
-        ),
-        // The source is built with one relationship ("associated segments"), so
-        // every annotation must carry a matching relatedSegments entry or the
-        // add throws while indexing it. Same shape the merge line uses: each
-        // side's root followed by its piece.
-        relatedSegments: [
-          BigUint64Array.of(
-            seedRoot!,
-            current.selfPieceId,
-            current.partnerRootId,
-            current.partnerPieceId,
-          ),
-        ],
-        properties: [],
-      };
-      const ref = mergeAnnotationState.source.add(line, true);
-      annotationIds.push(ref.id);
-
-      const midpoint = vec3.create();
-      vec3.add(midpoint, line.pointA as vec3, line.pointB as vec3);
-      vec3.scale(midpoint, midpoint, 0.5);
-      // Assumes the layer's three dimensions are the global ones, which holds
-      // for a calcada layer. Position.value ignores an array whose length does
-      // not match the coordinate space rank, so on a higher-rank space this
-      // simply does not move rather than moving somewhere wrong. The general
-      // form is UserLayer.setLayerPosition with the subsource's render
-      // transform.
-      const position = this.layer.manager.root.globalPosition;
-      position.value = Float32Array.from(midpoint);
-
-      const remaining = dropDecided(candidates, decided).length;
-      status.textContent =
-        `score ${current.score.toFixed(2)} · ${current.nInterfaces} interface(s)` +
-        ` · partner ${current.partnerRootId} · ${remaining} left`;
-    };
-
-    // Re-seeding while a fetch is in flight would otherwise let the older
-    // response land last and repopulate the list for the previous segment.
-    let fetchToken = 0;
-
-    // A merge is not instantly visible to a read that lands on another replica,
-    // so the enlarged segment can come back empty for a moment. Asking the
-    // server for a consistent read fixes that but measures 10x slower on this
-    // dataset (1.2s -> 13s), which is unusable between swipes. Retrying an
-    // empty result costs nothing in the common case.
-    const EMPTY_RETRY_DELAYS_MS = [300, 700, 1500];
-
-    const loadCandidates = async (retryWhenEmpty = false) => {
-      if (seedRoot === undefined) return;
-      const token = ++fetchToken;
-      status.textContent = "Fetching candidates…";
-      let fetched: EdgeCandidate[];
-      try {
-        fetched = await graphConnection.graph.graphServer.fetchCandidates(
-          seedRoot,
-          {
-            batch: DEFAULT_CANDIDATE_BATCH,
-            limit: CANDIDATE_FETCH_LIMIT,
-            branchId: graphConnection.graph.branchId.value,
-          },
-        );
-      } catch (e) {
-        if (token === fetchToken) {
-          status.textContent = `Failed to fetch candidates: ${e}`;
-        }
-        return;
-      }
-      if (token !== fetchToken) return;
-
-      if (fetched.length === 0 && retryWhenEmpty) {
-        for (const delay of EMPTY_RETRY_DELAYS_MS) {
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          if (token !== fetchToken) return;
-          fetched = await graphConnection.graph.graphServer
-            .fetchCandidates(seedRoot, {
-              batch: DEFAULT_CANDIDATE_BATCH,
-              limit: CANDIDATE_FETCH_LIMIT,
-              branchId: graphConnection.graph.branchId.value,
-            })
-            .catch(() => [] as EdgeCandidate[]);
-          if (token !== fetchToken) return;
-          if (fetched.length > 0) break;
-        }
-      }
-
-      candidates = fetched;
-      showCurrent();
-    };
-
-    const rejectCurrent = () => {
-      if (busy || current === undefined) return;
-      const rejected = current;
-      decided.add(rejected.lineId);
-      showCurrent();
-      graphConnection.graph.graphServer
-        .postCandidateDecision(
-          rejected.lineId,
-          "reject",
-          undefined,
-          graphConnection.graph.branchId.value,
-        )
-        .catch((e: unknown) => {
-          StatusMessage.showTemporaryMessage(
-            `Failed to record rejection: ${e}`,
-            5000,
-          );
-        });
-    };
-
-    const acceptCurrent = () => {
-      if (busy || current === undefined || seedRoot === undefined) return;
-      const accepted = current;
-      const sinkRoot = seedRoot;
-      setBusy(true);
-      clearAnnotation();
-      status.textContent = "Merging…";
-
-      void (async () => {
-        let merged: bigint;
-        try {
-          merged = await graphConnection.mergeSelections(
-            {
-              rootId: sinkRoot,
-              segmentId: accepted.selfPieceId,
-              position: accepted.pointA,
-            },
-            {
-              rootId: accepted.partnerRootId,
-              segmentId: accepted.partnerPieceId,
-              position: accepted.pointB,
-            },
-          );
-        } catch (e) {
-          // The candidate stays current so the right arrow retries it; a locked
-          // root usually frees up within seconds.
-          status.textContent = `Merge failed: ${e}`;
-          setBusy(false);
-          return;
-        }
-        decided.add(accepted.lineId);
-        // submitMerge adds the new root but leaves both pre-merge roots in the
-        // visible set, and GraphConnection.replaceSegments only rewrites the
-        // tool states, not the segment sets. Their meshes therefore keep being
-        // drawn as separate objects next to the merged one, so a completed
-        // merge looks like it did nothing. Retire them here.
-        for (const retired of [sinkRoot, accepted.partnerRootId]) {
-          if (retired === merged) continue;
-          segmentsState.visibleSegments.delete(retired);
-          segmentsState.selectedSegments.delete(retired);
-        }
-        // The partner is inside the merged root now, so it must not be hidden
-        // again on the way to the next candidate.
-        shownPartner = undefined;
-        graphConnection.graph.graphServer
-          .postCandidateDecision(
-            accepted.lineId,
-            "accept",
-            // submitMerge returns only the new root, so the operation id the
-            // decision could be tied to is not available here.
-            undefined,
-            graphConnection.graph.branchId.value,
-          )
-          .catch((e: unknown) => {
-            StatusMessage.showTemporaryMessage(
-              `Failed to record acceptance: ${e}`,
-              5000,
-            );
-          });
-        seedRoot = merged;
-        // The merge we just issued must be visible, or the enlarged segment
-        // reads back as having run out of candidates.
-        await loadCandidates(true);
-        setBusy(false);
-      })();
-    };
-
-    activation.bindInputEventMap(ZETTA_TRACE_INPUT_EVENT_MAP);
-
-    activation.bindAction("exit-trace", (event) => {
-      event.stopPropagation();
-      activation.cancel();
-    });
-
-    activation.bindAction("set-trace-seed", (event) => {
-      event.stopPropagation();
-      const selection = maybeGetSelection(this, segmentsState.visibleSegments);
-      if (selection === undefined) return;
-      // Re-seeding mid-session is the point: a proofreader who reaches a dead
-      // end picks another segment and keeps going. Clicking the current seed
-      // again is a no-op rather than a pointless refetch.
-      if (selection.rootId === seedRoot) return;
-
-      seedRoot = selection.rootId;
-      current = undefined;
-      candidates = [];
-      clearAnnotation();
-      shownPartner = undefined;
-      segmentsState.visibleSegments.clear();
-      segmentsState.selectedSegments.clear();
-      segmentsState.visibleSegments.add(seedRoot);
-      segmentsState.selectedSegments.add(seedRoot);
-      void loadCandidates();
-    });
-
-    activation.bindAction("reject-candidate", (event) => {
-      event.stopPropagation();
-      rejectCurrent();
-    });
-
-    activation.bindAction("accept-candidate", (event) => {
-      event.stopPropagation();
-      acceptCurrent();
-    });
+    const { zettaTraceState } = graphConnection.state;
+    zettaTraceState.active.value = !zettaTraceState.active.value;
+    // The mode owns its own keys and panel from here, so the activation has
+    // nothing left to hold: releasing it lets the next tool take the slot
+    // without ending the trace.
+    activation.cancel();
   }
 
   get description() {
