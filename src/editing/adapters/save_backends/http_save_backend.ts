@@ -36,6 +36,26 @@ import type { BackendClient } from "#src/editing/backend/backend_client.js";
 /** Default backend path for the chunk write (relative to the endpoint root). */
 const DEFAULT_CUTOUT_PATH = "/painting/cutout";
 
+/**
+ * Chunk uploads in flight at once within one layer (TM-455). A save is dominated
+ * by per-request round-trip latency, not bandwidth — uploading strictly one
+ * chunk at a time put a fully painted task at 15–20 min. Five is deliberately
+ * modest: the backend and GCS speak HTTP/2 so these multiplex over a single
+ * connection, and it still leaves a free connection under an HTTP/1.1
+ * deployment (e.g. a local backend) for token refresh and tile loads.
+ * `NgSaveTarget` keeps its per-layer loop sequential, so this is the total.
+ */
+export const SAVE_UPLOAD_CONCURRENCY = 5;
+
+/**
+ * Per-chunk retry budget for the upload (TM-455). Without a per-attempt
+ * deadline a stuck POST hangs forever, and the default 32 transient retries
+ * burn ~4–5 min per chunk against a cold-starting backend. Five attempts of at
+ * most 30 s each bounds a chunk at roughly 3 min and lets a cancel land within
+ * one attempt.
+ */
+const SAVE_RETRY_OPTIONS = { maxAttempts: 5, attemptTimeoutMs: 30_000 };
+
 export type Vec3 = [number, number, number];
 
 /**
@@ -178,23 +198,37 @@ export class HttpSaveBackend implements SaveBackend {
     let firstError: string | undefined;
     let cancelled = false;
 
-    for (const chunk of chunks) {
-      if (signal.aborted) {
-        cancelled = true;
-        break;
-      }
-      try {
-        await this.sendChunk(chunk, metadata, path, signal);
-        succeeded += 1;
-      } catch (err) {
+    // Bounded worker pool over a shared cursor. JS is single-threaded, so the
+    // shared counters only interleave at `await` points — no data race. On abort
+    // the workers stop dequeuing, and only settled chunks are counted, keeping
+    // the `cancelled-after-N-of-M` tally honest.
+    let nextChunk = 0;
+    const uploadWorker = async (): Promise<void> => {
+      while (nextChunk < chunks.length) {
         if (signal.aborted) {
           cancelled = true;
-          break;
+          return;
         }
-        failed += 1;
-        firstError ??= err instanceof Error ? err.message : String(err);
+        const chunk = chunks[nextChunk++];
+        try {
+          await this.sendChunk(chunk, metadata, path, signal);
+          succeeded += 1;
+        } catch (err) {
+          if (signal.aborted) {
+            cancelled = true;
+            return;
+          }
+          failed += 1;
+          firstError ??= err instanceof Error ? err.message : String(err);
+        }
       }
-    }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(SAVE_UPLOAD_CONCURRENCY, chunks.length) },
+        () => uploadWorker(),
+      ),
+    );
 
     if (cancelled) {
       return {
@@ -251,6 +285,7 @@ export class HttpSaveBackend implements SaveBackend {
       body,
       headers: { "Content-Type": "application/octet-stream" },
       signal,
+      retryOptions: SAVE_RETRY_OPTIONS,
     });
   }
 }
