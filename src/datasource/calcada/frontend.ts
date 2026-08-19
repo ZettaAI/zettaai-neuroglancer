@@ -222,7 +222,7 @@ import {
 import { MouseEventBinder } from "#src/util/mouse_bindings.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
-import { NullarySignal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
 import { DateTimeInputWidget } from "#src/widget/datetime.js";
@@ -1761,7 +1761,9 @@ class ZettaTraceState extends RefCounted implements Trackable {
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
   // changed, so anything holding a root id is stale.
-  graphEdited = new NullarySignal();
+  graphEdited = new Signal<
+    (oldRoots: Uint64Set, newRoots: Uint64Set) => void
+  >();
 
   constructor() {
     super();
@@ -1779,8 +1781,8 @@ class ZettaTraceState extends RefCounted implements Trackable {
   // The seed is re-resolved from its piece rather than remapped from the old
   // root set: a cut splits one root into several, so the set alone cannot say
   // which side the seed ended up on.
-  replaceSegments(_oldValues: Uint64Set, _newValues: Uint64Set) {
-    if (this.active.value) this.graphEdited.dispatch();
+  replaceSegments(oldValues: Uint64Set, newValues: Uint64Set) {
+    if (this.active.value) this.graphEdited.dispatch(oldValues, newValues);
   }
 
   toJSON() {
@@ -2999,6 +3001,10 @@ void main() {
    * or re-fetching chunks (which silently re-applies the stale LUT for
    * chunks the chunk manager still has cached).
    */
+  notifyGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
+    this.state.replaceSegments(oldRoots, newRoots);
+  }
+
   updateAfterSplit(
     oldRoot: bigint,
     newRoots: bigint[],
@@ -3255,7 +3261,7 @@ void main() {
         oldValues.add(focusSegment);
         const newValues = new Uint64Set();
         newValues.add(splitRoots);
-        this.state.replaceSegments(oldValues, newValues);
+        this.notifyGraphEdited(oldValues, newValues);
         this.updateAfterSplit(focusSegment, splitRoots, components);
         this.pushUndo(operationId, this.graph.branchId.value);
         return true;
@@ -3321,7 +3327,7 @@ void main() {
         oldValues.add(oldRootB);
         const newValues = new Uint64Set();
         newValues.add(newRoot);
-        this.state.replaceSegments(oldValues, newValues);
+        this.notifyGraphEdited(oldValues, newValues);
 
         const segmentsState =
           this.layer.displayState.segmentationGroupState.value;
