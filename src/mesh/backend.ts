@@ -460,6 +460,15 @@ export class MeshLayer extends withSegmentationLayerBackendState(
     const priorityTier = getPriorityTier(visibility);
     const basePriority = getBasePriority(visibility);
     const { source, chunkManager } = this;
+    // Every fragment of every visible root would otherwise share the exact
+    // same priority, which lets tryToFreeCapacity's eviction loop
+    // (chunk_manager/backend.ts) bail out on its very first comparison once
+    // the GPU budget fills with same-priority residents, deadlocking further
+    // promotions. Decrementing by a per-fragment ordinal (mirrors the `- maxLod
+    // + lod` tiebreak MultiscaleMeshLayer already uses below) keeps fragments
+    // distinguishable so eviction can make progress; PREFETCH_PRIORITY_MULTIPLIER
+    // (1e13) makes this negligible next to the gap between prefetch tiers.
+    let fragmentIndex = 0;
     forEachVisibleSegment(this, (objectId) => {
       const manifestChunk = source.getChunk(objectId);
       ++this.numVisibleChunksNeeded;
@@ -484,7 +493,7 @@ export class MeshLayer extends withSegmentationLayerBackendState(
           chunkManager.requestChunk(
             fragmentChunk,
             priorityTier,
-            basePriority + MESH_OBJECT_FRAGMENT_CHUNK_PRIORITY,
+            basePriority + MESH_OBJECT_FRAGMENT_CHUNK_PRIORITY - fragmentIndex++,
           );
           if (fragmentChunk.state === ChunkState.GPU_MEMORY) {
             ++this.numVisibleChunksAvailable;
