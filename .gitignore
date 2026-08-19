@@ -34,3 +34,5 @@ tsconfig.tsbuildinfo
 # Generated edit-session e2e fixtures (TM-331); regenerate with testdata/editing/generate.py
 testdata/editing/buckets/
 testdata/editing/fixtures.json
+
+/.worktrees
