@@ -439,6 +439,13 @@ export class CalcadaMeshSource extends WithParameters(
         await fetchOkImpl(baseUrl + manifestPath, { signal })
       ).json();
     } catch (error) {
+      if (
+        signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        this.manifestAttempts.delete(chunk);
+        throw error;
+      }
       const attemptCount = this.manifestAttempts.get(chunk) ?? 0;
       if (shouldRetryManifestDownload(attemptCount)) {
         this.manifestAttempts.set(chunk, attemptCount + 1);
