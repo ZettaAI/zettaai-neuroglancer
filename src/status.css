@@ -23,12 +23,14 @@
   margin: 0px;
   padding: 0px;
   font: 10pt sans-serif;
+  pointer-events: none;
 }
 
 #neuroglancer-status-container li {
   width: 100vw;
   max-height: 25vh;
   overflow-y: auto;
+  pointer-events: auto;
 }
 
 .neuroglancer-status-header {
