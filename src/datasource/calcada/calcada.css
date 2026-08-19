@@ -276,15 +276,15 @@
   font: 12px sans-serif;
 }
 
-/* Sits above the data panels, below neuroglancer's own status list (z-index
-   100), and is click-through so it never steals a seeding shift+click from the
-   viewport underneath it. */
+/* Anchored at the top so it cannot collide with the bottom-anchored status
+   and tool-activation panel (z-index 100). Still click-through so it never
+   steals a seeding shift+click from the viewport underneath it. */
 .calcada-zetta-trace-banner {
   position: absolute;
-  bottom: 12px;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 99;
+  z-index: 101;
   display: flex;
   align-items: center;
   gap: 10px;
