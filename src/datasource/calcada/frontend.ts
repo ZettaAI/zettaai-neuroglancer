@@ -6337,6 +6337,11 @@ const CANDIDATE_FETCH_LIMIT = 50;
 const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
+  // Seeding is deliberate and plain click is not: a proofreader checking
+  // whether a candidate is right needs to look at neighbouring segments, and
+  // that must not move the trace.
+  "at:shift+mousedown0": { action: "set-trace-seed" },
+  "at:escape": { action: "exit-trace" },
 });
 
 /**
@@ -6367,7 +6372,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
     body.classList.add("calcada-tool-status", "calcada-zetta-trace");
     const status = document.createElement("div");
     status.className = "calcada-zetta-trace-status";
-    status.textContent = "Click a point to seed the trace";
+    status.textContent = "Shift+click a segment to seed the trace";
     body.appendChild(status);
 
     // A merge is not instant, and a candidate that has not visibly changed
@@ -6636,7 +6641,12 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
 
     activation.bindInputEventMap(ZETTA_TRACE_INPUT_EVENT_MAP);
 
-    activation.bindAction("select", (event) => {
+    activation.bindAction("exit-trace", (event) => {
+      event.stopPropagation();
+      activation.cancel();
+    });
+
+    activation.bindAction("set-trace-seed", (event) => {
       event.stopPropagation();
       const selection = maybeGetSelection(this, segmentsState.visibleSegments);
       if (selection === undefined) return;
