@@ -6304,13 +6304,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // 2D, and tinting each mesh fragment separately in 3D — is a debugging view,
     // so it is turned on only while Debug is active (see setPieceView).
 
-    // Pending post-cut mesh re-fetch timers, cleared when the tool deactivates
-    // so back-to-back splits don't leak timers that fire after the tool is gone.
-    const meshRefetchTimers: ReturnType<typeof setTimeout>[] = [];
-    activation.registerDisposer(() => {
-      for (const timer of meshRefetchTimers) clearTimeout(timer);
-    });
-
     // Debug overlay state (toggled by the Debug button): the debugged root and a
     // per-piece colour map fetched from the backend. When on, every piece of the
     // root is tinted a distinct colour so a kept-whole segment's internal pieces
@@ -6428,14 +6421,27 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       // Uncoloured pieces stay merged into the focus root at the segment's normal
       // colour, so the rest of the segment never looks deselected while you place
       // points. We do NOT dim the rest of the view (no MULTICUT_OFF_COLOR).
-      segmentationGroupState.useTemporaryVisibleSegments.value = true;
+      // While a trace is reviewing this very segment, the trace owns what is
+      // visible (seed + candidate only). Overriding it here would put the rest
+      // of the view back and fight showOnly; the per-piece tinting below is
+      // still applied, so the split preview is unaffected.
+      const { zettaTraceState } = graphConnection.state;
+      const traceOwnsFocus =
+        zettaTraceState.active.value &&
+        (focus === zettaTraceState.seedRoot.value ||
+          focus === graphConnection.traceSession.current?.partnerRootId);
+      if (!traceOwnsFocus) {
+        segmentationGroupState.useTemporaryVisibleSegments.value = true;
+        segmentationGroupState.temporaryVisibleSegments.add(focus);
+      }
       segmentationGroupState.useTemporarySegmentEquivalences.value = true;
-      segmentationGroupState.temporaryVisibleSegments.add(focus);
       let anyTint = false;
       for (const piece of segmentationGroupState.segmentEquivalences.setElements(
         focus,
       )) {
-        segmentationGroupState.temporaryVisibleSegments.add(piece);
+        if (!traceOwnsFocus) {
+          segmentationGroupState.temporaryVisibleSegments.add(piece);
+        }
         const color = pieceColor.get(piece);
         if (color === "blue") {
           displayState.tempSegmentStatedColors2d.value.set(
@@ -6877,7 +6883,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           ...pieceSplitState.bluePoints.value.map((p) => toPayload(p, "blue")),
           ...pieceSplitState.redPoints.value.map((p) => toPayload(p, "red")),
         ];
-        const { roots, operationId, splitPieces } =
+        const { roots, components, operationId, splitPieces } =
           await graphConnection.graph.graphServer.generalSplit(
             points,
             branchId,
@@ -6902,9 +6908,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         for (const p of pieceSplitState.redPoints.value) {
           if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
         }
-        // The segment stays whole but its pieces changed, so the rendered chunks
-        // and the piece->root mapping are stale.
-        const segmentsState = layer.displayState.segmentationGroupState.value;
+        // The segment stays whole but its pieces changed, so the piece->root
+        // mapping is stale.
         const newRoots = roots.filter((root) => root !== 0n);
 
         steppedSplit = {
@@ -6920,31 +6925,18 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         const focus = currentFocusRoot();
         if (newRoots.length > 0 && focus !== undefined) {
           // Split-mode 2D renders raw piece ids through segmentEquivalences, so
-          // the links must follow the edit: chunks now hold the sub-piece ids
-          // and the root advanced — with the old links the segment renders
-          // blank until split mode is re-entered.
-          const newRoot = newRoots[0];
-          const oldPieces = [
-            ...segmentsState.segmentEquivalences.setElements(focus),
-          ].filter((id) => id !== focus && !wasSplit.has(id));
-          segmentsState.segmentEquivalences.deleteSet(focus);
-          for (const piece of oldPieces) {
-            segmentsState.segmentEquivalences.link(newRoot, piece);
-          }
-          for (const sp of splitPieces) {
-            segmentsState.segmentEquivalences.link(newRoot, sp.blue);
-            segmentsState.segmentEquivalences.link(newRoot, sp.red);
-          }
-          segmentsState.segmentEquivalences.changed.dispatch();
-          segmentsState.selectedSegments.delete(focus);
-          segmentsState.visibleSegments.delete(focus);
-          for (const root of newRoots) {
-            segmentsState.selectedSegments.add(root);
-            segmentsState.visibleSegments.add(root);
-          }
+          // the links must follow the edit. With pieces_only the segment stays
+          // whole, so the response carries one component holding the new root's
+          // complete piece list — authoritative where the local reconstruction
+          // was only as fresh as the last chunk fetch.
+          graphConnection.updateAfterSplit(focus, newRoots, components);
           graphConnection.meshAddNewSegments(newRoots);
+          const oldRootSet = new Uint64Set();
+          oldRootSet.add(focus);
+          const newRootSet = new Uint64Set();
+          newRootSet.add(newRoots);
+          graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         }
-        graphConnection.refreshChunkSources();
         clearDebug();
         StatusMessage.showTemporaryMessage(
           `Step 1 done — ${splitPieces.length} piece(s) split, segment still whole. ` +
@@ -6971,7 +6963,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       setBusy(true);
       const { sources, sinks, branchId, rootId } = steppedSplit;
       try {
-        const { roots, operationId } =
+        const { roots, components, operationId } =
           await graphConnection.graph.graphServer.splitByPieces(
             sources,
             sinks,
@@ -6990,33 +6982,24 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         }
         // The post-pieces root is superseded by the two cut roots. rootId is
         // the authoritative handle (currentFocusRoot maps the first point's
-        // piece, which the pieces step already retired). Its equivalence class
-        // must go too — stale piece links would union both new roots into one
-        // class when the re-fetched LUTs link those pieces again.
+        // piece, which the pieces step already retired).
         const oldRoot = rootId ?? currentFocusRoot();
         if (oldRoot !== undefined) {
-          segmentsState.segmentEquivalences.deleteSet(oldRoot);
-          segmentsState.segmentEquivalences.changed.dispatch();
-          segmentsState.selectedSegments.delete(oldRoot);
-          segmentsState.visibleSegments.delete(oldRoot);
-        }
-        for (const newRoot of newRoots) {
-          segmentsState.selectedSegments.add(newRoot);
-          segmentsState.visibleSegments.add(newRoot);
-        }
-        graphConnection.meshAddNewSegments(newRoots);
-        graphConnection.refreshChunkSources();
-        // A new root's sub-piece mesh may land after the first manifest fetch
-        // resolved it to a miss; re-fetch the new roots' manifests a few times
-        // so the 3D meshes appear without a manual reload. Timers are cleared
-        // on tool deactivation.
-        for (const delayMs of [1500, 4000, 9000, 20000]) {
-          meshRefetchTimers.push(
-            setTimeout(
-              () => graphConnection.meshRefreshSegments(newRoots),
-              delayMs,
-            ),
-          );
+          // Reconcile from the server's authoritative components instead of
+          // re-fetching chunks and waiting out the lagging LUT.
+          graphConnection.updateAfterSplit(oldRoot, newRoots, components);
+          graphConnection.meshAddNewSegments(newRoots);
+          const oldRootSet = new Uint64Set();
+          oldRootSet.add(oldRoot);
+          const newRootSet = new Uint64Set();
+          newRootSet.add(newRoots);
+          graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
+        } else {
+          for (const newRoot of newRoots) {
+            segmentsState.selectedSegments.add(newRoot);
+            segmentsState.visibleSegments.add(newRoot);
+          }
+          graphConnection.meshAddNewSegments(newRoots);
         }
         clearDebug();
         steppedSplit = undefined;
