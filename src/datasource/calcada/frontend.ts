@@ -3226,6 +3226,7 @@ class CalcadaGraphServerInterface {
       limit?: number;
       minScore?: number;
       branchId?: number;
+      consistent?: boolean;
     },
   ): Promise<EdgeCandidate[]> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -3240,6 +3241,9 @@ class CalcadaGraphServerInterface {
       params.set("min_score", String(opts.minScore));
     }
     if (opts.branchId) params.set("branch_id", String(opts.branchId));
+    // Makes the read wait for replica catch-up. Only worth its latency right
+    // after an edit, when the query has to see its own write.
+    if (opts.consistent) params.set("consistent", "1");
     const response = await fetchOkImpl(
       `${baseUrl}/segment/${rootId}/candidates?${params.toString()}`,
       { priority: "high" },
@@ -6483,7 +6487,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
     // response land last and repopulate the list for the previous segment.
     let fetchToken = 0;
 
-    const loadCandidates = async () => {
+    const loadCandidates = async (consistent = false) => {
       if (seedRoot === undefined) return;
       const token = ++fetchToken;
       status.textContent = "Fetching candidates…";
@@ -6495,6 +6499,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
             batch: DEFAULT_CANDIDATE_BATCH,
             limit: CANDIDATE_FETCH_LIMIT,
             branchId: graphConnection.graph.branchId.value,
+            consistent,
           },
         );
       } catch (e) {
@@ -6575,7 +6580,9 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
             );
           });
         seedRoot = merged;
-        await loadCandidates();
+        // The merge we just issued must be visible, or the enlarged segment
+        // reads back as having run out of candidates.
+        await loadCandidates(true);
         setBusy(false);
       })();
     };
