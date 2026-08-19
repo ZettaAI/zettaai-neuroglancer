@@ -2125,19 +2125,19 @@ class ZettaTraceSession extends RefCounted {
   }
 
   private seedFromMouse() {
-    const selection = maybeGetSelection(
-      {
-        layer: this.layer,
-        mouseState: this.layer.manager.root.layerSelectedValues.mouseState,
-      },
-      this.segmentsState.visibleSegments,
-    );
-    if (selection === undefined) return;
-    // Re-seeding mid-session is the point: a proofreader who reaches a dead end
-    // picks another segment and keeps going. Clicking the current seed again is
-    // a no-op rather than a pointless refetch.
-    if (selection.rootId === this.state.seedRoot.value) return;
-    this.setSeed(selection.rootId, selection.segmentId);
+    // Read the pick directly rather than through maybeGetSelection: showOnly has
+    // reduced visibleSegments to the seed and the candidate, so that helper's
+    // visibility gate would reject every third segment — exactly the ones a
+    // proofreader re-seeds onto after reaching a dead end.
+    const {
+      segmentSelectionState: { value, baseValue },
+    } = this.layer.displayState;
+    if (!value || !baseValue) return;
+    if (value === this.state.seedRoot.value) {
+      StatusMessage.showTemporaryMessage("Already the seed", 3000);
+      return;
+    }
+    this.setSeed(value, baseValue);
   }
 
   setSeed(rootId: bigint, pieceId?: bigint) {
