@@ -265,13 +265,89 @@
   flex-direction: column;
 }
 
-/* One flex row, like the other tools: the panel has a fixed height, so a second
-   row would sit on top of the keybinding hint underneath it. The status takes
-   the leftover width and ellipsises instead of wrapping, which keeps the two
-   buttons in place no matter how long the score/partner line gets. */
+/* Lives in the Graph tab rather than a tool-activation bubble, so it stacks:
+   the tab scrolls and has room. The status ellipsises instead of wrapping so a
+   long score/partner line cannot push the buttons around. */
 .calcada-zetta-trace {
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 2px;
   font: 12px sans-serif;
+}
+
+/* Sits above the data panels, below neuroglancer's own status list (z-index
+   100), and is click-through so it never steals a seeding shift+click from the
+   viewport underneath it. */
+.calcada-zetta-trace-banner {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 90%;
+  padding: 5px 10px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid #b58900;
+  font: 12px sans-serif;
+  color: #eee;
+  pointer-events: none;
+}
+
+.calcada-zetta-trace-banner-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calcada-zetta-trace-banner-keys {
+  color: #999;
+  white-space: nowrap;
+}
+
+.calcada-zetta-trace-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Reads as a mode banner, not a label: the proofreader has to be able to tell
+   at a glance that arrow keys are answering candidates rather than panning. */
+.calcada-zetta-trace-badge {
+  flex: 1 1 auto;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #b58900;
+  color: #000;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.calcada-zetta-trace-size {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.calcada-zetta-trace-size input {
+  width: 6em;
+  background: #222;
+  color: inherit;
+  border: 1px solid #444;
+}
+
+.calcada-zetta-trace-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .calcada-zetta-trace-status {

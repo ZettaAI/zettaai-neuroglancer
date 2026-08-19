@@ -327,7 +327,11 @@ export class GlobalToolBinder extends RefCounted {
   localBindersChanged = new Signal();
 
   constructor(
-    private inputEventMapBinder: InputEventMapBinder,
+    // Public so a persistent mode — one that must keep its keys while the user
+    // switches tools — can bind an event map for its own lifetime instead of a
+    // tool activation's. ToolActivation exposes the same binder for the same
+    // reason.
+    public readonly inputEventMapBinder: InputEventMapBinder,
     public toolPaletteState: MultiToolPaletteState,
   ) {
     super();
