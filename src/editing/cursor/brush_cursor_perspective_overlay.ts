@@ -29,7 +29,11 @@
  * `viewProjectionMat * modelMatrix`).
  */
 
-import { computeBrushFootprintAxes } from "#src/editing/cursor/brush_cursor_footprint.js";
+import {
+  computeBrushFootprintAxes,
+  resolveCursorVoxelFrame,
+  snapWorldCenterToVoxelCenter,
+} from "#src/editing/cursor/brush_cursor_footprint.js";
 import type { BrushCursorState } from "#src/editing/cursor/brush_cursor_state.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
@@ -140,6 +144,9 @@ export class BrushCursorPerspectiveOverlay extends PerspectiveViewRenderLayer {
     this.registerDisposer(
       state.toolKind.changed.add(this.redrawNeeded.dispatch),
     );
+    this.registerDisposer(
+      state.targetResolution.changed.add(this.redrawNeeded.dispatch),
+    );
   }
 
   get isTransparent() {
@@ -153,7 +160,8 @@ export class BrushCursorPerspectiveOverlay extends PerspectiveViewRenderLayer {
     const worldCenter = state.worldCenter.value;
     if (worldCenter === undefined) return;
     const radiusVoxels = state.radiusVoxels.value;
-    if (!Number.isFinite(radiusVoxels) || radiusVoxels <= 0) return;
+    // A brush size of 1 is radius 0 — a single voxel, not an empty footprint.
+    if (!Number.isFinite(radiusVoxels) || radiusVoxels < 0) return;
 
     // Two painted-plane semi-axis vectors in display coords (the same frame as
     // `worldCenter` / `viewProjectionMat`). On an anisotropic grid these differ
@@ -166,6 +174,18 @@ export class BrushCursorPerspectiveOverlay extends PerspectiveViewRenderLayer {
     const lenX = vec3.length(offsetX);
     const lenY = vec3.length(offsetY);
     if (lenX <= 0 && lenY <= 0) return;
+
+    // Snap to the center of the voxel the stamp lands on, matching the slice
+    // cursor: the disk marks the voxel column that will be painted, so it must
+    // not slide around inside that voxel as the pointer moves.
+    const frame = resolveCursorVoxelFrame(
+      state.targetResolution.value,
+      renderContext.projectionParameters.displayDimensionRenderInfo,
+    );
+    const diskCenter =
+      frame === undefined
+        ? worldCenter
+        : snapWorldCenterToVoxelCenter(worldCenter, frame);
 
     // Out-of-plane basis: a small thickness along the normal of the painted
     // plane (cross of the two in-plane axes). Degenerate (one axis edge-on) →
@@ -190,9 +210,9 @@ export class BrushCursorPerspectiveOverlay extends PerspectiveViewRenderLayer {
     model[8] = tempNormal[0];
     model[9] = tempNormal[1];
     model[10] = tempNormal[2];
-    model[12] = worldCenter[0];
-    model[13] = worldCenter[1];
-    model[14] = worldCenter[2];
+    model[12] = diskCenter[0];
+    model[13] = diskCenter[1];
+    model[14] = diskCenter[2];
 
     const { viewProjectionMat } = renderContext.projectionParameters;
     const mvp = mat4.multiply(mat4.create(), viewProjectionMat, model);
