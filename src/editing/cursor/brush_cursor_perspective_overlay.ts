@@ -32,7 +32,7 @@
 import {
   computeBrushFootprintAxes,
   resolveCursorVoxelFrame,
-  snapWorldCenterToVoxelCenter,
+  snapWorldCenterToStampCenter,
 } from "#src/editing/cursor/brush_cursor_footprint.js";
 import type { BrushCursorState } from "#src/editing/cursor/brush_cursor_state.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
@@ -175,9 +175,10 @@ export class BrushCursorPerspectiveOverlay extends PerspectiveViewRenderLayer {
     const lenY = vec3.length(offsetY);
     if (lenX <= 0 && lenY <= 0) return;
 
-    // Snap to the center of the voxel the stamp lands on, matching the slice
-    // cursor: the disk marks the voxel column that will be painted, so it must
-    // not slide around inside that voxel as the pointer moves.
+    // Snap to the stamp's centre, matching the slice cursor: the disk marks the
+    // voxel column that will be painted, so it must not slide around inside that
+    // voxel as the pointer moves. An EVEN size centres on a voxel boundary, not
+    // a voxel, so this cannot just floor to a voxel centre.
     const frame = resolveCursorVoxelFrame(
       state.targetResolution.value,
       renderContext.projectionParameters.displayDimensionRenderInfo,
@@ -185,7 +186,7 @@ export class BrushCursorPerspectiveOverlay extends PerspectiveViewRenderLayer {
     const diskCenter =
       frame === undefined
         ? worldCenter
-        : snapWorldCenterToVoxelCenter(worldCenter, frame);
+        : snapWorldCenterToStampCenter(worldCenter, frame, radiusVoxels);
 
     // Out-of-plane basis: a small thickness along the normal of the painted
     // plane (cross of the two in-plane axes). Degenerate (one axis edge-on) →
