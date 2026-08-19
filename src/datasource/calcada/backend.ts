@@ -44,6 +44,7 @@ import {
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
+import { selectLodForPieceCount } from "#src/datasource/calcada/lod_selection.js";
 import {
   shouldRetryManifestDownload,
   nextManifestRetryDelayMs,
@@ -528,6 +529,10 @@ export class CalcadaMeshSource extends WithParameters(
   }
 
   async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {
+    // Total piece count for the root this fragment belongs to, used to pick a
+    // coarser LOD for large segments instead of always requesting LOD 0 (see
+    // selectLodForPieceCount in lod_selection.ts).
+    const pieceCount = chunk.manifestChunk?.fragmentIds?.length ?? 0;
     // Fast path: calcada resolved this piece's byte-range, so read the combined
     // [Draco][manifest] blob in one range request straight from the bucket — no
     // client-side shard/minishard resolution.
@@ -562,6 +567,7 @@ export class CalcadaMeshSource extends WithParameters(
       }
       const dracoU8 = combined.slice(0, loc.dracoLength);
       const manifestU8 = combined.slice(loc.dracoLength);
+      const { numLods } = parseMultilodManifest(manifestU8);
       const { data: rawMesh } = await requestAsyncComputation(
         decodeCalcadaMultilodMesh,
         signal,
@@ -569,7 +575,7 @@ export class CalcadaMeshSource extends WithParameters(
         manifestU8,
         dracoU8,
         this.parameters.vertexQuantizationBits,
-        this.parameters.lod,
+        selectLodForPieceCount(pieceCount, numLods),
       );
       if (rawMesh && rawMesh.vertexPositions.length > 0) {
         assignMeshFragmentData(chunk, rawMesh);
@@ -641,7 +647,7 @@ export class CalcadaMeshSource extends WithParameters(
       manifestU8,
       dracoU8,
       this.parameters.vertexQuantizationBits,
-      this.parameters.lod,
+      selectLodForPieceCount(pieceCount, manifest.numLods),
     );
     if (rawMesh && rawMesh.vertexPositions.length > 0) {
       assignMeshFragmentData(chunk, rawMesh);
