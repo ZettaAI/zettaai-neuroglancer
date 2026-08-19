@@ -3226,7 +3226,6 @@ class CalcadaGraphServerInterface {
       limit?: number;
       minScore?: number;
       branchId?: number;
-      consistent?: boolean;
     },
   ): Promise<EdgeCandidate[]> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -3241,9 +3240,6 @@ class CalcadaGraphServerInterface {
       params.set("min_score", String(opts.minScore));
     }
     if (opts.branchId) params.set("branch_id", String(opts.branchId));
-    // Makes the read wait for replica catch-up. Only worth its latency right
-    // after an edit, when the query has to see its own write.
-    if (opts.consistent) params.set("consistent", "1");
     const response = await fetchOkImpl(
       `${baseUrl}/segment/${rootId}/candidates?${params.toString()}`,
       { priority: "high" },
@@ -6424,9 +6420,23 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
     let candidates: EdgeCandidate[] = [];
     let current: EdgeCandidate | undefined;
     const decided = new Set<bigint>();
+    // Only the seed and the candidate under review may be visible. Without
+    // retiring the previous partner every candidate ever shown stays on screen
+    // in its own colour, which reads as "the merge did nothing".
+    let shownPartner: bigint | undefined;
+
+    const hideShownPartner = () => {
+      if (shownPartner === undefined) return;
+      if (shownPartner !== seedRoot) {
+        segmentsState.visibleSegments.delete(shownPartner);
+        segmentsState.selectedSegments.delete(shownPartner);
+      }
+      shownPartner = undefined;
+    };
 
     const showCurrent = () => {
       clearAnnotation();
+      hideShownPartner();
       current = nextCandidate(candidates, decided);
       if (current === undefined) {
         status.textContent = "No candidates left for this segment";
@@ -6434,6 +6444,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
       }
       segmentsState.visibleSegments.add(current.partnerRootId);
       segmentsState.selectedSegments.add(current.partnerRootId);
+      shownPartner = current.partnerRootId;
 
       const line: Line = {
         id: "",
@@ -6487,7 +6498,14 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
     // response land last and repopulate the list for the previous segment.
     let fetchToken = 0;
 
-    const loadCandidates = async (consistent = false) => {
+    // A merge is not instantly visible to a read that lands on another replica,
+    // so the enlarged segment can come back empty for a moment. Asking the
+    // server for a consistent read fixes that but measures 10x slower on this
+    // dataset (1.2s -> 13s), which is unusable between swipes. Retrying an
+    // empty result costs nothing in the common case.
+    const EMPTY_RETRY_DELAYS_MS = [300, 700, 1500];
+
+    const loadCandidates = async (retryWhenEmpty = false) => {
       if (seedRoot === undefined) return;
       const token = ++fetchToken;
       status.textContent = "Fetching candidates…";
@@ -6499,7 +6517,6 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
             batch: DEFAULT_CANDIDATE_BATCH,
             limit: CANDIDATE_FETCH_LIMIT,
             branchId: graphConnection.graph.branchId.value,
-            consistent,
           },
         );
       } catch (e) {
@@ -6509,6 +6526,23 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
         return;
       }
       if (token !== fetchToken) return;
+
+      if (fetched.length === 0 && retryWhenEmpty) {
+        for (const delay of EMPTY_RETRY_DELAYS_MS) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          if (token !== fetchToken) return;
+          fetched = await graphConnection.graph.graphServer
+            .fetchCandidates(seedRoot, {
+              batch: DEFAULT_CANDIDATE_BATCH,
+              limit: CANDIDATE_FETCH_LIMIT,
+              branchId: graphConnection.graph.branchId.value,
+            })
+            .catch(() => [] as EdgeCandidate[]);
+          if (token !== fetchToken) return;
+          if (fetched.length > 0) break;
+        }
+      }
+
       candidates = fetched;
       showCurrent();
     };
@@ -6564,6 +6598,9 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         decided.add(accepted.lineId);
+        // The partner is inside the merged root now, so it must not be hidden
+        // on the way to the next candidate.
+        shownPartner = undefined;
         graphConnection.graph.graphServer
           .postCandidateDecision(
             accepted.lineId,
@@ -6602,6 +6639,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
       current = undefined;
       candidates = [];
       clearAnnotation();
+      shownPartner = undefined;
       segmentsState.visibleSegments.clear();
       segmentsState.selectedSegments.clear();
       segmentsState.visibleSegments.add(seedRoot);
