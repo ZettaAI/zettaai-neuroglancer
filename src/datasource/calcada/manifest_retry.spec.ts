@@ -8,10 +8,14 @@ import {
 describe("shouldRetryManifestDownload", () => {
   it("allows retries below the max attempt count", () => {
     expect(shouldRetryManifestDownload(0)).toBe(true);
-    expect(shouldRetryManifestDownload(MAX_MANIFEST_DOWNLOAD_ATTEMPTS - 1)).toBe(true);
+    expect(
+      shouldRetryManifestDownload(MAX_MANIFEST_DOWNLOAD_ATTEMPTS - 1),
+    ).toBe(true);
   });
   it("stops retrying at the max attempt count", () => {
-    expect(shouldRetryManifestDownload(MAX_MANIFEST_DOWNLOAD_ATTEMPTS)).toBe(false);
+    expect(shouldRetryManifestDownload(MAX_MANIFEST_DOWNLOAD_ATTEMPTS)).toBe(
+      false,
+    );
   });
 });
 

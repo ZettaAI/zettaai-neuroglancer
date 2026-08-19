@@ -493,7 +493,9 @@ export class MeshLayer extends withSegmentationLayerBackendState(
           chunkManager.requestChunk(
             fragmentChunk,
             priorityTier,
-            basePriority + MESH_OBJECT_FRAGMENT_CHUNK_PRIORITY - fragmentIndex++,
+            basePriority +
+              MESH_OBJECT_FRAGMENT_CHUNK_PRIORITY -
+              fragmentIndex++,
           );
           if (fragmentChunk.state === ChunkState.GPU_MEMORY) {
             ++this.numVisibleChunksAvailable;

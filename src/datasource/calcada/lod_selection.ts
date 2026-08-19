@@ -23,6 +23,7 @@ export function selectLodForPieceCount(
   numLods: number,
 ): number {
   if (numLods <= 1) return 0;
-  const steps = pieceCount <= 50 ? 0 : Math.floor(Math.log2(pieceCount / 50)) + 1;
+  const steps =
+    pieceCount <= 50 ? 0 : Math.floor(Math.log2(pieceCount / 50)) + 1;
   return Math.min(steps, numLods - 1);
 }
