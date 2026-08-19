@@ -457,7 +457,10 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
     const { displayState } = this;
     return (
       displayState.objectAlpha.value < 1.0 ||
-      displayState.silhouetteRendering.value > 0
+      displayState.silhouetteRendering.value > 0 ||
+      // A temp stated color can carry a per-object alpha below 1, which the
+      // layer-wide objectAlpha check cannot see.
+      displayState.useTempSegmentStatedColors2d.value
     );
   }
 
@@ -895,7 +898,10 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
     const { displayState } = this;
     return (
       displayState.objectAlpha.value < 1.0 ||
-      displayState.silhouetteRendering.value > 0
+      displayState.silhouetteRendering.value > 0 ||
+      // A temp stated color can carry a per-object alpha below 1, which the
+      // layer-wide objectAlpha check cannot see.
+      displayState.useTempSegmentStatedColors2d.value
     );
   }
 
