@@ -110,6 +110,23 @@ export function ParamInput<T>({
     onCommit(parsed);
   };
 
+  /**
+   * A `change` event from a control the user did not type into — the native
+   * number spinner's up/down buttons, and arrow-key stepping on the same field.
+   * The browser fires `input` (which only updates the draft) plus `change` for
+   * those, but never `change` mid-typing, so committing here gives the spinner
+   * immediate effect without breaking the draft pattern. Without it the value
+   * visibly changed but nothing downstream saw it until the field lost focus.
+   */
+  const onChange = (e: Event) => {
+    const raw = (e.currentTarget as HTMLInputElement).value;
+    const parsed = parse(raw);
+    if (parsed === null) return; // let `commit` handle it on blur
+    setDraft(format(parsed));
+    flag(false);
+    onCommit(parsed);
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
     const input = e.currentTarget as HTMLInputElement;
     if (e.key === "Enter") {
@@ -135,6 +152,7 @@ export function ParamInput<T>({
       disabled={disabled}
       value={draft}
       onInput={onInput}
+      onChange={onChange}
       onBlur={commit}
       onKeyDown={onKeyDown}
     />
