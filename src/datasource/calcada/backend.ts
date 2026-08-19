@@ -44,6 +44,11 @@ import {
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
+import { selectLodForPieceCount } from "#src/datasource/calcada/lod_selection.js";
+import {
+  shouldRetryManifestDownload,
+  nextManifestRetryDelayMs,
+} from "#src/datasource/calcada/manifest_retry.js";
 import { parseMultilodManifest } from "#src/datasource/calcada/multilod_mesh.js";
 import { decodeManifestChunk } from "#src/datasource/precomputed/backend.js";
 import type { ShardedKvStore } from "#src/datasource/precomputed/sharded.js";
@@ -336,6 +341,7 @@ export class CalcadaMeshSource extends WithParameters(
   MeshSourceParameters,
 ) {
   manifestRequestCount = new Map<string, number>();
+  manifestAttempts = new WeakMap<ManifestChunk, number>();
   newSegments = new Uint64Set();
   // Live branch shared from the frontend. parameters.branchId is frozen at
   // datasource creation; the dropdown branch switch mutates the frontend's
@@ -427,9 +433,27 @@ export class CalcadaMeshSource extends WithParameters(
     if (branchId && branchId > 0) {
       manifestPath += `&branch_id=${branchId}`;
     }
-    const response = await (
-      await fetchOkImpl(baseUrl + manifestPath, { signal })
-    ).json();
+    let response: any;
+    try {
+      response = await (
+        await fetchOkImpl(baseUrl + manifestPath, { signal })
+      ).json();
+    } catch (error) {
+      const attemptCount = this.manifestAttempts.get(chunk) ?? 0;
+      if (shouldRetryManifestDownload(attemptCount)) {
+        this.manifestAttempts.set(chunk, attemptCount + 1);
+        setTimeout(() => {
+          this.chunkManager.queueManager.updateChunkState(
+            chunk,
+            ChunkState.QUEUED,
+          );
+        }, nextManifestRetryDelayMs(attemptCount));
+        return decodeManifestChunk(chunk, { fragments: [] });
+      }
+      this.manifestAttempts.delete(chunk);
+      throw error;
+    }
+    this.manifestAttempts.delete(chunk);
     // Stash calcada's per-piece byte-ranges (if any) so downloadFragment can
     // read each piece in one direct-from-bucket range request.
     const fragLocations = response?.frag_locations;
@@ -445,8 +469,23 @@ export class CalcadaMeshSource extends WithParameters(
         });
       }
     }
+    // Link every piece the manifest lists to its root (chunk.objectId), so a 3D
+    // mesh pick anywhere on the mesh resolves piece->root even over a part with no
+    // loaded 2D chunk (whose LUT trailer would otherwise be the only source of the
+    // mapping). The manifest is fetched for a currently-visible root, so its
+    // piece->root is current; linkChunkEquivalences is link-once, so it never
+    // overrides a piece the authoritative LUT already mapped, and
+    // refreshChunkSources clears equivalences after every edit. Fragment ids are
+    // strings ("{piece}:0", per getFragmentPickId).
+    const fragments = (response as { fragments?: unknown })?.fragments;
+    const hasFragments = Array.isArray(fragments) && fragments.length > 0;
     const chunkIdentifier = manifestPath;
-    if (newSegments.has(chunk.objectId)) {
+    // A merge marks its root "new" so we keep polling until calcada's async
+    // mesh-generation job actually publishes fragments for it; once a
+    // download for this root has returned real fragments, stop polling
+    // rather than continuing on the fixed schedule for the full 10-minute
+    // newSegments window.
+    if (newSegments.has(chunk.objectId) && !hasFragments) {
       const requestCount = (manifestRequestCount.get(chunkIdentifier) ?? 0) + 1;
       manifestRequestCount.set(chunkIdentifier, requestCount);
       setTimeout(
@@ -461,16 +500,7 @@ export class CalcadaMeshSource extends WithParameters(
     } else {
       manifestRequestCount.delete(chunkIdentifier);
     }
-    // Link every piece the manifest lists to its root (chunk.objectId), so a 3D
-    // mesh pick anywhere on the mesh resolves piece->root even over a part with no
-    // loaded 2D chunk (whose LUT trailer would otherwise be the only source of the
-    // mapping). The manifest is fetched for a currently-visible root, so its
-    // piece->root is current; linkChunkEquivalences is link-once, so it never
-    // overrides a piece the authoritative LUT already mapped, and
-    // refreshChunkSources clears equivalences after every edit. Fragment ids are
-    // strings ("{piece}:0", per getFragmentPickId).
-    const fragments = (response as { fragments?: unknown })?.fragments;
-    if (Array.isArray(fragments) && fragments.length > 0) {
+    if (hasFragments) {
       const pieces = new BigUint64Array(fragments.length);
       const roots = new BigUint64Array(fragments.length);
       let count = 0;
@@ -499,6 +529,10 @@ export class CalcadaMeshSource extends WithParameters(
   }
 
   async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {
+    // Total piece count for the root this fragment belongs to, used to pick a
+    // coarser LOD for large segments instead of always requesting LOD 0 (see
+    // selectLodForPieceCount in lod_selection.ts).
+    const pieceCount = chunk.manifestChunk?.fragmentIds?.length ?? 0;
     // Fast path: calcada resolved this piece's byte-range, so read the combined
     // [Draco][manifest] blob in one range request straight from the bucket — no
     // client-side shard/minishard resolution.
@@ -533,6 +567,7 @@ export class CalcadaMeshSource extends WithParameters(
       }
       const dracoU8 = combined.slice(0, loc.dracoLength);
       const manifestU8 = combined.slice(loc.dracoLength);
+      const { numLods } = parseMultilodManifest(manifestU8);
       const { data: rawMesh } = await requestAsyncComputation(
         decodeCalcadaMultilodMesh,
         signal,
@@ -540,7 +575,7 @@ export class CalcadaMeshSource extends WithParameters(
         manifestU8,
         dracoU8,
         this.parameters.vertexQuantizationBits,
-        this.parameters.lod,
+        selectLodForPieceCount(pieceCount, numLods),
       );
       if (rawMesh && rawMesh.vertexPositions.length > 0) {
         assignMeshFragmentData(chunk, rawMesh);
@@ -612,7 +647,7 @@ export class CalcadaMeshSource extends WithParameters(
       manifestU8,
       dracoU8,
       this.parameters.vertexQuantizationBits,
-      this.parameters.lod,
+      selectLodForPieceCount(pieceCount, manifest.numLods),
     );
     if (rawMesh && rawMesh.vertexPositions.length > 0) {
       assignMeshFragmentData(chunk, rawMesh);

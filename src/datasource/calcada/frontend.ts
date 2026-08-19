@@ -751,6 +751,10 @@ async function getMeshSource(
   const parameters: MeshSourceParameters = {
     manifestUrl: url,
     fragmentUrl: fragmentUrl,
+    // Only selects which manifest to fetch (see CalcadaMeshSource.download's
+    // `/manifest/{objectId}:{lod}` path); the mesh detail level actually
+    // rendered per piece is chosen dynamically in backend.ts's
+    // downloadFragment via selectLodForPieceCount, not by this field.
     lod: 0,
     sharding: metadata?.sharding,
     vertexQuantizationBits: metadata?.vertexQuantizationBits ?? 16,
