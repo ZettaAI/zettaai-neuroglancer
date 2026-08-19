@@ -264,3 +264,29 @@
   display: flex;
   flex-direction: column;
 }
+
+/* One flex row, like the other tools: the panel has a fixed height, so a second
+   row would sit on top of the keybinding hint underneath it. The status takes
+   the leftover width and ellipsises instead of wrapping, which keeps the two
+   buttons in place no matter how long the score/partner line gets. */
+.calcada-zetta-trace {
+  align-items: center;
+  font: 12px sans-serif;
+}
+
+.calcada-zetta-trace-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calcada-zetta-trace .neuroglancer-icon {
+  flex: 0 0 auto;
+}
+
+.calcada-zetta-trace .neuroglancer-icon.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
