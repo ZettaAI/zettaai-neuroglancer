@@ -75,6 +75,7 @@ import {
   TRACE_SEED_COLOR_PACKED,
   TRACE_SEED_DIM_COLOR_PACKED,
 } from "#src/datasource/calcada/role_colors.js";
+import { isStaleRoot } from "#src/datasource/calcada/root_resolution.js";
 import type {
   DataSource,
   DataSourceLookupResult,
@@ -1935,7 +1936,11 @@ class ZettaTraceSession extends RefCounted {
         }
       }),
     );
-    this.registerDisposer(state.graphEdited.add(() => this.onGraphEdited()));
+    this.registerDisposer(
+      state.graphEdited.add((oldRoots, newRoots) =>
+        this.onGraphEdited(oldRoots, newRoots),
+      ),
+    );
     this.registerDisposer(
       state.minPieceVoxels.changed.add(() => {
         if (state.active.value) void this.loadCandidates();
@@ -2391,7 +2396,21 @@ class ZettaTraceSession extends RefCounted {
    * out to contain a merger. Both the seed and the partner get new root ids, so
    * the trace follows their pieces, which survive re-rooting.
    */
-  private async onGraphEdited() {
+  // A read that comes back as one of the roots the edit just retired is a
+  // lagging replica, not an answer. Retry on the same ladder the empty-candidate
+  // refetch uses.
+  private async getRootRetrying(pieceId: bigint, oldRoots: Uint64Set) {
+    const retired = new Set<bigint>(oldRoots);
+    let resolved = await this.graphServer.getRoot(pieceId, 0, this.branchId);
+    for (const delayMs of EMPTY_RETRY_DELAYS_MS) {
+      if (!isStaleRoot(resolved, retired)) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      resolved = await this.graphServer.getRoot(pieceId, 0, this.branchId);
+    }
+    return resolved;
+  }
+
+  private async onGraphEdited(oldRoots: Uint64Set, _newRoots: Uint64Set) {
     if (this.bindings === undefined || this.busy) return;
     // Prefer the seed's own piece; the candidate's is the fallback for a trace
     // restored from a link, which carries no piece.
@@ -2404,11 +2423,7 @@ class ZettaTraceSession extends RefCounted {
       // Resolving the seed's own piece is what makes a cut safe: whichever side
       // of the cut that piece landed on is the segment the proofreader is on.
       if (seedPiece !== undefined) {
-        const resolved = await this.graphServer.getRoot(
-          seedPiece,
-          0,
-          this.branchId,
-        );
+        const resolved = await this.getRootRetrying(seedPiece, oldRoots);
         if (token !== this.fetchToken) return;
         this.state.seedRoot.value = resolved;
       }
