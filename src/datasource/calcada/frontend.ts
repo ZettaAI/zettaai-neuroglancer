@@ -6598,8 +6598,18 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         decided.add(accepted.lineId);
+        // submitMerge adds the new root but leaves both pre-merge roots in the
+        // visible set, and GraphConnection.replaceSegments only rewrites the
+        // tool states, not the segment sets. Their meshes therefore keep being
+        // drawn as separate objects next to the merged one, so a completed
+        // merge looks like it did nothing. Retire them here.
+        for (const retired of [sinkRoot, accepted.partnerRootId]) {
+          if (retired === merged) continue;
+          segmentsState.visibleSegments.delete(retired);
+          segmentsState.selectedSegments.delete(retired);
+        }
         // The partner is inside the merged root now, so it must not be hidden
-        // on the way to the next candidate.
+        // again on the way to the next candidate.
         shownPartner = undefined;
         graphConnection.graph.graphServer
           .postCandidateDecision(
