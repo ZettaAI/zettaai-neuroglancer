@@ -75,7 +75,10 @@ import {
   TRACE_SEED_COLOR_PACKED,
   TRACE_SEED_DIM_COLOR_PACKED,
 } from "#src/datasource/calcada/role_colors.js";
-import { isStaleRoot } from "#src/datasource/calcada/root_resolution.js";
+import {
+  classifyCandidateEdit,
+  isStaleRoot,
+} from "#src/datasource/calcada/root_resolution.js";
 import type {
   DataSource,
   DataSourceLookupResult,
@@ -2390,12 +2393,6 @@ class ZettaTraceSession extends RefCounted {
     return this.busy;
   }
 
-  /**
-   * Re-resolve the trace after someone edited the graph — a manual merge, or a
-   * cut of the candidate segment, which is the workflow when a candidate turns
-   * out to contain a merger. Both the seed and the partner get new root ids, so
-   * the trace follows their pieces, which survive re-rooting.
-   */
   // A read that comes back as one of the roots the edit just retired is a
   // lagging replica, not an answer. Retry on the same ladder the empty-candidate
   // refetch uses.
@@ -2410,6 +2407,12 @@ class ZettaTraceSession extends RefCounted {
     return resolved;
   }
 
+  /**
+   * Re-resolve the trace after someone edited the graph — a manual merge, or a
+   * cut of the candidate segment, which is the workflow when a candidate turns
+   * out to contain a merger. Both the seed and the partner get new root ids, so
+   * the trace follows their pieces, which survive re-rooting.
+   */
   private async onGraphEdited(oldRoots: Uint64Set, _newRoots: Uint64Set) {
     if (this.bindings === undefined || this.busy) return;
     // Prefer the seed's own piece; the candidate's is the fallback for a trace
@@ -2432,9 +2435,41 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     if (token !== this.fetchToken) return;
+    const resolvedSeedRoot = this.state.seedRoot.value!;
+
+    // An edit that only re-rooted the candidate under review is not a reason to
+    // throw away the review queue: follow the partner's piece and redraw in
+    // place, so the proofreader keeps their position.
+    if (this.current !== undefined) {
+      let newPartnerRoot: bigint;
+      try {
+        newPartnerRoot = await this.getRootRetrying(
+          this.current.partnerPieceId,
+          oldRoots,
+        );
+      } catch (e) {
+        this.setStatus(`Failed to re-resolve the candidate: ${e}`);
+        return;
+      }
+      if (token !== this.fetchToken) return;
+      const outcome = classifyCandidateEdit(
+        resolvedSeedRoot !== seedRoot,
+        resolvedSeedRoot,
+        newPartnerRoot,
+      );
+      if (outcome === "rerooted") {
+        this.current = { ...this.current, partnerRootId: newPartnerRoot };
+        this.showOnly(resolvedSeedRoot, newPartnerRoot);
+        this.setStatus(`partner ${newPartnerRoot} · ${this.remaining} left`);
+        return;
+      }
+      if (outcome === "absorbed") {
+        this.decided.add(this.current.lineId);
+      }
+    }
     this.current = undefined;
     this.clearAnnotation();
-    this.showOnly(this.state.seedRoot.value!);
+    this.showOnly(resolvedSeedRoot);
     await this.loadCandidates(true);
   }
 }
