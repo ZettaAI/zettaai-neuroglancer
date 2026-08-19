@@ -68,6 +68,12 @@ import {
   dropDecided,
   nextCandidate,
 } from "#src/datasource/calcada/candidate_ranking.js";
+import {
+  TRACE_CANDIDATE_COLOR_PACKED,
+  TRACE_CANDIDATE_DIM_COLOR_PACKED,
+  TRACE_SEED_COLOR_PACKED,
+  TRACE_SEED_DIM_COLOR_PACKED,
+} from "#src/datasource/calcada/role_colors.js";
 import type {
   DataSource,
   DataSourceLookupResult,
@@ -1908,6 +1914,10 @@ class ZettaTraceSession extends RefCounted {
   private bindings: RefCounted | undefined;
   private banner: HTMLElement | undefined;
   private bannerStatus: HTMLElement | undefined;
+  // Role segments the proofreader toggled "off": they stay visible but faint
+  // rather than disappearing, so the comparison never loses a side.
+  private readonly dimmed = new Set<bigint>();
+  private priorUseTempSegmentStatedColors2d = false;
 
   constructor(
     private connection: GraphConnection,
@@ -1999,6 +2009,9 @@ class ZettaTraceSession extends RefCounted {
     // at is this mode's exit contract.
     this.savedVisible = [...this.segmentsState.visibleSegments];
     this.savedSelected = [...this.segmentsState.selectedSegments];
+    this.priorUseTempSegmentStatedColors2d =
+      this.layer.displayState.useTempSegmentStatedColors2d.value;
+    this.dimmed.clear();
 
     const bindings = new RefCounted();
     this.bindings = bindings;
@@ -2061,6 +2074,9 @@ class ZettaTraceSession extends RefCounted {
     this.seedPieceId = undefined;
     ++this.fetchToken;
 
+    this.dimmed.clear();
+    this.clearRoleColors();
+
     const { segmentsState } = this;
     segmentsState.visibleSegments.clear();
     segmentsState.selectedSegments.clear();
@@ -2106,14 +2122,48 @@ class ZettaTraceSession extends RefCounted {
   // Accepting or rejecting clears whatever the proofreader had selected for
   // context: the next candidate is a fresh question, and leaving the previous
   // comparison on screen is what made merges look like they had done nothing.
-  private showOnly(...roots: bigint[]) {
+  private showOnly(seedRoot: bigint, candidateRoot?: bigint) {
     const { segmentsState } = this;
     segmentsState.visibleSegments.clear();
     segmentsState.selectedSegments.clear();
-    for (const root of roots) {
-      segmentsState.visibleSegments.add(root);
-      segmentsState.selectedSegments.add(root);
+    segmentsState.visibleSegments.add(seedRoot);
+    segmentsState.selectedSegments.add(seedRoot);
+    if (candidateRoot !== undefined) {
+      segmentsState.visibleSegments.add(candidateRoot);
+      segmentsState.selectedSegments.add(candidateRoot);
     }
+    this.applyRoleColors(seedRoot, candidateRoot);
+  }
+
+  // Gold seed, silver candidate. Written into the temporary stated-color map
+  // only: the persistent one serializes into the layer JSON and would leak
+  // these role colors into shared links.
+  private applyRoleColors(seedRoot: bigint, candidateRoot?: bigint) {
+    const { displayState } = this.layer;
+    const temp = displayState.tempSegmentStatedColors2d.value;
+    temp.clear();
+    temp.set(
+      seedRoot,
+      this.dimmed.has(seedRoot)
+        ? TRACE_SEED_DIM_COLOR_PACKED
+        : TRACE_SEED_COLOR_PACKED,
+    );
+    if (candidateRoot !== undefined) {
+      temp.set(
+        candidateRoot,
+        this.dimmed.has(candidateRoot)
+          ? TRACE_CANDIDATE_DIM_COLOR_PACKED
+          : TRACE_CANDIDATE_COLOR_PACKED,
+      );
+    }
+    displayState.useTempSegmentStatedColors2d.value = true;
+  }
+
+  private clearRoleColors() {
+    const { displayState } = this.layer;
+    displayState.tempSegmentStatedColors2d.value.clear();
+    displayState.useTempSegmentStatedColors2d.value =
+      this.priorUseTempSegmentStatedColors2d;
   }
 
   private showCurrent() {
