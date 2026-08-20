@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ghostSegmentDither,
   resolveStatedColor,
   unpackColorWithAlpha,
 } from "#src/segmentation_display_state/frontend.js";
 import { Uint64Map } from "#src/uint64_map.js";
+import { vec4 } from "#src/util/geom.js";
 
 describe("resolveStatedColor", () => {
   it("prefers the temp map when useTemp is true and the id is present", () => {
@@ -25,6 +27,29 @@ describe("resolveStatedColor", () => {
     const persistent = new Uint64Map();
     persistent.set(5n, 0x11n);
     expect(resolveStatedColor(true, temp, persistent, 5n)).toBe(0x11n);
+  });
+});
+
+describe("ghostSegmentDither", () => {
+  const opaqueGold = (0xffn << 24n) | 0x00d7ffn;
+  const dimGold = (0x14n << 24n) | 0x00d7ffn;
+
+  it("asks for no dithering on a fully opaque color", () => {
+    const out = vec4.fromValues(-1, -1, -1, -1);
+    expect(ghostSegmentDither(opaqueGold, out)).toBe(1);
+    expect(Array.from(out)).toEqual([-1, -1, -1, -1]);
+  });
+  it("returns the packed alpha as the fraction of pixels to keep", () => {
+    const out = vec4.create();
+    expect(ghostSegmentDither(dimGold, out)).toBeCloseTo(0x14 / 255, 4);
+  });
+  it("keeps the color at full brightness so only the dither fades it", () => {
+    const out = vec4.create();
+    ghostSegmentDither(dimGold, out);
+    expect(out[0]).toBe(1);
+    expect(out[1]).toBeCloseTo(0xd7 / 255, 4);
+    expect(out[2]).toBe(0);
+    expect(out[3]).toBe(1);
   });
 });
 

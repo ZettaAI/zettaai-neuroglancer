@@ -17,10 +17,15 @@
 import { packColor } from "#src/util/color.js";
 import { vec4 } from "#src/util/geom.js";
 
-export const TRACE_SEED_RGB = vec4.fromValues(1.0, 0.84, 0.0, 1.0);
-export const TRACE_CANDIDATE_RGB = vec4.fromValues(0.75, 0.75, 0.78, 1.0);
-export const TRACE_SEED_DIM_RGB = vec4.fromValues(1.0, 0.84, 0.0, 0.15);
-export const TRACE_CANDIDATE_DIM_RGB = vec4.fromValues(0.75, 0.75, 0.78, 0.15);
+// Alpha 0 is the "no opacity of its own" encoding shared with the rest of the
+// stated-color machinery: the renderers take the color and leave the layer's
+// own alpha (selectedAlpha in 2D, objectAlpha in 3D) alone, so a seed reads as
+// gold exactly as solid as every other segment on screen. Only the dim colors
+// below carry a real alpha, which is what makes toggling one off recede.
+export const TRACE_SEED_RGB = vec4.fromValues(1.0, 0.84, 0.0, 0.0);
+export const TRACE_CANDIDATE_RGB = vec4.fromValues(0.75, 0.75, 0.78, 0.0);
+export const TRACE_SEED_DIM_RGB = vec4.fromValues(1.0, 0.84, 0.0, 0.08);
+export const TRACE_CANDIDATE_DIM_RGB = vec4.fromValues(0.75, 0.75, 0.78, 0.08);
 
 export function packRoleColor(rgba: vec4): bigint {
   return BigInt(packColor(rgba));

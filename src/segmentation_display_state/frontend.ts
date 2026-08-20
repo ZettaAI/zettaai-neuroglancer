@@ -1022,6 +1022,29 @@ export function unpackColorWithAlpha(
   out[3] = a > 0 ? a * fallbackAlpha : fallbackAlpha;
 }
 
+// A temp stated color with partial alpha means "show this faintly". Real alpha
+// blending cannot express that per segment in 3D: a render layer draws in
+// exactly one pass, so a single translucent segment would push the whole layer
+// into the order-independent-transparency pass, where the opaque segments
+// sharing it lose their depth ordering and turn see-through too.
+//
+// The perspective view therefore keeps the layer opaque and dithers instead —
+// the mesh shader discards a matching fraction of its pixels, so the segment
+// is genuinely see-through while its neighbours are untouched.
+//
+// Writes the segment's full-brightness color into `out` and returns the
+// fraction of pixels to keep; returns 1 (leaving `out` alone) for colors that
+// are fully opaque or fully transparent.
+export function ghostSegmentDither(packed: bigint, out: vec4): number {
+  const alpha = Number((packed >> 24n) & 0xffn) / 255;
+  if (alpha === 0 || alpha === 1) return 1;
+  out[0] = Number(packed & 0xffn) / 255;
+  out[1] = Number((packed >> 8n) & 0xffn) / 255;
+  out[2] = Number((packed >> 16n) & 0xffn) / 255;
+  out[3] = 1;
+  return alpha;
+}
+
 export function getBaseObjectColor(
   displayState: SegmentationDisplayState | undefined | null,
   objectId: bigint,
