@@ -1870,7 +1870,11 @@ const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
   "at:arrowdown": { action: "skip-candidate" },
-  "at:control+keyz": { action: "undo" },
+  // Its own action name, not the shared "undo": the merge and cut tools listen
+  // for that one on window, and a keypress resolving to it would run their
+  // handler and this one both — two reverts from a single press.
+  "at:control+keyz": { action: "trace-undo" },
+  "at:meta+keyz": { action: "trace-undo" },
   // Seeding is deliberate and plain click is not: a proofreader checking
   // whether a candidate is right needs to select neighbouring segments to look
   // at, and that must not move the trace.
@@ -1999,7 +2003,8 @@ class ZettaTraceSession extends RefCounted {
 
     const keys = document.createElement("span");
     keys.className = "calcada-zetta-trace-banner-keys";
-    keys.textContent = "← reject · ↓ skip · → accept · ctrl+Z undo · Esc exit";
+    keys.textContent =
+      "← reject · ↓ skip · → accept · ⌘/ctrl+Z undo · Esc exit";
     banner.appendChild(keys);
 
     (
@@ -2059,7 +2064,7 @@ class ZettaTraceSession extends RefCounted {
     bind("reject-candidate", () => this.reject());
     bind("accept-candidate", () => void this.accept());
     bind("skip-candidate", () => this.skip());
-    bind("undo", () => void this.undoLast());
+    bind("trace-undo", () => void this.undoLast());
     bind("exit-trace", () => {
       this.state.active.value = false;
     });
@@ -2233,9 +2238,13 @@ class ZettaTraceSession extends RefCounted {
       this.connection.meshAddNewSegments([next.partnerRootId]);
     }
 
-    // The accept branch: the partner's own candidates, which the merged
-    // segment inherits. Cached by the server round-trip, so the refetch after
-    // a merge lands on a warm read instead of a cold scan.
+    // The accept branch cannot be prefetched by url: the merged root does not
+    // exist until the merge returns, so the post-merge request asks about an id
+    // nothing can know yet. What this warms instead is the server's read of the
+    // partner's pieces — the merged root contains them, so the same rows are on
+    // the path of the query that follows. A cache keyed on the root id in the
+    // path would not be hit; this is worth its cost only for the row-level
+    // caching underneath.
     if (this.prefetchedPartner === current.partnerRootId) return;
     this.prefetchedPartner = current.partnerRootId;
     void this.graphServer
@@ -2245,6 +2254,7 @@ class ZettaTraceSession extends RefCounted {
         minPieceVoxels: this.state.minPieceVoxels.value,
         rejectedBy: this.state.rejectedBy.value,
         branchId: this.branchId,
+        priority: "low",
       })
       .catch(() => undefined);
   }
@@ -2413,10 +2423,15 @@ class ZettaTraceSession extends RefCounted {
     this.setBusy(true);
     this.setStatus("Undoing…");
     try {
-      await this.connection.undo();
+      // Only forget an accept when something actually reverted. An empty undo
+      // stack and a failed revert both leave the graph as it was, and popping
+      // then would re-offer a candidate whose merge is still in place while
+      // quietly draining the list.
+      if (await this.connection.undo()) {
+        const lastAccepted = this.acceptedLines.pop();
+        if (lastAccepted !== undefined) this.decided.delete(lastAccepted);
+      }
     } finally {
-      const lastAccepted = this.acceptedLines.pop();
-      if (lastAccepted !== undefined) this.decided.delete(lastAccepted);
       await this.refreshFromSeedPiece();
       this.setBusy(false);
     }
@@ -3160,11 +3175,16 @@ void main() {
     return this.undoStack.length > 0;
   }
 
-  async undo(): Promise<void> {
+  /**
+   * Revert the last edit. Returns whether anything actually reverted, so a
+   * caller keeping its own bookkeeping does not have to guess: an empty stack
+   * and a failed revert both leave the graph untouched.
+   */
+  async undo(): Promise<boolean> {
     const entry = this.undoStack.pop();
     if (entry === undefined) {
       StatusMessage.showTemporaryMessage("Nothing to undo", 2500);
-      return;
+      return false;
     }
     let restoredRoots: bigint[];
     let supersededRoots: bigint[];
@@ -3182,7 +3202,7 @@ void main() {
         `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
         8000,
       );
-      return;
+      return false;
     }
     const segmentsState = this.layer.displayState.segmentationGroupState.value;
     // Drop the roots this undo retired (the reverted op's outputs), else their
@@ -3207,6 +3227,7 @@ void main() {
       `Undo applied — restored ${restoredRoots.length} root(s)`,
       5000,
     );
+    return true;
   }
 
   setDebugPieces(
@@ -3936,6 +3957,9 @@ class CalcadaGraphServerInterface {
       minPieceVoxels?: number;
       rejectedBy?: string[];
       branchId?: number;
+      // Speculative callers pass "low" so they cannot preempt the fetch the
+      // proofreader is actually waiting on.
+      priority?: "high" | "low";
     },
   ): Promise<EdgeCandidate[]> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -3961,7 +3985,7 @@ class CalcadaGraphServerInterface {
     if (opts.branchId) params.set("branch_id", String(opts.branchId));
     const response = await fetchOkImpl(
       `${baseUrl}/segment/${rootId}/candidates?${params.toString()}`,
-      { priority: "high" },
+      { priority: opts.priority ?? "high" },
     );
     const jsonResp = await response.json();
     return (jsonResp.candidates ?? []).map(
@@ -5811,7 +5835,7 @@ function makeZettaTracePanel(
   });
   const undoIcon = makeIcon({
     text: "Undo",
-    title: "Take back the last edit (ctrl+Z)",
+    title: "Take back the last edit (⌘/ctrl+Z)",
     onClick: () => void session()?.traceSession.undoLast(),
   });
   buttons.appendChild(rejectIcon);
