@@ -76,6 +76,25 @@ const maxAttempts = 32;
 const minDelayMilliseconds = 500;
 const maxDelayMilliseconds = 10000;
 
+/**
+ * Per-request overrides for the transient-retry loop, for callers whose request
+ * must fail within a bounded time rather than retry for minutes.  The defaults
+ * (no cap on how long an attempt may hang, {@link maxAttempts} retries) suit
+ * background chunk reads, which are hedged and can afford to keep waiting; an
+ * interactive write cannot.
+ */
+export interface RetryOptions {
+  /** Total attempts before the failure propagates.  Defaults to {@link maxAttempts}. */
+  maxAttempts?: number;
+  /**
+   * Deadline for a single attempt.  When it expires the attempt is aborted and
+   * retried under the same attempt budget, so a request that is stuck (rather
+   * than slow) does not hang forever.  Only applies to non-idempotent requests:
+   * idempotent ones get their deadline from hedging instead.
+   */
+  attemptTimeoutMs?: number;
+}
+
 export function pickDelay(attemptNumber: number): number {
   // If `attemptNumber == 0`, delay is a random number of milliseconds between
   // `[minDelayMilliseconds, minDelayMilliseconds*2]`.  The lower and upper bounds of the interval
@@ -216,15 +235,58 @@ async function hedgeResponseHeaders(
   }
 }
 
+/** Resolve after `ms`, or early when `signal` aborts.  Never rejects. */
+function delayUnlessAborted(
+  ms: number,
+  signal: AbortSignal | null | undefined,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal == null) {
+      setTimeout(resolve, ms);
+      return;
+    }
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Whether `error` is a cancellation — a per-attempt timeout or an `abort()`. */
+function isAbortLike(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}
+
 /**
- * Retries a `429`/`503`/`504` response with exponential backoff up to {@link maxAttempts} times; any
+ * Retries a `429`/`503`/`504` response with exponential backoff up to `attemptLimit` times; any
  * other error status throws an `HttpError`.  A network or CORS failure throws an `HttpError` with a
  * `status` of `0`.
+ *
+ * When `retryAttemptTimeouts` is set (the caller asked for a per-attempt deadline), an attempt that
+ * aborts while the caller's own signal is still live is a stuck request, not a cancellation, and is
+ * retried under the same budget.  An abort that follows the caller's signal always propagates.
+ *
+ * The backoff sleep resolves early on caller abort, so a cancel takes effect within the current
+ * attempt rather than after the full delay; the loop's `throwIfAborted` then surfaces it.
  */
 async function retryTransientStatus(
   input: RequestInfo,
   callerSignal: AbortSignal | null | undefined,
   sendRequest: () => Promise<Response>,
+  attemptLimit: number,
+  retryAttemptTimeouts: boolean,
 ): Promise<Response> {
   for (let requestAttempt = 0; ; ) {
     callerSignal?.throwIfAborted();
@@ -232,16 +294,23 @@ async function retryTransientStatus(
     try {
       response = await sendRequest();
     } catch (error) {
+      if (
+        retryAttemptTimeouts &&
+        isAbortLike(error) &&
+        callerSignal?.aborted !== true &&
+        ++requestAttempt !== attemptLimit
+      ) {
+        await delayUnlessAborted(pickDelay(requestAttempt - 1), callerSignal);
+        continue;
+      }
       throw HttpError.fromRequestError(input, error);
     }
     if (!response.ok) {
       const { status } = response;
       if (status === 429 || status === 503 || status === 504) {
         // 429: Too Many Requests.  503: Service unavailable.  504: Gateway timeout.  Retry.
-        if (++requestAttempt !== maxAttempts) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, pickDelay(requestAttempt - 1)),
-          );
+        if (++requestAttempt !== attemptLimit) {
+          await delayUnlessAborted(pickDelay(requestAttempt - 1), callerSignal);
           continue;
         }
       }
@@ -263,20 +332,51 @@ async function retryTransientStatus(
  * identical request is issued in parallel and the first to respond wins — see
  * {@link hedgeResponseHeaders}.  The slow original is never cancelled, so a request that was merely
  * slow (rather than stuck) can still win without discarding its progress.
+ *
+ * A non-idempotent request cannot be hedged (a second POST could apply the side effect twice), so it
+ * has no deadline of its own unless the caller supplies {@link RetryOptions.attemptTimeoutMs} — see
+ * {@link retryTransientStatus}.
  */
 export async function fetchOk(
   input: RequestInfo,
   init?: RequestInitWithProgress,
 ): Promise<Response> {
   const callerSignal = init?.signal;
+  const { maxAttempts: attemptLimit = maxAttempts, attemptTimeoutMs } =
+    init?.retryOptions ?? {};
+  // Idempotent requests take their deadline from hedging, so a per-attempt timeout applies only to
+  // the non-hedged path.
+  const perAttemptTimeoutMs = isIdempotentRequest(init)
+    ? undefined
+    : attemptTimeoutMs;
   const sendRequest = isIdempotentRequest(init)
     ? () => hedgeResponseHeaders(input, init, callerSignal)
-    : () => fetch(input, init);
-  return retryTransientStatus(input, callerSignal, sendRequest);
+    : perAttemptTimeoutMs !== undefined
+      ? () =>
+          // A FRESH deadline per attempt, composed inside the closure and never written back onto
+          // `init`: retries here — and `BackendClient`'s 401 replay, which re-sends the same `init` —
+          // must each get their own timer rather than inherit an already-expired one.
+          fetch(input, {
+            ...init,
+            signal: combineAbortSignals([
+              callerSignal,
+              AbortSignal.timeout(perAttemptTimeoutMs),
+            ]),
+          })
+      : () => fetch(input, init);
+  return retryTransientStatus(
+    input,
+    callerSignal,
+    sendRequest,
+    attemptLimit,
+    perAttemptTimeoutMs !== undefined,
+  );
 }
 
 export interface RequestInitWithProgress extends RequestInit {
   progressListener?: ProgressListener;
+  /** Per-request overrides for the transient-retry loop; see {@link RetryOptions}. */
+  retryOptions?: RetryOptions;
 }
 
 export type FetchOk = (

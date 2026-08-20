@@ -380,8 +380,15 @@ export class NgChunkSource implements LibraryChunkSource {
    * One read-back attempt for the save verification (TM-352): fresh-read the
    * chunk and compare its content hash to the bytes we recorded as saved for it.
    * Returns `true` only on a confirmed match. Throws on a read error (the caller
-   * retries); returns `false` on a value mismatch or when there is no recorded
-   * saved hash / no resolvable source.
+   * retries); returns `false` on a value mismatch or when there is no expected
+   * hash / no resolvable source.
+   *
+   * `expectedHash` — the hash from the caller's own `SavedChunk` snapshot —
+   * takes precedence over the {@link SavedBaselineStore} lookup, and is what
+   * makes verification work for a save larger than the store's FIFO capacity
+   * (TM-455): past 512 chunks the store has already evicted the earliest
+   * entries, and a lookup-only verify could never confirm them. Both hashes come
+   * from `contentRefFromBuffer`, so they are directly comparable.
    */
   async confirmChunkPersisted(
     layerId: LayerId,
@@ -389,8 +396,10 @@ export class NgChunkSource implements LibraryChunkSource {
     chunkId: ChunkId,
     chunkCoord: ChunkCoord,
     signal?: AbortSignal,
+    expectedHash?: string,
   ): Promise<boolean> {
-    const savedHash = this.getSavedBaselineHash(layerId, resolution, chunkId);
+    const savedHash =
+      expectedHash ?? this.getSavedBaselineHash(layerId, resolution, chunkId);
     if (savedHash === undefined) return false;
     const readBack = await this.readFreshDecoded(
       layerId,

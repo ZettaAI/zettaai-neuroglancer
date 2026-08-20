@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchOk,
   hedgeDelayMilliseconds,
+  HttpError,
   maxConcurrentAttempts,
 } from "#src/util/http_request.js";
 
@@ -147,6 +148,158 @@ describe("fetchOk header hedging", () => {
 
     expect(sawAbort).toBe(false);
     expect(settled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+function alwaysRespondWith(status: number) {
+  return vi.fn((_input: RequestInfo, _init?: RequestInit) =>
+    Promise.resolve(new Response("body", { status })),
+  );
+}
+
+function respondWithStatusSequence(statuses: number[]) {
+  const fetchMock = vi.fn((_input: RequestInfo, _init?: RequestInit) => {
+    const status =
+      statuses[Math.min(fetchMock.mock.calls.length - 1, statuses.length - 1)];
+    return Promise.resolve(new Response("body", { status }));
+  });
+  return fetchMock;
+}
+
+function recordSignalsAndHang(signals: AbortSignal[]) {
+  return vi.fn((_input: RequestInfo, init?: RequestInit) => {
+    signals.push(init!.signal!);
+    return hangUntilAborted(init);
+  });
+}
+
+function settlementOf(promise: Promise<unknown>) {
+  return promise.then(
+    (value) => ({ outcome: "resolved" as const, value }),
+    (error: unknown) => ({ outcome: "rejected" as const, error }),
+  );
+}
+
+function trackedSettlementOf(promise: Promise<unknown>) {
+  const state = { settled: false };
+  const result = settlementOf(promise).then((settlement) => {
+    state.settled = true;
+    return settlement;
+  });
+  return { state, result };
+}
+
+describe("fetchOk retryOptions", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("stops after maxAttempts fetches when the server keeps answering 503", async () => {
+    const fetchMock = alwaysRespondWith(503);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = settlementOf(
+      fetchOk("http://example.test/write", {
+        method: "POST",
+        retryOptions: { maxAttempts: 3 },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.advanceTimersByTimeAsync(60000);
+
+    const settlement = await result;
+    expect(settlement.outcome).toBe("rejected");
+    expect((settlement as { error: HttpError }).error).toBeInstanceOf(
+      HttpError,
+    );
+    expect((settlement as { error: HttpError }).error.status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("still retries a transient 503 when no retryOptions are given", async () => {
+    const fetchMock = respondWithStatusSequence([503, 200]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const responsePromise = fetchOk("http://example.test/write", {
+      method: "POST",
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts a stuck attempt at attemptTimeoutMs and retries up to maxAttempts", async () => {
+    const signals: AbortSignal[] = [];
+    const fetchMock = recordSignalsAndHang(signals);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = settlementOf(
+      fetchOk("http://example.test/write", {
+        method: "POST",
+        retryOptions: { attemptTimeoutMs: 30000, maxAttempts: 3 },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.advanceTimersByTimeAsync(60000);
+
+    const settlement = await result;
+    expect(settlement.outcome).toBe("rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(signals).toHaveLength(3);
+    expect(new Set(signals).size).toBe(3);
+  });
+
+  it("does not retry when the caller cancels an in-flight attempt", async () => {
+    const signals: AbortSignal[] = [];
+    const fetchMock = recordSignalsAndHang(signals);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    const result = settlementOf(
+      fetchOk("http://example.test/write", {
+        method: "POST",
+        signal: controller.signal,
+        retryOptions: { attemptTimeoutMs: 30000, maxAttempts: 3 },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort(new DOMException("Cancelled", "AbortError"));
+    await vi.advanceTimersByTimeAsync(60000);
+
+    const settlement = await result;
+    expect(settlement.outcome).toBe("rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects promptly when the caller cancels during the backoff sleep", async () => {
+    const fetchMock = alwaysRespondWith(503);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    const { state, result } = trackedSettlementOf(
+      fetchOk("http://example.test/write", {
+        method: "POST",
+        signal: controller.signal,
+        retryOptions: { maxAttempts: 3 },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(state.settled).toBe(false);
+
+    controller.abort(new DOMException("Cancelled", "AbortError"));
+    await vi.advanceTimersByTimeAsync(1);
+
+    const settlement = await result;
+    expect(settlement.outcome).toBe("rejected");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

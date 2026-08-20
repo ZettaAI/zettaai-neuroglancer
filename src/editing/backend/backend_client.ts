@@ -29,6 +29,7 @@ import {
   isAuthExpiredSignal,
   setBackendAuthExpired,
 } from "#src/editing/backend/backend_endpoint.js";
+import type { RequestInitWithProgress } from "#src/util/http_request.js";
 import { fetchOk, HttpError } from "#src/util/http_request.js";
 
 /**
@@ -123,7 +124,10 @@ export class BackendClient {
    * @throws {BackendAuthExpiredError} if the host's auth expired.
    * @throws {HttpError} on network/CORS failure or a non-OK HTTP status.
    */
-  async request(path: string, init: RequestInit = {}): Promise<Response> {
+  async request(
+    path: string,
+    init: RequestInitWithProgress = {},
+  ): Promise<Response> {
     const endpoint = this.requireEndpoint(path);
     const url = joinBackendUrl(endpoint.baseUrl, path);
     try {
@@ -156,10 +160,20 @@ export class BackendClient {
   private async attempt(
     endpoint: BackendEndpoint,
     url: string,
-    init: RequestInit,
+    init: RequestInitWithProgress,
   ): Promise<Response> {
     try {
-      const response = await fetchOk(url, await endpoint.authorize(init));
+      // `authorize` is typed over plain `RequestInit`, so a host is free to
+      // rebuild the init from the fields it knows. Re-apply the caller's
+      // `retryOptions` afterwards so a request's timeout/attempt budget cannot
+      // be dropped by whichever host is installed.
+      const authorized = await endpoint.authorize(init);
+      const response = await fetchOk(
+        url,
+        init.retryOptions === undefined
+          ? authorized
+          : { ...authorized, retryOptions: init.retryOptions },
+      );
       // A request got through — auth is healthy again; clear any expired flag.
       setBackendAuthExpired(false);
       return response;

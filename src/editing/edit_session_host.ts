@@ -441,6 +441,15 @@ const VERIFY_BACKOFF_MS: readonly number[] = [
 ];
 
 /**
+ * Read-backs in flight at once during save verification (TM-455). Each is one
+ * `promiseInvoke` for a distinct chunk — the RPC layer is built for many
+ * concurrent chunk requests — and they go to the storage origin, not the
+ * backend the upload POSTs hit, so the two phases never contend. Matched to
+ * `SAVE_UPLOAD_CONCURRENCY`, which the same reasoning sizes.
+ */
+const VERIFY_CONCURRENCY = 5;
+
+/**
  * Target on-screen brush diameter, in CSS pixels, used to seed the brush size
  * from the current zoom on first paint-tool activation. Chosen to be clearly
  * visible without dominating the slice; the user adjusts from here with `+`/`-`.
@@ -1543,29 +1552,43 @@ export class EditSessionHost extends RefCounted {
     }
     let confirmed = 0;
     this.saveProgress.value = { kind: "verifying", confirmed, total };
-    for (const c of chunks) {
-      const ok = await this.verifyOneSavedChunk(c, signal, (attempt) => {
-        // The first read-back didn't confirm (the request succeeded, the data
-        // just isn't verified) — surface that we're re-checking, NOT that the
-        // connection is slow.
-        this.saveProgress.value = {
-          kind: "reverifying",
-          confirmed,
-          total,
-          attempt,
-        };
-      });
-      if (ok) {
-        const key = `${c.layerId}|${c.resolution}|${c.chunkId}`;
-        this.unconfirmedChunks.delete(key);
-        // Track the verified chunk so exit can evict its stale datasource cache
-        // entry (TM-352) — the backend provably holds these bytes.
-        this.verifiedSavedChunks.set(key, c);
-        confirmed += 1;
+    // Bounded worker pool over a shared cursor (TM-455): one read-back per chunk
+    // is pure round-trip latency, and serially that dominates a large save. JS is
+    // single-threaded, so `confirmed` and the Map mutations only interleave at
+    // `await` points. Concurrent chunks may interleave their `reverifying`
+    // reports — the counts stay correct, only the reported attempt jitters.
+    let nextChunk = 0;
+    const verifyWorker = async (): Promise<void> => {
+      while (nextChunk < total) {
+        const c = chunks[nextChunk++];
+        const ok = await this.verifyOneSavedChunk(c, signal, (attempt) => {
+          // The first read-back didn't confirm (the request succeeded, the data
+          // just isn't verified) — surface that we're re-checking, NOT that the
+          // connection is slow.
+          this.saveProgress.value = {
+            kind: "reverifying",
+            confirmed,
+            total,
+            attempt,
+          };
+        });
+        if (ok) {
+          const key = `${c.layerId}|${c.resolution}|${c.chunkId}`;
+          this.unconfirmedChunks.delete(key);
+          // Track the verified chunk so exit can evict its stale datasource cache
+          // entry (TM-352) — the backend provably holds these bytes.
+          this.verifiedSavedChunks.set(key, c);
+          confirmed += 1;
+        }
+        // Back to the in-progress state for the next chunk's first attempt.
+        this.saveProgress.value = { kind: "verifying", confirmed, total };
       }
-      // Back to the in-progress state for the next chunk's first attempt.
-      this.saveProgress.value = { kind: "verifying", confirmed, total };
-    }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(VERIFY_CONCURRENCY, total) }, () =>
+        verifyWorker(),
+      ),
+    );
     const unconfirmed = total - confirmed;
     this.saveProgress.value =
       unconfirmed === 0
@@ -1593,6 +1616,11 @@ export class EditSessionHost extends RefCounted {
           chunk.chunkId,
           chunk.chunkCoord,
           signal,
+          // Compare against the snapshot's own content hash rather than the
+          // chunk source's bounded saved-baseline store: past its 512-entry
+          // capacity the store has evicted the earliest chunks, and those could
+          // otherwise never be confirmed (TM-455).
+          chunk.contentRef.hash,
         );
         if (ok) return true;
       } catch {
