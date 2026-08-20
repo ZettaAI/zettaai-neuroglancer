@@ -32,7 +32,6 @@ body {
 }
 
 #neuroglancer-container {
-  position: relative;
   width: 100vw;
   overflow: hidden;
   flex: 1;

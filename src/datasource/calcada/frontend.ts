@@ -1947,12 +1947,13 @@ class ZettaTraceSession extends RefCounted {
   // panel re-renders the current one.
   private prefetchedPartner: bigint | undefined;
   private bindings: RefCounted | undefined;
-  private banner: HTMLElement | undefined;
-  private bannerStatus: HTMLElement | undefined;
+  private modePanel: StatusMessage | undefined;
+  private modePanelStatus: HTMLElement | undefined;
   // Role segments the proofreader toggled "off": they stay visible but faint
   // rather than disappearing, so the comparison never loses a side.
   private readonly dimmed = new Set<bigint>();
   private priorUseTempSegmentStatedColors2d = false;
+  private reassertingRoleColors = false;
 
   constructor(
     private connection: GraphConnection,
@@ -1982,7 +1983,7 @@ class ZettaTraceSession extends RefCounted {
     );
     this.registerDisposer(state.rejectedBy.changed.add(refetchOnFilterChange));
     if (state.active.value) this.enter();
-    this.registerDisposer(() => this.hideBanner());
+    this.registerDisposer(() => this.hideModePanel());
   }
 
   private get segmentsState() {
@@ -1999,50 +2000,60 @@ class ZettaTraceSession extends RefCounted {
 
   private setStatus(text: string) {
     this.status = text;
-    if (this.bannerStatus !== undefined) this.bannerStatus.textContent = text;
+    if (this.modePanelStatus !== undefined) {
+      this.modePanelStatus.textContent = text;
+    }
     this.changed.dispatch();
   }
 
   /**
-   * A banner over the viewport, because the arrow keys stop panning while the
-   * mode is on and that has to be visible from wherever the proofreader is
-   * looking — which is the data, not the side panel.
-   *
-   * Hosted the way StatusMessage hosts itself: inside #neuroglancer-container
-   * when the viewer is embedded, so it cannot escape the widget.
+   * The mode's own section in the status list, built the way a tool activation
+   * builds one (makeToolActivationStatusMessage) — same header, body and
+   * key-binding row as merge and cut, so the three read as one family. The mode
+   * cannot use that helper directly: its activation releases the tool slot
+   * immediately, and the section has to outlive it.
    */
-  private showBanner() {
-    if (this.banner !== undefined) return;
-    const banner = document.createElement("div");
-    banner.className = "calcada-zetta-trace-banner";
+  private showModePanel() {
+    if (this.modePanel !== undefined) return;
+    const message = new StatusMessage(false);
+    message.element.classList.add(
+      "neuroglancer-tool-status",
+      "calcada-zetta-trace-mode",
+    );
 
-    const badge = document.createElement("span");
-    badge.className = "calcada-zetta-trace-badge";
-    badge.textContent = "Trace mode";
-    banner.appendChild(badge);
+    const content = document.createElement("div");
+    content.classList.add("neuroglancer-tool-status-content");
+    message.element.appendChild(content);
 
+    const headerContainer = document.createElement("div");
+    headerContainer.classList.add("neuroglancer-tool-status-header-container");
+    const header = document.createElement("div");
+    header.classList.add("neuroglancer-tool-status-header");
+    header.textContent = "Zetta trace";
+    headerContainer.appendChild(header);
+    content.appendChild(headerContainer);
+
+    const body = document.createElement("div");
+    body.classList.add("neuroglancer-tool-status-body", "calcada-tool-status");
     const status = document.createElement("span");
-    status.className = "calcada-zetta-trace-banner-status";
+    status.className = "calcada-zetta-trace-status";
     status.textContent = this.status;
-    banner.appendChild(status);
+    body.appendChild(status);
+    content.appendChild(body);
 
-    const keys = document.createElement("span");
-    keys.className = "calcada-zetta-trace-banner-keys";
-    keys.textContent =
-      "← reject · ↓ skip · → accept · ⌘/ctrl+Z undo · Esc exit";
-    banner.appendChild(keys);
+    const bindingHelp = document.createElement("div");
+    bindingHelp.textContent = ZETTA_TRACE_INPUT_EVENT_MAP.describe();
+    bindingHelp.classList.add("neuroglancer-tool-status-bindings");
+    message.element.appendChild(bindingHelp);
 
-    (
-      document.getElementById("neuroglancer-container") ?? document.body
-    ).appendChild(banner);
-    this.banner = banner;
-    this.bannerStatus = status;
+    this.modePanel = message;
+    this.modePanelStatus = status;
   }
 
-  private hideBanner() {
-    this.banner?.remove();
-    this.banner = undefined;
-    this.bannerStatus = undefined;
+  private hideModePanel() {
+    this.modePanel?.dispose();
+    this.modePanel = undefined;
+    this.modePanelStatus = undefined;
   }
 
   enter() {
@@ -2113,14 +2124,36 @@ class ZettaTraceSession extends RefCounted {
         const removed = interceptedRemovals(removedIds, roleRoots);
         if (removed.length === 0) return;
         for (const id of removed) {
-          this.dimmed.add(id);
+          // Toggle, not latch: hiding a dimmed role segment brings it back to
+          // full strength — otherwise a second double-click did nothing.
+          if (this.dimmed.has(id)) {
+            this.dimmed.delete(id);
+          } else {
+            this.dimmed.add(id);
+          }
           this.segmentsState.visibleSegments.add(id);
         }
         this.applyRoleColors(seedRoot, this.current?.partnerRootId);
       }),
     );
 
-    this.showBanner();
+    // A graph tool activating (multicut, merge) resets the shared temp color
+    // map for its own display, and the role colors vanish with it — pressing C
+    // made the mode look like it had ended. Refill whatever went missing; a
+    // tool that painted a role segment itself (the focus of a cut renders
+    // transparent) keeps its own entry because refilling never overwrites.
+    bindings.registerDisposer(
+      this.layer.displayState.tempSegmentStatedColors2d.value.changed.add(() =>
+        this.reassertRoleColors(),
+      ),
+    );
+    bindings.registerDisposer(
+      this.layer.displayState.useTempSegmentStatedColors2d.changed.add(() =>
+        this.reassertRoleColors(),
+      ),
+    );
+
+    this.showModePanel();
     this.revealSegmentsTab();
     if (this.state.seedRoot.value !== undefined) {
       void this.loadCandidates();
@@ -2144,7 +2177,7 @@ class ZettaTraceSession extends RefCounted {
     if (this.bindings === undefined) return;
     this.bindings.dispose();
     this.bindings = undefined;
-    this.hideBanner();
+    this.hideModePanel();
     this.clearAnnotation();
     this.candidates = [];
     this.current = undefined;
@@ -2221,24 +2254,67 @@ class ZettaTraceSession extends RefCounted {
   // these role colors into shared links.
   private applyRoleColors(seedRoot: bigint, candidateRoot?: bigint) {
     const { displayState } = this.layer;
-    const temp = displayState.tempSegmentStatedColors2d.value;
-    temp.clear();
-    temp.set(
-      seedRoot,
-      this.dimmed.has(seedRoot)
-        ? TRACE_SEED_DIM_COLOR_PACKED
-        : TRACE_SEED_COLOR_PACKED,
-    );
-    if (candidateRoot !== undefined) {
-      temp.set(
-        candidateRoot,
-        this.dimmed.has(candidateRoot)
-          ? TRACE_CANDIDATE_DIM_COLOR_PACKED
-          : TRACE_CANDIDATE_COLOR_PACKED,
-      );
+    this.reassertingRoleColors = true;
+    try {
+      const temp = displayState.tempSegmentStatedColors2d.value;
+      temp.clear();
+      temp.set(seedRoot, this.roleColor(seedRoot, "seed"));
+      if (candidateRoot !== undefined) {
+        temp.set(candidateRoot, this.roleColor(candidateRoot, "candidate"));
+      }
+      displayState.useTempSegmentStatedColors2d.value = true;
+      displayState.honorTempStatedColorAlpha.value = true;
+    } finally {
+      this.reassertingRoleColors = false;
     }
-    displayState.useTempSegmentStatedColors2d.value = true;
-    displayState.honorTempStatedColorAlpha.value = true;
+  }
+
+  private roleColor(rootId: bigint, role: "seed" | "candidate"): bigint {
+    if (role === "seed") {
+      return this.dimmed.has(rootId)
+        ? TRACE_SEED_DIM_COLOR_PACKED
+        : TRACE_SEED_COLOR_PACKED;
+    }
+    return this.dimmed.has(rootId)
+      ? TRACE_CANDIDATE_DIM_COLOR_PACKED
+      : TRACE_CANDIDATE_COLOR_PACKED;
+  }
+
+  // See the listener registration in enter(): puts the role colors back after
+  // a tool activation resets the shared temp color map. Only fills entries
+  // that are absent, so an active tool's own painting always wins.
+  private reassertRoleColors() {
+    if (this.reassertingRoleColors) return;
+    if (!this.state.active.value) return;
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return;
+    const { displayState } = this.layer;
+    const temp = displayState.tempSegmentStatedColors2d.value;
+    const candidateRoot = this.current?.partnerRootId;
+    const seedMissing = !temp.has(seedRoot);
+    const candidateMissing =
+      candidateRoot !== undefined && !temp.has(candidateRoot);
+    if (
+      !seedMissing &&
+      !candidateMissing &&
+      displayState.useTempSegmentStatedColors2d.value &&
+      displayState.honorTempStatedColorAlpha.value
+    ) {
+      return;
+    }
+    this.reassertingRoleColors = true;
+    try {
+      if (seedMissing) {
+        temp.set(seedRoot, this.roleColor(seedRoot, "seed"));
+      }
+      if (candidateRoot !== undefined && candidateMissing) {
+        temp.set(candidateRoot, this.roleColor(candidateRoot, "candidate"));
+      }
+      displayState.useTempSegmentStatedColors2d.value = true;
+      displayState.honorTempStatedColorAlpha.value = true;
+    } finally {
+      this.reassertingRoleColors = false;
+    }
   }
 
   private clearRoleColors() {

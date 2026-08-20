@@ -24,6 +24,10 @@
   padding: 0px;
   font: 10pt sans-serif;
   pointer-events: none;
+  /* So a long-lived section can order itself relative to the tool-activation
+     sections instead of landing wherever its creation happened to fall. */
+  display: flex;
+  flex-direction: column;
 }
 
 #neuroglancer-status-container li {
