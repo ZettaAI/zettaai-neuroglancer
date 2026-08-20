@@ -17,6 +17,7 @@ import {
   dataSourceUrlToCutoutPath,
   HttpSaveBackend,
   parseResolution,
+  SAVE_UPLOAD_CONCURRENCY,
 } from "#src/editing/adapters/save_backends/http_save_backend.js";
 import type { BackendClient } from "#src/editing/backend/backend_client.js";
 
@@ -179,5 +180,183 @@ describe("HttpSaveBackend.saveLayer", () => {
       chunkCount: 0,
     });
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+const CHUNK_SIZE = [64, 64, 8] as const;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chunkIndexFromPath(path: string): number {
+  const query = path.slice(path.indexOf("?") + 1);
+  const starts = new URLSearchParams(query).getAll("bbox_start");
+  return Number(starts[0]) / CHUNK_SIZE[0];
+}
+
+function distinctChunks(count: number): SavedChunk[] {
+  return Array.from({ length: count }, (_unused, index) =>
+    fakeChunk({ x: index, y: 0, z: 0 }),
+  );
+}
+
+function okResponse(): Response {
+  return new Response("", { status: 200 });
+}
+
+const noop = () => {};
+
+function makeConcurrencyProbe(target: number) {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let openGate: () => void = noop;
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  const request = vi.fn(async (_path: string, _init?: RequestInit) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    (inFlight === target ? openGate : noop)();
+    await Promise.race([gate, sleep(10)]);
+    inFlight -= 1;
+    return okResponse();
+  });
+  return { request, maxInFlight: () => maxInFlight };
+}
+
+function makeAbortingProbe(settleTarget: number, controller: AbortController) {
+  let settled = 0;
+  const abort = () => controller.abort();
+  return vi.fn(async (_path: string, _init?: RequestInit) => {
+    await sleep(3);
+    settled += 1;
+    (settled === settleTarget ? abort : noop)();
+    return okResponse();
+  });
+}
+
+const mixedOutcomes: Record<string, () => Promise<Response>> = {
+  fail: () => Promise.reject(new Error("upload failed")),
+  ok: () => Promise.resolve(okResponse()),
+};
+
+function makeMixedProbe(failEvery: number) {
+  return vi.fn(async (path: string, _init?: RequestInit) => {
+    await sleep(1);
+    return mixedOutcomes[
+      chunkIndexFromPath(path) % failEvery === 0 ? "fail" : "ok"
+    ]();
+  });
+}
+
+interface AggregateShape {
+  succeeded: number;
+  failed: number;
+  details: string;
+}
+
+function asAggregate(result: unknown): AggregateShape {
+  return result as AggregateShape;
+}
+
+describe("HttpSaveBackend.saveLayer parallel uploads", () => {
+  it("uploads every chunk exactly once without exceeding SAVE_UPLOAD_CONCURRENCY in flight", async () => {
+    scaleForSpy.mockReturnValue({
+      chunkDataSize: [...CHUNK_SIZE],
+      voxelOffset: [0, 0, 0],
+    });
+    const chunkCount = 20;
+    const probe = makeConcurrencyProbe(SAVE_UPLOAD_CONCURRENCY);
+    const backend = new HttpSaveBackend({
+      client: makeClient(probe.request),
+      resolveDataSourceUrl: () => "gs://b/p",
+    });
+
+    const result = await backend.saveLayer(
+      "layer-1" as LayerId,
+      distinctChunks(chunkCount),
+      metadata,
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({
+      status: "succeeded",
+      layerId: "layer-1",
+      chunkCount,
+    });
+    expect(probe.maxInFlight()).toBeLessThanOrEqual(SAVE_UPLOAD_CONCURRENCY);
+    expect(probe.maxInFlight()).toBe(SAVE_UPLOAD_CONCURRENCY);
+    expect(probe.request).toHaveBeenCalledTimes(chunkCount);
+    const uploaded = probe.request.mock.calls
+      .map(([path]) => chunkIndexFromPath(path))
+      .sort((a, b) => a - b);
+    expect(uploaded).toEqual(
+      Array.from({ length: chunkCount }, (_unused, index) => index),
+    );
+  });
+
+  it("stops dispatching and reports cancelled counts when the signal aborts mid-pool", async () => {
+    scaleForSpy.mockReturnValue({
+      chunkDataSize: [...CHUNK_SIZE],
+      voxelOffset: [0, 0, 0],
+    });
+    const chunkCount = 20;
+    const controller = new AbortController();
+    const request = makeAbortingProbe(6, controller);
+    const backend = new HttpSaveBackend({
+      client: makeClient(request),
+      resolveDataSourceUrl: () => "gs://b/p",
+    });
+
+    const result = await backend.saveLayer(
+      "layer-1" as LayerId,
+      distinctChunks(chunkCount),
+      metadata,
+      controller.signal,
+    );
+
+    expect(result).toMatchObject({ status: "partial", layerId: "layer-1" });
+    const aggregate = asAggregate(result);
+    const match = /^cancelled-after-(\d+)-of-(\d+)$/.exec(aggregate.details);
+    expect(match).not.toBeNull();
+    const settled = Number(match?.[1]);
+    expect(aggregate.succeeded + aggregate.failed).toBe(settled);
+    expect(Number(match?.[2])).toBe(chunkCount);
+    expect(settled).toBeGreaterThan(0);
+    expect(settled).toBeLessThan(chunkCount);
+    expect(request.mock.calls.length).toBeLessThan(chunkCount);
+    expect(request.mock.calls.length).toBeGreaterThanOrEqual(settled);
+  });
+
+  it("aggregates mixed successes and failures across the pool into a partial result", async () => {
+    scaleForSpy.mockReturnValue({
+      chunkDataSize: [...CHUNK_SIZE],
+      voxelOffset: [0, 0, 0],
+    });
+    const chunkCount = 12;
+    const request = makeMixedProbe(3);
+    const backend = new HttpSaveBackend({
+      client: makeClient(request),
+      resolveDataSourceUrl: () => "gs://b/p",
+    });
+
+    const result = await backend.saveLayer(
+      "layer-1" as LayerId,
+      distinctChunks(chunkCount),
+      metadata,
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      status: "partial",
+      layerId: "layer-1",
+      succeeded: 8,
+      failed: 4,
+      details: "upload failed",
+    });
+    const aggregate = asAggregate(result);
+    expect(aggregate.succeeded + aggregate.failed).toBe(chunkCount);
+    expect(request).toHaveBeenCalledTimes(chunkCount);
   });
 });
