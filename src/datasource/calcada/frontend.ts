@@ -230,6 +230,7 @@ import {
   verifyString,
   verifyStringArray,
 } from "#src/util/json.js";
+import { KeyboardEventBinder } from "#src/util/keyboard_bindings.js";
 import { MouseEventBinder } from "#src/util/mouse_bindings.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
@@ -1753,6 +1754,9 @@ class PieceSplitState extends RefCounted implements Trackable {
 const TRACE_ACTIVE_KEY = "active";
 const TRACE_SEED_KEY = "seedRoot";
 const TRACE_MIN_PIECE_VOXELS_KEY = "minPieceVoxels";
+const TRACE_REJECTED_BY_KEY = "rejectedBy";
+// Server-side alias for the authenticated user.
+const TRACE_CURRENT_USER = "me";
 
 /**
  * Zetta Trace is a mode, not a tool: a proofreader stays in it while switching
@@ -1772,6 +1776,10 @@ class ZettaTraceState extends RefCounted implements Trackable {
   // Candidates whose partner piece is smaller than this are debris the model
   // still scores highly. Zero offers everything.
   minPieceVoxels = new WatchableValue<number>(0);
+  // Whose rejections to honour. Empty means anyone's. The literal "me" is
+  // resolved by the server, which knows who the request is from — the browser
+  // never learns its own user id.
+  rejectedBy = new WatchableValue<string[]>([]);
 
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
@@ -1786,6 +1794,7 @@ class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.active.changed.add(reemit));
     this.registerDisposer(this.seedRoot.changed.add(reemit));
     this.registerDisposer(this.minPieceVoxels.changed.add(reemit));
+    this.registerDisposer(this.rejectedBy.changed.add(reemit));
   }
 
   reset() {
@@ -1805,6 +1814,9 @@ class ZettaTraceState extends RefCounted implements Trackable {
       [TRACE_ACTIVE_KEY]: this.active.value ? true : undefined,
       [TRACE_SEED_KEY]: this.seedRoot.value?.toString(),
       [TRACE_MIN_PIECE_VOXELS_KEY]: this.minPieceVoxels.value || undefined,
+      [TRACE_REJECTED_BY_KEY]: this.rejectedBy.value.length
+        ? this.rejectedBy.value
+        : undefined,
     };
   }
 
@@ -1817,6 +1829,9 @@ class ZettaTraceState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, TRACE_MIN_PIECE_VOXELS_KEY, (value) => {
       this.minPieceVoxels.value = verifyInt(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_REJECTED_BY_KEY, (value) => {
+      this.rejectedBy.value = parseArray(value, verifyString);
     });
   }
 }
@@ -1872,6 +1887,11 @@ const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
   "at:arrowdown": { action: "skip-candidate" },
+  // Its own action name, not the shared "undo": the merge and cut tools listen
+  // for that one on window, and a keypress resolving to it would run their
+  // handler and this one both — two reverts from a single press.
+  "at:control+keyz": { action: "trace-undo" },
+  "at:meta+keyz": { action: "trace-undo" },
   // Seeding is deliberate and plain click is not: a proofreader checking
   // whether a candidate is right needs to select neighbouring segments to look
   // at, and that must not move the trace.
@@ -1907,6 +1927,9 @@ class ZettaTraceSession extends RefCounted {
   // so it is what the trace re-resolves itself from afterwards.
   private seedPieceId: bigint | undefined;
   private candidates: EdgeCandidate[] = [];
+  // Candidates accepted this session, newest last, so an undo can offer the top
+  // one again.
+  private acceptedLines: bigint[] = [];
   // Rejections and skips both land here so neither comes back this session.
   // Skips are memory-only by design: they mean "not now", and a proofreader
   // starting a fresh session should see them again.
@@ -1920,6 +1943,9 @@ class ZettaTraceSession extends RefCounted {
   // response land last and repopulate the list for the previous segment.
   private fetchToken = 0;
   private annotationIds: string[] = [];
+  // Guards against re-requesting the same partner's candidates every time the
+  // panel re-renders the current one.
+  private prefetchedPartner: bigint | undefined;
   private bindings: RefCounted | undefined;
   private banner: HTMLElement | undefined;
   private bannerStatus: HTMLElement | undefined;
@@ -1948,11 +1974,13 @@ class ZettaTraceSession extends RefCounted {
         this.onGraphEdited(oldRoots, newRoots),
       ),
     );
+    const refetchOnFilterChange = () => {
+      if (state.active.value) void this.loadCandidates();
+    };
     this.registerDisposer(
-      state.minPieceVoxels.changed.add(() => {
-        if (state.active.value) void this.loadCandidates();
-      }),
+      state.minPieceVoxels.changed.add(refetchOnFilterChange),
     );
+    this.registerDisposer(state.rejectedBy.changed.add(refetchOnFilterChange));
     if (state.active.value) this.enter();
     this.registerDisposer(() => this.hideBanner());
   }
@@ -2000,7 +2028,8 @@ class ZettaTraceSession extends RefCounted {
 
     const keys = document.createElement("span");
     keys.className = "calcada-zetta-trace-banner-keys";
-    keys.textContent = "← reject · ↓ skip · → accept · Esc exit";
+    keys.textContent =
+      "← reject · ↓ skip · → accept · ⌘/ctrl+Z undo · Esc exit";
     banner.appendChild(keys);
 
     (
@@ -2035,6 +2064,19 @@ class ZettaTraceSession extends RefCounted {
       ZETTA_TRACE_INPUT_EVENT_MAP,
       bindings,
     );
+    // That binder only reaches the data panels, so the keys went dead the
+    // moment focus moved to the side panel — a proofreader who had just
+    // clicked a segment in the list had to click back onto the image before an
+    // arrow did anything. A document-level binder covers the rest of the
+    // viewer; it steps aside over a data panel so the two never both fire, and
+    // KeyboardEventBinder already ignores keys typed into form fields.
+    const documentKeys = bindings.registerDisposer(
+      new KeyboardEventBinder(document, ZETTA_TRACE_INPUT_EVENT_MAP),
+    );
+    documentKeys.shouldIgnore = (event: KeyboardEvent) =>
+      (event.target as HTMLElement | null)?.closest?.(
+        ".neuroglancer-rendered-data-panel",
+      ) != null;
     const bind = (action: string, handler: () => void) => {
       bindings.registerDisposer(
         registerActionListener(
@@ -2050,6 +2092,7 @@ class ZettaTraceSession extends RefCounted {
     bind("reject-candidate", () => this.reject());
     bind("accept-candidate", () => void this.accept());
     bind("skip-candidate", () => this.skip());
+    bind("trace-undo", () => void this.undoLast());
     bind("exit-trace", () => {
       this.state.active.value = false;
     });
@@ -2106,6 +2149,8 @@ class ZettaTraceSession extends RefCounted {
     this.candidates = [];
     this.current = undefined;
     this.decided.clear();
+    this.acceptedLines.length = 0;
+    this.prefetchedPartner = undefined;
     this.seedPieceId = undefined;
     ++this.fetchToken;
 
@@ -2261,6 +2306,48 @@ class ZettaTraceSession extends RefCounted {
       `score ${candidate.score.toFixed(2)} · ${candidate.nInterfaces} interface(s)` +
         ` · partner ${candidate.partnerRootId} · ${this.remaining} left`,
     );
+    this.prefetchNext(candidate);
+  }
+
+  /**
+   * Warm what either answer will need, while the proofreader is still deciding.
+   *
+   * Both outcomes are knowable now: rejecting shows the next candidate in the
+   * list, and accepting continues from the merged segment, whose candidates
+   * include the partner's own. Fetching each ahead of time turns the wait after
+   * a keypress into no wait at all.
+   *
+   * Deliberately fire-and-forget: a prefetch that fails costs nothing, because
+   * the real path re-requests anyway.
+   */
+  private prefetchNext(current: EdgeCandidate) {
+    // The reject branch: the mesh of whichever candidate comes next.
+    const decidedAfterThis = new Set(this.decided);
+    decidedAfterThis.add(current.lineId);
+    const next = nextCandidate(this.candidates, decidedAfterThis);
+    if (next !== undefined) {
+      this.connection.meshAddNewSegments([next.partnerRootId]);
+    }
+
+    // The accept branch cannot be prefetched by url: the merged root does not
+    // exist until the merge returns, so the post-merge request asks about an id
+    // nothing can know yet. What this warms instead is the server's read of the
+    // partner's pieces — the merged root contains them, so the same rows are on
+    // the path of the query that follows. A cache keyed on the root id in the
+    // path would not be hit; this is worth its cost only for the row-level
+    // caching underneath.
+    if (this.prefetchedPartner === current.partnerRootId) return;
+    this.prefetchedPartner = current.partnerRootId;
+    void this.graphServer
+      .fetchCandidates(current.partnerRootId, {
+        batch: DEFAULT_CANDIDATE_BATCH,
+        limit: CANDIDATE_FETCH_LIMIT,
+        minPieceVoxels: this.state.minPieceVoxels.value,
+        rejectedBy: this.state.rejectedBy.value,
+        branchId: this.branchId,
+        priority: "low",
+      })
+      .catch(() => undefined);
   }
 
   private fetchOnce(seedRoot: bigint) {
@@ -2268,6 +2355,7 @@ class ZettaTraceSession extends RefCounted {
       batch: DEFAULT_CANDIDATE_BATCH,
       limit: CANDIDATE_FETCH_LIMIT,
       minPieceVoxels: this.state.minPieceVoxels.value,
+      rejectedBy: this.state.rejectedBy.value,
       branchId: this.branchId,
     });
   }
@@ -2365,6 +2453,7 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     this.decided.add(accepted.lineId);
+    this.acceptedLines.push(accepted.lineId);
     this.state.seedRoot.value = merged;
     this.showOnly(merged);
 
@@ -2421,6 +2510,42 @@ class ZettaTraceSession extends RefCounted {
    */
   private async onGraphEdited(oldRoots: Uint64Set, _newRoots: Uint64Set) {
     if (this.bindings === undefined || this.busy) return;
+    await this.refreshFromSeedPiece(oldRoots);
+  }
+
+  /**
+   * Take back the last graph edit and put its candidate back on the table.
+   *
+   * Undo is graph-wide, not trace-local: control+Z takes back whatever was
+   * edited last, which is what a proofreader who just made a mistake expects.
+   * The candidate popped here is therefore the trace's last accept, which is the
+   * same thing only when the accept was also the last edit — the common case,
+   * and an over-eager offer is cheaper than a candidate that can never be
+   * revisited.
+   */
+  async undoLast() {
+    if (this.bindings === undefined || this.busy) return;
+    this.setBusy(true);
+    this.setStatus("Undoing…");
+    try {
+      // Only forget an accept when something actually reverted. An empty undo
+      // stack and a failed revert both leave the graph as it was, and popping
+      // then would re-offer a candidate whose merge is still in place while
+      // quietly draining the list.
+      if (await this.connection.undo()) {
+        const lastAccepted = this.acceptedLines.pop();
+        if (lastAccepted !== undefined) this.decided.delete(lastAccepted);
+      }
+    } finally {
+      // Undo does not carry the retired root set the way a graph edit
+      // notification does, so there is nothing to retry a stale read
+      // against here.
+      await this.refreshFromSeedPiece(new Uint64Set());
+      this.setBusy(false);
+    }
+  }
+
+  private async refreshFromSeedPiece(oldRoots: Uint64Set) {
     // Prefer the seed's own piece; the candidate's is the fallback for a trace
     // restored from a link, which carries no piece.
     const seedPiece = this.seedPieceId ?? this.current?.selfPieceId;
@@ -3190,11 +3315,16 @@ void main() {
     return this.undoStack.length > 0;
   }
 
-  async undo(): Promise<void> {
+  /**
+   * Revert the last edit. Returns whether anything actually reverted, so a
+   * caller keeping its own bookkeeping does not have to guess: an empty stack
+   * and a failed revert both leave the graph untouched.
+   */
+  async undo(): Promise<boolean> {
     const entry = this.undoStack.pop();
     if (entry === undefined) {
       StatusMessage.showTemporaryMessage("Nothing to undo", 2500);
-      return;
+      return false;
     }
     let restoredRoots: bigint[];
     let supersededRoots: bigint[];
@@ -3212,7 +3342,7 @@ void main() {
         `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
         8000,
       );
-      return;
+      return false;
     }
     const segmentsState = this.layer.displayState.segmentationGroupState.value;
     // Drop the roots this undo retired (the reverted op's outputs), else their
@@ -3237,6 +3367,7 @@ void main() {
       `Undo applied — restored ${restoredRoots.length} root(s)`,
       5000,
     );
+    return true;
   }
 
   setDebugPieces(
@@ -3966,6 +4097,9 @@ class CalcadaGraphServerInterface {
       minPieceVoxels?: number;
       rejectedBy?: string[];
       branchId?: number;
+      // Speculative callers pass "low" so they cannot preempt the fetch the
+      // proofreader is actually waiting on.
+      priority?: "high" | "low";
     },
   ): Promise<EdgeCandidate[]> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -3991,7 +4125,7 @@ class CalcadaGraphServerInterface {
     if (opts.branchId) params.set("branch_id", String(opts.branchId));
     const response = await fetchOkImpl(
       `${baseUrl}/segment/${rootId}/candidates?${params.toString()}`,
-      { priority: "high" },
+      { priority: opts.priority ?? "high" },
     );
     const jsonResp = await response.json();
     return (jsonResp.candidates ?? []).map(
@@ -5777,6 +5911,34 @@ function makeZettaTracePanel(
   sizeRow.appendChild(sizeInput);
   panel.appendChild(sizeRow);
 
+  // Proofreaders disagree, so whose rejections count is a setting rather than a
+  // rule. "me" is sent verbatim — the server resolves it, because the browser
+  // has an opaque token and no idea who it belongs to.
+  const rejectedRow = document.createElement("label");
+  rejectedRow.className = "calcada-zetta-trace-size";
+  rejectedRow.textContent = "Skip rejected by";
+  const rejectedSelect = document.createElement("select");
+  for (const [value, label] of [
+    ["anyone", "anyone"],
+    ["me", "only me"],
+    ["custom", "me and…"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    rejectedSelect.appendChild(option);
+  }
+  rejectedRow.appendChild(rejectedSelect);
+  panel.appendChild(rejectedRow);
+
+  const rejectedUsers = document.createElement("input");
+  rejectedUsers.type = "text";
+  rejectedUsers.placeholder = "tommy@zetta.ai, …";
+  rejectedUsers.title =
+    "Comma-separated users whose rejections to skip as well";
+  rejectedUsers.className = "calcada-zetta-trace-users";
+  panel.appendChild(rejectedUsers);
+
   const buttons = document.createElement("div");
   buttons.className = "calcada-zetta-trace-buttons";
   panel.appendChild(buttons);
@@ -5811,9 +5973,15 @@ function makeZettaTracePanel(
     title: "Accept and merge (right arrow)",
     onClick: () => void session()?.traceSession.accept(),
   });
+  const undoIcon = makeIcon({
+    text: "Undo",
+    title: "Take back the last edit (⌘/ctrl+Z)",
+    onClick: () => void session()?.traceSession.undoLast(),
+  });
   buttons.appendChild(rejectIcon);
   buttons.appendChild(skipIcon);
   buttons.appendChild(acceptIcon);
+  buttons.appendChild(undoIcon);
 
   const render = () => {
     const connection = session();
@@ -5825,12 +5993,46 @@ function makeZettaTracePanel(
     if (document.activeElement !== sizeInput) {
       sizeInput.value = String(traceState!.minPieceVoxels.value);
     }
+    const rejected = traceState!.rejectedBy.value;
+    const extra = rejected.filter((user) => user !== TRACE_CURRENT_USER);
+    if (document.activeElement !== rejectedSelect) {
+      rejectedSelect.value =
+        rejected.length === 0 ? "anyone" : extra.length > 0 ? "custom" : "me";
+    }
+    rejectedUsers.style.display =
+      rejectedSelect.value === "custom" ? "" : "none";
+    if (document.activeElement !== rejectedUsers) {
+      rejectedUsers.value = extra.join(", ");
+    }
     const busy = connection.traceSession.isBusy;
     const noCandidate = connection.traceSession.current === undefined;
     for (const icon of [rejectIcon, skipIcon, acceptIcon]) {
       icon.classList.toggle("disabled", busy || noCandidate);
     }
+    // Undo stays live with no candidate on screen: running out of candidates is
+    // exactly when someone notices the last merge was wrong.
+    undoIcon.classList.toggle("disabled", busy || !connection.canUndo());
   };
+
+  const applyRejectedBy = () => {
+    const traceState = session()?.state.zettaTraceState;
+    if (traceState === undefined) return;
+    const mode = rejectedSelect.value;
+    if (mode === "anyone") {
+      traceState.rejectedBy.value = [];
+      return;
+    }
+    const extra =
+      mode === "custom"
+        ? rejectedUsers.value
+            .split(",")
+            .map((user) => user.trim())
+            .filter((user) => user.length > 0)
+        : [];
+    traceState.rejectedBy.value = [TRACE_CURRENT_USER, ...extra];
+  };
+  rejectedSelect.addEventListener("change", applyRejectedBy);
+  rejectedUsers.addEventListener("change", applyRejectedBy);
 
   sizeInput.addEventListener("change", () => {
     const traceState = session()?.state.zettaTraceState;
