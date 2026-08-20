@@ -211,6 +211,13 @@ export interface SegmentationDisplayState {
   segmentStatedColors: WatchableValueInterface<Uint64Map>;
   tempSegmentStatedColors2d: WatchableValueInterface<Uint64Map>;
   useTempSegmentStatedColors2d: WatchableValueInterface<boolean>;
+  // Opt-in companion to useTempSegmentStatedColors2d: only callers whose temp
+  // colors carry meaningful per-object alpha (e.g. calcada trace mode's
+  // gold/silver role colors) set this, so getBaseObjectColor's skeleton/segment
+  // list consumers honor that alpha. Other reusers of the same temp color map
+  // (multicut's red/blue/off tinting, calcada's own piece-split preview) leave
+  // it false and keep their pre-existing behavior of being ignored there.
+  honorTempStatedColorAlpha: WatchableValueInterface<boolean>;
   segmentDefaultColor: WatchableValueInterface<vec3 | undefined>;
   tempSegmentDefaultColor2d: WatchableValueInterface<vec3 | vec4 | undefined>;
   highlightColor: WatchableValueInterface<vec4 | undefined>;
@@ -1026,7 +1033,8 @@ export function getBaseObjectColor(
   }
   const colorGroupState = displayState.segmentationColorGroupState.value;
   const statedColor = resolveStatedColor(
-    displayState.useTempSegmentStatedColors2d.value,
+    displayState.useTempSegmentStatedColors2d.value &&
+      displayState.honorTempStatedColorAlpha.value,
     displayState.tempSegmentStatedColors2d.value,
     colorGroupState.segmentStatedColors,
     objectId,

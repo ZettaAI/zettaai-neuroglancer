@@ -2193,6 +2193,7 @@ class ZettaTraceSession extends RefCounted {
       );
     }
     displayState.useTempSegmentStatedColors2d.value = true;
+    displayState.honorTempStatedColorAlpha.value = true;
   }
 
   private clearRoleColors() {
@@ -2200,6 +2201,7 @@ class ZettaTraceSession extends RefCounted {
     displayState.tempSegmentStatedColors2d.value.clear();
     displayState.useTempSegmentStatedColors2d.value =
       this.priorUseTempSegmentStatedColors2d;
+    displayState.honorTempStatedColorAlpha.value = false;
   }
 
   private showCurrent() {
