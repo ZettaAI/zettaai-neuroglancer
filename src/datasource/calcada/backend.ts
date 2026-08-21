@@ -341,6 +341,10 @@ export class CalcadaMeshSource extends WithParameters(
 ) {
   manifestRequestCount = new Map<string, number>();
   manifestAttempts = new WeakMap<ManifestChunk, number>();
+  // Pending manifest-retry backoffs. Held so a source torn down mid-backoff
+  // (branch switch, layer removal) does not re-queue a chunk on a manager that
+  // is already gone.
+  private retryTimers = new Set<ReturnType<typeof setTimeout>>();
   newSegments = new Uint64Set();
   // Live branch shared from the frontend. parameters.branchId is frozen at
   // datasource creation; the dropdown branch switch mutates the frontend's
@@ -421,6 +425,12 @@ export class CalcadaMeshSource extends WithParameters(
     }
   }
 
+  disposed() {
+    for (const timer of this.retryTimers) clearTimeout(timer);
+    this.retryTimers.clear();
+    super.disposed();
+  }
+
   async download(chunk: ManifestChunk, signal: AbortSignal) {
     const { parameters, newSegments, manifestRequestCount } = this;
     if (isBaseSegmentId(chunk.objectId, parameters.nBitsForLayerId)) {
@@ -448,12 +458,15 @@ export class CalcadaMeshSource extends WithParameters(
       const attemptCount = this.manifestAttempts.get(chunk) ?? 0;
       if (shouldRetryManifestDownload(attemptCount)) {
         this.manifestAttempts.set(chunk, attemptCount + 1);
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          this.retryTimers.delete(timer);
+          if (this.wasDisposed) return;
           this.chunkManager.queueManager.updateChunkState(
             chunk,
             ChunkState.QUEUED,
           );
         }, nextManifestRetryDelayMs(attemptCount));
+        this.retryTimers.add(timer);
         return decodeManifestChunk(chunk, { fragments: [] });
       }
       this.manifestAttempts.delete(chunk);
