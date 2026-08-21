@@ -68,6 +68,17 @@ import {
   dropDecided,
   nextCandidate,
 } from "#src/datasource/calcada/candidate_ranking.js";
+import {
+  interceptedRemovals,
+  TRACE_CANDIDATE_COLOR_PACKED,
+  TRACE_CANDIDATE_DIM_COLOR_PACKED,
+  TRACE_SEED_COLOR_PACKED,
+  TRACE_SEED_DIM_COLOR_PACKED,
+} from "#src/datasource/calcada/role_colors.js";
+import {
+  classifyCandidateEdit,
+  isStaleRoot,
+} from "#src/datasource/calcada/root_resolution.js";
 import type {
   DataSource,
   DataSourceLookupResult,
@@ -223,7 +234,7 @@ import { KeyboardEventBinder } from "#src/util/keyboard_bindings.js";
 import { MouseEventBinder } from "#src/util/mouse_bindings.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
-import { NullarySignal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
 import { DateTimeInputWidget } from "#src/widget/datetime.js";
@@ -741,6 +752,10 @@ async function getMeshSource(
   const parameters: MeshSourceParameters = {
     manifestUrl: url,
     fragmentUrl: fragmentUrl,
+    // Only selects which manifest to fetch (see CalcadaMeshSource.download's
+    // `/manifest/{objectId}:{lod}` path); the mesh detail level actually
+    // rendered per piece is chosen dynamically in backend.ts's
+    // downloadFragment via selectLodForPieceCount, not by this field.
     lod: 0,
     sharding: metadata?.sharding,
     vertexQuantizationBits: metadata?.vertexQuantizationBits ?? 16,
@@ -1769,7 +1784,9 @@ class ZettaTraceState extends RefCounted implements Trackable {
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
   // changed, so anything holding a root id is stale.
-  graphEdited = new NullarySignal();
+  graphEdited = new Signal<
+    (oldRoots: Uint64Set, newRoots: Uint64Set) => void
+  >();
 
   constructor() {
     super();
@@ -1788,8 +1805,8 @@ class ZettaTraceState extends RefCounted implements Trackable {
   // The seed is re-resolved from its piece rather than remapped from the old
   // root set: a cut splits one root into several, so the set alone cannot say
   // which side the seed ended up on.
-  replaceSegments(_oldValues: Uint64Set, _newValues: Uint64Set) {
-    if (this.active.value) this.graphEdited.dispatch();
+  replaceSegments(oldValues: Uint64Set, newValues: Uint64Set) {
+    if (this.active.value) this.graphEdited.dispatch(oldValues, newValues);
   }
 
   toJSON() {
@@ -1930,8 +1947,17 @@ class ZettaTraceSession extends RefCounted {
   // panel re-renders the current one.
   private prefetchedPartner: bigint | undefined;
   private bindings: RefCounted | undefined;
-  private banner: HTMLElement | undefined;
-  private bannerStatus: HTMLElement | undefined;
+  private modePanel: StatusMessage | undefined;
+  private modePanelStatus: HTMLElement | undefined;
+  // Role segments the proofreader toggled "off": they stay visible but faint
+  // rather than disappearing, so the comparison never loses a side.
+  private readonly dimmed = new Set<bigint>();
+  // Roots this session's edits retired. Exiting must not put them back on
+  // screen: they no longer exist in the graph, and the segment that replaced
+  // them is already visible.
+  private readonly retired = new Set<bigint>();
+  private priorUseTempSegmentStatedColors2d = false;
+  private reassertingRoleColors = false;
 
   constructor(
     private connection: GraphConnection,
@@ -1948,7 +1974,11 @@ class ZettaTraceSession extends RefCounted {
         }
       }),
     );
-    this.registerDisposer(state.graphEdited.add(() => this.onGraphEdited()));
+    this.registerDisposer(
+      state.graphEdited.add((oldRoots, newRoots) =>
+        this.onGraphEdited(oldRoots, newRoots),
+      ),
+    );
     const refetchOnFilterChange = () => {
       if (state.active.value) void this.loadCandidates();
     };
@@ -1957,7 +1987,7 @@ class ZettaTraceSession extends RefCounted {
     );
     this.registerDisposer(state.rejectedBy.changed.add(refetchOnFilterChange));
     if (state.active.value) this.enter();
-    this.registerDisposer(() => this.hideBanner());
+    this.registerDisposer(() => this.hideModePanel());
   }
 
   private get segmentsState() {
@@ -1974,50 +2004,60 @@ class ZettaTraceSession extends RefCounted {
 
   private setStatus(text: string) {
     this.status = text;
-    if (this.bannerStatus !== undefined) this.bannerStatus.textContent = text;
+    if (this.modePanelStatus !== undefined) {
+      this.modePanelStatus.textContent = text;
+    }
     this.changed.dispatch();
   }
 
   /**
-   * A banner over the viewport, because the arrow keys stop panning while the
-   * mode is on and that has to be visible from wherever the proofreader is
-   * looking — which is the data, not the side panel.
-   *
-   * Hosted the way StatusMessage hosts itself: inside #neuroglancer-container
-   * when the viewer is embedded, so it cannot escape the widget.
+   * The mode's own section in the status list, built the way a tool activation
+   * builds one (makeToolActivationStatusMessage) — same header, body and
+   * key-binding row as merge and cut, so the three read as one family. The mode
+   * cannot use that helper directly: its activation releases the tool slot
+   * immediately, and the section has to outlive it.
    */
-  private showBanner() {
-    if (this.banner !== undefined) return;
-    const banner = document.createElement("div");
-    banner.className = "calcada-zetta-trace-banner";
+  private showModePanel() {
+    if (this.modePanel !== undefined) return;
+    const message = new StatusMessage(false);
+    message.element.classList.add(
+      "neuroglancer-tool-status",
+      "calcada-zetta-trace-mode",
+    );
 
-    const badge = document.createElement("span");
-    badge.className = "calcada-zetta-trace-badge";
-    badge.textContent = "Trace mode";
-    banner.appendChild(badge);
+    const content = document.createElement("div");
+    content.classList.add("neuroglancer-tool-status-content");
+    message.element.appendChild(content);
 
+    const headerContainer = document.createElement("div");
+    headerContainer.classList.add("neuroglancer-tool-status-header-container");
+    const header = document.createElement("div");
+    header.classList.add("neuroglancer-tool-status-header");
+    header.textContent = "Zetta trace";
+    headerContainer.appendChild(header);
+    content.appendChild(headerContainer);
+
+    const body = document.createElement("div");
+    body.classList.add("neuroglancer-tool-status-body", "calcada-tool-status");
     const status = document.createElement("span");
-    status.className = "calcada-zetta-trace-banner-status";
+    status.className = "calcada-zetta-trace-status";
     status.textContent = this.status;
-    banner.appendChild(status);
+    body.appendChild(status);
+    content.appendChild(body);
 
-    const keys = document.createElement("span");
-    keys.className = "calcada-zetta-trace-banner-keys";
-    keys.textContent =
-      "← reject · ↓ skip · → accept · ⌘/ctrl+Z undo · Esc exit";
-    banner.appendChild(keys);
+    const bindingHelp = document.createElement("div");
+    bindingHelp.textContent = ZETTA_TRACE_INPUT_EVENT_MAP.describe();
+    bindingHelp.classList.add("neuroglancer-tool-status-bindings");
+    message.element.appendChild(bindingHelp);
 
-    (
-      document.getElementById("neuroglancer-container") ?? document.body
-    ).appendChild(banner);
-    this.banner = banner;
-    this.bannerStatus = status;
+    this.modePanel = message;
+    this.modePanelStatus = status;
   }
 
-  private hideBanner() {
-    this.banner?.remove();
-    this.banner = undefined;
-    this.bannerStatus = undefined;
+  private hideModePanel() {
+    this.modePanel?.dispose();
+    this.modePanel = undefined;
+    this.modePanelStatus = undefined;
   }
 
   enter() {
@@ -2026,6 +2066,10 @@ class ZettaTraceSession extends RefCounted {
     // at is this mode's exit contract.
     this.savedVisible = [...this.segmentsState.visibleSegments];
     this.savedSelected = [...this.segmentsState.selectedSegments];
+    this.priorUseTempSegmentStatedColors2d =
+      this.layer.displayState.useTempSegmentStatedColors2d.value;
+    this.dimmed.clear();
+    this.retired.clear();
 
     const bindings = new RefCounted();
     this.bindings = bindings;
@@ -2070,7 +2114,56 @@ class ZettaTraceSession extends RefCounted {
     });
     bind("set-trace-seed", () => this.seedFromMouse());
 
-    this.showBanner();
+    // Toggling a role segment off would drop half the comparison. Put it back
+    // and record it as dimmed instead, so it renders faint rather than gone.
+    bindings.registerDisposer(
+      this.segmentsState.visibleSegments.changed.add((ids, add) => {
+        if (add !== false || ids === null) return;
+        const seedRoot = this.state.seedRoot.value;
+        if (seedRoot === undefined) return;
+        const roleRoots = new Set<bigint>([seedRoot]);
+        if (this.current !== undefined) {
+          roleRoots.add(this.current.partnerRootId);
+        }
+        const removedIds = typeof ids === "bigint" ? [ids] : Array.from(ids);
+        const removed = interceptedRemovals(removedIds, roleRoots).filter(
+          // A root an edit retired is being removed because it no longer
+          // exists, not because the proofreader hid it; putting it back would
+          // leave an id on screen that renders nothing.
+          (id) => !this.retired.has(id),
+        );
+        if (removed.length === 0) return;
+        for (const id of removed) {
+          // Toggle, not latch: hiding a dimmed role segment brings it back to
+          // full strength — otherwise a second double-click did nothing.
+          if (this.dimmed.has(id)) {
+            this.dimmed.delete(id);
+          } else {
+            this.dimmed.add(id);
+          }
+          this.segmentsState.visibleSegments.add(id);
+        }
+        this.applyRoleColors(seedRoot, this.current?.partnerRootId);
+      }),
+    );
+
+    // A graph tool activating (multicut, merge) resets the shared temp color
+    // map for its own display, and the role colors vanish with it — pressing C
+    // made the mode look like it had ended. Refill whatever went missing; a
+    // tool that painted a role segment itself (the focus of a cut renders
+    // transparent) keeps its own entry because refilling never overwrites.
+    bindings.registerDisposer(
+      this.layer.displayState.tempSegmentStatedColors2d.value.changed.add(() =>
+        this.reassertRoleColors(),
+      ),
+    );
+    bindings.registerDisposer(
+      this.layer.displayState.useTempSegmentStatedColors2d.changed.add(() =>
+        this.reassertRoleColors(),
+      ),
+    );
+
+    this.showModePanel();
     this.revealSegmentsTab();
     if (this.state.seedRoot.value !== undefined) {
       void this.loadCandidates();
@@ -2092,9 +2185,10 @@ class ZettaTraceSession extends RefCounted {
 
   exit() {
     if (this.bindings === undefined) return;
+    const candidateRoot = this.current?.partnerRootId;
     this.bindings.dispose();
     this.bindings = undefined;
-    this.hideBanner();
+    this.hideModePanel();
     this.clearAnnotation();
     this.candidates = [];
     this.current = undefined;
@@ -2104,11 +2198,34 @@ class ZettaTraceSession extends RefCounted {
     this.seedPieceId = undefined;
     ++this.fetchToken;
 
+    this.dimmed.clear();
+    this.clearRoleColors();
+
+    // Leaving keeps what the review built rather than rewinding to the entry
+    // snapshot: the merged seed stays, and so does any segment pulled up for
+    // context. Two things go: the candidate still under review, which was never
+    // accepted, and every root this session's edits retired — those ids are
+    // gone from the graph and restoring them would show segments that no longer
+    // exist beside the one that replaced them.
     const { segmentsState } = this;
+    const keep = (ids: Iterable<bigint>) => {
+      const out = new Set<bigint>(ids);
+      for (const id of this.retired) out.delete(id);
+      if (candidateRoot !== undefined) out.delete(candidateRoot);
+      return out;
+    };
+    const visible = keep([
+      ...this.savedVisible,
+      ...segmentsState.visibleSegments,
+    ]);
+    const selected = keep([
+      ...this.savedSelected,
+      ...segmentsState.selectedSegments,
+    ]);
     segmentsState.visibleSegments.clear();
     segmentsState.selectedSegments.clear();
-    for (const id of this.savedSelected) segmentsState.selectedSegments.add(id);
-    for (const id of this.savedVisible) segmentsState.visibleSegments.add(id);
+    for (const id of selected) segmentsState.selectedSegments.add(id);
+    for (const id of visible) segmentsState.visibleSegments.add(id);
     this.setStatus("");
   }
 
@@ -2121,19 +2238,19 @@ class ZettaTraceSession extends RefCounted {
   }
 
   private seedFromMouse() {
-    const selection = maybeGetSelection(
-      {
-        layer: this.layer,
-        mouseState: this.layer.manager.root.layerSelectedValues.mouseState,
-      },
-      this.segmentsState.visibleSegments,
-    );
-    if (selection === undefined) return;
-    // Re-seeding mid-session is the point: a proofreader who reaches a dead end
-    // picks another segment and keeps going. Clicking the current seed again is
-    // a no-op rather than a pointless refetch.
-    if (selection.rootId === this.state.seedRoot.value) return;
-    this.setSeed(selection.rootId, selection.segmentId);
+    // Read the pick directly rather than through maybeGetSelection: showOnly has
+    // reduced visibleSegments to the seed and the candidate, so that helper's
+    // visibility gate would reject every third segment — exactly the ones a
+    // proofreader re-seeds onto after reaching a dead end.
+    const {
+      segmentSelectionState: { value, baseValue },
+    } = this.layer.displayState;
+    if (!value || !baseValue) return;
+    if (value === this.state.seedRoot.value) {
+      StatusMessage.showTemporaryMessage("Already the seed", 3000);
+      return;
+    }
+    this.setSeed(value, baseValue);
   }
 
   setSeed(rootId: bigint, pieceId?: bigint) {
@@ -2141,6 +2258,7 @@ class ZettaTraceSession extends RefCounted {
     this.seedPieceId = pieceId;
     this.current = undefined;
     this.candidates = [];
+    this.dimmed.clear();
     this.clearAnnotation();
     this.showOnly(rootId);
     void this.loadCandidates();
@@ -2149,20 +2267,100 @@ class ZettaTraceSession extends RefCounted {
   // Accepting or rejecting clears whatever the proofreader had selected for
   // context: the next candidate is a fresh question, and leaving the previous
   // comparison on screen is what made merges look like they had done nothing.
-  private showOnly(...roots: bigint[]) {
+  private showOnly(seedRoot: bigint, candidateRoot?: bigint) {
     const { segmentsState } = this;
     segmentsState.visibleSegments.clear();
     segmentsState.selectedSegments.clear();
-    for (const root of roots) {
-      segmentsState.visibleSegments.add(root);
-      segmentsState.selectedSegments.add(root);
+    segmentsState.visibleSegments.add(seedRoot);
+    segmentsState.selectedSegments.add(seedRoot);
+    if (candidateRoot !== undefined) {
+      segmentsState.visibleSegments.add(candidateRoot);
+      segmentsState.selectedSegments.add(candidateRoot);
     }
+    this.applyRoleColors(seedRoot, candidateRoot);
+  }
+
+  // Blue seed, yellow candidate. Written into the temporary stated-color map
+  // only: the persistent one serializes into the layer JSON and would leak
+  // these role colors into shared links.
+  private applyRoleColors(seedRoot: bigint, candidateRoot?: bigint) {
+    const { displayState } = this.layer;
+    this.reassertingRoleColors = true;
+    try {
+      const temp = displayState.tempSegmentStatedColors2d.value;
+      temp.clear();
+      temp.set(seedRoot, this.roleColor(seedRoot, "seed"));
+      if (candidateRoot !== undefined) {
+        temp.set(candidateRoot, this.roleColor(candidateRoot, "candidate"));
+      }
+      displayState.useTempSegmentStatedColors2d.value = true;
+      displayState.honorTempStatedColorAlpha.value = true;
+    } finally {
+      this.reassertingRoleColors = false;
+    }
+  }
+
+  private roleColor(rootId: bigint, role: "seed" | "candidate"): bigint {
+    if (role === "seed") {
+      return this.dimmed.has(rootId)
+        ? TRACE_SEED_DIM_COLOR_PACKED
+        : TRACE_SEED_COLOR_PACKED;
+    }
+    return this.dimmed.has(rootId)
+      ? TRACE_CANDIDATE_DIM_COLOR_PACKED
+      : TRACE_CANDIDATE_COLOR_PACKED;
+  }
+
+  // See the listener registration in enter(): puts the role colors back after
+  // a tool activation resets the shared temp color map. Only fills entries
+  // that are absent, so an active tool's own painting always wins.
+  private reassertRoleColors() {
+    if (this.reassertingRoleColors) return;
+    if (!this.state.active.value) return;
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return;
+    const { displayState } = this.layer;
+    const temp = displayState.tempSegmentStatedColors2d.value;
+    const candidateRoot = this.current?.partnerRootId;
+    const seedMissing = !temp.has(seedRoot);
+    const candidateMissing =
+      candidateRoot !== undefined && !temp.has(candidateRoot);
+    if (
+      !seedMissing &&
+      !candidateMissing &&
+      displayState.useTempSegmentStatedColors2d.value &&
+      displayState.honorTempStatedColorAlpha.value
+    ) {
+      return;
+    }
+    this.reassertingRoleColors = true;
+    try {
+      if (seedMissing) {
+        temp.set(seedRoot, this.roleColor(seedRoot, "seed"));
+      }
+      if (candidateRoot !== undefined && candidateMissing) {
+        temp.set(candidateRoot, this.roleColor(candidateRoot, "candidate"));
+      }
+      displayState.useTempSegmentStatedColors2d.value = true;
+      displayState.honorTempStatedColorAlpha.value = true;
+    } finally {
+      this.reassertingRoleColors = false;
+    }
+  }
+
+  private clearRoleColors() {
+    const { displayState } = this.layer;
+    displayState.tempSegmentStatedColors2d.value.clear();
+    displayState.useTempSegmentStatedColors2d.value =
+      this.priorUseTempSegmentStatedColors2d;
+    displayState.honorTempStatedColorAlpha.value = false;
   }
 
   private showCurrent() {
     this.clearAnnotation();
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
+    this.dimmed.clear();
     this.current = nextCandidate(this.candidates, this.decided);
     this.remaining = dropDecided(this.candidates, this.decided).length;
     if (this.current === undefined) {
@@ -2397,15 +2595,32 @@ class ZettaTraceSession extends RefCounted {
     return this.busy;
   }
 
+  // A read that comes back as one of the roots the edit just retired is a
+  // lagging replica, not an answer. Retry on the same ladder the empty-candidate
+  // refetch uses.
+  private async getRootRetrying(pieceId: bigint, oldRoots: Uint64Set) {
+    const retired = new Set<bigint>(oldRoots);
+    let resolved = await this.graphServer.getRoot(pieceId, 0, this.branchId);
+    for (const delayMs of EMPTY_RETRY_DELAYS_MS) {
+      if (!isStaleRoot(resolved, retired)) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      resolved = await this.graphServer.getRoot(pieceId, 0, this.branchId);
+    }
+    return resolved;
+  }
+
   /**
    * Re-resolve the trace after someone edited the graph — a manual merge, or a
    * cut of the candidate segment, which is the workflow when a candidate turns
    * out to contain a merger. Both the seed and the partner get new root ids, so
    * the trace follows their pieces, which survive re-rooting.
    */
-  private async onGraphEdited() {
+  private async onGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
     if (this.bindings === undefined || this.busy) return;
-    await this.refreshFromSeedPiece();
+    for (const id of oldRoots) {
+      if (!newRoots.has(id)) this.retired.add(id);
+    }
+    await this.refreshFromSeedPiece(oldRoots, newRoots);
   }
 
   /**
@@ -2432,12 +2647,57 @@ class ZettaTraceSession extends RefCounted {
         if (lastAccepted !== undefined) this.decided.delete(lastAccepted);
       }
     } finally {
-      await this.refreshFromSeedPiece();
+      // Undo does not carry the retired root set the way a graph edit
+      // notification does, so there is nothing to retry a stale read
+      // against here.
+      await this.refreshFromSeedPiece(new Uint64Set());
       this.setBusy(false);
     }
   }
 
-  private async refreshFromSeedPiece() {
+  private async refreshFromSeedPiece(
+    oldRoots: Uint64Set,
+    newRoots?: Uint64Set,
+  ) {
+    // piece -> root reads go through a materialized view that lags an edit by
+    // a moment, so a merge can keep answering with a root it just retired even
+    // after getRootRetrying has exhausted its retries. Showing that id renders
+    // nothing: both originals are gone and the segment that replaced them was
+    // never made visible. When the edit produced exactly one root — every
+    // merge — that root is the answer the lookup is failing to give.
+    const replacement =
+      newRoots !== undefined && newRoots.size === 1
+        ? [...newRoots][0]
+        : undefined;
+    const retiredByEdit = new Set<bigint>(oldRoots);
+    // An edit is not a reason to throw away what the proofreader has on screen.
+    // showOnly() is for deliberate resets (seeding, accepting, rejecting); here
+    // the view is reconciled instead: drop the roots this edit retired, show
+    // the roots it created, keep everything else, and make sure the role
+    // segments are present.
+    const reconcile = (seed: bigint, candidate?: bigint) => {
+      const { segmentsState } = this;
+      for (const id of oldRoots) {
+        if (newRoots !== undefined && newRoots.has(id)) continue;
+        segmentsState.visibleSegments.delete(id);
+        segmentsState.selectedSegments.delete(id);
+      }
+      for (const id of newRoots ?? []) {
+        segmentsState.visibleSegments.add(id);
+        segmentsState.selectedSegments.add(id);
+      }
+      for (const id of candidate === undefined ? [seed] : [seed, candidate]) {
+        segmentsState.visibleSegments.add(id);
+        segmentsState.selectedSegments.add(id);
+      }
+      this.applyRoleColors(seed, candidate);
+    };
+    const resolveRoot = async (pieceId: bigint) => {
+      const resolved = await this.getRootRetrying(pieceId, oldRoots);
+      return replacement !== undefined && isStaleRoot(resolved, retiredByEdit)
+        ? replacement
+        : resolved;
+    };
     // Prefer the seed's own piece; the candidate's is the fallback for a trace
     // restored from a link, which carries no piece.
     const seedPiece = this.seedPieceId ?? this.current?.selfPieceId;
@@ -2449,11 +2709,7 @@ class ZettaTraceSession extends RefCounted {
       // Resolving the seed's own piece is what makes a cut safe: whichever side
       // of the cut that piece landed on is the segment the proofreader is on.
       if (seedPiece !== undefined) {
-        const resolved = await this.graphServer.getRoot(
-          seedPiece,
-          0,
-          this.branchId,
-        );
+        const resolved = await resolveRoot(seedPiece);
         if (token !== this.fetchToken) return;
         this.state.seedRoot.value = resolved;
       }
@@ -2462,9 +2718,38 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     if (token !== this.fetchToken) return;
+    const resolvedSeedRoot = this.state.seedRoot.value!;
+
+    // An edit that only re-rooted the candidate under review is not a reason to
+    // throw away the review queue: follow the partner's piece and redraw in
+    // place, so the proofreader keeps their position.
+    if (this.current !== undefined) {
+      let newPartnerRoot: bigint;
+      try {
+        newPartnerRoot = await resolveRoot(this.current.partnerPieceId);
+      } catch (e) {
+        this.setStatus(`Failed to re-resolve the candidate: ${e}`);
+        return;
+      }
+      if (token !== this.fetchToken) return;
+      const outcome = classifyCandidateEdit(
+        resolvedSeedRoot !== seedRoot,
+        resolvedSeedRoot,
+        newPartnerRoot,
+      );
+      if (outcome === "rerooted") {
+        this.current = { ...this.current, partnerRootId: newPartnerRoot };
+        reconcile(resolvedSeedRoot, newPartnerRoot);
+        this.setStatus(`partner ${newPartnerRoot} · ${this.remaining} left`);
+        return;
+      }
+      if (outcome === "absorbed") {
+        this.decided.add(this.current.lineId);
+      }
+    }
     this.current = undefined;
     this.clearAnnotation();
-    this.showOnly(this.state.seedRoot.value!);
+    reconcile(resolvedSeedRoot);
     await this.loadCandidates(true);
   }
 }
@@ -3121,6 +3406,10 @@ void main() {
    * or re-fetching chunks (which silently re-applies the stale LUT for
    * chunks the chunk manager still has cached).
    */
+  notifyGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
+    this.state.replaceSegments(oldRoots, newRoots);
+  }
+
   updateAfterSplit(
     oldRoot: bigint,
     newRoots: bigint[],
@@ -3383,7 +3672,7 @@ void main() {
         oldValues.add(focusSegment);
         const newValues = new Uint64Set();
         newValues.add(splitRoots);
-        this.state.replaceSegments(oldValues, newValues);
+        this.notifyGraphEdited(oldValues, newValues);
         this.updateAfterSplit(focusSegment, splitRoots, components);
         this.pushUndo(operationId, this.graph.branchId.value);
         return true;
@@ -3449,7 +3738,7 @@ void main() {
         oldValues.add(oldRootB);
         const newValues = new Uint64Set();
         newValues.add(newRoot);
-        this.state.replaceSegments(oldValues, newValues);
+        this.notifyGraphEdited(oldValues, newValues);
 
         const segmentsState =
           this.layer.displayState.segmentationGroupState.value;
@@ -6422,13 +6711,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // 2D, and tinting each mesh fragment separately in 3D — is a debugging view,
     // so it is turned on only while Debug is active (see setPieceView).
 
-    // Pending post-cut mesh re-fetch timers, cleared when the tool deactivates
-    // so back-to-back splits don't leak timers that fire after the tool is gone.
-    const meshRefetchTimers: ReturnType<typeof setTimeout>[] = [];
-    activation.registerDisposer(() => {
-      for (const timer of meshRefetchTimers) clearTimeout(timer);
-    });
-
     // Debug overlay state (toggled by the Debug button): the debugged root and a
     // per-piece colour map fetched from the backend. When on, every piece of the
     // root is tinted a distinct colour so a kept-whole segment's internal pieces
@@ -6546,14 +6828,27 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       // Uncoloured pieces stay merged into the focus root at the segment's normal
       // colour, so the rest of the segment never looks deselected while you place
       // points. We do NOT dim the rest of the view (no MULTICUT_OFF_COLOR).
-      segmentationGroupState.useTemporaryVisibleSegments.value = true;
+      // While a trace is reviewing this very segment, the trace owns what is
+      // visible (seed + candidate only). Overriding it here would put the rest
+      // of the view back and fight showOnly; the per-piece tinting below is
+      // still applied, so the split preview is unaffected.
+      const { zettaTraceState } = graphConnection.state;
+      const traceOwnsFocus =
+        zettaTraceState.active.value &&
+        (focus === zettaTraceState.seedRoot.value ||
+          focus === graphConnection.traceSession.current?.partnerRootId);
+      if (!traceOwnsFocus) {
+        segmentationGroupState.useTemporaryVisibleSegments.value = true;
+        segmentationGroupState.temporaryVisibleSegments.add(focus);
+      }
       segmentationGroupState.useTemporarySegmentEquivalences.value = true;
-      segmentationGroupState.temporaryVisibleSegments.add(focus);
       let anyTint = false;
       for (const piece of segmentationGroupState.segmentEquivalences.setElements(
         focus,
       )) {
-        segmentationGroupState.temporaryVisibleSegments.add(piece);
+        if (!traceOwnsFocus) {
+          segmentationGroupState.temporaryVisibleSegments.add(piece);
+        }
         const color = pieceColor.get(piece);
         if (color === "blue") {
           displayState.tempSegmentStatedColors2d.value.set(
@@ -6995,7 +7290,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           ...pieceSplitState.bluePoints.value.map((p) => toPayload(p, "blue")),
           ...pieceSplitState.redPoints.value.map((p) => toPayload(p, "red")),
         ];
-        const { roots, operationId, splitPieces } =
+        const { roots, components, operationId, splitPieces } =
           await graphConnection.graph.graphServer.generalSplit(
             points,
             branchId,
@@ -7020,9 +7315,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         for (const p of pieceSplitState.redPoints.value) {
           if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
         }
-        // The segment stays whole but its pieces changed, so the rendered chunks
-        // and the piece->root mapping are stale.
-        const segmentsState = layer.displayState.segmentationGroupState.value;
+        // The segment stays whole but its pieces changed, so the piece->root
+        // mapping is stale.
         const newRoots = roots.filter((root) => root !== 0n);
 
         steppedSplit = {
@@ -7038,31 +7332,18 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         const focus = currentFocusRoot();
         if (newRoots.length > 0 && focus !== undefined) {
           // Split-mode 2D renders raw piece ids through segmentEquivalences, so
-          // the links must follow the edit: chunks now hold the sub-piece ids
-          // and the root advanced — with the old links the segment renders
-          // blank until split mode is re-entered.
-          const newRoot = newRoots[0];
-          const oldPieces = [
-            ...segmentsState.segmentEquivalences.setElements(focus),
-          ].filter((id) => id !== focus && !wasSplit.has(id));
-          segmentsState.segmentEquivalences.deleteSet(focus);
-          for (const piece of oldPieces) {
-            segmentsState.segmentEquivalences.link(newRoot, piece);
-          }
-          for (const sp of splitPieces) {
-            segmentsState.segmentEquivalences.link(newRoot, sp.blue);
-            segmentsState.segmentEquivalences.link(newRoot, sp.red);
-          }
-          segmentsState.segmentEquivalences.changed.dispatch();
-          segmentsState.selectedSegments.delete(focus);
-          segmentsState.visibleSegments.delete(focus);
-          for (const root of newRoots) {
-            segmentsState.selectedSegments.add(root);
-            segmentsState.visibleSegments.add(root);
-          }
+          // the links must follow the edit. With pieces_only the segment stays
+          // whole, so the response carries one component holding the new root's
+          // complete piece list — authoritative where the local reconstruction
+          // was only as fresh as the last chunk fetch.
+          graphConnection.updateAfterSplit(focus, newRoots, components);
           graphConnection.meshAddNewSegments(newRoots);
+          const oldRootSet = new Uint64Set();
+          oldRootSet.add(focus);
+          const newRootSet = new Uint64Set();
+          newRootSet.add(newRoots);
+          graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         }
-        graphConnection.refreshChunkSources();
         clearDebug();
         StatusMessage.showTemporaryMessage(
           `Step 1 done — ${splitPieces.length} piece(s) split, segment still whole. ` +
@@ -7089,7 +7370,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       setBusy(true);
       const { sources, sinks, branchId, rootId } = steppedSplit;
       try {
-        const { roots, operationId } =
+        const { roots, components, operationId } =
           await graphConnection.graph.graphServer.splitByPieces(
             sources,
             sinks,
@@ -7108,33 +7389,24 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         }
         // The post-pieces root is superseded by the two cut roots. rootId is
         // the authoritative handle (currentFocusRoot maps the first point's
-        // piece, which the pieces step already retired). Its equivalence class
-        // must go too — stale piece links would union both new roots into one
-        // class when the re-fetched LUTs link those pieces again.
+        // piece, which the pieces step already retired).
         const oldRoot = rootId ?? currentFocusRoot();
         if (oldRoot !== undefined) {
-          segmentsState.segmentEquivalences.deleteSet(oldRoot);
-          segmentsState.segmentEquivalences.changed.dispatch();
-          segmentsState.selectedSegments.delete(oldRoot);
-          segmentsState.visibleSegments.delete(oldRoot);
-        }
-        for (const newRoot of newRoots) {
-          segmentsState.selectedSegments.add(newRoot);
-          segmentsState.visibleSegments.add(newRoot);
-        }
-        graphConnection.meshAddNewSegments(newRoots);
-        graphConnection.refreshChunkSources();
-        // A new root's sub-piece mesh may land after the first manifest fetch
-        // resolved it to a miss; re-fetch the new roots' manifests a few times
-        // so the 3D meshes appear without a manual reload. Timers are cleared
-        // on tool deactivation.
-        for (const delayMs of [1500, 4000, 9000, 20000]) {
-          meshRefetchTimers.push(
-            setTimeout(
-              () => graphConnection.meshRefreshSegments(newRoots),
-              delayMs,
-            ),
-          );
+          // Reconcile from the server's authoritative components instead of
+          // re-fetching chunks and waiting out the lagging LUT.
+          graphConnection.updateAfterSplit(oldRoot, newRoots, components);
+          graphConnection.meshAddNewSegments(newRoots);
+          const oldRootSet = new Uint64Set();
+          oldRootSet.add(oldRoot);
+          const newRootSet = new Uint64Set();
+          newRootSet.add(newRoots);
+          graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
+        } else {
+          for (const newRoot of newRoots) {
+            segmentsState.selectedSegments.add(newRoot);
+            segmentsState.visibleSegments.add(newRoot);
+          }
+          graphConnection.meshAddNewSegments(newRoots);
         }
         clearDebug();
         steppedSplit = undefined;

@@ -211,6 +211,13 @@ export interface SegmentationDisplayState {
   segmentStatedColors: WatchableValueInterface<Uint64Map>;
   tempSegmentStatedColors2d: WatchableValueInterface<Uint64Map>;
   useTempSegmentStatedColors2d: WatchableValueInterface<boolean>;
+  // Opt-in companion to useTempSegmentStatedColors2d: only callers whose temp
+  // colors carry meaningful per-object alpha (e.g. calcada trace mode's
+  // blue/yellow role colors) set this, so getBaseObjectColor's skeleton/segment
+  // list consumers honor that alpha. Other reusers of the same temp color map
+  // (multicut's red/blue/off tinting, calcada's own piece-split preview) leave
+  // it false and keep their pre-existing behavior of being ignored there.
+  honorTempStatedColorAlpha: WatchableValueInterface<boolean>;
   segmentDefaultColor: WatchableValueInterface<vec3 | undefined>;
   tempSegmentDefaultColor2d: WatchableValueInterface<vec3 | vec4 | undefined>;
   highlightColor: WatchableValueInterface<vec4 | undefined>;
@@ -989,6 +996,55 @@ export function registerRedrawWhenSegmentationDisplayState3DChanged(
  */
 const tempColor = vec4.create();
 
+export function resolveStatedColor(
+  useTemp: boolean,
+  tempMap: Uint64Map | undefined,
+  persistentMap: Uint64Map,
+  objectId: bigint,
+): bigint | undefined {
+  if (useTemp && tempMap !== undefined && tempMap.size !== 0) {
+    const tempValue = tempMap.get(objectId);
+    if (tempValue !== undefined) return tempValue;
+  }
+  if (persistentMap.size === 0) return undefined;
+  return persistentMap.get(objectId);
+}
+
+export function unpackColorWithAlpha(
+  packed: bigint,
+  out: Float32Array,
+  fallbackAlpha: number,
+): void {
+  out[0] = Number(packed & 0xffn) / 255;
+  out[1] = Number((packed >> 8n) & 0xffn) / 255;
+  out[2] = Number((packed >> 16n) & 0xffn) / 255;
+  const a = Number((packed >> 24n) & 0xffn) / 255;
+  out[3] = a > 0 ? a * fallbackAlpha : fallbackAlpha;
+}
+
+// A temp stated color with partial alpha means "show this faintly". Real alpha
+// blending cannot express that per segment in 3D: a render layer draws in
+// exactly one pass, so a single translucent segment would push the whole layer
+// into the order-independent-transparency pass, where the opaque segments
+// sharing it lose their depth ordering and turn see-through too.
+//
+// The perspective view therefore keeps the layer opaque and dithers instead —
+// the mesh shader discards a matching fraction of its pixels, so the segment
+// is genuinely see-through while its neighbours are untouched.
+//
+// Writes the segment's full-brightness color into `out` and returns the
+// fraction of pixels to keep; returns 1 (leaving `out` alone) for colors that
+// are fully opaque or fully transparent.
+export function ghostSegmentDither(packed: bigint, out: vec4): number {
+  const alpha = Number((packed >> 24n) & 0xffn) / 255;
+  if (alpha === 0 || alpha === 1) return 1;
+  out[0] = Number(packed & 0xffn) / 255;
+  out[1] = Number((packed >> 8n) & 0xffn) / 255;
+  out[2] = Number((packed >> 16n) & 0xffn) / 255;
+  out[3] = 1;
+  return alpha;
+}
+
 export function getBaseObjectColor(
   displayState: SegmentationDisplayState | undefined | null,
   objectId: bigint,
@@ -999,17 +1055,15 @@ export function getBaseObjectColor(
     return color;
   }
   const colorGroupState = displayState.segmentationColorGroupState.value;
-  const { segmentStatedColors } = colorGroupState;
-  let statedColor: bigint | undefined;
-  if (
-    segmentStatedColors.size !== 0 &&
-    (statedColor = colorGroupState.segmentStatedColors.get(objectId)) !==
-      undefined
-  ) {
-    // If displayState maps the ID to a color, use it
-    color[0] = Number(statedColor & 0x0000ffn) / 255.0;
-    color[1] = (Number(statedColor & 0x00ff00n) >>> 8) / 255.0;
-    color[2] = (Number(statedColor & 0xff0000n) >>> 16) / 255.0;
+  const statedColor = resolveStatedColor(
+    displayState.useTempSegmentStatedColors2d.value &&
+      displayState.honorTempStatedColorAlpha.value,
+    displayState.tempSegmentStatedColors2d.value,
+    colorGroupState.segmentStatedColors,
+    objectId,
+  );
+  if (statedColor !== undefined) {
+    unpackColorWithAlpha(statedColor, color, 1.0);
     return color;
   }
   const segmentDefaultColor = colorGroupState.segmentDefaultColor.value;
@@ -1017,9 +1071,11 @@ export function getBaseObjectColor(
     color[0] = segmentDefaultColor[0];
     color[1] = segmentDefaultColor[1];
     color[2] = segmentDefaultColor[2];
+    color[3] = 1.0;
     return color;
   }
   colorGroupState.segmentColorHash.compute(color, objectId);
+  color[3] = 1.0;
   return color;
 }
 
@@ -1032,7 +1088,6 @@ export function getObjectColor(
   alpha = 1,
 ) {
   const color = tempColor;
-  color[3] = alpha;
   getBaseObjectColor(displayState, objectId, color);
   let saturation = displayState.saturation.value;
   if (
@@ -1050,9 +1105,10 @@ export function getObjectColor(
     color[i] = color[i] * saturation + (1 - saturation);
   }
 
-  color[0] *= alpha;
-  color[1] *= alpha;
-  color[2] *= alpha;
+  color[3] *= alpha;
+  color[0] *= color[3];
+  color[1] *= color[3];
+  color[2] *= color[3];
   return color;
 }
 
