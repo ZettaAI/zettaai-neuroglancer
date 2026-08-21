@@ -344,6 +344,17 @@
   border: 1px solid #444;
 }
 
+.calcada-zetta-trace-size select,
+.calcada-zetta-trace-users {
+  background: #222;
+  color: inherit;
+  border: 1px solid #444;
+}
+
+.calcada-zetta-trace-users {
+  width: 100%;
+}
+
 .calcada-zetta-trace-buttons {
   display: flex;
   align-items: center;
