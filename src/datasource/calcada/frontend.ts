@@ -2198,6 +2198,11 @@ class ZettaTraceSession extends RefCounted {
     this.seedPieceId = undefined;
     ++this.fetchToken;
 
+    // The seed does not outlive the mode: leaving means done with that segment.
+    // Keeping it made re-entry snap the view back to the old candidate and wipe
+    // whatever the proofreader had just selected to trace next.
+    this.state.seedRoot.value = undefined;
+
     this.dimmed.clear();
     this.clearRoleColors();
 
