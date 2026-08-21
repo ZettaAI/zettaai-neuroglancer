@@ -169,8 +169,8 @@
 .neuroglancer-tool-panel-row input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   margin-top: -5.5px;
-  width: 16px;
-  height: 16px;
+  width: var(--nge-slider-thumb);
+  height: var(--nge-slider-thumb);
   border-radius: 50%;
   background: #fff;
   border: 2px solid var(--nge-accent);
@@ -179,8 +179,8 @@
 }
 
 .neuroglancer-tool-panel-row input[type="range"]::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
+  width: var(--nge-slider-thumb);
+  height: var(--nge-slider-thumb);
   border: 2px solid var(--nge-accent);
   border-radius: 50%;
   background: #fff;
@@ -205,7 +205,9 @@
 }
 
 /* When a range and a numeric readout share a row, the range fills the gap
-   and the number keeps its fixed width at the right edge. */
+   and the number keeps its fixed width at the right edge. A range wrapped for
+   extra furniture (the Size slider's tick strip) styles its own readout — see
+   brush_size_field.css. */
 .neuroglancer-tool-panel-row input[type="range"] + input[type="number"] {
   margin-left: 0;
   flex: 0 0 auto;
