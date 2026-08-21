@@ -63,9 +63,18 @@ export interface ChunkTile {
 
 /**
  * The chunk tiles an unmasked single-z stroke footprint overlaps, clipped to the
- * session bounds. Per-segment bounding boxes (point ± floor(radius), matching
- * the rasterize kernel) are unioned so a thin diagonal does not enumerate the
- * empty chunks of its bounding rectangle. Pure / unit-tested.
+ * session bounds. Per-segment bounding boxes are unioned so a thin diagonal does
+ * not enumerate the empty chunks of its bounding rectangle. Pure / unit-tested.
+ *
+ * `points` must be stamp ANCHORS (`brushStampAnchor`) — whole voxels for an odd
+ * brush size, half-voxels for an even one. That is what makes the per-segment
+ * box `floor(min) - floor(radius) .. ceil(max) + floor(radius)` an exact cover
+ * of the footprint at both parities: an even size's half-voxel anchor widens the
+ * floor/ceil by the half voxel its smaller `floor(radius)` leaves out. The tile
+ * set must be a SUPERSET of the voxels the kernel writes — `paintSegment` only
+ * writes the tiles listed here, so a short box would silently drop paint at a
+ * chunk boundary. Pinned by `covers the painted footprint at every size` in the
+ * spec.
  */
 export function chunksForStroke(
   points: readonly Vec3[],

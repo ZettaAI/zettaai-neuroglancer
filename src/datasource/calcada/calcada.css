@@ -1,25 +1,25 @@
-.neuroglancer-graphene-tab .neuroglancer-annotation-toolbox {
+.neuroglancer-calcada-tab .neuroglancer-annotation-toolbox {
   display: none;
 }
 
-.neuroglancer-graphene-tab
+.neuroglancer-calcada-tab
   div[data-color="#ff0000"]
   > .neuroglancer-annotation-position {
   color: red;
 }
 
-.neuroglancer-graphene-tab
+.neuroglancer-calcada-tab
   div[data-color="#0000ff"]
   > .neuroglancer-annotation-position {
   color: #4444ff;
 }
 
-.graphene-tool-status {
+.calcada-tool-status {
   display: flex;
   gap: 10px;
 }
 
-.graphene-multicut > .activeGroupIndicator {
+.calcada-multicut > .activeGroupIndicator {
   padding: 2px;
   margin: auto 0;
   background-color: red;
@@ -27,33 +27,33 @@
   font-weight: 900;
 }
 
-.graphene-multicut > .activeGroupIndicator.blueGroup {
+.calcada-multicut > .activeGroupIndicator.blueGroup {
   background-color: blue;
 }
 
-.graphene-multicut > .activeGroupIndicator::after {
+.calcada-multicut > .activeGroupIndicator::after {
   content: "Red";
 }
 
-.graphene-multicut > .activeGroupIndicator.blueGroup::after {
+.calcada-multicut > .activeGroupIndicator.blueGroup::after {
   content: "Blue";
 }
 
-.graphene-merge-segments-merges {
+.calcada-merge-segments-merges {
   display: flex;
   flex-direction: column;
 }
 
-.graphene-merge-segments-submission {
+.calcada-merge-segments-submission {
   display: flex;
   gap: 10px;
 }
 
-.graphene-tool-status .neuroglancer-icon {
+.calcada-tool-status .neuroglancer-icon {
   height: 100%;
 }
 
-.graphene-merge-segments-status label {
+.calcada-merge-segments-status label {
   display: grid;
   grid-template-columns: min-content min-content;
   white-space: nowrap;
@@ -61,23 +61,22 @@
   align-content: center;
 }
 
-.graphene-merge-segments-point {
+.calcada-merge-segments-point {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.graphene-merge-segments-point
-  .neuroglancer-segment-list-entry-visible-checkbox,
-.graphene-merge-segments-point .neuroglancer-segment-list-entry-copy-container {
+.calcada-merge-segments-point .neuroglancer-segment-list-entry-visible-checkbox,
+.calcada-merge-segments-point .neuroglancer-segment-list-entry-copy-container {
   display: none;
 }
 
-.graphene-find-path > label {
+.calcada-find-path > label {
   display: flex;
 }
 
-.graphene-find-path > label > span {
+.calcada-find-path > label > span {
   display: flex;
   align-content: center;
   flex-wrap: wrap;
@@ -92,58 +91,67 @@
   background-color: black;
 }
 
-.graphene-piece-split {
+.calcada-piece-split {
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
   min-width: 28em;
 }
 
-.graphene-piece-split .piece-split-focus {
+.calcada-piece-split .piece-split-focus {
   font: 13px sans-serif;
   font-weight: 600;
 }
 
-.graphene-piece-split .piece-split-group-row {
+.calcada-piece-split .piece-split-group-row {
   font-weight: 700;
 }
 
-.graphene-piece-split .piece-split-points {
+.calcada-piece-split .piece-split-points {
   display: flex;
   gap: 12px;
   font: 12px monospace;
 }
 
-.graphene-piece-split .piece-split-blue > div:first-child,
-.graphene-piece-split .piece-split-red > div:first-child {
+.calcada-piece-split .piece-split-blue > div:first-child,
+.calcada-piece-split .piece-split-red > div:first-child {
   font-weight: 700;
   margin-bottom: 2px;
 }
 
-.graphene-piece-split .piece-split-point-row {
+.calcada-piece-split .piece-split-point-row {
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
-.graphene-piece-split .piece-split-preview-summary {
+.calcada-piece-split .piece-split-preview-summary {
   font: 12px sans-serif;
   background: rgba(255, 255, 255, 0.05);
   padding: 4px;
   border-radius: 2px;
 }
 
-.graphene-piece-split .piece-split-actions {
+.calcada-piece-split .piece-split-actions {
   display: flex;
   gap: 10px;
 }
 
-.graphene-piece-split .neuroglancer-icon.disabled {
+.calcada-piece-split .piece-split-use-image {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 12px sans-serif;
+  cursor: pointer;
+  user-select: none;
+}
+
+.calcada-piece-split .neuroglancer-icon.disabled {
   opacity: 0.4;
   pointer-events: none;
 }
 
-.graphene-piece-split .piece-split-spinner {
+.calcada-piece-split .piece-split-spinner {
   width: 14px;
   height: 14px;
   align-self: center;
@@ -211,4 +219,161 @@
 .neuroglancer-calcada-labeled-timestamp-control > select {
   width: auto;
   max-width: 100%;
+}
+
+.piece-split-debug-pieces {
+  margin-top: 4px;
+}
+
+.piece-split-piece-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.4;
+}
+
+.piece-split-piece-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #888;
+  flex: none;
+}
+
+.piece-split-piece-eye {
+  margin-left: auto;
+  font-size: 90%;
+  cursor: pointer;
+}
+
+.calcada-debug-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.calcada-debug-tab-hint,
+.calcada-debug-tab-header {
+  color: #ccc;
+  margin-bottom: 4px;
+}
+
+.calcada-debug-piece-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Lives in the Graph tab rather than a tool-activation bubble, so it stacks:
+   the tab scrolls and has room. The status ellipsises instead of wrapping so a
+   long score/partner line cannot push the buttons around. */
+.calcada-zetta-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 2px;
+  font: 12px sans-serif;
+}
+
+/* Sits above the data panels, below neuroglancer's own status list (z-index
+   100), and is click-through so it never steals a seeding shift+click from the
+   viewport underneath it. */
+.calcada-zetta-trace-banner {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 90%;
+  padding: 5px 10px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid #b58900;
+  font: 12px sans-serif;
+  color: #eee;
+  pointer-events: none;
+}
+
+.calcada-zetta-trace-banner-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calcada-zetta-trace-banner-keys {
+  color: #999;
+  white-space: nowrap;
+}
+
+.calcada-zetta-trace-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Reads as a mode banner, not a label: the proofreader has to be able to tell
+   at a glance that arrow keys are answering candidates rather than panning. */
+.calcada-zetta-trace-badge {
+  flex: 1 1 auto;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #b58900;
+  color: #000;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.calcada-zetta-trace-size {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.calcada-zetta-trace-size input {
+  width: 6em;
+  background: #222;
+  color: inherit;
+  border: 1px solid #444;
+}
+
+.calcada-zetta-trace-size select,
+.calcada-zetta-trace-users {
+  background: #222;
+  color: inherit;
+  border: 1px solid #444;
+}
+
+.calcada-zetta-trace-users {
+  width: 100%;
+}
+
+.calcada-zetta-trace-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.calcada-zetta-trace-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calcada-zetta-trace .neuroglancer-icon {
+  flex: 0 0 auto;
+}
+
+.calcada-zetta-trace .neuroglancer-icon.disabled {
+  opacity: 0.4;
+  pointer-events: none;
 }
