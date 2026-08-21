@@ -2214,7 +2214,10 @@ class ZettaTraceSession extends RefCounted {
       if (candidateRoot !== undefined) out.delete(candidateRoot);
       return out;
     };
-    const visible = keep([...this.savedVisible, ...segmentsState.visibleSegments]);
+    const visible = keep([
+      ...this.savedVisible,
+      ...segmentsState.visibleSegments,
+    ]);
     const selected = keep([
       ...this.savedSelected,
       ...segmentsState.selectedSegments,
@@ -2652,7 +2655,10 @@ class ZettaTraceSession extends RefCounted {
     }
   }
 
-  private async refreshFromSeedPiece(oldRoots: Uint64Set, newRoots?: Uint64Set) {
+  private async refreshFromSeedPiece(
+    oldRoots: Uint64Set,
+    newRoots?: Uint64Set,
+  ) {
     // piece -> root reads go through a materialized view that lags an edit by
     // a moment, so a merge can keep answering with a root it just retired even
     // after getRootRetrying has exhausted its retries. Showing that id renders
