@@ -235,12 +235,25 @@ export class FragmentBatchReader {
           this.settleEntry(batch[settledCount++], record);
         }
       }
-    } catch (error) {
-      for (let i = settledCount; i < batch.length; i++) {
-        batch[i].reject(error);
+      if (settledCount < batch.length) {
+        throw new Error(
+          `calcada fragment batch stream ended after ${settledCount} of ${batch.length} records`,
+        );
       }
+    } catch (error) {
+      this.rejectRemaining(batch, settledCount, error);
     } finally {
       for (const entry of batch) entry.notifyAbort = undefined;
+    }
+  }
+
+  private rejectRemaining(
+    batch: PendingEntry[],
+    fromIndex: number,
+    error: unknown,
+  ) {
+    for (let i = fromIndex; i < batch.length; i++) {
+      batch[i].reject(error);
     }
   }
 

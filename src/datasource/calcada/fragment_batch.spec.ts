@@ -174,6 +174,30 @@ describe("FragmentBatchReader", () => {
     expect(reader.supported).toBe(true);
   });
 
+  it("rejects entries orphaned by a stream that ends before every record arrives", async () => {
+    let call = 0;
+    const fetchBatch = vi.fn(async () => {
+      call++;
+      if (call === 1) {
+        const body = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+        return new Response(streamOf([body]), { status: 200 });
+      }
+      const body = encodeRecord(0, new Uint8Array([2]), new Uint8Array([]));
+      return new Response(streamOf([body]), { status: 200 });
+    });
+    const reader = new FragmentBatchReader(fetchBatch);
+    const signal = new AbortController().signal;
+    const p1 = reader.read("piece-a", signal);
+    const p2 = reader.read("piece-b", signal);
+    const a = await p1;
+    expect([...a.draco]).toEqual([1]);
+    await expect(p2).rejects.toThrow(/ended after 1 of 2/);
+
+    const b = await reader.read("piece-c", signal);
+    expect([...b.draco]).toEqual([2]);
+    expect(fetchBatch).toHaveBeenCalledTimes(2);
+  });
+
   it("never enqueues a read called with a pre-aborted signal", async () => {
     const fetchBatch = vi.fn(async () => new Response(streamOf([]), { status: 200 }));
     const reader = new FragmentBatchReader(fetchBatch);
