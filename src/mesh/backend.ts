@@ -170,6 +170,10 @@ export class FragmentChunk extends Chunk {
     );
     super.downloadSucceeded();
   }
+  get downloadSlots(): number {
+    const meshSource = (this.source as FragmentSource | null)?.meshSource;
+    return meshSource?.getFragmentDownloadSlots?.(this) ?? super.downloadSlots;
+  }
 }
 
 /**
@@ -374,6 +378,11 @@ export interface MeshSource {
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class MeshSource extends ChunkSource {
   fragmentSource: FragmentSource;
+
+  // Optional per-chunk download-slot override so a datasource can mark
+  // fragment requests that piggyback on an already-pending batched read as
+  // free (see CalcadaMeshSource). Mirrors ChunkedGraphChunk.downloadSlots.
+  getFragmentDownloadSlots?(chunk: FragmentChunk): number | undefined;
 
   constructor(rpc: RPC, options: any) {
     super(rpc, options);

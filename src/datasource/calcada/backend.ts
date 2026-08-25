@@ -45,6 +45,7 @@ import {
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
+import { FragmentBatchReader } from "#src/datasource/calcada/fragment_batch.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import {
   shouldRetryManifestDownload,
@@ -157,6 +158,14 @@ function assignEmptyMesh(chunk: FragmentChunk) {
     vertexPositions: new Float32Array(0),
     indices: new Uint32Array(0),
   });
+}
+
+// fetchOkImpl throws HttpError (rather than resolving a non-ok Response) on a
+// non-2xx status; 404/405 mean the server has no /fragments_batch endpoint.
+function isUnsupportedFragmentBatchError(error: unknown): boolean {
+  return (
+    error instanceof HttpError && (error.status === 404 || error.status === 405)
+  );
 }
 
 // Module-level reference to active ChunkedGraphLayers — used by
@@ -388,6 +397,18 @@ export class CalcadaMeshSource extends WithParameters(
     }
   >();
 
+  // Streaming batch reader for fragments the manifest resolved into a shard
+  // (no split-piece `url`); coalesces many piece reads issued in the same
+  // tick into a single POST instead of one range request per piece.
+  fragmentBatch = new FragmentBatchReader(async (pieceIds, signal) => {
+    const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
+    return fetchOkImpl(`${baseUrl}/fragments_batch`, {
+      method: "POST",
+      body: JSON.stringify({ pieces: pieceIds }),
+      signal,
+    });
+  }, isUnsupportedFragmentBatchError);
+
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
     // Move calcada mesh manifest + fragment downloads to their own download
@@ -588,6 +609,33 @@ export class CalcadaMeshSource extends WithParameters(
     // client-side shard/minishard resolution.
     const loc = this.fragLocations.get(chunk.fragmentId!);
     if (loc !== undefined) {
+      if (this.fragmentBatch.supported !== false && loc.url === undefined) {
+        try {
+          const { draco, manifest } = await this.fragmentBatch.read(
+            chunk.fragmentId!,
+            signal,
+          );
+          const { data: rawMesh } = await requestAsyncComputation(
+            decodeCalcadaMultilodMesh,
+            signal,
+            [manifest.buffer, draco.buffer],
+            manifest,
+            draco,
+            this.parameters.vertexQuantizationBits,
+            this.parameters.lod,
+          );
+          if (rawMesh && rawMesh.vertexPositions.length > 0) {
+            assignMeshFragmentData(chunk, rawMesh);
+          } else {
+            assignEmptyMesh(chunk);
+          }
+          return;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          // Endpoint missing or this piece failed in the batch: fall through
+          // to the per-piece direct read below.
+        }
+      }
       let combined: Uint8Array;
       if (loc.url) {
         // Split-piece mesh lives in mesh_write_dir (a different bucket than the
@@ -703,6 +751,19 @@ export class CalcadaMeshSource extends WithParameters(
     } else {
       assignEmptyMesh(chunk);
     }
+  }
+
+  getFragmentDownloadSlots(chunk: FragmentChunk): number | undefined {
+    const fragmentId = chunk.fragmentId;
+    if (fragmentId === null) return undefined;
+    if (this.fragmentBatch.supported === false) return undefined;
+    const loc = this.fragLocations.get(fragmentId);
+    if (loc === undefined || loc.url !== undefined) return undefined;
+    // Batchable pieces are admission-free so the whole neuron enqueues in one
+    // promotion pass and lands in the same batch tick; the batch reader
+    // (2000/POST, 2 POSTs in flight) is the effective throttle. A constant
+    // value also keeps slot charge/release symmetric.
+    return 0;
   }
 
   getFragmentKey(objectKey: string | null, fragmentId: string) {
