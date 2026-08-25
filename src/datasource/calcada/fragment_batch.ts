@@ -72,7 +72,7 @@ export type FragmentBatchFetch = (
 ) => Promise<Response>;
 
 export const FRAGMENT_BATCH_MAX_PIECES = 2000;
-export const FRAGMENT_BATCH_MAX_CONCURRENT = 2;
+export const FRAGMENT_BATCH_MAX_CONCURRENT = 4;
 
 interface PendingEntry {
   pieceId: string;
@@ -91,9 +91,17 @@ function unsupportedError(): FragmentBatchUnsupportedError {
 }
 
 /**
- * Batches read(pieceId, signal) calls issued within one tick into POSTs of
- * up to FRAGMENT_BATCH_MAX_PIECES piece ids, with at most
- * FRAGMENT_BATCH_MAX_CONCURRENT batches in flight (extra batches queue).
+ * Batches read(pieceId, signal) calls into POSTs of up to
+ * FRAGMENT_BATCH_MAX_PIECES piece ids, with at most
+ * FRAGMENT_BATCH_MAX_CONCURRENT POSTs in flight.
+ *
+ * Entries accumulate in a shared, order-preserving pool: each tick's
+ * setTimeout(0) flush moves that tick's live entries into the pool, then
+ * drains up to FRAGMENT_BATCH_MAX_PIECES of them into a POST for every free
+ * concurrency slot. Entries that arrive while all slots are busy simply wait
+ * in the pool and get swept into the next POST alongside whatever else is
+ * still undispatched when a slot frees up — so a steady stream of read()
+ * calls coalesces into large POSTs instead of one tiny POST per tick.
  *
  * `fetchBatch` may reject (e.g. a fetch wrapper that throws HttpError on a
  * non-2xx status) or resolve with a non-ok Response; both paths are checked
@@ -104,7 +112,7 @@ function unsupportedError(): FragmentBatchUnsupportedError {
 export class FragmentBatchReader {
   private pendingEntries: PendingEntry[] = [];
   private flushScheduled = false;
-  private batchQueue: PendingEntry[][] = [];
+  private pool: PendingEntry[] = [];
   private inFlightCount = 0;
   private supportedState: boolean | undefined = undefined;
 
@@ -164,27 +172,25 @@ export class FragmentBatchReader {
 
   private flush() {
     this.flushScheduled = false;
-    const entries = this.pendingEntries;
+    this.pool.push(...this.pendingEntries);
     this.pendingEntries = [];
-    const live = entries.filter((entry) => {
-      if (entry.aborted) {
-        entry.reject(new DOMException("aborted", "AbortError"));
-        return false;
-      }
-      return true;
-    });
-    for (let i = 0; i < live.length; i += FRAGMENT_BATCH_MAX_PIECES) {
-      this.batchQueue.push(live.slice(i, i + FRAGMENT_BATCH_MAX_PIECES));
-    }
     this.pumpQueue();
   }
 
   private pumpQueue() {
     while (
       this.inFlightCount < FRAGMENT_BATCH_MAX_CONCURRENT &&
-      this.batchQueue.length > 0
+      this.pool.length > 0
     ) {
-      const batch = this.batchQueue.shift()!;
+      const drained = this.pool.splice(0, FRAGMENT_BATCH_MAX_PIECES);
+      const batch = drained.filter((entry) => {
+        if (entry.aborted) {
+          entry.reject(new DOMException("aborted", "AbortError"));
+          return false;
+        }
+        return true;
+      });
+      if (batch.length === 0) continue;
       this.inFlightCount++;
       void this.runBatch(batch).finally(() => {
         this.inFlightCount--;

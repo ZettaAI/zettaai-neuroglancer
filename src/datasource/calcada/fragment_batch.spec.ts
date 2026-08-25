@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  FRAGMENT_BATCH_MAX_CONCURRENT,
   FRAGMENT_BATCH_MAX_PIECES,
   FragmentBatchReader,
   FragmentBatchUnsupportedError,
@@ -250,5 +251,59 @@ describe("FragmentBatchReader", () => {
     expect(fetchBatch).toHaveBeenCalledTimes(2);
     expect(fetchBatch.mock.calls[0][0].length).toBe(FRAGMENT_BATCH_MAX_PIECES);
     expect(fetchBatch.mock.calls[1][0].length).toBe(1);
+  });
+
+  it("merges entries from a later tick with earlier undispatched entries into one POST once a slot frees", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const reader = new FragmentBatchReader(fetchBatch);
+    const signal = new AbortController().signal;
+
+    for (let i = 0; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
+      reader.read(`saturate-${i}`, signal).catch(() => {});
+      await tick();
+    }
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+
+    const a = reader.read("piece-a", signal);
+    await tick();
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+
+    const b1 = reader.read("piece-b1", signal);
+    const b2 = reader.read("piece-b2", signal);
+    await tick();
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+
+    const freedBody = encodeRecord(0, new Uint8Array([9]), new Uint8Array([]));
+    held[0](new Response(streamOf([freedBody]), { status: 200 }));
+    await tick();
+
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT + 1);
+    expect(posts[FRAGMENT_BATCH_MAX_CONCURRENT]).toEqual([
+      "piece-a",
+      "piece-b1",
+      "piece-b2",
+    ]);
+
+    const mergedBody = new Uint8Array([
+      ...encodeRecord(0, new Uint8Array([1]), new Uint8Array([])),
+      ...encodeRecord(0, new Uint8Array([2]), new Uint8Array([])),
+      ...encodeRecord(0, new Uint8Array([3]), new Uint8Array([])),
+    ]);
+    held[FRAGMENT_BATCH_MAX_CONCURRENT](
+      new Response(streamOf([mergedBody]), { status: 200 }),
+    );
+    const [ra, rb1, rb2] = await Promise.all([a, b1, b2]);
+    expect([...ra.draco]).toEqual([1]);
+    expect([...rb1.draco]).toEqual([2]);
+    expect([...rb2.draco]).toEqual([3]);
+
+    for (let i = 1; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
+      held[i](new Response(streamOf([]), { status: 200 }));
+    }
   });
 });
