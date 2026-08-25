@@ -3296,48 +3296,70 @@ void main() {
       );
       return;
     }
+    const nBits = this.graph.info.graph.nBitsForLayerId;
+    const toResolve: {
+      queryId: bigint;
+      original: bigint;
+      linkPiece: boolean;
+    }[] = [];
     for (const segmentId of segments) {
       if (!added) continue;
-      const nBits = this.graph.info.graph.nBitsForLayerId;
       const layerId = segmentId >> BigInt(64 - nBits);
 
       // Already a root (layer >= 2) — nothing to resolve
       if (layerId >= 2n) continue;
 
-      const resolveAndReplace = (rootId: bigint) => {
-        segmentsState.visibleSegments.add(rootId);
-        segmentsState.selectedSegments.add(rootId);
-        // Drop the source piece so the segment panel only lists the
-        // resolved root. selectedSegments.delete cascades to
-        // visibleSegments removal, but the volume shader resolves the
-        // piece to its root via segmentEquivalences before consulting
-        // visibleSegments — as long as root stays selected the voxel
-        // still renders with the root's color.
-        if (segmentId !== rootId) {
-          segmentsState.selectedSegments.delete(segmentId);
-        }
-      };
-
       if (layerId === 1n) {
-        this.graph
-          .getRoot(segmentId, segmentsState.timestamp.value)
-          .then(resolveAndReplace);
-      } else {
-        // Raw piece (layer 0) — check equivalences first, fallback to server
-        const representative = segmentsState.segmentEquivalences.get(segmentId);
-        if (representative !== segmentId) {
-          resolveAndReplace(representative);
-        } else {
-          const pieceWithLayer =
-            (segmentId & 0x00ffffffffffffffn) | (1n << 56n);
-          this.graph
-            .getRoot(pieceWithLayer, segmentsState.timestamp.value)
-            .then((rootId) => {
-              resolveAndReplace(rootId);
-              segmentsState.segmentEquivalences.link(rootId, segmentId);
-            });
-        }
+        toResolve.push({
+          queryId: segmentId,
+          original: segmentId,
+          linkPiece: false,
+        });
+        continue;
       }
+      // Raw piece (layer 0) — check equivalences first, fallback to server
+      const representative = segmentsState.segmentEquivalences.get(segmentId);
+      if (representative !== segmentId) {
+        this.replaceSelectedWithRoot(segmentId, representative);
+      } else {
+        const pieceWithLayer = (segmentId & 0x00ffffffffffffffn) | (1n << 56n);
+        toResolve.push({
+          queryId: pieceWithLayer,
+          original: segmentId,
+          linkPiece: true,
+        });
+      }
+    }
+    if (toResolve.length === 0) return;
+    this.graph
+      .getRoots(
+        toResolve.map((entry) => entry.queryId),
+        segmentsState.timestamp.value,
+      )
+      .then((rootIds) => {
+        toResolve.forEach((entry, i) => {
+          const rootId = rootIds[i];
+          // 0 = unknown id (e.g. wrong layer byte); leave the segment as-is.
+          if (rootId === undefined || rootId === 0n) return;
+          this.replaceSelectedWithRoot(entry.original, rootId);
+          if (entry.linkPiece) {
+            segmentsState.segmentEquivalences.link(rootId, entry.original);
+          }
+        });
+      });
+  }
+
+  // Swap a selected piece id for its resolved root. selectedSegments.delete
+  // cascades to visibleSegments removal, but the volume shader resolves the
+  // piece to its root via segmentEquivalences before consulting
+  // visibleSegments — as long as the root stays selected the voxel still
+  // renders with the root's color.
+  private replaceSelectedWithRoot(segmentId: bigint, rootId: bigint) {
+    const { segmentsState } = this;
+    segmentsState.visibleSegments.add(rootId);
+    segmentsState.selectedSegments.add(rootId);
+    if (segmentId !== rootId) {
+      segmentsState.selectedSegments.delete(segmentId);
     }
   }
 
@@ -4107,6 +4129,30 @@ class CalcadaGraphServerInterface {
     return parseUint64(jsonResp.root_id);
   }
 
+  async getRoots(segments: bigint[], timestamp = 0, branchId = 0) {
+    if (segments.length === 0) return [];
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const jsonResp = await withErrorMessageHTTP(
+      fetchOkImpl(
+        appendCoordParams(`${baseUrl}/roots?int64_as_str=1`, {
+          timestamp,
+          branchId,
+        }),
+        {
+          method: "POST",
+          body: JSON.stringify({
+            node_ids: segments.map((segment) => segment.toString()),
+          }),
+        },
+      ).then((response) => response.json()),
+      {
+        initialMessage: `Retrieving roots for ${segments.length} segment(s)`,
+        errorPrefix: "Could not fetch roots: ",
+      },
+    );
+    return (jsonResp.root_ids as string[]).map(parseUint64);
+  }
+
   async getLeaves(
     segment: bigint,
     timestamp = 0,
@@ -4793,6 +4839,10 @@ class CalcadaGraphSource extends SegmentationGraphSource {
 
   getRoot(segment: bigint, timestamp?: number) {
     return this.graphServer.getRoot(segment, timestamp, this.branchId.value);
+  }
+
+  getRoots(segments: bigint[], timestamp?: number) {
+    return this.graphServer.getRoots(segments, timestamp, this.branchId.value);
   }
 
   async isL2CacheUrlAvailable() {
