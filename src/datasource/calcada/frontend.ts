@@ -55,6 +55,7 @@ import {
   getHttpSource,
   CALCADA_MESH_NEW_SEGMENT_RPC_ID,
   CALCADA_MESH_REFRESH_SEGMENT_RPC_ID,
+  CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID,
   isBaseSegmentId,
   makeChunkedGraphChunkSpecification,
   MeshSourceParameters,
@@ -2438,7 +2439,7 @@ class ZettaTraceSession extends RefCounted {
     decidedAfterThis.add(current.lineId);
     const next = nextCandidate(this.candidates, decidedAfterThis);
     if (next !== undefined) {
-      this.connection.meshAddNewSegments([next.partnerRootId]);
+      this.connection.meshPrefetchSegments([next.partnerRootId]);
     }
 
     // The accept branch cannot be prefetched by url: the merged root does not
@@ -3598,6 +3599,24 @@ void main() {
       idle(fetchMeshes, { timeout: 500 });
     } else {
       setTimeout(fetchMeshes, 100);
+    }
+  }
+
+  meshPrefetchSegments(segments: bigint[]) {
+    const meshSource = this.getMeshSource();
+    if (!meshSource) return;
+    const prefetch = () => {
+      const { rpc, rpcId } = meshSource;
+      if (!rpc || rpcId === undefined) return;
+      for (const segment of segments) {
+        rpc.invoke(CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID, { rpcId, segment });
+      }
+    };
+    const idle = window.requestIdleCallback?.bind(window);
+    if (idle) {
+      idle(prefetch, { timeout: 500 });
+    } else {
+      setTimeout(prefetch, 100);
     }
   }
 

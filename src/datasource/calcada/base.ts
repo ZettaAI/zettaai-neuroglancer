@@ -46,6 +46,10 @@ export const CALCADA_MESH_NEW_SEGMENT_RPC_ID = "CalcadaMeshSource:NewSegment";
 // split (root id unchanged, but its leaves changed) refreshes its 3D mesh.
 export const CALCADA_MESH_REFRESH_SEGMENT_RPC_ID =
   "CalcadaMeshSource:RefreshSegment";
+// Fire the manifest HTTP request for a root likely to be selected next, to
+// warm calcada's server-side root-pieces/frag-location caches ahead of time.
+export const CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID =
+  "CalcadaMeshSource:PrefetchSegment";
 export const CALCADA_BULK_LINK_RPC_ID = "CalcadaChunkedGraphLayer:BulkLink";
 
 // Off-thread decode of a per-piece multilod-draco mesh: parse the manifest,

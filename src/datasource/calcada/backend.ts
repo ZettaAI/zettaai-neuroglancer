@@ -31,6 +31,7 @@ import {
   getCalcadaFragmentKey,
   CALCADA_MESH_NEW_SEGMENT_RPC_ID,
   CALCADA_MESH_REFRESH_SEGMENT_RPC_ID,
+  CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID,
   CALCADA_BULK_LINK_RPC_ID,
   ChunkedGraphSourceParameters,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
@@ -44,6 +45,7 @@ import {
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
+import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import {
   shouldRetryManifestDownload,
   nextManifestRetryDelayMs,
@@ -410,6 +412,38 @@ export class CalcadaMeshSource extends WithParameters(
     }, TEN_MINUTES);
   }
 
+  // Fire-and-forget manifest fetch for a root likely to be selected next.
+  // Warms calcada's server-side root-pieces/frag-location caches (the cold
+  // /manifest cost) and stashes frag_locations for the coalesced fast path;
+  // the chunk system still performs the real fetch when the root turns
+  // visible.
+  prefetchManifest(segment: bigint) {
+    const { parameters } = this;
+    if (isBaseSegmentId(segment, parameters.nBitsForLayerId)) return;
+    if (this.chunks.has(getObjectKey(segment))) return;
+    const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
+    const branchId = this.branchId?.value ?? parameters.branchId;
+    const manifestPath = buildManifestPath(segment, parameters.lod, branchId);
+    void fetchOkImpl(baseUrl + manifestPath, {})
+      .then((response) => response.json())
+      .then((response) => {
+        const fragLocations = response?.frag_locations;
+        if (fragLocations && typeof fragLocations === "object") {
+          for (const piece of Object.keys(fragLocations)) {
+            const l = fragLocations[piece];
+            this.fragLocations.set(`${piece}:0`, {
+              shard: l.shard,
+              offset: l.offset,
+              dracoLength: l.draco_length,
+              manifestLength: l.manifest_length,
+              url: l.url,
+            });
+          }
+        }
+      })
+      .catch(() => undefined);
+  }
+
   // Force a re-download of a root whose manifest is already cached. A keep-whole
   // piece split keeps the root id but changes its leaves, so addNewSegment alone
   // (which only re-fetches manifests the mesh layer requests fresh) never
@@ -437,11 +471,12 @@ export class CalcadaMeshSource extends WithParameters(
       return decodeManifestChunk(chunk, { fragments: [] });
     }
     const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
-    let manifestPath = `/manifest/${chunk.objectId}:${parameters.lod}?verify=1&prepend_seg_ids=1`;
     const branchId = this.branchId?.value ?? parameters.branchId;
-    if (branchId && branchId > 0) {
-      manifestPath += `&branch_id=${branchId}`;
-    }
+    const manifestPath = buildManifestPath(
+      chunk.objectId,
+      parameters.lod,
+      branchId,
+    );
     let response: any;
     try {
       response = await (
@@ -1000,4 +1035,9 @@ registerRPC(CALCADA_MESH_NEW_SEGMENT_RPC_ID, function (x) {
 registerRPC(CALCADA_MESH_REFRESH_SEGMENT_RPC_ID, function (x) {
   const obj = <CalcadaMeshSource>this.get(x.rpcId);
   obj.refreshSegment(x.segment);
+});
+
+registerRPC(CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID, function (x) {
+  const obj = <CalcadaMeshSource>this.get(x.rpcId);
+  obj.prefetchManifest(x.segment);
 });
