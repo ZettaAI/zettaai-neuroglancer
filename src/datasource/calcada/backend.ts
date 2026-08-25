@@ -414,7 +414,7 @@ export class CalcadaMeshSource extends WithParameters(
 
   // Fire-and-forget manifest fetch for a root likely to be selected next.
   // Warms calcada's server-side root-pieces/frag-location caches (the cold
-  // /manifest cost) and stashes frag_locations for the coalesced fast path;
+  // /manifest cost) and stashes frag_locations for downloadFragment's direct range-read fast path;
   // the chunk system still performs the real fetch when the root turns
   // visible.
   prefetchManifest(segment: bigint) {

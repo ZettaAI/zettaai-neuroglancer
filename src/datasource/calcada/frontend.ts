@@ -3628,6 +3628,8 @@ void main() {
     const meshSource = this.getMeshSource();
     if (!meshSource) return;
     const prefetch = () => {
+      // Deferred: the source may have been disposed (layer removed / chunk
+      // sources refreshed) between scheduling and firing, so re-check.
       const { rpc, rpcId } = meshSource;
       if (!rpc || rpcId === undefined) return;
       for (const segment of segments) {
