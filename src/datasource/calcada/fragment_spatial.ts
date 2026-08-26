@@ -136,10 +136,11 @@ export class FragmentSpatialIndex {
   private biasCache: Map<string, number> | null = null;
   private dMax = 1;
 
-  // resolution is the graph's base voxel resolution (nm/voxel per axis),
-  // used to convert between the nm centers parsed from the manifest and the
-  // mesh's voxel model space. Invalid input (see normalizeResolution) falls
-  // back to [1, 1, 1].
+  // resolution is the mesh's own voxel model-space resolution (nm/voxel per
+  // axis) — NOT necessarily the graph's base resolution, since a mesh can be
+  // generated at a coarser mip (see mesh_model_resolution.ts). Used to
+  // convert between the nm centers parsed from the manifest and that model
+  // space. Invalid input (see normalizeResolution) falls back to [1, 1, 1].
   constructor(resolution?: Resolution) {
     this.resolution = normalizeResolution(resolution);
   }

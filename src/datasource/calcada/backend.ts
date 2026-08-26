@@ -404,9 +404,10 @@ export class CalcadaMeshSource extends WithParameters(
 
   // Scores pieces by proximity to the current view so the batch pool and
   // fragment chunk priorities favor near, on-screen pieces first. Piece
-  // centers arrive in nm; graphResolution converts them into the mesh's
-  // voxel model space (falls back to treating nm as model units when absent).
-  spatialIndex = new FragmentSpatialIndex(this.parameters.graphResolution);
+  // centers arrive in nm; meshModelResolution converts them into the mesh's
+  // own voxel model space (falls back to treating nm as model units when
+  // absent).
+  spatialIndex = new FragmentSpatialIndex(this.parameters.meshModelResolution);
 
   // Streaming batch reader for fragments the manifest resolved into a shard
   // (no split-piece `url`); coalesces many piece reads issued in the same

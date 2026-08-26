@@ -69,6 +69,7 @@ import {
   dropDecided,
   nextCandidate,
 } from "#src/datasource/calcada/candidate_ranking.js";
+import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import {
   interceptedRemovals,
   TRACE_CANDIDATE_COLOR_PACKED,
@@ -751,6 +752,11 @@ async function getMeshSource(
     fragmentUrl,
     options,
   );
+  // The mesh can be generated at a coarser mip than the graph's base
+  // resolution; `transform` maps the graph's voxel grid into the mesh's own,
+  // so the spatial index needs the graph resolution scaled by it, not the
+  // graph resolution alone.
+  const transform = metadata?.transform || mat4.create();
   const parameters: MeshSourceParameters = {
     manifestUrl: url,
     fragmentUrl: fragmentUrl,
@@ -763,9 +769,8 @@ async function getMeshSource(
     vertexQuantizationBits: metadata?.vertexQuantizationBits ?? 16,
     nBitsForLayerId,
     branchId: branchId.value,
-    graphResolution,
+    meshModelResolution: meshModelResolution(graphResolution, transform),
   };
-  const transform = metadata?.transform || mat4.create();
   return {
     source: getShardedMeshSource(sharedKvStoreContext, parameters, branchId),
     transform,
