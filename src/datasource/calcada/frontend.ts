@@ -752,9 +752,9 @@ async function getMeshSource(
     options,
   );
   // The mesh can be generated at a coarser mip than the graph's base
-  // resolution; `transform` maps the graph's voxel grid into the mesh's own,
-  // so the spatial index needs the graph resolution scaled by it, not the
-  // graph resolution alone.
+  // resolution; the transform's diagonal is the mesh model space's
+  // nm-per-unit grid (see meshModelResolution), which already encodes that
+  // mip — so it is used directly, not multiplied by the graph resolution.
   const transform = metadata?.transform || mat4.create();
   const parameters: MeshSourceParameters = {
     manifestUrl: url,

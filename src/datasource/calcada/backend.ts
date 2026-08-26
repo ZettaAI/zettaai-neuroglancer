@@ -787,12 +787,17 @@ export class CalcadaMeshSource extends WithParameters(
   getFragmentDownloadSlots(chunk: FragmentChunk): number | undefined {
     const fragmentId = chunk.fragmentId;
     if (fragmentId === null) return undefined;
-    if (this.fragmentBatch.supported === false) return undefined;
+    // Free admission only once batch support is CONFIRMED. While support is
+    // still unknown (before the first POST resolves), pieces charge normal
+    // slots: if the server turns out to lack the endpoint, the first wave
+    // falls back to per-piece direct reads and must stay slot-throttled —
+    // admission-free chunks would stampede GCS with the whole neuron at once.
+    if (this.fragmentBatch.supported !== true) return undefined;
     const loc = this.fragLocations.get(fragmentId);
     if (loc === undefined || loc.url !== undefined) return undefined;
     // Batchable pieces are admission-free so the whole neuron enqueues in one
     // promotion pass and lands in the same batch tick; the batch reader
-    // (2000/POST, 2 POSTs in flight) is the effective throttle. A constant
+    // (2000/POST, 4 POSTs in flight) is the effective throttle. A constant
     // value also keeps slot charge/release symmetric.
     return 0;
   }
