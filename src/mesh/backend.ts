@@ -399,6 +399,8 @@ export class MeshSource extends ChunkSource {
   // Optional view-priority hooks (see FragmentSpatialHint): the layer feeds
   // the current view frustum/focus in model space, and the source may bias
   // individual fragment request priorities within [-1, 0] in response.
+  // Callers must pass a freshly allocated hint each time (implementations may
+  // retain it by reference and dedup by value against the previous one).
   updateFragmentSpatialHint?(hint: FragmentSpatialHint | null): void;
   getFragmentPriorityBias?(fragmentId: string): number;
 
