@@ -141,4 +141,63 @@ describe("FragmentSpatialIndex", () => {
     const cacheAfter = (index as unknown as { scoreCache: unknown }).scoreCache;
     expect(cacheAfter).not.toBe(cacheBefore);
   });
+
+  describe("with an anisotropic resolution (voxel model space, nm centers)", () => {
+    const resolution: [number, number, number] = [16, 16, 45];
+
+    it("orders by physical nm distance to the focus, not raw coordinate magnitude", () => {
+      const index = new FragmentSpatialIndex(resolution);
+      // focusModel is in voxels (100, 0, 0) -> focus in nm is (1600, 0, 0).
+      // "physically-near" is 50nm from that focus; "origin-near" is 1550nm
+      // from it despite having the smaller raw nm coordinate. Under the old
+      // bug (nm centers compared directly against a voxel-space focus with
+      // no conversion), "origin-near" would have sorted first.
+      index.setFromManifest(
+        ["physically-near:0", "origin-near:0"],
+        [1650, 0, 0, 50, 0, 0],
+        [5, 5],
+      );
+      const mvp = mat4.ortho(
+        mat4.create(),
+        -1000,
+        1000,
+        -1000,
+        1000,
+        -1000,
+        1000,
+      );
+      const hint: FragmentSpatialHint = {
+        clippingPlanes: getFrustrumPlanes(new Float32Array(24), mvp),
+        focusModel: vec3.fromValues(100, 0, 0),
+      };
+      index.updateHint(hint);
+      expect(index.score("physically-near:0")).toBeLessThan(
+        index.score("origin-near:0"),
+      );
+    });
+
+    it("classifies a piece by its MODEL-space position, not its raw nm coordinates", () => {
+      const index = new FragmentSpatialIndex(resolution);
+      // Raw nm coordinate (3000) is outside a +/-200 box, but the
+      // MODEL-space position (3000 / 16 = 187.5) is inside it.
+      index.setFromManifest(["big:0"], [3000, 0, 0], [5]);
+      const mvp = mat4.ortho(mat4.create(), -200, 200, -200, 200, -200, 200);
+      const hint: FragmentSpatialHint = {
+        clippingPlanes: getFrustrumPlanes(new Float32Array(24), mvp),
+        focusModel: vec3.fromValues(0, 0, 0),
+      };
+      index.updateHint(hint);
+      // In-frustum score is the nm distance to the focus (0); out-of-frustum
+      // would be OUT_OF_VIEW_OFFSET (~2^53) larger.
+      expect(index.score("big:0")).toBe(3000);
+    });
+  });
+
+  it("falls back to identity resolution ([1, 1, 1]) when given an invalid array", () => {
+    const index = new FragmentSpatialIndex([16, 0, 45]);
+    index.setFromManifest(["near:0", "far:0"], [10, 0, 0, 50, 0, 0], [5, 5]);
+    index.updateHint(makeHint());
+    expect(index.score("near:0")).toBe(10);
+    expect(index.score("near:0")).toBeLessThan(index.score("far:0"));
+  });
 });

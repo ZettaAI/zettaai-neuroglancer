@@ -109,6 +109,11 @@ export class MeshSourceParameters {
   vertexQuantizationBits: number;
   nBitsForLayerId: number;
   branchId: number;
+  // Graph base-scale voxel resolution (nm/voxel per axis), used to convert
+  // manifest piece centers (nm) into the mesh's voxel model space for
+  // view-priority scoring. Undefined for datasources that can't determine it
+  // (FragmentSpatialIndex then falls back to treating nm as model units).
+  graphResolution: [number, number, number] | undefined;
 
   static RPC_ID = "calcada/MeshSource";
 }

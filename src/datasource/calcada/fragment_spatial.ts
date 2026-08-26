@@ -26,25 +26,54 @@ export interface FragmentSphere {
 const UNKNOWN_SCORE = Number.MAX_SAFE_INTEGER / 2;
 const OUT_OF_VIEW_OFFSET = Number.MAX_SAFE_INTEGER;
 
-// Seam for converting manifest center units (nm) into mesh model-space
-// units. Currently identity; change to 1 / resolution here if model space
-// turns out not to be nm.
-const NM_TO_MODEL_SCALE = 1;
+export type Resolution = readonly [number, number, number];
+
+const IDENTITY_RESOLUTION: Resolution = [1, 1, 1];
+
+// Falls back to [1, 1, 1] (nm treated as model units) when the caller has no
+// resolution, or any axis isn't a finite positive number.
+function normalizeResolution(resolution: Resolution | undefined): Resolution {
+  if (
+    resolution === undefined ||
+    resolution.length !== 3 ||
+    resolution.some((v) => !(Number.isFinite(v) && v > 0))
+  ) {
+    return IDENTITY_RESOLUTION;
+  }
+  return resolution;
+}
 
 type Category = "in" | "unknown" | "out";
 
-function distanceTo(hint: FragmentSpatialHint, sphere: FragmentSphere): number {
-  const dx = hint.focusModel[0] - sphere.cx;
-  const dy = hint.focusModel[1] - sphere.cy;
-  const dz = hint.focusModel[2] - sphere.cz;
+// Piece centers/radii are stored in nm (see FragmentSphere); focusModel and
+// clippingPlanes are in the mesh's MODEL space, which is voxels at the
+// graph's base resolution, not necessarily nm. Distance is computed in nm
+// (physically correct, avoids anisotropic z distortion) by converting the
+// focus into nm; the frustum test is done in model space (matching the
+// planes) by converting the sphere into model units.
+function distanceTo(
+  hint: FragmentSpatialHint,
+  sphere: FragmentSphere,
+  resolution: Resolution,
+): number {
+  const dx = hint.focusModel[0] * resolution[0] - sphere.cx;
+  const dy = hint.focusModel[1] * resolution[1] - sphere.cy;
+  const dz = hint.focusModel[2] * resolution[2] - sphere.cz;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 function isInFrustum(
   clippingPlanes: Float32Array,
   sphere: FragmentSphere,
+  resolution: Resolution,
 ): boolean {
-  const { cx, cy, cz, r } = sphere;
+  const cx = sphere.cx / resolution[0];
+  const cy = sphere.cy / resolution[1];
+  const cz = sphere.cz / resolution[2];
+  // Dividing by the smallest axis resolution over-estimates the model-space
+  // radius on the other axes, so an edge piece stays classified in-frustum
+  // rather than incorrectly deferred.
+  const r = sphere.r / Math.min(resolution[0], resolution[1], resolution[2]);
   for (let i = 0; i < 6; ++i) {
     const a = clippingPlanes[4 * i];
     const b = clippingPlanes[4 * i + 1];
@@ -76,13 +105,19 @@ function hintEquals(
 function classify(
   hint: FragmentSpatialHint,
   sphere: FragmentSphere,
+  resolution: Resolution,
 ): { category: Category; distance: number } {
   if (sphere.r < 0) {
-    return { category: "unknown", distance: distanceTo(hint, sphere) };
+    return {
+      category: "unknown",
+      distance: distanceTo(hint, sphere, resolution),
+    };
   }
-  const distance = distanceTo(hint, sphere);
+  const distance = distanceTo(hint, sphere, resolution);
   return {
-    category: isInFrustum(hint.clippingPlanes, sphere) ? "in" : "out",
+    category: isInFrustum(hint.clippingPlanes, sphere, resolution)
+      ? "in"
+      : "out",
     distance,
   };
 }
@@ -96,9 +131,18 @@ function classify(
 export class FragmentSpatialIndex {
   private spheres = new Map<string, FragmentSphere>();
   private hint: FragmentSpatialHint | null = null;
+  private resolution: Resolution;
   private scoreCache: Map<string, number> | null = null;
   private biasCache: Map<string, number> | null = null;
   private dMax = 1;
+
+  // resolution is the graph's base voxel resolution (nm/voxel per axis),
+  // used to convert between the nm centers parsed from the manifest and the
+  // mesh's voxel model space. Invalid input (see normalizeResolution) falls
+  // back to [1, 1, 1].
+  constructor(resolution?: Resolution) {
+    this.resolution = normalizeResolution(resolution);
+  }
 
   setFromManifest(
     fragments: string[],
@@ -114,9 +158,9 @@ export class FragmentSpatialIndex {
     }
     for (let i = 0; i < fragments.length; ++i) {
       this.spheres.set(fragments[i], {
-        cx: centers[3 * i] * NM_TO_MODEL_SCALE,
-        cy: centers[3 * i + 1] * NM_TO_MODEL_SCALE,
-        cz: centers[3 * i + 2] * NM_TO_MODEL_SCALE,
+        cx: centers[3 * i],
+        cy: centers[3 * i + 1],
+        cz: centers[3 * i + 2],
         r: radii[i],
       });
     }
@@ -169,7 +213,7 @@ export class FragmentSpatialIndex {
       { category: Category; distance: number }
     >();
     for (const [id, sphere] of this.spheres) {
-      const result = classify(hint, sphere);
+      const result = classify(hint, sphere, this.resolution);
       classified.set(id, result);
       if (result.category === "in") dMax = Math.max(dMax, result.distance);
     }
