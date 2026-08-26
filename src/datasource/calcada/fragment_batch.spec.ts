@@ -306,4 +306,118 @@ describe("FragmentBatchReader", () => {
       held[i](new Response(streamOf([]), { status: 200 }));
     }
   });
+
+  it("dispatches pieces in comparator order when more than FRAGMENT_BATCH_MAX_PIECES are pooled in one tick", async () => {
+    const fetchBatch = vi.fn(async (pieceIds: string[]) => {
+      const parts: Uint8Array[] = [];
+      for (const _ of pieceIds) {
+        parts.push(encodeRecord(0, new Uint8Array([1]), new Uint8Array([])));
+      }
+      const body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let offset = 0;
+      for (const p of parts) {
+        body.set(p, offset);
+        offset += p.length;
+      }
+      return new Response(streamOf([body]), { status: 200 });
+    });
+    const descending = (a: string, b: string) => (a < b ? 1 : a > b ? -1 : 0);
+    const reader = new FragmentBatchReader(fetchBatch, () => false, descending);
+    const signal = new AbortController().signal;
+    const total = FRAGMENT_BATCH_MAX_PIECES + 1;
+    const pieceId = (i: number) => `piece-${i.toString().padStart(4, "0")}`;
+    const promises = [];
+    for (let i = 0; i < total; i++) {
+      promises.push(reader.read(pieceId(i), signal));
+    }
+    await Promise.all(promises);
+    expect(fetchBatch).toHaveBeenCalledTimes(2);
+    const expectedFirst = [];
+    for (let i = FRAGMENT_BATCH_MAX_PIECES; i >= 1; i--) {
+      expectedFirst.push(pieceId(i));
+    }
+    expect(fetchBatch.mock.calls[0][0]).toEqual(expectedFirst);
+    expect(fetchBatch.mock.calls[1][0]).toEqual([pieceId(0)]);
+  });
+
+  it("re-sorts pieces from an earlier pooled wave together with a newly enqueued wave at dispatch time", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const descending = (a: string, b: string) => (a < b ? 1 : a > b ? -1 : 0);
+    const reader = new FragmentBatchReader(fetchBatch, () => false, descending);
+    const signal = new AbortController().signal;
+
+    for (let i = 0; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
+      reader.read(`saturate-${i}`, signal).catch(() => {});
+      await tick();
+    }
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+
+    reader.read("piece-m", signal).catch(() => {});
+    reader.read("piece-z", signal).catch(() => {});
+    await tick();
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+
+    reader.read("piece-a", signal).catch(() => {});
+    reader.read("piece-k", signal).catch(() => {});
+    await tick();
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+
+    held[0](new Response(streamOf([]), { status: 200 }));
+    await tick();
+
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT + 1);
+    expect(posts[FRAGMENT_BATCH_MAX_CONCURRENT]).toEqual([
+      "piece-z",
+      "piece-m",
+      "piece-k",
+      "piece-a",
+    ]);
+
+    for (let i = 1; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
+      held[i](new Response(streamOf([]), { status: 200 }));
+    }
+  });
+
+  it("preserves FIFO dispatch order across pooled waves when no sortPool comparator is given", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const reader = new FragmentBatchReader(fetchBatch);
+    const signal = new AbortController().signal;
+
+    for (let i = 0; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
+      reader.read(`saturate-${i}`, signal).catch(() => {});
+      await tick();
+    }
+
+    reader.read("piece-m", signal).catch(() => {});
+    reader.read("piece-z", signal).catch(() => {});
+    await tick();
+
+    reader.read("piece-a", signal).catch(() => {});
+    reader.read("piece-k", signal).catch(() => {});
+    await tick();
+
+    held[0](new Response(streamOf([]), { status: 200 }));
+    await tick();
+
+    expect(posts[FRAGMENT_BATCH_MAX_CONCURRENT]).toEqual([
+      "piece-m",
+      "piece-z",
+      "piece-a",
+      "piece-k",
+    ]);
+
+    for (let i = 1; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
+      held[i](new Response(streamOf([]), { status: 200 }));
+    }
+  });
 });
