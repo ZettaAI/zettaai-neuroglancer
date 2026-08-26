@@ -108,6 +108,9 @@ function unsupportedError(): FragmentBatchUnsupportedError {
  * for the unsupported condition. On resolve, a 404 or 405 status marks the
  * reader unsupported. On reject, `isUnsupportedError` (default: never) gets
  * the thrown error and decides.
+ *
+ * `sortPool` (default: none), if given, reorders the pool by piece id right
+ * before each pump's dispatch, so pieces are no longer strictly FIFO.
  */
 export class FragmentBatchReader {
   private pendingEntries: PendingEntry[] = [];
@@ -119,6 +122,7 @@ export class FragmentBatchReader {
   constructor(
     private fetchBatch: FragmentBatchFetch,
     private isUnsupportedError: (error: unknown) => boolean = () => false,
+    private sortPool?: (a: string, b: string) => number,
   ) {}
 
   get supported(): boolean | undefined {
@@ -178,6 +182,13 @@ export class FragmentBatchReader {
   }
 
   private pumpQueue() {
+    const canDispatch =
+      this.inFlightCount < FRAGMENT_BATCH_MAX_CONCURRENT &&
+      this.pool.length > 0;
+    if (this.sortPool && canDispatch) {
+      const cmp = this.sortPool;
+      this.pool.sort((x, y) => cmp(x.pieceId, y.pieceId));
+    }
     while (
       this.inFlightCount < FRAGMENT_BATCH_MAX_CONCURRENT &&
       this.pool.length > 0
