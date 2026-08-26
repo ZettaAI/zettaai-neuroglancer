@@ -4415,7 +4415,12 @@ class CalcadaGraphServerInterface {
     operationId: number;
     roots: bigint[];
     components: bigint[][];
-    splitPieces: { old: bigint; blue: bigint; red: bigint }[];
+    splitPieces: {
+      old: bigint;
+      blue: bigint;
+      red: bigint;
+      origin: "user" | "auto";
+    }[];
   }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     let response: Response;
@@ -4447,7 +4452,7 @@ class CalcadaGraphServerInterface {
     const jsonResp = await response.json();
     const rootIds: string[] = jsonResp.new_root_ids ?? [];
     const comps: string[][] = jsonResp.components ?? [];
-    const subs: { old: string; blue: string; red: string }[] =
+    const subs: { old: string; blue: string; red: string; origin?: string }[] =
       jsonResp.split_pieces ?? [];
     return {
       operationId: Number(jsonResp.operation_id ?? 0),
@@ -4457,6 +4462,9 @@ class CalcadaGraphServerInterface {
         old: parseUint64(sp.old),
         blue: parseUint64(sp.blue),
         red: parseUint64(sp.red),
+        // "auto" marks a piece the backend had to cut on its own to satisfy the
+        // request; nothing renders it, it exists for debugging.
+        origin: sp.origin === "auto" ? ("auto" as const) : ("user" as const),
       })),
     };
   }
