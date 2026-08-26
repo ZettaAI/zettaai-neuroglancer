@@ -93,7 +93,11 @@ describe("FragmentBatchReader", () => {
 
   it("returns separate buffer copies for draco and manifest", async () => {
     const fetchBatch = vi.fn(async () => {
-      const body = encodeRecord(0, new Uint8Array([1, 2]), new Uint8Array([3, 4]));
+      const body = encodeRecord(
+        0,
+        new Uint8Array([1, 2]),
+        new Uint8Array([3, 4]),
+      );
       return new Response(streamOf([body]), { status: 200 });
     });
     const reader = new FragmentBatchReader(fetchBatch);
@@ -200,7 +204,9 @@ describe("FragmentBatchReader", () => {
   });
 
   it("never enqueues a read called with a pre-aborted signal", async () => {
-    const fetchBatch = vi.fn(async () => new Response(streamOf([]), { status: 200 }));
+    const fetchBatch = vi.fn(
+      async () => new Response(streamOf([]), { status: 200 }),
+    );
     const reader = new FragmentBatchReader(fetchBatch);
     const controller = new AbortController();
     controller.abort();
