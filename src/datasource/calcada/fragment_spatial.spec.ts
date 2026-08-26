@@ -103,4 +103,20 @@ describe("FragmentSpatialIndex", () => {
     // manifest was ignored, so neither is scored as in-frustum.
     expect(index.score("near:0")).toBe(index.score("far:0"));
   });
+
+  it("gives a fragment with no spatial data no priority penalty", () => {
+    const index = new FragmentSpatialIndex();
+    index.updateHint(makeHint());
+    expect(index.priorityBias("never-seen:0")).toBe(0);
+    expect(index.compare("never-seen:0", "also-never-seen:0")).toBe(0);
+  });
+
+  it("scores a never-seen fragment like an unknown-bounds one but with no bias penalty", () => {
+    const index = new FragmentSpatialIndex();
+    index.setFromManifest(fragments(["unknown:0"]), [0, 0, 0], [-1]);
+    index.updateHint(makeHint());
+    expect(index.compare("never-seen:0", "unknown:0")).toBe(0);
+    expect(index.priorityBias("never-seen:0")).toBe(0);
+    expect(index.priorityBias("unknown:0")).toBe(-0.75);
+  });
 });

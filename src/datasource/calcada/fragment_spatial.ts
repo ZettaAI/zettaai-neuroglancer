@@ -26,6 +26,11 @@ export interface FragmentSphere {
 const UNKNOWN_SCORE = Number.MAX_SAFE_INTEGER / 2;
 const OUT_OF_VIEW_OFFSET = Number.MAX_SAFE_INTEGER;
 
+// Seam for converting manifest center units (nm) into mesh model-space units.
+// Currently identity; change to 1 / resolution here if model space turns out
+// not to be nm (see task-5-brief.md Step 4).
+const NM_TO_MODEL_SCALE = 1;
+
 type Category = "in" | "unknown" | "out";
 
 function distanceTo(hint: FragmentSpatialHint, sphere: FragmentSphere): number {
@@ -90,11 +95,10 @@ export class FragmentSpatialIndex {
       return;
     }
     for (let i = 0; i < fragments.length; ++i) {
-      const nmToModel = 1;
       this.spheres.set(`${fragments[i]}:0`, {
-        cx: centers[3 * i] * nmToModel,
-        cy: centers[3 * i + 1] * nmToModel,
-        cz: centers[3 * i + 2] * nmToModel,
+        cx: centers[3 * i] * NM_TO_MODEL_SCALE,
+        cy: centers[3 * i + 1] * NM_TO_MODEL_SCALE,
+        cz: centers[3 * i + 2] * NM_TO_MODEL_SCALE,
         r: radii[i],
       });
     }
@@ -158,17 +162,15 @@ export class FragmentSpatialIndex {
   }
 
   // Computes and caches score/bias for a fragment id with no known sphere
-  // (never appeared in a parsed manifest, or seen after a cache fill). Under
-  // a hint it is treated as unknown-bounds; with no hint it stays at 0.
+  // (server sent no centers for it, or it arrived after the last cache
+  // fill). Score matches known-unknown-bounds pieces (mid-pack pool order),
+  // but bias stays 0 — no server info means no priority penalty, so sources
+  // without spatial data keep today's queue behavior exactly.
   private fill(fragmentId: string): { score: number; bias: number } {
-    const { hint } = this;
-    const result: { score: number; bias: number } =
-      hint === null
+    const result =
+      this.hint === null
         ? { score: 0, bias: 0 }
-        : {
-            score: this.scoreFor({ category: "unknown", distance: 0 }),
-            bias: this.biasFor({ category: "unknown", distance: 0 }),
-          };
+        : { score: UNKNOWN_SCORE, bias: 0 };
     this.scoreCache!.set(fragmentId, result.score);
     this.biasCache!.set(fragmentId, result.bias);
     return result;
