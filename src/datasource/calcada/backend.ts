@@ -45,6 +45,8 @@ import {
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
+import { FragmentBatchReader } from "#src/datasource/calcada/fragment_batch.js";
+import { FragmentSpatialIndex } from "#src/datasource/calcada/fragment_spatial.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import {
   shouldRetryManifestDownload,
@@ -57,7 +59,11 @@ import { getShardedKvStoreIfApplicable } from "#src/datasource/precomputed/shard
 import { WithSharedKvStoreContextCounterpart } from "#src/kvstore/backend.js";
 import type { KvStoreWithPath, ReadResponse } from "#src/kvstore/index.js";
 import { readKvStore } from "#src/kvstore/index.js";
-import type { FragmentChunk, ManifestChunk } from "#src/mesh/backend.js";
+import type {
+  FragmentChunk,
+  FragmentSpatialHint,
+  ManifestChunk,
+} from "#src/mesh/backend.js";
 import { assignMeshFragmentData, MeshSource } from "#src/mesh/backend.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import type {
@@ -157,6 +163,14 @@ function assignEmptyMesh(chunk: FragmentChunk) {
     vertexPositions: new Float32Array(0),
     indices: new Uint32Array(0),
   });
+}
+
+// fetchOkImpl throws HttpError (rather than resolving a non-ok Response) on a
+// non-2xx status; 404/405 mean the server has no /fragments_batch endpoint.
+function isUnsupportedFragmentBatchError(error: unknown): boolean {
+  return (
+    error instanceof HttpError && (error.status === 404 || error.status === 405)
+  );
 }
 
 // Module-level reference to active ChunkedGraphLayers — used by
@@ -388,6 +402,29 @@ export class CalcadaMeshSource extends WithParameters(
     }
   >();
 
+  // Scores pieces by proximity to the current view so the batch pool and
+  // fragment chunk priorities favor near, on-screen pieces first. Piece
+  // centers arrive in nm; meshModelResolution converts them into the mesh's
+  // own voxel model space (falls back to treating nm as model units when
+  // absent).
+  spatialIndex = new FragmentSpatialIndex(this.parameters.meshModelResolution);
+
+  // Streaming batch reader for fragments the manifest resolved into a shard
+  // (no split-piece `url`); coalesces many piece reads issued in the same
+  // tick into a single POST instead of one range request per piece.
+  fragmentBatch = new FragmentBatchReader(
+    async (pieceIds, signal) => {
+      const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
+      return fetchOkImpl(`${baseUrl}/fragments_batch`, {
+        method: "POST",
+        body: JSON.stringify({ pieces: pieceIds }),
+        signal,
+      });
+    },
+    isUnsupportedFragmentBatchError,
+    (a, b) => this.spatialIndex.compare(a, b),
+  );
+
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
     // Move calcada mesh manifest + fragment downloads to their own download
@@ -439,6 +476,14 @@ export class CalcadaMeshSource extends WithParameters(
               url: l.url,
             });
           }
+        }
+        const fragments = response?.fragments;
+        if (Array.isArray(fragments)) {
+          this.spatialIndex.setFromManifest(
+            fragments,
+            response?.frag_centers,
+            response?.frag_radii,
+          );
         }
       })
       .catch(() => undefined);
@@ -533,6 +578,13 @@ export class CalcadaMeshSource extends WithParameters(
     // strings ("{piece}:0", per getFragmentPickId).
     const fragments = (response as { fragments?: unknown })?.fragments;
     const hasFragments = Array.isArray(fragments) && fragments.length > 0;
+    if (hasFragments) {
+      this.spatialIndex.setFromManifest(
+        fragments,
+        response?.frag_centers,
+        response?.frag_radii,
+      );
+    }
     const chunkIdentifier = manifestPath;
     // A merge marks its root "new" so we keep polling until calcada's async
     // mesh-generation job actually publishes fragments for it; once a
@@ -588,6 +640,33 @@ export class CalcadaMeshSource extends WithParameters(
     // client-side shard/minishard resolution.
     const loc = this.fragLocations.get(chunk.fragmentId!);
     if (loc !== undefined) {
+      if (this.fragmentBatch.supported !== false && loc.url === undefined) {
+        try {
+          const { draco, manifest } = await this.fragmentBatch.read(
+            chunk.fragmentId!,
+            signal,
+          );
+          const { data: rawMesh } = await requestAsyncComputation(
+            decodeCalcadaMultilodMesh,
+            signal,
+            [manifest.buffer, draco.buffer],
+            manifest,
+            draco,
+            this.parameters.vertexQuantizationBits,
+            this.parameters.lod,
+          );
+          if (rawMesh && rawMesh.vertexPositions.length > 0) {
+            assignMeshFragmentData(chunk, rawMesh);
+          } else {
+            assignEmptyMesh(chunk);
+          }
+          return;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          // Endpoint missing or this piece failed in the batch: fall through
+          // to the per-piece direct read below.
+        }
+      }
       let combined: Uint8Array;
       if (loc.url) {
         // Split-piece mesh lives in mesh_write_dir (a different bucket than the
@@ -705,9 +784,30 @@ export class CalcadaMeshSource extends WithParameters(
     }
   }
 
+  getFragmentDownloadSlots(chunk: FragmentChunk): number | undefined {
+    const fragmentId = chunk.fragmentId;
+    if (fragmentId === null) return undefined;
+    if (this.fragmentBatch.supported === false) return undefined;
+    const loc = this.fragLocations.get(fragmentId);
+    if (loc === undefined || loc.url !== undefined) return undefined;
+    // Batchable pieces are admission-free so the whole neuron enqueues in one
+    // promotion pass and lands in the same batch tick; the batch reader
+    // (2000/POST, 2 POSTs in flight) is the effective throttle. A constant
+    // value also keeps slot charge/release symmetric.
+    return 0;
+  }
+
   getFragmentKey(objectKey: string | null, fragmentId: string) {
     objectKey;
     return getCalcadaFragmentKey(fragmentId);
+  }
+
+  updateFragmentSpatialHint(hint: FragmentSpatialHint | null) {
+    this.spatialIndex.updateHint(hint);
+  }
+
+  getFragmentPriorityBias(fragmentId: string): number {
+    return this.spatialIndex.priorityBias(fragmentId);
   }
 }
 
