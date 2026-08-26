@@ -45,6 +45,7 @@ import {
   getHttpSource,
   decodeCalcadaMultilodMesh,
 } from "#src/datasource/calcada/base.js";
+import { FragmentAdmissionLatch } from "#src/datasource/calcada/fragment_admission.js";
 import { FragmentBatchReader } from "#src/datasource/calcada/fragment_batch.js";
 import { FragmentSpatialIndex } from "#src/datasource/calcada/fragment_spatial.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
@@ -784,22 +785,29 @@ export class CalcadaMeshSource extends WithParameters(
     }
   }
 
+  private fragmentAdmission = new FragmentAdmissionLatch();
+
   getFragmentDownloadSlots(chunk: FragmentChunk): number | undefined {
     const fragmentId = chunk.fragmentId;
     if (fragmentId === null) return undefined;
-    // Free admission only once batch support is CONFIRMED. While support is
-    // still unknown (before the first POST resolves), pieces charge normal
-    // slots: if the server turns out to lack the endpoint, the first wave
-    // falls back to per-piece direct reads and must stay slot-throttled —
-    // admission-free chunks would stampede GCS with the whole neuron at once.
-    if (this.fragmentBatch.supported !== true) return undefined;
-    const loc = this.fragLocations.get(fragmentId);
-    if (loc === undefined || loc.url !== undefined) return undefined;
-    // Batchable pieces are admission-free so the whole neuron enqueues in one
-    // promotion pass and lands in the same batch tick; the batch reader
-    // (2000/POST, 4 POSTs in flight) is the effective throttle. A constant
-    // value also keeps slot charge/release symmetric.
-    return 0;
+    // Latched per download (see FragmentAdmissionLatch): the queue reads this
+    // at both the charge and release transitions, and both inputs below can
+    // change in between, so an unlatched value would leak queue capacity.
+    return this.fragmentAdmission.get(chunk, fragmentId, () => {
+      // Free admission only once batch support is CONFIRMED. While support
+      // is still unknown (before the first POST resolves), pieces charge
+      // normal slots: if the server turns out to lack the endpoint, the
+      // first wave falls back to per-piece direct reads and must stay
+      // slot-throttled — admission-free chunks would stampede GCS with the
+      // whole neuron at once.
+      if (this.fragmentBatch.supported !== true) return undefined;
+      const loc = this.fragLocations.get(fragmentId);
+      if (loc === undefined || loc.url !== undefined) return undefined;
+      // Batchable pieces are admission-free so the whole neuron enqueues in
+      // one promotion pass and lands in the same batch tick; the batch
+      // reader (2000/POST, 4 POSTs in flight) is the effective throttle.
+      return 0;
+    });
   }
 
   getFragmentKey(objectKey: string | null, fragmentId: string) {
