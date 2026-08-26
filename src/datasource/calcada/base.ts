@@ -46,6 +46,10 @@ export const CALCADA_MESH_NEW_SEGMENT_RPC_ID = "CalcadaMeshSource:NewSegment";
 // split (root id unchanged, but its leaves changed) refreshes its 3D mesh.
 export const CALCADA_MESH_REFRESH_SEGMENT_RPC_ID =
   "CalcadaMeshSource:RefreshSegment";
+// Fire the manifest HTTP request for a root likely to be selected next, to
+// warm calcada's server-side root-pieces/frag-location caches ahead of time.
+export const CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID =
+  "CalcadaMeshSource:PrefetchSegment";
 export const CALCADA_BULK_LINK_RPC_ID = "CalcadaChunkedGraphLayer:BulkLink";
 
 // Off-thread decode of a per-piece multilod-draco mesh: parse the manifest,
@@ -105,6 +109,14 @@ export class MeshSourceParameters {
   vertexQuantizationBits: number;
   nBitsForLayerId: number;
   branchId: number;
+  // The mesh's own voxel model-space resolution (nm/voxel per axis) — the
+  // mesh metadata transform's diagonal alone (see meshModelResolution), NOT
+  // the graph's base resolution or any product with it, since a mesh can be
+  // generated at a coarser mip and its transform already carries that grid
+  // in nm. Used to convert manifest piece centers (nm) into model space for
+  // view-priority scoring. Undefined for datasources that can't determine it
+  // (FragmentSpatialIndex then falls back to treating nm as model units).
+  meshModelResolution: [number, number, number] | undefined;
 
   static RPC_ID = "calcada/MeshSource";
 }

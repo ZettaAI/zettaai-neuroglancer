@@ -39,7 +39,10 @@ import { computeTriangleStrips } from "#src/mesh/triangle_strips.js";
 import type { PerspectiveViewBackend } from "#src/perspective_view/backend.js";
 import { PerspectiveViewRenderLayerBackend } from "#src/perspective_view/backend.js";
 import { get3dModelToDisplaySpaceMatrix } from "#src/render_coordinate_transform.js";
-import type { RenderLayerBackendAttachment } from "#src/render_layer_backend.js";
+import type {
+  RenderedViewBackend,
+  RenderLayerBackendAttachment,
+} from "#src/render_layer_backend.js";
 import { withSegmentationLayerBackendState } from "#src/segmentation_display_state/backend.js";
 import {
   getObjectKey,
@@ -169,6 +172,10 @@ export class FragmentChunk extends Chunk {
       this.meshData!,
     );
     super.downloadSucceeded();
+  }
+  get downloadSlots(): number {
+    const meshSource = (this.source as FragmentSource | null)?.meshSource;
+    return meshSource?.getFragmentDownloadSlots?.(this) ?? super.downloadSlots;
   }
 }
 
@@ -364,6 +371,15 @@ export function decodeTriangleVertexPositionsAndIndices(
   );
 }
 
+// The frustum planes and focus point are expressed in the mesh source's
+// MODEL space (i.e. after inverting the model-to-display transform), so
+// implementations can compare them directly against fragment bounds stored
+// in that same space.
+export interface FragmentSpatialHint {
+  clippingPlanes: Float32Array;
+  focusModel: vec3;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export interface MeshSource {
   // TODO(jbms): Move this declaration to class definition below and declare abstract once
@@ -374,6 +390,19 @@ export interface MeshSource {
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class MeshSource extends ChunkSource {
   fragmentSource: FragmentSource;
+
+  // Optional per-chunk download-slot override so a datasource can mark
+  // fragment requests that piggyback on an already-pending batched read as
+  // free (see CalcadaMeshSource). Mirrors ChunkedGraphChunk.downloadSlots.
+  getFragmentDownloadSlots?(chunk: FragmentChunk): number | undefined;
+
+  // Optional view-priority hooks (see FragmentSpatialHint): the layer feeds
+  // the current view frustum/focus in model space, and the source may bias
+  // individual fragment request priorities within [-1, 0] in response.
+  // Callers must pass a freshly allocated hint each time (implementations may
+  // retain it by reference and dedup by value against the previous one).
+  updateFragmentSpatialHint?(hint: FragmentSpatialHint | null): void;
+  getFragmentPriorityBias?(fragmentId: string): number;
 
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
@@ -445,10 +474,58 @@ export class MeshLayer extends withSegmentationLayerBackendState(
     };
     const { view } = attachment;
     attachment.registerDisposer(
+      view.projectionParameters.changed.add(scheduleUpdateChunkPriorities),
+    );
+    attachment.registerDisposer(
       view.visibility.changed.add(scheduleUpdateChunkPriorities),
     );
     attachment.registerDisposer(scheduleUpdateChunkPriorities);
     scheduleUpdateChunkPriorities();
+  }
+
+  private computeFragmentSpatialHint(): FragmentSpatialHint | null {
+    let view: RenderedViewBackend | undefined;
+    for (const attachment of this.attachments.values()) {
+      if (attachment.view.visibility.value !== Number.NEGATIVE_INFINITY) {
+        view = attachment.view;
+        break;
+      }
+    }
+    if (view === undefined) return null;
+    const {
+      transform: { value: transform },
+    } = this;
+    if (transform.error !== undefined) return null;
+    const projectionParameters = view.projectionParameters.value;
+    const modelToDisplay = mat4.create();
+    try {
+      get3dModelToDisplaySpaceMatrix(
+        modelToDisplay,
+        projectionParameters.displayDimensionRenderInfo,
+        transform,
+      );
+    } catch {
+      return null;
+    }
+    const mvp = mat4.create();
+    mat4.multiply(mvp, projectionParameters.viewProjectionMat, modelToDisplay);
+    const clippingPlanes = getFrustrumPlanes(new Float32Array(24), mvp);
+
+    const { displayDimensionIndices } =
+      projectionParameters.displayDimensionRenderInfo;
+    const focusDisplay = vec3.create();
+    for (let i = 0; i < 3; ++i) {
+      const globalDim = displayDimensionIndices[i];
+      focusDisplay[i] =
+        globalDim === -1 ? 0 : projectionParameters.globalPosition[globalDim];
+    }
+    const inverseModelToDisplay = mat4.create();
+    if (mat4.invert(inverseModelToDisplay, modelToDisplay) === null) {
+      return null;
+    }
+    const focusModel = vec3.create();
+    vec3.transformMat4(focusModel, focusDisplay, inverseModelToDisplay);
+    return { clippingPlanes, focusModel };
   }
 
   private updateChunkPriorities() {
@@ -460,6 +537,9 @@ export class MeshLayer extends withSegmentationLayerBackendState(
     const priorityTier = getPriorityTier(visibility);
     const basePriority = getBasePriority(visibility);
     const { source, chunkManager } = this;
+    if (source.updateFragmentSpatialHint !== undefined) {
+      source.updateFragmentSpatialHint(this.computeFragmentSpatialHint());
+    }
     forEachVisibleSegment(this, (objectId) => {
       const manifestChunk = source.getChunk(objectId);
       ++this.numVisibleChunksNeeded;
@@ -481,10 +561,11 @@ export class MeshLayer extends withSegmentationLayerBackendState(
             fragmentId,
           );
           ++this.numVisibleChunksNeeded;
+          const bias = source.getFragmentPriorityBias?.(fragmentId) ?? 0;
           chunkManager.requestChunk(
             fragmentChunk,
             priorityTier,
-            basePriority + MESH_OBJECT_FRAGMENT_CHUNK_PRIORITY,
+            basePriority + MESH_OBJECT_FRAGMENT_CHUNK_PRIORITY + bias,
           );
           if (fragmentChunk.state === ChunkState.GPU_MEMORY) {
             ++this.numVisibleChunksAvailable;
