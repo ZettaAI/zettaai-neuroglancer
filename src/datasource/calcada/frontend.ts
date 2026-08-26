@@ -3343,6 +3343,15 @@ void main() {
         segmentsState.timestamp.value,
       )
       .then((rootIds) => {
+        // The batch contract is positional: one root per posted id, in
+        // order, 0 for unknowns. A shorter/longer response would shift every
+        // entry after the first gap and silently assign wrong roots — bail
+        // loudly instead.
+        if (rootIds.length !== toResolve.length) {
+          throw new Error(
+            `Batched /roots returned ${rootIds.length} ids for ${toResolve.length} queries`,
+          );
+        }
         toResolve.forEach((entry, i) => {
           const rootId = rootIds[i];
           // 0 = unknown id (e.g. wrong layer byte); leave the segment as-is.
@@ -3352,6 +3361,12 @@ void main() {
             segmentsState.segmentEquivalences.link(rootId, entry.original);
           }
         });
+      })
+      .catch((error) => {
+        StatusMessage.showTemporaryMessage(
+          `Failed to resolve roots for ${toResolve.length} segment(s): ${error}`,
+          5000,
+        );
       });
   }
 
