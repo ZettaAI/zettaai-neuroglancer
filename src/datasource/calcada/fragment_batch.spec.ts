@@ -357,13 +357,13 @@ describe("FragmentBatchReader", () => {
     }
     expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
 
-    reader.read("piece-m", signal).catch(() => {});
-    reader.read("piece-z", signal).catch(() => {});
+    reader.read("piece-b", signal).catch(() => {});
+    reader.read("piece-y", signal).catch(() => {});
     await tick();
     expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
 
-    reader.read("piece-a", signal).catch(() => {});
-    reader.read("piece-k", signal).catch(() => {});
+    reader.read("piece-c", signal).catch(() => {});
+    reader.read("piece-x", signal).catch(() => {});
     await tick();
     expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
 
@@ -372,10 +372,10 @@ describe("FragmentBatchReader", () => {
 
     expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT + 1);
     expect(posts[FRAGMENT_BATCH_MAX_CONCURRENT]).toEqual([
-      "piece-z",
-      "piece-m",
-      "piece-k",
-      "piece-a",
+      "piece-y",
+      "piece-x",
+      "piece-c",
+      "piece-b",
     ]);
 
     for (let i = 1; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
