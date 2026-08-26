@@ -16,20 +16,17 @@
 
 import type { mat4 } from "#src/util/geom.js";
 
-// A mesh can be generated at a coarser scale than the graph's base
-// resolution (e.g. mesh_mip_1 for a graph built at mip 0); the mesh
-// metadata's transform maps the graph's base-resolution voxel grid into the
-// mesh's own voxel grid, so the graph's base resolution alone isn't the
-// mesh's model-space resolution. This assumes an axis-aligned transform (no
-// rotation/shear) — only the diagonal is used.
+// The mesh metadata transform's diagonal is the mesh model space's
+// nm-per-unit resolution: a mesh generated at a coarser scale than the
+// graph's base resolution (e.g. mesh_mip_1 = [32,32,45] nm for a graph
+// built at [16,16,45] nm) carries that grid directly in its transform, so
+// the graph's base resolution must NOT be multiplied in (measured live:
+// focusModel * diag(transform) equals the focus point in nm exactly).
+// Assumes an axis-aligned transform (no rotation/shear) — only the
+// diagonal is used. An identity transform means mesh coordinates are
+// already nm.
 export function meshModelResolution(
-  graphResolution: [number, number, number] | undefined,
   transform: mat4,
-): [number, number, number] | undefined {
-  if (graphResolution === undefined) return undefined;
-  return [
-    graphResolution[0] * transform[0],
-    graphResolution[1] * transform[5],
-    graphResolution[2] * transform[10],
-  ];
+): [number, number, number] {
+  return [transform[0], transform[5], transform[10]];
 }

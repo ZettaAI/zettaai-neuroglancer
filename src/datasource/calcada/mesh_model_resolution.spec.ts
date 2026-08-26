@@ -3,23 +3,18 @@ import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resoluti
 import { mat4 } from "#src/util/geom.js";
 
 describe("meshModelResolution", () => {
-  it("scales the graph resolution by the transform's diagonal", () => {
-    const transform = mat4.fromScaling(mat4.create(), [2, 2, 1]);
-    expect(meshModelResolution([16, 16, 45], transform)).toEqual([32, 32, 45]);
+  it("is the transform's diagonal (nm per mesh-model unit)", () => {
+    const transform = mat4.fromScaling(mat4.create(), [32, 32, 45]);
+    expect(meshModelResolution(transform)).toEqual([32, 32, 45]);
   });
 
   it("handles a non-uniform diagonal", () => {
-    const transform = mat4.fromScaling(mat4.create(), [4, 1, 2]);
-    expect(meshModelResolution([16, 16, 45], transform)).toEqual([64, 16, 90]);
+    const transform = mat4.fromScaling(mat4.create(), [64, 16, 90]);
+    expect(meshModelResolution(transform)).toEqual([64, 16, 90]);
   });
 
-  it("passes through undefined when the graph resolution is unknown", () => {
-    const transform = mat4.fromScaling(mat4.create(), [2, 2, 1]);
-    expect(meshModelResolution(undefined, transform)).toBeUndefined();
-  });
-
-  it("is the identity when the transform is the identity matrix", () => {
+  it("is [1,1,1] for an identity transform (mesh coordinates already nm)", () => {
     const transform = mat4.create();
-    expect(meshModelResolution([16, 16, 45], transform)).toEqual([16, 16, 45]);
+    expect(meshModelResolution(transform)).toEqual([1, 1, 1]);
   });
 });

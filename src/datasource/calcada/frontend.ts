@@ -744,7 +744,6 @@ async function getMeshSource(
   fragmentUrl: string,
   nBitsForLayerId: number,
   branchId: WatchableValueInterface<number>,
-  graphResolution: [number, number, number] | undefined,
   options: ProgressOptions,
 ) {
   const { metadata, segmentPropertyMap } = await getMeshMetadata(
@@ -769,7 +768,7 @@ async function getMeshSource(
     vertexQuantizationBits: metadata?.vertexQuantizationBits ?? 16,
     nBitsForLayerId,
     branchId: branchId.value,
-    meshModelResolution: meshModelResolution(graphResolution, transform),
+    meshModelResolution: meshModelResolution(transform),
   };
   return {
     source: getShardedMeshSource(sharedKvStoreContext, parameters, branchId),
@@ -889,14 +888,12 @@ async function getVolumeDataSource(
           info.mesh,
         ),
     );
-    const baseResolution = info.scales[0].resolution;
     const { source: meshSource, transform } = await getMeshSource(
       sharedKvStoreContext,
       info.app!.meshingUrl,
       meshFragmentUrl,
       info.graph.nBitsForLayerId,
       state.branchId,
-      [baseResolution[0], baseResolution[1], baseResolution[2]],
       options,
     );
     const subsourceToModelSubspaceTransform =
