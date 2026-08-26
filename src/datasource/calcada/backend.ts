@@ -173,16 +173,6 @@ function isUnsupportedFragmentBatchError(error: unknown): boolean {
   );
 }
 
-// Strips a manifest fragment id ("{piece}:0") down to its bare piece id, so
-// it lines up with the piece-keyed frag_centers/frag_radii arrays.
-function barePieceIds(fragments: unknown[]): string[] {
-  return fragments.map((frag) => {
-    const s = String(frag);
-    const colon = s.indexOf(":");
-    return colon === -1 ? s : s.slice(0, colon);
-  });
-}
-
 // Module-level reference to active ChunkedGraphLayers — used by
 // CalcadaVolumeChunkSource.download to build piece→root equivalences from
 // the LUT trailer of each chunk. Tracking the LAYER (not just its
@@ -487,7 +477,7 @@ export class CalcadaMeshSource extends WithParameters(
         const fragments = response?.fragments;
         if (Array.isArray(fragments)) {
           this.spatialIndex.setFromManifest(
-            barePieceIds(fragments),
+            fragments,
             response?.frag_centers,
             response?.frag_radii,
           );
@@ -587,7 +577,7 @@ export class CalcadaMeshSource extends WithParameters(
     const hasFragments = Array.isArray(fragments) && fragments.length > 0;
     if (hasFragments) {
       this.spatialIndex.setFromManifest(
-        barePieceIds(fragments),
+        fragments,
         response?.frag_centers,
         response?.frag_radii,
       );

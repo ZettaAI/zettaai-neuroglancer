@@ -182,7 +182,10 @@ export class FragmentBatchReader {
   }
 
   private pumpQueue() {
-    if (this.sortPool) {
+    const canDispatch =
+      this.inFlightCount < FRAGMENT_BATCH_MAX_CONCURRENT &&
+      this.pool.length > 0;
+    if (this.sortPool && canDispatch) {
       const cmp = this.sortPool;
       this.pool.sort((x, y) => cmp(x.pieceId, y.pieceId));
     }

@@ -26,9 +26,9 @@ export interface FragmentSphere {
 const UNKNOWN_SCORE = Number.MAX_SAFE_INTEGER / 2;
 const OUT_OF_VIEW_OFFSET = Number.MAX_SAFE_INTEGER;
 
-// Seam for converting manifest center units (nm) into mesh model-space units.
-// Currently identity; change to 1 / resolution here if model space turns out
-// not to be nm (see task-5-brief.md Step 4).
+// Seam for converting manifest center units (nm) into mesh model-space
+// units. Currently identity; change to 1 / resolution here if model space
+// turns out not to be nm.
 const NM_TO_MODEL_SCALE = 1;
 
 type Category = "in" | "unknown" | "out";
@@ -51,6 +51,24 @@ function isInFrustum(
     const c = clippingPlanes[4 * i + 2];
     const d = clippingPlanes[4 * i + 3];
     if (a * cx + b * cy + c * cz + d < -r) return false;
+  }
+  return true;
+}
+
+// True when two hints carry the same view (same clipping planes and focus),
+// regardless of object identity. Lets updateHint skip the O(all-pieces)
+// reclassification pass on a recomputeChunkPriorities tick that didn't
+// actually move the camera or load new manifest data.
+function hintEquals(
+  a: FragmentSpatialHint | null,
+  b: FragmentSpatialHint | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  for (let i = 0; i < 24; ++i) {
+    if (a.clippingPlanes[i] !== b.clippingPlanes[i]) return false;
+  }
+  for (let i = 0; i < 3; ++i) {
+    if (a.focusModel[i] !== b.focusModel[i]) return false;
   }
   return true;
 }
@@ -95,7 +113,7 @@ export class FragmentSpatialIndex {
       return;
     }
     for (let i = 0; i < fragments.length; ++i) {
-      this.spheres.set(`${fragments[i]}:0`, {
+      this.spheres.set(fragments[i], {
         cx: centers[3 * i] * NM_TO_MODEL_SCALE,
         cy: centers[3 * i + 1] * NM_TO_MODEL_SCALE,
         cz: centers[3 * i + 2] * NM_TO_MODEL_SCALE,
@@ -106,6 +124,7 @@ export class FragmentSpatialIndex {
   }
 
   updateHint(hint: FragmentSpatialHint | null): void {
+    if (hintEquals(this.hint, hint)) return;
     this.hint = hint;
     this.invalidate();
   }

@@ -11,18 +11,10 @@ function makeHint(): FragmentSpatialHint {
   return { clippingPlanes, focusModel: vec3.fromValues(0, 0, 0) };
 }
 
-function fragments(ids: string[]) {
-  return ids.map((id) => id.replace(/:0$/, ""));
-}
-
 describe("FragmentSpatialIndex", () => {
   it("orders known in-frustum pieces by distance to the focus", () => {
     const index = new FragmentSpatialIndex();
-    index.setFromManifest(
-      fragments(["near:0", "far:0"]),
-      [10, 0, 0, 50, 0, 0],
-      [5, 5],
-    );
+    index.setFromManifest(["near:0", "far:0"], [10, 0, 0, 50, 0, 0], [5, 5]);
     index.updateHint(makeHint());
     expect(index.score("near:0")).toBeLessThan(index.score("far:0"));
     expect(index.compare("near:0", "far:0")).toBeLessThan(0);
@@ -31,7 +23,7 @@ describe("FragmentSpatialIndex", () => {
   it("scores an out-of-frustum piece after an unknown-bounds piece", () => {
     const index = new FragmentSpatialIndex();
     index.setFromManifest(
-      fragments(["unknown:0", "outside:0"]),
+      ["unknown:0", "outside:0"],
       [0, 0, 0, 10000, 0, 0],
       [-1, 1],
     );
@@ -42,7 +34,7 @@ describe("FragmentSpatialIndex", () => {
   it("scores unknown-bounds pieces after every known in-frustum piece", () => {
     const index = new FragmentSpatialIndex();
     index.setFromManifest(
-      fragments(["near:0", "far:0", "unknown:0"]),
+      ["near:0", "far:0", "unknown:0"],
       [10, 0, 0, 50, 0, 0, 0, 0, 0],
       [5, 5, -1],
     );
@@ -54,7 +46,7 @@ describe("FragmentSpatialIndex", () => {
   it("updateHint(null) makes compare return 0 for all pairs", () => {
     const index = new FragmentSpatialIndex();
     index.setFromManifest(
-      fragments(["near:0", "far:0", "unknown:0", "outside:0"]),
+      ["near:0", "far:0", "unknown:0", "outside:0"],
       [10, 0, 0, 50, 0, 0, 0, 0, 0, 5000, 0, 0],
       [5, 5, -1, 5],
     );
@@ -69,7 +61,7 @@ describe("FragmentSpatialIndex", () => {
   it("keeps priorityBias within [-1, 0] and monotone in distance", () => {
     const index = new FragmentSpatialIndex();
     index.setFromManifest(
-      fragments(["near:0", "far:0", "unknown:0", "outside:0"]),
+      ["near:0", "far:0", "unknown:0", "outside:0"],
       [10, 0, 0, 50, 0, 0, 0, 0, 0, 10000, 0, 0],
       [5, 5, -1, 1],
     );
@@ -89,15 +81,15 @@ describe("FragmentSpatialIndex", () => {
 
   it("merges spheres across multiple setFromManifest calls instead of replacing them", () => {
     const index = new FragmentSpatialIndex();
-    index.setFromManifest(fragments(["near:0"]), [10, 0, 0], [5]);
-    index.setFromManifest(fragments(["far:0"]), [50, 0, 0], [5]);
+    index.setFromManifest(["near:0"], [10, 0, 0], [5]);
+    index.setFromManifest(["far:0"], [50, 0, 0], [5]);
     index.updateHint(makeHint());
     expect(index.score("near:0")).toBeLessThan(index.score("far:0"));
   });
 
   it("ignores frag_centers/frag_radii on length mismatch", () => {
     const index = new FragmentSpatialIndex();
-    index.setFromManifest(fragments(["near:0", "far:0"]), [10, 0, 0], [5, 5]);
+    index.setFromManifest(["near:0", "far:0"], [10, 0, 0], [5, 5]);
     index.updateHint(makeHint());
     // Both pieces fall back to unknown-bounds treatment since the malformed
     // manifest was ignored, so neither is scored as in-frustum.
@@ -113,10 +105,40 @@ describe("FragmentSpatialIndex", () => {
 
   it("scores a never-seen fragment like an unknown-bounds one but with no bias penalty", () => {
     const index = new FragmentSpatialIndex();
-    index.setFromManifest(fragments(["unknown:0"]), [0, 0, 0], [-1]);
+    index.setFromManifest(["unknown:0"], [0, 0, 0], [-1]);
     index.updateHint(makeHint());
     expect(index.compare("never-seen:0", "unknown:0")).toBe(0);
     expect(index.priorityBias("never-seen:0")).toBe(0);
     expect(index.priorityBias("unknown:0")).toBe(-0.75);
+  });
+
+  it("does not rebuild the score cache when updateHint receives an unchanged hint", () => {
+    const index = new FragmentSpatialIndex();
+    index.setFromManifest(["near:0"], [10, 0, 0], [5]);
+    index.updateHint(makeHint());
+    index.score("near:0"); // force the cache to fill
+    const cacheBefore = (index as unknown as { scoreCache: unknown })
+      .scoreCache;
+    // A freshly-built hint with identical values, but a different object
+    // identity, must not trigger a rebuild.
+    index.updateHint(makeHint());
+    const cacheAfter = (index as unknown as { scoreCache: unknown }).scoreCache;
+    expect(cacheAfter).toBe(cacheBefore);
+  });
+
+  it("does rebuild the score cache when updateHint receives a changed hint", () => {
+    const index = new FragmentSpatialIndex();
+    index.setFromManifest(["near:0"], [10, 0, 0], [5]);
+    index.updateHint(makeHint());
+    index.score("near:0");
+    const cacheBefore = (index as unknown as { scoreCache: unknown })
+      .scoreCache;
+    index.updateHint({
+      clippingPlanes: makeHint().clippingPlanes,
+      focusModel: vec3.fromValues(1, 0, 0),
+    });
+    index.score("near:0"); // force the cache to refill
+    const cacheAfter = (index as unknown as { scoreCache: unknown }).scoreCache;
+    expect(cacheAfter).not.toBe(cacheBefore);
   });
 });
