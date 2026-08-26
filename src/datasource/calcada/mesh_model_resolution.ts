@@ -25,8 +25,6 @@ import type { mat4 } from "#src/util/geom.js";
 // Assumes an axis-aligned transform (no rotation/shear) — only the
 // diagonal is used. An identity transform means mesh coordinates are
 // already nm.
-export function meshModelResolution(
-  transform: mat4,
-): [number, number, number] {
+export function meshModelResolution(transform: mat4): [number, number, number] {
   return [transform[0], transform[5], transform[10]];
 }
