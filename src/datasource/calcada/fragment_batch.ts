@@ -113,13 +113,10 @@ function unsupportedError(): FragmentBatchUnsupportedError {
  * before each pump's dispatch, so pieces are no longer strictly FIFO.
  *
  * `deferPiece` (default: none), if given, parks pieces it reports true for
- * (out-of-view pieces) in the pool instead of dispatching them — they do
- * not download at all while the predicate holds. The predicate is
- * re-consulted on every pump, so a piece that stops being deferred (comes
- * into view) dispatches on the next pump with no re-enqueue needed. Pumps
- * happen on new read() calls and batch completions; when the predicate's
- * underlying state changes with nothing else in motion (a camera move over
- * a fully parked pool), the owner MUST call reconsiderDeferred() or the
+ * in the pool — they never download while the predicate holds. Pumps (new
+ * read() calls, batch completions) re-consult it; when the predicate's
+ * backing state changes with nothing else in motion (a camera move over a
+ * fully parked pool), the owner MUST call reconsiderDeferred() or the
  * parked pieces stall forever.
  */
 export class FragmentBatchReader {
@@ -174,7 +171,13 @@ export class FragmentBatchReader {
       };
       entry.abortHandler = () => {
         entry.aborted = true;
-        entry.notifyAbort?.();
+        if (entry.notifyAbort !== undefined) {
+          entry.notifyAbort();
+          return;
+        }
+        // Parked entry with the reader otherwise idle: no follow-up pump is
+        // coming, so sweep here or the read never settles.
+        queueMicrotask(() => this.rejectAbortedPoolEntries());
       };
       signal.addEventListener("abort", entry.abortHandler);
       this.pendingEntries.push(entry);
@@ -215,16 +218,12 @@ export class FragmentBatchReader {
     }
   }
 
-  // Re-partition the pool against the deferPiece predicate. Call whenever
-  // the predicate's underlying state changes (the view moved), so pieces
-  // that just came into view dispatch even when every pool entry was parked
-  // and no batch completion is coming to pump the queue.
+  // Call when the deferPiece predicate's backing state changes (the view
+  // moved): a fully parked pool has no batch completion coming to pump it.
   reconsiderDeferred(): void {
     this.pumpQueue();
   }
 
-  // Deferred (out-of-view) pieces stay parked in the pool until the
-  // predicate stops deferring them — they never download in the background.
   private takeNextBatch(): PendingEntry[] {
     const { deferPiece } = this;
     if (deferPiece === undefined) {
@@ -247,8 +246,7 @@ export class FragmentBatchReader {
     return dispatchable;
   }
 
-  // Parked entries can abort while they wait (e.g. their chunk got evicted);
-  // sweeping them on every pump keeps an always-deferred entry from leaking.
+  // Parked entries can abort while they wait (e.g. their chunk got evicted).
   private rejectAbortedPoolEntries() {
     if (!this.pool.some((entry) => entry.aborted)) return;
     const alive: PendingEntry[] = [];

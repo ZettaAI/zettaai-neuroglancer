@@ -640,4 +640,23 @@ describe("FragmentBatchReader", () => {
     expect(fetchBatch).toHaveBeenCalledTimes(1);
     expect(posts.flat()).not.toContain("piece-d");
   });
+
+  it("rejects a parked deferred entry on abort with no other activity to pump the reader", async () => {
+    const fetchBatch = vi.fn(() => new Promise<Response>(() => {}));
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      () => true,
+    );
+    const abortController = new AbortController();
+
+    const doomed = reader.read("piece-d", abortController.signal);
+    await tick();
+    expect(fetchBatch).not.toHaveBeenCalled();
+
+    abortController.abort();
+    await expect(doomed).rejects.toThrow();
+    expect(fetchBatch).not.toHaveBeenCalled();
+  });
 });

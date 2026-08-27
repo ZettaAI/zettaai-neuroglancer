@@ -412,10 +412,10 @@ export class CalcadaMeshSource extends WithParameters(
 
   // Streaming batch reader for fragments the manifest resolved into a shard
   // (no split-piece `url`); coalesces many piece reads issued in the same
-  // tick into a single POST instead of one range request per piece. Pieces
-  // fully outside the view frustum are parked in the reader's pool and never
-  // download while off-screen; a camera move re-classifies the pool (see
-  // updateFragmentSpatialHint), so pieces that came into view dispatch then.
+  // tick into a single POST instead of one range request per piece.
+  // Out-of-frustum pieces are parked in the reader's pool and never download
+  // while off-screen; a camera move re-classifies the pool (see
+  // updateFragmentSpatialHint).
   fragmentBatch = new FragmentBatchReader(
     async (pieceIds, signal) => {
       const { fetchOkImpl, baseUrl } = this.manifestHttpSource;

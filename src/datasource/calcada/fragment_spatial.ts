@@ -62,11 +62,9 @@ function distanceTo(
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-// getFrustrumPlanes extracts planes straight from the MVP, so their normals
-// are NOT unit length; a * x + b * y + c * z + d is the signed distance
-// scaled by |(a, b, c)|. Normalizing here lets the sphere test compare that
-// value against the radius directly. A degenerate plane (zero normal) is
-// dropped: it can't reject anything meaningfully.
+// getFrustrumPlanes returns non-unit normals, so the raw plane equation is a
+// distance scaled by |(a, b, c)| — unusable against a radius until
+// normalized. A degenerate plane (zero normal) is made to never reject.
 function normalizePlanes(clippingPlanes: Float32Array): Float32Array {
   const normalized = new Float32Array(24);
   for (let i = 0; i < 6; ++i) {
@@ -206,12 +204,10 @@ export class FragmentSpatialIndex {
     this.invalidate();
   }
 
-  // Returns true when the hint actually changed (and caches were
-  // invalidated), so callers can react to a real view change only. A hint
-  // with any non-finite plane or focus value (a degenerate camera during a
-  // navigation transient) is ignored, keeping the last valid hint: such a
-  // hint can't reject anything, so accepting it would classify every piece
-  // in-frustum and flush the entire deferred pool for one broken frame.
+  // Returns whether the hint actually changed. A non-finite hint (degenerate
+  // camera during a navigation transient) is ignored — it can't reject
+  // anything, so accepting it would flush the deferred pool for one broken
+  // frame.
   updateHint(hint: FragmentSpatialHint | null): boolean {
     if (hint !== null && !hintIsFinite(hint)) return false;
     if (hintEquals(this.hint, hint)) return false;
@@ -234,11 +230,9 @@ export class FragmentSpatialIndex {
     return this.score(a) - this.score(b);
   }
 
-  // True only for a piece with known bounds that lies fully outside the
-  // current view frustum. Unknown-bounds pieces, never-seen pieces, and
-  // everything while no hint is set report false, so callers can safely
-  // defer/cull on a true result without ever starving a piece that might
-  // be visible.
+  // True only for a known-bounds piece fully outside the frustum;
+  // unknown-bounds, never-seen, and no-hint cases report false so a piece
+  // that might be visible is never culled.
   isOutOfView(fragmentId: string): boolean {
     this.ensureCache();
     return this.outOfViewCache.has(fragmentId);
