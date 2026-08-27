@@ -62,8 +62,36 @@ function distanceTo(
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// getFrustrumPlanes extracts planes straight from the MVP, so their normals
+// are NOT unit length; a * x + b * y + c * z + d is the signed distance
+// scaled by |(a, b, c)|. Normalizing here lets the sphere test compare that
+// value against the radius directly. A degenerate plane (zero normal) is
+// dropped: it can't reject anything meaningfully.
+function normalizePlanes(clippingPlanes: Float32Array): Float32Array {
+  const normalized = new Float32Array(24);
+  for (let i = 0; i < 6; ++i) {
+    const a = clippingPlanes[4 * i];
+    const b = clippingPlanes[4 * i + 1];
+    const c = clippingPlanes[4 * i + 2];
+    const d = clippingPlanes[4 * i + 3];
+    const length = Math.sqrt(a * a + b * b + c * c);
+    if (!(length > 0) || !Number.isFinite(length)) {
+      normalized[4 * i] = 0;
+      normalized[4 * i + 1] = 0;
+      normalized[4 * i + 2] = 0;
+      normalized[4 * i + 3] = Number.MAX_VALUE;
+      continue;
+    }
+    normalized[4 * i] = a / length;
+    normalized[4 * i + 1] = b / length;
+    normalized[4 * i + 2] = c / length;
+    normalized[4 * i + 3] = d / length;
+  }
+  return normalized;
+}
+
 function isInFrustum(
-  clippingPlanes: Float32Array,
+  normalizedPlanes: Float32Array,
   sphere: FragmentSphere,
   resolution: Resolution,
 ): boolean {
@@ -75,10 +103,10 @@ function isInFrustum(
   // rather than incorrectly deferred.
   const r = sphere.r / Math.min(resolution[0], resolution[1], resolution[2]);
   for (let i = 0; i < 6; ++i) {
-    const a = clippingPlanes[4 * i];
-    const b = clippingPlanes[4 * i + 1];
-    const c = clippingPlanes[4 * i + 2];
-    const d = clippingPlanes[4 * i + 3];
+    const a = normalizedPlanes[4 * i];
+    const b = normalizedPlanes[4 * i + 1];
+    const c = normalizedPlanes[4 * i + 2];
+    const d = normalizedPlanes[4 * i + 3];
     if (a * cx + b * cy + c * cz + d < -r) return false;
   }
   return true;
@@ -102,8 +130,19 @@ function hintEquals(
   return true;
 }
 
+function hintIsFinite(hint: FragmentSpatialHint): boolean {
+  for (let i = 0; i < 24; ++i) {
+    if (!Number.isFinite(hint.clippingPlanes[i])) return false;
+  }
+  for (let i = 0; i < 3; ++i) {
+    if (!Number.isFinite(hint.focusModel[i])) return false;
+  }
+  return true;
+}
+
 function classify(
   hint: FragmentSpatialHint,
+  normalizedPlanes: Float32Array,
   sphere: FragmentSphere,
   resolution: Resolution,
 ): { category: Category; distance: number } {
@@ -115,9 +154,7 @@ function classify(
   }
   const distance = distanceTo(hint, sphere, resolution);
   return {
-    category: isInFrustum(hint.clippingPlanes, sphere, resolution)
-      ? "in"
-      : "out",
+    category: isInFrustum(normalizedPlanes, sphere, resolution) ? "in" : "out",
     distance,
   };
 }
@@ -169,10 +206,18 @@ export class FragmentSpatialIndex {
     this.invalidate();
   }
 
-  updateHint(hint: FragmentSpatialHint | null): void {
-    if (hintEquals(this.hint, hint)) return;
+  // Returns true when the hint actually changed (and caches were
+  // invalidated), so callers can react to a real view change only. A hint
+  // with any non-finite plane or focus value (a degenerate camera during a
+  // navigation transient) is ignored, keeping the last valid hint: such a
+  // hint can't reject anything, so accepting it would classify every piece
+  // in-frustum and flush the entire deferred pool for one broken frame.
+  updateHint(hint: FragmentSpatialHint | null): boolean {
+    if (hint !== null && !hintIsFinite(hint)) return false;
+    if (hintEquals(this.hint, hint)) return false;
     this.hint = hint;
     this.invalidate();
+    return true;
   }
 
   score(fragmentId: string): number {
@@ -221,12 +266,13 @@ export class FragmentSpatialIndex {
       return;
     }
     let dMax = 1;
+    const normalizedPlanes = normalizePlanes(hint.clippingPlanes);
     const classified = new Map<
       string,
       { category: Category; distance: number }
     >();
     for (const [id, sphere] of this.spheres) {
-      const result = classify(hint, sphere, this.resolution);
+      const result = classify(hint, normalizedPlanes, sphere, this.resolution);
       classified.set(id, result);
       if (result.category === "in") dMax = Math.max(dMax, result.distance);
     }
