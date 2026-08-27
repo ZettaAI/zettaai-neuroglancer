@@ -134,6 +134,7 @@ export class FragmentSpatialIndex {
   private resolution: Resolution;
   private scoreCache: Map<string, number> | null = null;
   private biasCache: Map<string, number> | null = null;
+  private outOfViewCache = new Set<string>();
   private dMax = 1;
 
   // resolution is the mesh's own voxel model-space resolution (nm/voxel per
@@ -188,6 +189,16 @@ export class FragmentSpatialIndex {
     return this.score(a) - this.score(b);
   }
 
+  // True only for a piece with known bounds that lies fully outside the
+  // current view frustum. Unknown-bounds pieces, never-seen pieces, and
+  // everything while no hint is set report false, so callers can safely
+  // defer/cull on a true result without ever starving a piece that might
+  // be visible.
+  isOutOfView(fragmentId: string): boolean {
+    this.ensureCache();
+    return this.outOfViewCache.has(fragmentId);
+  }
+
   private invalidate() {
     this.scoreCache = null;
     this.biasCache = null;
@@ -199,6 +210,7 @@ export class FragmentSpatialIndex {
     const biasCache = new Map<string, number>();
     this.scoreCache = scoreCache;
     this.biasCache = biasCache;
+    this.outOfViewCache = new Set();
     const { hint } = this;
     if (hint === null) {
       for (const id of this.spheres.keys()) {
@@ -222,6 +234,7 @@ export class FragmentSpatialIndex {
     for (const [id, result] of classified) {
       scoreCache.set(id, this.scoreFor(result));
       biasCache.set(id, this.biasFor(result));
+      if (result.category === "out") this.outOfViewCache.add(id);
     }
   }
 

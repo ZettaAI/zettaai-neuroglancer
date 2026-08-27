@@ -426,4 +426,197 @@ describe("FragmentBatchReader", () => {
       held[i](new Response(streamOf([]), { status: 200 }));
     }
   });
+
+  it("dispatches only the non-deferred pieces from a mixed same-tick wave in the first POST", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d1", "piece-d2"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    const d1 = reader.read("piece-d1", signal);
+    const b = reader.read("piece-b", signal);
+    const d2 = reader.read("piece-d2", signal);
+    await tick();
+
+    expect(posts).toEqual([["piece-a", "piece-b"]]);
+
+    const firstBody = new Uint8Array([
+      ...encodeRecord(0, new Uint8Array([1]), new Uint8Array([])),
+      ...encodeRecord(0, new Uint8Array([2]), new Uint8Array([])),
+    ]);
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await Promise.all([a, b]);
+    await tick();
+    const secondBody = new Uint8Array([
+      ...encodeRecord(0, new Uint8Array([3]), new Uint8Array([])),
+      ...encodeRecord(0, new Uint8Array([4]), new Uint8Array([])),
+    ]);
+    held[1](new Response(streamOf([secondBody]), { status: 200 }));
+    await Promise.all([d1, d2]);
+  });
+
+  it("dispatches deferred pieces in a POST of their own and resolves them once the reader is idle", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d1", "piece-d2"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    const d1 = reader.read("piece-d1", signal);
+    const d2 = reader.read("piece-d2", signal);
+    await tick();
+
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await a;
+    await tick();
+
+    expect(posts).toEqual([["piece-a"], ["piece-d1", "piece-d2"]]);
+
+    const deferredBody = new Uint8Array([
+      ...encodeRecord(0, new Uint8Array([5]), new Uint8Array([6])),
+      ...encodeRecord(0, new Uint8Array([7]), new Uint8Array([8])),
+    ]);
+    held[1](new Response(streamOf([deferredBody]), { status: 200 }));
+    const [rd1, rd2] = await Promise.all([d1, d2]);
+    expect([...rd1.draco]).toEqual([5]);
+    expect([...rd1.manifest]).toEqual([6]);
+    expect([...rd2.draco]).toEqual([7]);
+    expect([...rd2.manifest]).toEqual([8]);
+  });
+
+  it("keeps a deferred piece out of every POST while a batch is in flight", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    const d = reader.read("piece-d", signal);
+    await tick();
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await a;
+    await tick();
+
+    expect(posts).toEqual([["piece-a"], ["piece-d"]]);
+
+    const deferredBody = encodeRecord(
+      0,
+      new Uint8Array([2]),
+      new Uint8Array([]),
+    );
+    held[1](new Response(streamOf([deferredBody]), { status: 200 }));
+    const rd = await d;
+    expect([...rd.draco]).toEqual([2]);
+  });
+
+  it("re-consults the predicate at each dispatch, sending a newly undeferred piece before still-deferred ones", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d1", "piece-d2"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    const d1 = reader.read("piece-d1", signal);
+    const d2 = reader.read("piece-d2", signal);
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    deferred.delete("piece-d1");
+    const record = () =>
+      encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([record()]), { status: 200 }));
+    await a;
+    await tick();
+    expect(posts).toEqual([["piece-a"], ["piece-d1"]]);
+
+    held[1](new Response(streamOf([record()]), { status: 200 }));
+    await d1;
+    await tick();
+    expect(posts).toEqual([["piece-a"], ["piece-d1"], ["piece-d2"]]);
+
+    held[2](new Response(streamOf([record()]), { status: 200 }));
+    await d2;
+  });
+
+  it("rejects a parked deferred entry whose signal aborts and never includes its piece in any POST", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+    const abortController = new AbortController();
+
+    const a = reader.read("piece-a", signal);
+    const doomed = reader.read("piece-d", abortController.signal);
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    abortController.abort();
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await a;
+    await expect(doomed).rejects.toThrow();
+    await tick();
+
+    expect(fetchBatch).toHaveBeenCalledTimes(1);
+    expect(posts.flat()).not.toContain("piece-d");
+  });
 });
