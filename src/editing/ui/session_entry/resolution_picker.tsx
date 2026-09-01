@@ -10,7 +10,7 @@
 
 import type { Resolution } from "@zettaai/edit-session";
 
-import { ListboxDropdown } from "#src/editing/ui/session_entry/listbox_dropdown.js";
+import { ListboxDropdown } from "#src/widget/listbox_dropdown.js";
 
 /**
  * Per-layer resolution picker. A thin adapter over the shared
