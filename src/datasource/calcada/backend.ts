@@ -413,6 +413,9 @@ export class CalcadaMeshSource extends WithParameters(
   // Streaming batch reader for fragments the manifest resolved into a shard
   // (no split-piece `url`); coalesces many piece reads issued in the same
   // tick into a single POST instead of one range request per piece.
+  // Out-of-frustum pieces are parked in the reader's pool and never download
+  // while off-screen; a camera move re-classifies the pool (see
+  // updateFragmentSpatialHint).
   fragmentBatch = new FragmentBatchReader(
     async (pieceIds, signal) => {
       const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
@@ -424,6 +427,7 @@ export class CalcadaMeshSource extends WithParameters(
     },
     isUnsupportedFragmentBatchError,
     (a, b) => this.spatialIndex.compare(a, b),
+    (pieceId) => this.spatialIndex.isOutOfView(pieceId),
   );
 
   constructor(rpc: RPC, options: any) {
@@ -816,7 +820,9 @@ export class CalcadaMeshSource extends WithParameters(
   }
 
   updateFragmentSpatialHint(hint: FragmentSpatialHint | null) {
-    this.spatialIndex.updateHint(hint);
+    if (this.spatialIndex.updateHint(hint)) {
+      this.fragmentBatch.reconsiderDeferred();
+    }
   }
 
   getFragmentPriorityBias(fragmentId: string): number {

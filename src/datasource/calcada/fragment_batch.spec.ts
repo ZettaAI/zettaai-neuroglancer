@@ -11,6 +11,16 @@ function tick() {
   return new Promise((resolve) => setTimeout(resolve, 1));
 }
 
+function settlement(promise: Promise<unknown>) {
+  return Promise.race([
+    promise.then(
+      () => "settled",
+      () => "settled",
+    ),
+    tick().then(() => "pending"),
+  ]);
+}
+
 function encodeRecord(
   status: number,
   draco: Uint8Array,
@@ -425,5 +435,228 @@ describe("FragmentBatchReader", () => {
     for (let i = 1; i < FRAGMENT_BATCH_MAX_CONCURRENT; i++) {
       held[i](new Response(streamOf([]), { status: 200 }));
     }
+  });
+
+  it("dispatches only the non-deferred pieces from a mixed same-tick wave and keeps the deferred ones parked after the batch completes", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d1", "piece-d2"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    const d1 = reader.read("piece-d1", signal);
+    const b = reader.read("piece-b", signal);
+    const d2 = reader.read("piece-d2", signal);
+    await tick();
+
+    expect(posts).toEqual([["piece-a", "piece-b"]]);
+
+    const firstBody = new Uint8Array([
+      ...encodeRecord(0, new Uint8Array([1]), new Uint8Array([])),
+      ...encodeRecord(0, new Uint8Array([2]), new Uint8Array([])),
+    ]);
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await Promise.all([a, b]);
+    await tick();
+    await tick();
+
+    expect(posts).toEqual([["piece-a", "piece-b"]]);
+    await expect(settlement(d1)).resolves.toBe("pending");
+    await expect(settlement(d2)).resolves.toBe("pending");
+  });
+
+  it("never POSTs a deferred piece while the reader is idle, leaving its read pending", async () => {
+    const fetchBatch = vi.fn(() => new Promise<Response>(() => {}));
+    const deferred = new Set(["piece-d"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const d = reader.read("piece-d", signal);
+    await tick();
+    await tick();
+    await tick();
+
+    expect(fetchBatch).not.toHaveBeenCalled();
+    await expect(settlement(d)).resolves.toBe("pending");
+  });
+
+  it("keeps a deferred piece out of every POST while a batch is in flight and after it resolves", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    const d = reader.read("piece-d", signal);
+    await tick();
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await a;
+    await tick();
+    await tick();
+
+    expect(posts).toEqual([["piece-a"]]);
+    await expect(settlement(d)).resolves.toBe("pending");
+  });
+
+  it("reconsiderDeferred dispatches pieces the predicate stopped deferring and keeps still-deferred pieces parked", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d1", "piece-d2"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const d1 = reader.read("piece-d1", signal);
+    const d2 = reader.read("piece-d2", signal);
+    await tick();
+    expect(fetchBatch).not.toHaveBeenCalled();
+
+    deferred.delete("piece-d1");
+    reader.reconsiderDeferred();
+    expect(posts).toEqual([["piece-d1"]]);
+
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([2]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    const rd1 = await d1;
+    expect([...rd1.draco]).toEqual([1]);
+    expect([...rd1.manifest]).toEqual([2]);
+    await tick();
+    expect(posts).toEqual([["piece-d1"]]);
+    await expect(settlement(d2)).resolves.toBe("pending");
+
+    deferred.delete("piece-d2");
+    reader.reconsiderDeferred();
+    expect(posts).toEqual([["piece-d1"], ["piece-d2"]]);
+
+    const secondBody = encodeRecord(0, new Uint8Array([3]), new Uint8Array([]));
+    held[1](new Response(streamOf([secondBody]), { status: 200 }));
+    const rd2 = await d2;
+    expect([...rd2.draco]).toEqual([3]);
+  });
+
+  it("dispatches a piece undeferred during an in-flight batch when that batch resolves, without reconsiderDeferred", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+
+    const a = reader.read("piece-a", signal);
+    const d = reader.read("piece-d", signal);
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    deferred.delete("piece-d");
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await a;
+    await tick();
+    expect(posts).toEqual([["piece-a"], ["piece-d"]]);
+
+    const secondBody = encodeRecord(0, new Uint8Array([2]), new Uint8Array([]));
+    held[1](new Response(streamOf([secondBody]), { status: 200 }));
+    const rd = await d;
+    expect([...rd.draco]).toEqual([2]);
+  });
+
+  it("rejects a parked deferred entry whose signal aborts and never includes its piece in any POST", async () => {
+    const posts: string[][] = [];
+    const held: ((response: Response) => void)[] = [];
+    const fetchBatch = vi.fn((pieceIds: string[]) => {
+      posts.push(pieceIds);
+      return new Promise<Response>((resolve) => held.push(resolve));
+    });
+    const deferred = new Set(["piece-d"]);
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      (pieceId) => deferred.has(pieceId),
+    );
+    const signal = new AbortController().signal;
+    const abortController = new AbortController();
+
+    const a = reader.read("piece-a", signal);
+    const doomed = reader.read("piece-d", abortController.signal);
+    await tick();
+    expect(posts).toEqual([["piece-a"]]);
+
+    abortController.abort();
+    const firstBody = encodeRecord(0, new Uint8Array([1]), new Uint8Array([]));
+    held[0](new Response(streamOf([firstBody]), { status: 200 }));
+    await a;
+    await expect(doomed).rejects.toThrow();
+    await tick();
+
+    expect(fetchBatch).toHaveBeenCalledTimes(1);
+    expect(posts.flat()).not.toContain("piece-d");
+  });
+
+  it("rejects a parked deferred entry on abort with no other activity to pump the reader", async () => {
+    const fetchBatch = vi.fn(() => new Promise<Response>(() => {}));
+    const reader = new FragmentBatchReader(
+      fetchBatch,
+      undefined,
+      undefined,
+      () => true,
+    );
+    const abortController = new AbortController();
+
+    const doomed = reader.read("piece-d", abortController.signal);
+    await tick();
+    expect(fetchBatch).not.toHaveBeenCalled();
+
+    abortController.abort();
+    await expect(doomed).rejects.toThrow();
+    expect(fetchBatch).not.toHaveBeenCalled();
   });
 });

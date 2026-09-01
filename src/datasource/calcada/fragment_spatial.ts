@@ -62,8 +62,34 @@ function distanceTo(
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// getFrustrumPlanes returns non-unit normals, so the raw plane equation is a
+// distance scaled by |(a, b, c)| — unusable against a radius until
+// normalized. A degenerate plane (zero normal) is made to never reject.
+function normalizePlanes(clippingPlanes: Float32Array): Float32Array {
+  const normalized = new Float32Array(24);
+  for (let i = 0; i < 6; ++i) {
+    const a = clippingPlanes[4 * i];
+    const b = clippingPlanes[4 * i + 1];
+    const c = clippingPlanes[4 * i + 2];
+    const d = clippingPlanes[4 * i + 3];
+    const length = Math.sqrt(a * a + b * b + c * c);
+    if (!(length > 0) || !Number.isFinite(length)) {
+      normalized[4 * i] = 0;
+      normalized[4 * i + 1] = 0;
+      normalized[4 * i + 2] = 0;
+      normalized[4 * i + 3] = Number.MAX_VALUE;
+      continue;
+    }
+    normalized[4 * i] = a / length;
+    normalized[4 * i + 1] = b / length;
+    normalized[4 * i + 2] = c / length;
+    normalized[4 * i + 3] = d / length;
+  }
+  return normalized;
+}
+
 function isInFrustum(
-  clippingPlanes: Float32Array,
+  normalizedPlanes: Float32Array,
   sphere: FragmentSphere,
   resolution: Resolution,
 ): boolean {
@@ -75,10 +101,10 @@ function isInFrustum(
   // rather than incorrectly deferred.
   const r = sphere.r / Math.min(resolution[0], resolution[1], resolution[2]);
   for (let i = 0; i < 6; ++i) {
-    const a = clippingPlanes[4 * i];
-    const b = clippingPlanes[4 * i + 1];
-    const c = clippingPlanes[4 * i + 2];
-    const d = clippingPlanes[4 * i + 3];
+    const a = normalizedPlanes[4 * i];
+    const b = normalizedPlanes[4 * i + 1];
+    const c = normalizedPlanes[4 * i + 2];
+    const d = normalizedPlanes[4 * i + 3];
     if (a * cx + b * cy + c * cz + d < -r) return false;
   }
   return true;
@@ -102,8 +128,19 @@ function hintEquals(
   return true;
 }
 
+function hintIsFinite(hint: FragmentSpatialHint): boolean {
+  for (let i = 0; i < 24; ++i) {
+    if (!Number.isFinite(hint.clippingPlanes[i])) return false;
+  }
+  for (let i = 0; i < 3; ++i) {
+    if (!Number.isFinite(hint.focusModel[i])) return false;
+  }
+  return true;
+}
+
 function classify(
   hint: FragmentSpatialHint,
+  normalizedPlanes: Float32Array,
   sphere: FragmentSphere,
   resolution: Resolution,
 ): { category: Category; distance: number } {
@@ -115,9 +152,7 @@ function classify(
   }
   const distance = distanceTo(hint, sphere, resolution);
   return {
-    category: isInFrustum(hint.clippingPlanes, sphere, resolution)
-      ? "in"
-      : "out",
+    category: isInFrustum(normalizedPlanes, sphere, resolution) ? "in" : "out",
     distance,
   };
 }
@@ -134,6 +169,7 @@ export class FragmentSpatialIndex {
   private resolution: Resolution;
   private scoreCache: Map<string, number> | null = null;
   private biasCache: Map<string, number> | null = null;
+  private outOfViewCache = new Set<string>();
   private dMax = 1;
 
   // resolution is the mesh's own voxel model-space resolution (nm/voxel per
@@ -168,10 +204,16 @@ export class FragmentSpatialIndex {
     this.invalidate();
   }
 
-  updateHint(hint: FragmentSpatialHint | null): void {
-    if (hintEquals(this.hint, hint)) return;
+  // Returns whether the hint actually changed. A non-finite hint (degenerate
+  // camera during a navigation transient) is ignored — it can't reject
+  // anything, so accepting it would flush the deferred pool for one broken
+  // frame.
+  updateHint(hint: FragmentSpatialHint | null): boolean {
+    if (hint !== null && !hintIsFinite(hint)) return false;
+    if (hintEquals(this.hint, hint)) return false;
     this.hint = hint;
     this.invalidate();
+    return true;
   }
 
   score(fragmentId: string): number {
@@ -188,6 +230,14 @@ export class FragmentSpatialIndex {
     return this.score(a) - this.score(b);
   }
 
+  // True only for a known-bounds piece fully outside the frustum;
+  // unknown-bounds, never-seen, and no-hint cases report false so a piece
+  // that might be visible is never culled.
+  isOutOfView(fragmentId: string): boolean {
+    this.ensureCache();
+    return this.outOfViewCache.has(fragmentId);
+  }
+
   private invalidate() {
     this.scoreCache = null;
     this.biasCache = null;
@@ -199,6 +249,7 @@ export class FragmentSpatialIndex {
     const biasCache = new Map<string, number>();
     this.scoreCache = scoreCache;
     this.biasCache = biasCache;
+    this.outOfViewCache = new Set();
     const { hint } = this;
     if (hint === null) {
       for (const id of this.spheres.keys()) {
@@ -209,12 +260,13 @@ export class FragmentSpatialIndex {
       return;
     }
     let dMax = 1;
+    const normalizedPlanes = normalizePlanes(hint.clippingPlanes);
     const classified = new Map<
       string,
       { category: Category; distance: number }
     >();
     for (const [id, sphere] of this.spheres) {
-      const result = classify(hint, sphere, this.resolution);
+      const result = classify(hint, normalizedPlanes, sphere, this.resolution);
       classified.set(id, result);
       if (result.category === "in") dMax = Math.max(dMax, result.distance);
     }
@@ -222,6 +274,7 @@ export class FragmentSpatialIndex {
     for (const [id, result] of classified) {
       scoreCache.set(id, this.scoreFor(result));
       biasCache.set(id, this.biasFor(result));
+      if (result.category === "out") this.outOfViewCache.add(id);
     }
   }
 
