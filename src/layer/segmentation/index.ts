@@ -616,6 +616,8 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   // brighten the segment under the cursor; the `hoverHighlight` preference above
   // is left untouched.
   hoverHighlightSuppressed = new WatchableValue<boolean>(false);
+  // See SegmentationDisplayState.honorTempStatedColorAlpha.
+  honorTempStatedColorAlpha = new WatchableValue<boolean>(false);
   silhouetteRendering = new TrackableValue<number>(
     0,
     verifyFiniteNonNegativeFloat,
