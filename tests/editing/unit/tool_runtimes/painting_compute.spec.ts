@@ -17,6 +17,12 @@ import { ChunkId, Resolution, layerId } from "@zettaai/edit-session";
 
 import { describe, it, expect, vi } from "vitest";
 
+import {
+  brushBoundsPadding,
+  brushFootprintContains,
+  brushRadiusSquared,
+  brushStampAnchor,
+} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 import type { MorphologyClient } from "#src/editing/tool_runtimes/morphology_client.js";
 import type { MorphologyRequest } from "#src/editing/tool_runtimes/morphology_request.js";
 import type {
@@ -388,6 +394,178 @@ function writtenVoxels(
   }
   return out;
 }
+
+/**
+ * The exact voxel set a brush of `radius` writes for a pointer at `position`, as
+ * `"x,y,z"` keys — read straight off the shared shape definition
+ * (`brush_disk_footprint.ts`), which is also what the cursor draws. A stamp that
+ * disagrees with it is a cursor that lies about where paint will land.
+ */
+function expectedDiskKeys(
+  position: readonly [number, number, number],
+  radius: number,
+): Set<string> {
+  const [anchorX, anchorY, anchorZ] = brushStampAnchor(position, radius);
+  const radiusSquared = brushRadiusSquared(radius);
+  const sweep = brushBoundsPadding(radius) + 2;
+  const keys = new Set<string>();
+  for (
+    let voxelY = Math.floor(anchorY) - sweep;
+    voxelY <= Math.ceil(anchorY) + sweep;
+    voxelY++
+  ) {
+    for (
+      let voxelX = Math.floor(anchorX) - sweep;
+      voxelX <= Math.ceil(anchorX) + sweep;
+      voxelX++
+    ) {
+      if (
+        brushFootprintContains(
+          voxelX - anchorX,
+          voxelY - anchorY,
+          0,
+          radiusSquared,
+        )
+      ) {
+        keys.add(`${voxelX},${voxelY},${anchorZ}`);
+      }
+    }
+  }
+  return keys;
+}
+
+function voxelKeys(
+  batch: { chunks: readonly PaintChunkWrite[] },
+  chunkDataSize: readonly [number, number, number],
+): Set<string> {
+  return new Set(
+    writtenVoxels(batch, chunkDataSize).map(([x, y, z]) => `${x},${y},${z}`),
+  );
+}
+
+/**
+ * The footprint must be the symmetric disk about the voxel the pointer is in —
+ * whatever the sub-voxel fraction. The capsule stamps used to measure distances
+ * from the raw fractional position to integer voxel indices, so a pointer at
+ * x.5 painted an even-width blob that slid a whole voxel across the voxel and
+ * disagreed with the cursor outline (TM-300).
+ */
+describe("brush footprint is voxel-snapped and fraction-independent", () => {
+  const CHUNK: readonly [number, number, number] = [64, 64, 64];
+  const RADIUS = 2;
+  // Every combination of "just inside the lower face", "mid-voxel", and "just
+  // inside the upper face" on both painted axes.
+  const FRACTIONS = [0, 0.25, 0.5, 0.75, 0.999];
+
+  const brushInput = (
+    position: readonly [number, number, number],
+    radius: number = RADIUS,
+  ): BrushApplyInput => ({
+    targetLayerId: TARGET_LAYER,
+    targetResolution: TARGET_RES,
+    metadata: metadata(CHUNK),
+    voxelPosition: [position[0], position[1], position[2]],
+    radius,
+    value: 9n,
+    readChunk: zeroReader(CHUNK),
+    readChunkAt: unusedReadChunkAt,
+  });
+
+  it("a click paints the shared footprint, at odd and even sizes", async () => {
+    const compute = new PaintingCompute();
+    // Radii of both parities: whole = odd size (anchored on a voxel), half =
+    // even size (anchored on a voxel boundary).
+    for (const radius of [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5]) {
+      for (const fractionX of FRACTIONS) {
+        for (const fractionY of FRACTIONS) {
+          const position: [number, number, number] = [
+            32 + fractionX,
+            32 + fractionY,
+            16.5,
+          ];
+          const batch = await compute.applyBrush(brushInput(position, radius));
+          expect(
+            voxelKeys(batch, CHUNK),
+            `radius ${radius} at fraction (${fractionX}, ${fractionY})`,
+          ).toEqual(expectedDiskKeys(position, radius));
+        }
+      }
+    }
+  });
+
+  it("paints the same disk from anywhere inside one voxel", async () => {
+    const compute = new PaintingCompute();
+    const expected = expectedDiskKeys([32, 32, 16], RADIUS);
+    expect(expected.size).toBe(diskFootprint(RADIUS));
+    for (const fractionX of FRACTIONS) {
+      for (const fractionY of FRACTIONS) {
+        const batch = await compute.applyBrush(
+          brushInput([32 + fractionX, 32 + fractionY, 16.5]),
+        );
+        expect(
+          voxelKeys(batch, CHUNK),
+          `fraction (${fractionX}, ${fractionY})`,
+        ).toEqual(expected);
+      }
+    }
+  });
+
+  it("a degenerate stroke paints the same disk as a click", async () => {
+    const compute = new PaintingCompute();
+    const position: [number, number, number] = [32.75, 32.75, 16.5];
+    const input: BrushStrokeInput = {
+      targetLayerId: TARGET_LAYER,
+      targetResolution: TARGET_RES,
+      metadata: metadata(CHUNK),
+      from: position,
+      to: position,
+      radius: RADIUS,
+      stepVoxels: 1,
+      value: 9n,
+      readChunk: zeroReader(CHUNK),
+      readChunkAt: unusedReadChunkAt,
+    };
+    const batch = await compute.applyBrushStroke(input);
+    expect(voxelKeys(batch, CHUNK)).toEqual(expectedDiskKeys(position, RADIUS));
+  });
+
+  it("a swept stroke is the union of the disks at its endpoints' voxels", async () => {
+    const compute = new PaintingCompute();
+    // Axis-aligned two-voxel step, so the capsule is exactly the union of the
+    // two end-cap disks — no interior voxels a diagonal sweep would add.
+    const from: [number, number, number] = [32.3, 32.8, 16.5];
+    const to: [number, number, number] = [34.9, 32.1, 16.5];
+    const batch = await compute.applyBrushStroke({
+      targetLayerId: TARGET_LAYER,
+      targetResolution: TARGET_RES,
+      metadata: metadata(CHUNK),
+      from,
+      to,
+      radius: RADIUS,
+      stepVoxels: 1,
+      value: 9n,
+      readChunk: zeroReader(CHUNK),
+      readChunkAt: unusedReadChunkAt,
+    });
+    const painted = voxelKeys(batch, CHUNK);
+    // Both end caps are present in full...
+    for (const endpoint of [from, to]) {
+      for (const key of expectedDiskKeys(endpoint, RADIUS)) {
+        expect(painted.has(key), `end cap ${key}`).toBe(true);
+      }
+    }
+    // ...and the sweep stays within the disks' bounding band: x in
+    // [32-2, 34+2], y in [32-2, 32+2], one z-slice.
+    for (const key of painted) {
+      const [x, y, z] = key.split(",").map(Number);
+      expect(x).toBeGreaterThanOrEqual(30);
+      expect(x).toBeLessThanOrEqual(36);
+      expect(y).toBeGreaterThanOrEqual(30);
+      expect(y).toBeLessThanOrEqual(34);
+      expect(z).toBe(16);
+    }
+  });
+});
 
 describe("PaintingCompute.fill", () => {
   it("caps total voxels written at maxVoxels (truncated batch)", async () => {
