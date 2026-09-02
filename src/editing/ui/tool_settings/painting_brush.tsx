@@ -17,7 +17,13 @@ import type {
 import { X } from "lucide-preact";
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
-import { radiusToSize, sizeToRadius } from "#src/editing/brush_size_presets.js";
+import {
+  clampBrushSize,
+  MAX_BRUSH_SIZE,
+  MIN_BRUSH_SIZE,
+  radiusToSize,
+  sizeToRadius,
+} from "#src/editing/brush_size_presets.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
 import type { PaintingMaskConfig } from "#src/editing/tool_runtimes/paint_types.js";
@@ -32,7 +38,6 @@ import {
 import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { ToggleSwitch } from "#src/editing/ui/toggle_switch.js";
-import { BrushSizeField } from "#src/editing/ui/tool_settings/brush_size_field.js";
 import { PaintingTargetPicker } from "#src/editing/ui/tool_settings/painting_target_picker.js";
 import { PaintingThreshold } from "#src/editing/ui/tool_settings/painting_threshold.js";
 import {
@@ -59,6 +64,12 @@ import {
 import { TargetValueField } from "#src/editing/ui/tool_settings/target_value_field.js";
 import { useLayerVoxelType } from "#src/editing/ui/tool_settings/use_layer_voxel_type.js";
 import "#src/editing/ui/tool_settings/painting_brush.css";
+
+/** Parse a typed size into a valid brush size, or null if empty/invalid. */
+function parseSize(raw: string): number | null {
+  const n = Number(raw);
+  return raw.trim() !== "" && Number.isFinite(n) ? clampBrushSize(n) : null;
+}
 
 /** Parse a non-negative voxel count (min component / closing), or null. */
 function parseCount(raw: string): number | null {
@@ -89,6 +100,13 @@ export function PaintingBrush({
   const commitSize = (size: number) =>
     painting.patchState({ radius: sizeToRadius(size) });
 
+  // The slider commits live as it's dragged (direct manipulation); the number
+  // box uses the draft pattern and commits on blur.
+  const onSizeSlide = (e: Event) =>
+    commitSize(
+      clampBrushSize((e.currentTarget as HTMLInputElement).valueAsNumber),
+    );
+
   const size = radiusToSize(state.radius);
   const targetVoxelType = useLayerVoxelType(host, state.targetLayerId);
 
@@ -107,13 +125,35 @@ export function PaintingBrush({
   return (
     <div class="neuroglancer-tool-panel neuroglancer-painting-brush-panel">
       <PaintingTargetPicker host={host} />
-      <BrushSizeField
-        size={size}
-        hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
-        onCommit={commitSize}
-        highlighted={selectedId === PARAM_IDS.size}
-        onSelect={() => selectParam(PARAM_IDS.size)}
-      />
+      <div
+        class={rowClass(
+          "neuroglancer-tool-panel-row",
+          PARAM_IDS.size,
+          selectedId,
+        )}
+        {...paramFocusHandlers(selectParam, PARAM_IDS.size)}
+      >
+        <ParamLabel
+          text="Size"
+          hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
+        />
+        <input
+          type="range"
+          min={MIN_BRUSH_SIZE}
+          max={MAX_BRUSH_SIZE}
+          step={2}
+          value={size}
+          onInput={onSizeSlide}
+        />
+        <ParamInput<number>
+          type="number"
+          min={MIN_BRUSH_SIZE}
+          step={1}
+          value={size}
+          parse={parseSize}
+          onCommit={commitSize}
+        />
+      </div>
       <TargetValueField
         value={state.activeValue}
         voxelDataType={targetVoxelType}

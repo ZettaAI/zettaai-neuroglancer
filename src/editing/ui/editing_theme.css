@@ -110,9 +110,6 @@
   --nge-control-h-compact: 24px; /* dense topbar row controls */
   --nge-control-h-lg: 32px; /* prominent modal/dialog action buttons */
   --nge-control-w: 120px;
-  /* Slider thumb diameter. Also the width the thumb's travel is inset from each
-     end of the rail, which is what the Size slider's ticks align against. */
-  --nge-slider-thumb: 16px;
   --nge-control-w-narrow: 60px;
   --nge-control-pad-x: 8px;
   --nge-list-max-h: 9rem; /* scrollable tool-panel list cap before it scrolls */

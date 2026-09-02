@@ -21,12 +21,12 @@ import {
   nextThresholdLow,
 } from "#src/editing/painting_hotkey_math.js";
 
-// Presets: every size 1..17, then doubling — [1, 2, …, 16, 17, 33, 65, 129, 257,
-//   513, 1025].
+// Presets: [1, 3, 5, 7, 9, 11, 13, 17, 21, 25, 31, 37, 45, 55, 67, 81, 97, 117,
+//   141, 169, 203, 245, 295, 355, 427, 513, 617, 741, 889, 1025].
 describe("nextPresetSize", () => {
   it("steps one preset up/down from a preset member", () => {
-    expect(nextPresetSize(5, +1)).toBe(6);
-    expect(nextPresetSize(5, -1)).toBe(4);
+    expect(nextPresetSize(5, +1)).toBe(7);
+    expect(nextPresetSize(5, -1)).toBe(3);
   });
 
   it("clamps at both ends (no wrap)", () => {
@@ -35,9 +35,8 @@ describe("nextPresetSize", () => {
   });
 
   it("snaps an off-preset size toward the requested direction", () => {
-    // 20 is off-ladder (the rungs jump 17 → 33 above the single-voxel range).
-    expect(nextPresetSize(20, +1)).toBe(33);
-    expect(nextPresetSize(20, -1)).toBe(17);
+    expect(nextPresetSize(15, +1)).toBe(17);
+    expect(nextPresetSize(15, -1)).toBe(13);
   });
 
   it("is a no-op above the largest preset when increasing", () => {
@@ -46,8 +45,8 @@ describe("nextPresetSize", () => {
   });
 
   it("only uses the sign of dir (fixed step)", () => {
-    expect(nextPresetSize(5, +10)).toBe(6);
-    expect(nextPresetSize(5, -10)).toBe(4);
+    expect(nextPresetSize(5, +10)).toBe(7);
+    expect(nextPresetSize(5, -10)).toBe(3);
   });
 });
 
