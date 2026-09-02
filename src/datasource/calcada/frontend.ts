@@ -6150,13 +6150,13 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       const renderOptions = () => {
         const branches =
           graph instanceof CalcadaGraphSource ? graph.branches.value : [];
-        while (select.firstChild) {
-          select.removeChild(select.firstChild);
-        }
-        const mainOption = document.createElement("option");
-        mainOption.value = "0";
-        mainOption.textContent = "main";
-        select.appendChild(mainOption);
+        // Built as a description first and applied in place below. A fork
+        // rewrites branches.value once a second to move its percentage, and
+        // replacing every option on each of those ticks resets the scroll of an
+        // open dropdown — unusable on a graph with hundreds of branches.
+        const wanted: { value: string; text: string; disabled: boolean }[] = [
+          { value: "0", text: "main", disabled: false },
+        ];
         // Show active and creating branches in the dropdown; creating
         // branches are disabled until their copy completes. Other
         // non-active branches (merged/abandoned) are hidden unless the
@@ -6169,28 +6169,40 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
           const isActive = status === "active";
           const isCreating = status === "creating";
           if (!isActive && !isCreating && id !== selectedId) continue;
-          const opt = document.createElement("option");
-          opt.value = String(id);
+          let text: string;
           if (isCreating) {
             const pct =
               progress === undefined
                 ? ""
                 : ` ${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`;
-            opt.textContent = `${name} (creating…${pct})`;
+            text = `${name} (creating…${pct})`;
           } else if (!isActive) {
-            opt.textContent = `${name} (${status})`;
+            text = `${name} (${status})`;
           } else if (parentId !== 0) {
             const parentName =
               branches.find((branch) => branch.id === parentId)?.name ??
               `#${parentId}`;
-            opt.textContent = `${name} ← ${parentName}`;
+            text = `${name} ← ${parentName}`;
           } else {
-            opt.textContent = name;
+            text = name;
           }
-          opt.disabled = isCreating;
-          select.appendChild(opt);
+          wanted.push({ value: String(id), text, disabled: isCreating });
         }
-        select.value = String(selectedId);
+        while (select.childElementCount > wanted.length) {
+          select.removeChild(select.lastElementChild!);
+        }
+        while (select.childElementCount < wanted.length) {
+          select.appendChild(document.createElement("option"));
+        }
+        wanted.forEach((spec, index) => {
+          const opt = select.children[index] as HTMLOptionElement;
+          if (opt.value !== spec.value) opt.value = spec.value;
+          if (opt.textContent !== spec.text) opt.textContent = spec.text;
+          if (opt.disabled !== spec.disabled) opt.disabled = spec.disabled;
+        });
+        if (select.value !== String(selectedId)) {
+          select.value = String(selectedId);
+        }
       };
       renderOptions();
 
