@@ -404,7 +404,6 @@ export class LayoutComponentContainer extends RefCounted {
 
 function getCommonViewerState(viewer: Viewer) {
   return {
-    alignmentLink: viewer.alignmentLink,
     mouseState: viewer.mouseState,
     showAxisLines: viewer.showAxisLines,
     wireFrame: viewer.wireFrame,
