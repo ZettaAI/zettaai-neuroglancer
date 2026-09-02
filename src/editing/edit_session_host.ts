@@ -41,6 +41,7 @@ import {
   InvalidSessionConfigError,
   OverlayKey,
   Resolution,
+  scaleFor,
   SessionPhaseViolationError,
   layerId as toLayerId,
   sessionId as toSessionId,
@@ -116,9 +117,13 @@ import {
   regionResolution,
   regionVoxelSizeNm,
 } from "#src/editing/region/edit_target_compat.js";
+import type { OwnedChunkWrite } from "#src/editing/region/owned_chunk_write.js";
+import { planOwnedWrite } from "#src/editing/region/owned_chunk_write.js";
 import { voxelCenterInBox } from "#src/editing/region/region_geometry.js";
 import { EditRegionPerspectiveOverlay } from "#src/editing/region/region_perspective_overlay.js";
 import { EditRegionSliceOverlay } from "#src/editing/region/region_slice_overlay.js";
+import type { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
+import { captureSessionRegions } from "#src/editing/region/session_region_snapshot.js";
 import { EditSessionHotkeyBinder } from "#src/editing/session_hotkey_binder.js";
 import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
@@ -450,6 +455,13 @@ const VERIFY_BACKOFF_MS: readonly number[] = [
 const VERIFY_CONCURRENCY = 5;
 
 /**
+ * Stands in for a layer whose committed chunks were painted under more than one
+ * edit session, so no single region describes them. Saving such a layer is
+ * refused rather than clipped to whichever session committed last.
+ */
+const REGION_SPANS_SESSIONS = Symbol("committed-region-spans-sessions");
+
+/**
  * Target on-screen brush diameter, in CSS pixels, used to seed the brush size
  * from the current zoom on first paint-tool activation. Chosen to be clearly
  * visible without dominating the slice; the user adjusts from here with `+`/`-`.
@@ -599,6 +611,93 @@ export class EditSessionHost extends RefCounted {
   private saveAbortController: AbortController | undefined;
 
   /**
+   * The active session's edit region as plain numbers, captured at open.
+   *
+   * Deliberately NOT cleared on teardown: `retryUnconfirmedSaves` and
+   * `saveCommitted` both legitimately run after a session ends and still need
+   * the region their chunks were painted under. A snapshot holds no
+   * `EditSession`, so keeping it leaks nothing and cannot answer for a live
+   * session that has since terminated.
+   */
+  private sessionRegions: SessionRegionSnapshot | undefined;
+
+  /**
+   * The region each layer's COMMITTED chunks were painted under.
+   *
+   * `commitTarget` deliberately outlives its session, but `sessionRegions` is
+   * replaced by the next `openSession`. Clipping one task's committed chunks
+   * to a LATER task's region is silent corruption: where the two regions
+   * overlap it uploads the old session's UNPAINTED baseline over the new
+   * task's voxels and never uploads the old task's paint — all on 200s, with
+   * the layer reported saved and its buffer then discarded. So the region
+   * travels with the committed bytes and dies with them.
+   */
+  private readonly committedRegions = new Map<
+    LayerId,
+    SessionRegionSnapshot | typeof REGION_SPANS_SESSIONS
+  >();
+
+  /**
+   * The region every save clips to. Absent means no session has been opened in
+   * this host, so nothing could legitimately be dirty — failing here beats
+   * writing whole chunks over voxels another task owns.
+   */
+  private requireSessionRegions(): SessionRegionSnapshot {
+    if (this.sessionRegions === undefined) {
+      throw new Error(
+        "No edit region captured: refusing to save without knowing which " +
+          "voxels this task owns",
+      );
+    }
+    return this.sessionRegions;
+  }
+
+  /**
+   * Pair each dirty chunk with the voxels this save owns.
+   *
+   * `NgSaveTarget` plans the library's payload the same way, from the same
+   * region snapshot through the same pure function, so the two derivations
+   * agree chunk for chunk without the host and the library having to hand each
+   * other the same object. Chunks that own nothing are dropped here: they are
+   * not written, so they must not be verified or baselined either.
+   */
+  private async planOwnedWrites(
+    chunks: readonly SavedChunk[],
+  ): Promise<OwnedChunkWrite[]> {
+    const regions = this.requireSessionRegions();
+    // `undefined` records a layer whose metadata could not be resolved, so it
+    // is attempted once rather than once per chunk.
+    const metadataByLayer = new Map<LayerId, LayerMetadata | undefined>();
+    const writes: OwnedChunkWrite[] = [];
+    for (const chunk of chunks) {
+      if (!metadataByLayer.has(chunk.layerId)) {
+        // Per layer, and swallowed deliberately: a layer renamed or removed
+        // mid-session must not abort the save for every OTHER layer. Dropping
+        // its chunks here leaves `NgSaveTarget` to report that layer's own
+        // failed outcome, which is what happened before this pre-pass existed.
+        try {
+          metadataByLayer.set(
+            chunk.layerId,
+            await this.layerMetadataSource.resolve(chunk.layerId),
+          );
+        } catch {
+          metadataByLayer.set(chunk.layerId, undefined);
+        }
+      }
+      const metadata = metadataByLayer.get(chunk.layerId);
+      if (metadata === undefined) continue;
+      const plan = planOwnedWrite(
+        chunk,
+        metadata,
+        scaleFor(metadata, chunk.resolution),
+        regions.boundsFor(chunk.layerId, chunk.resolution),
+      );
+      if ("write" in plan) writes.push(plan.write);
+    }
+    return writes;
+  }
+
+  /**
    * Reactive flag: whether a save started by `saveActive()` is currently in
    * flight. The topbar's Save button drives its loading state from this, and
    * the Exit-session button disables itself while it is `true` so a save can't
@@ -626,7 +725,7 @@ export class EditSessionHost extends RefCounted {
    * session exit — the user must never leave believing data is saved when it is
    * not — and `retryUnconfirmedSaves()` can re-send them (TM-352).
    */
-  private readonly unconfirmedChunks = new Map<string, SavedChunk>();
+  private readonly unconfirmedChunks = new Map<string, OwnedChunkWrite>();
 
   /** True while any saved chunk is still unconfirmed (in-flight or failed). */
   hasUnconfirmedSaves(): boolean {
@@ -655,7 +754,7 @@ export class EditSessionHost extends RefCounted {
    * saved-baseline snapshot is dropped (TM-352, see
    * {@link reconcileSavedChunksWithBackend}). Cleared on teardown.
    */
-  private readonly verifiedSavedChunks = new Map<string, SavedChunk>();
+  private readonly verifiedSavedChunks = new Map<string, OwnedChunkWrite>();
 
   // -- Adapters (constructed once, reused across sessions) ------------------
   readonly logger: NgLogger;
@@ -1061,6 +1160,9 @@ export class EditSessionHost extends RefCounted {
       // and the failure handler clears the intent — wiping the URL state
       // we'd just persisted. The user only sees the bug on the next reload.
       this.activeSession.value = session;
+      // Freeze the edit region now, while the session is guaranteed ACTIVE.
+      // Every save clips to this, including the ones that run after exit.
+      this.sessionRegions = captureSessionRegions(session);
       // Fresh session: the brush size will be re-seeded from the zoom on the
       // first paint-tool activation.
       this.brushSizeAutoSized = false;
@@ -1449,6 +1551,30 @@ export class EditSessionHost extends RefCounted {
     let result: CommitResult;
     try {
       result = await session.commit();
+      // Pin the region these chunks were painted under, before any later
+      // `openSession` can replace `sessionRegions`.
+      //
+      // `commitTarget` survives `openSession`, so a layer committed under one
+      // session and committed AGAIN under the next holds chunks from both while
+      // a single region can describe only one of them. Overwriting the pin
+      // there would silently clip the older session's chunks to the newer
+      // session's region — the exact corruption this pinning exists to prevent.
+      // There is no correct single answer, so record the ambiguity and let
+      // `saveCommitted` refuse.
+      const regions = this.sessionRegions;
+      if (regions !== undefined) {
+        for (const committedLayer of this.commitTarget.pendingLayerIds()) {
+          const pinned = this.committedRegions.get(committedLayer);
+          const spansSessions =
+            pinned !== undefined &&
+            (pinned === REGION_SPANS_SESSIONS ||
+              pinned.sessionId !== regions.sessionId);
+          this.committedRegions.set(
+            committedLayer,
+            spansSessions ? REGION_SPANS_SESSIONS : regions,
+          );
+        }
+      }
     } finally {
       // Commit = client-side in-memory persist. Keep the painted patches
       // visible on the canvas (they live in the per-layer LocalPatchStore /
@@ -1493,12 +1619,16 @@ export class EditSessionHost extends RefCounted {
       this.saveProgress.value = { kind: "writing" };
       const layerFilter =
         layerIds !== undefined ? new Set<LayerId>(layerIds) : undefined;
-      const snapshot: SavedChunk[] = await collectDirtyChunks(
-        session.overlay,
-        layerFilter,
+      const snapshot: OwnedChunkWrite[] = await this.planOwnedWrites(
+        await collectDirtyChunks(session.overlay, layerFilter),
       );
-      // 2. Write to the backend.
-      const result = await session.save(layerIds, controller.signal);
+      // 2. Write to the backend. The library builds the payload and calls the
+      //    save target itself, so the region is installed around the call
+      //    rather than passed in; `withSessionRegions` clears it unconditionally.
+      const regions = this.requireSessionRegions();
+      const result = await this.saveTarget.withSessionRegions(regions, () =>
+        session.save(layerIds, controller.signal),
+      );
       // 3. Retain the client's own copy of every saved chunk and mark it
       //    unconfirmed until read-back proves it durable. Scope to layers the
       //    write reported as succeeded.
@@ -1529,6 +1659,12 @@ export class EditSessionHost extends RefCounted {
       if (this.saveAbortController === controller) {
         this.saveAbortController = undefined;
         this.saveInProgress.value = false;
+        // A throw before `verifySavedChunks` never reaches the code that
+        // resolves progress, so the topbar would sit on "Still saving your
+        // changes…" forever while the tracker already reported failure.
+        if (this.saveProgress.value.kind === "writing") {
+          this.saveProgress.value = { kind: "idle" };
+        }
       }
     }
   }
@@ -1542,7 +1678,7 @@ export class EditSessionHost extends RefCounted {
    * user keeps their (client-retained) copy.
    */
   private async verifySavedChunks(
-    chunks: readonly SavedChunk[],
+    chunks: readonly OwnedChunkWrite[],
     signal: AbortSignal,
   ): Promise<void> {
     const total = chunks.length;
@@ -1603,7 +1739,7 @@ export class EditSessionHost extends RefCounted {
    * a false positive. The spinner stays up across the retries.
    */
   private async verifyOneSavedChunk(
-    chunk: SavedChunk,
+    chunk: OwnedChunkWrite,
     signal: AbortSignal,
     onRetry: (attempt: number) => void,
   ): Promise<boolean> {
@@ -1613,14 +1749,9 @@ export class EditSessionHost extends RefCounted {
         const ok = await this.chunkSource.confirmChunkPersisted(
           chunk.layerId,
           chunk.resolution,
-          chunk.chunkId,
           chunk.chunkCoord,
+          chunk.owned,
           signal,
-          // Compare against the snapshot's own content hash rather than the
-          // chunk source's bounded saved-baseline store: past its 512-entry
-          // capacity the store has evicted the earliest chunks, and those could
-          // otherwise never be confirmed (TM-455).
-          chunk.contentRef.hash,
         );
         if (ok) return true;
       } catch {
@@ -1693,7 +1824,10 @@ export class EditSessionHost extends RefCounted {
             ) ?? c.bytes,
         })),
       };
-      await this.saveTarget.save(payload, controller.signal);
+      await this.saveTarget.withSessionRegions(
+        this.requireSessionRegions(),
+        () => this.saveTarget.save(payload, controller.signal),
+      );
       await this.verifySavedChunks(chunks, controller.signal);
     } finally {
       if (signal !== undefined) {
@@ -1702,6 +1836,12 @@ export class EditSessionHost extends RefCounted {
       if (this.saveAbortController === controller) {
         this.saveAbortController = undefined;
         this.saveInProgress.value = false;
+        // A throw before `verifySavedChunks` never reaches the code that
+        // resolves progress, so the topbar would sit on "Still saving your
+        // changes…" forever while the tracker already reported failure.
+        if (this.saveProgress.value.kind === "writing") {
+          this.saveProgress.value = { kind: "idle" };
+        }
       }
     }
   }
@@ -1802,6 +1942,10 @@ export class EditSessionHost extends RefCounted {
    */
   resetLayer(layerId: LayerId): void {
     this.commitTarget.clearLayer(layerId);
+    // The pin dies with the bytes it describes. An in-flight `saveCommitted`
+    // already holds its own reference, so this cannot pull the region out from
+    // under a save that is running against it.
+    this.committedRegions.delete(layerId);
     const entry = this.perLayer.get(layerId);
     if (entry === undefined) return;
     if (entry.mirror !== undefined) {
@@ -1841,6 +1985,7 @@ export class EditSessionHost extends RefCounted {
     // Make sure NgCommitTarget is fully empty even for layers whose
     // perLayer entry was already gone.
     this.commitTarget.clearAll();
+    this.committedRegions.clear();
   }
 
   /**
@@ -1880,7 +2025,24 @@ export class EditSessionHost extends RefCounted {
       };
       let layerResult: SaveResult;
       try {
-        layerResult = await this.saveTarget.save(payload);
+        // The region THESE chunks were painted under — not whichever session
+        // happens to be open now.
+        const regions = this.committedRegions.get(layerId);
+        if (regions === undefined) {
+          throw new Error(
+            `no committed edit region for ${layerId}: refusing to clip its ` +
+              "committed chunks to a different session's region",
+          );
+        }
+        if (regions === REGION_SPANS_SESSIONS) {
+          throw new Error(
+            `${layerId} has committed chunks from more than one edit session; ` +
+              "save them before starting another session on this layer",
+          );
+        }
+        layerResult = await this.saveTarget.withSessionRegions(regions, () =>
+          this.saveTarget.save(payload),
+        );
       } catch (err) {
         outcomes.push({
           status: "failed",
@@ -2196,6 +2358,7 @@ export class EditSessionHost extends RefCounted {
     this.teardownHotkeyBinder();
     this.teardownPerLayer();
     this.commitTarget.clearAll();
+    this.committedRegions.clear();
     super.disposed();
   }
 
