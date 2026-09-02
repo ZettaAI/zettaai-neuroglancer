@@ -64,11 +64,21 @@ import {
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
+import { CalcadaBranchPicker } from "#src/datasource/calcada/branch_picker.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
   dropDecided,
   nextCandidate,
 } from "#src/datasource/calcada/candidate_ranking.js";
+import type {
+  DebugGraph,
+  RootDebugGraph,
+} from "#src/datasource/calcada/debug_graph.js";
+import { mergeDebugGraphs } from "#src/datasource/calcada/debug_graph.js";
+import {
+  CalcadaLabeledTimestampPicker,
+  LABELED_TIMESTAMP_CONTROL_TITLE,
+} from "#src/datasource/calcada/labeled_timestamp_picker.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import {
   interceptedRemovals,
@@ -81,6 +91,7 @@ import {
   classifyCandidateEdit,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
+import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
 import type {
   DataSource,
   DataSourceLookupResult,
@@ -99,6 +110,7 @@ import {
   parseMultiscaleVolumeInfo,
   PrecomputedMultiscaleVolumeChunkSource,
 } from "#src/datasource/precomputed/frontend.js";
+import { mountComponent } from "#src/editing/ui/interop/component_mount.js";
 import { WithSharedKvStoreContext } from "#src/kvstore/chunk_source_frontend.js";
 import type { SharedKvStoreContext } from "#src/kvstore/frontend.js";
 import {
@@ -1086,7 +1098,72 @@ const PRECISION_MODE_JSON_KEY = "precision";
 
 const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const ZETTA_TRACE_JSON_KEY = "zettaTrace";
+const CALCADA_DEBUG_JSON_KEY = "debug";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
+
+// Debugging more than a handful of segments at once is N whole-segment queries,
+// each up to ~10K pieces. The cap keeps an accidental "select everything" from
+// turning one keypress into a flood; the mode says plainly when it bites.
+const DEBUG_MAX_ROOTS = 8;
+
+const DEBUG_STATE_ACTIVE_KEY = "active";
+
+// Double-click is bound at mode scope rather than inside a tool activation:
+// the whole point of the mode is that it outlives whatever tool is held, and a
+// binding that lives in an activation is dead the moment the tool changes.
+const CALCADA_DEBUG_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:dblclick0": { action: "calcada-debug-toggle-piece" },
+});
+
+// Row bindings for the Debug tab's piece list. Right button moves the viewer to
+// the piece, the way the annotation list's own rows do — a left click would
+// fight the selection gestures the surrounding lists already use for it.
+const CALCADA_DEBUG_LIST_EVENT_MAP = EventActionMap.fromObject({
+  mousedown2: "calcada-debug-go-to-piece",
+});
+
+// CalcadaDebugState is the debug overlay's own state. It lives on the connection
+// rather than inside a tool activation because the overlay has to survive the
+// proofreader picking up merge or cut to act on what it shows them — the same
+// reason Zetta Trace is a mode rather than a tool.
+class CalcadaDebugState extends RefCounted implements Trackable {
+  readonly changed = new NullarySignal();
+  active = new WatchableValue<boolean>(false);
+
+  // Fires when an edit rewrote roots. The overlay is keyed on roots, so every
+  // id it holds is stale and it has to be rebuilt from what is now visible.
+  graphEdited = new NullarySignal();
+
+  constructor() {
+    super();
+    this.registerDisposer(
+      this.active.changed.add(() => this.changed.dispatch()),
+    );
+  }
+
+  reset() {
+    this.active.value = false;
+  }
+
+  replaceSegments(_oldValues: Uint64Set, _newValues: Uint64Set) {
+    if (this.active.value) this.graphEdited.dispatch();
+  }
+
+  toJSON() {
+    return this.active.value ? { [DEBUG_STATE_ACTIVE_KEY]: true } : undefined;
+  }
+
+  restoreState(value: unknown) {
+    if (value === undefined || value === null) {
+      this.reset();
+      return;
+    }
+    verifyObject(value);
+    verifyOptionalObjectProperty(value, DEBUG_STATE_ACTIVE_KEY, (active) => {
+      this.active.value = verifyBoolean(active);
+    });
+  }
+}
 
 // CalcadaDebugTab is the layer's "Debug" tab: visible only while the
 // piece-split tool's debug mode is active, it lists the debugged root's pieces
@@ -1094,38 +1171,160 @@ const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 // between sub-pieces often run INSIDE a neighbouring piece's mesh, and hiding
 // that piece is the only way to see them.
 class CalcadaDebugTab extends Tab {
+  // The chrome is built once and only the list is re-rendered. Rebuilding the
+  // whole tab on every change would drop focus and the caret out of the filter
+  // box between keystrokes.
+  private readonly queryElement = document.createElement("input");
+  private readonly statusMessage = document.createElement("span");
+  private readonly copyAllButton: HTMLElement;
+  private readonly copyVisibleButton: HTMLElement;
+  private readonly toggleAllButton: HTMLElement;
+  private readonly hintElement = document.createElement("div");
+  private readonly listElement = document.createElement("div");
+  private query = "";
+
   constructor(private connection: GraphConnection) {
     super();
-    this.element.classList.add("calcada-debug-tab");
+    const { element } = this;
+    element.classList.add("calcada-debug-tab");
+
+    this.hintElement.className = "calcada-debug-tab-hint";
+    element.appendChild(this.hintElement);
+
+    const { queryElement } = this;
+    queryElement.classList.add("neuroglancer-segment-list-query");
+    queryElement.autocomplete = "off";
+    queryElement.spellcheck = false;
+    // Deliberately not the Seg. tab's wording: pieces carry no names, so
+    // promising a name prefix here would be a lie.
+    queryElement.placeholder = "Filter piece IDs, or /regexp";
+    const applyQuery = this.registerCancellable(
+      debounce(() => {
+        this.query = queryElement.value.trim();
+        this.render();
+      }, 150),
+    );
+    queryElement.addEventListener("input", () => applyQuery());
+    element.appendChild(queryElement);
+
+    this.copyAllButton = makeCopyButton({
+      onClick: (event) => {
+        event.stopPropagation();
+        setClipboard(this.listedPieces().join("\n"));
+      },
+    });
+    this.copyVisibleButton = makeCopyButton({
+      onClick: (event) => {
+        event.stopPropagation();
+        setClipboard(this.listedPieces(true).join("\n"));
+      },
+    });
+    // Deliberately NOT neuroglancer-segment-list-entry-copy: that class is
+    // `visibility: hidden` until its ROW is hovered, which is right for a row
+    // and makes a toolbar button permanently invisible. The rows read
+    // [copy][eye][id] and this row reads the same, so the eyes line up anyway.
+    this.toggleAllButton = makeEyeButton({
+      title: "Show or hide every piece's mesh",
+      onClick: (event) => {
+        event.stopPropagation();
+        this.connection.setAllPieceMeshesHidden(
+          !this.connection.allPieceMeshesHidden(),
+        );
+      },
+    });
+    const status = document.createElement("div");
+    status.classList.add("neuroglancer-segment-list-status");
+    this.statusMessage.classList.add(
+      "neuroglancer-segment-list-status-message",
+    );
+    status.appendChild(this.copyAllButton);
+    status.appendChild(this.toggleAllButton);
+    status.appendChild(this.copyVisibleButton);
+    status.appendChild(this.statusMessage);
+    element.appendChild(status);
+
+    this.listElement.className = "calcada-debug-piece-list";
+    this.registerDisposer(
+      new MouseEventBinder(this.listElement, CALCADA_DEBUG_LIST_EVENT_MAP),
+    );
+    element.appendChild(this.listElement);
+
     this.registerDisposer(
       connection.debugPiecesChanged.add(() => this.render()),
     );
     this.render();
   }
 
-  private render() {
-    const { element } = this;
-    removeChildren(element);
+  // Plain text matches anywhere in the id; a leading slash is a regexp, the same
+  // two forms the Seg. tab's filter accepts.
+  private matches(piece: bigint): boolean {
+    const { query } = this;
+    if (query === "") return true;
+    const text = piece.toString();
+    if (query.startsWith("/")) {
+      try {
+        return new RegExp(query.slice(1)).test(text);
+      } catch {
+        // A half-typed regexp is not an error worth showing; match nothing until
+        // it parses.
+        return false;
+      }
+    }
+    return text.includes(query);
+  }
+
+  private listedPieces(onlyVisible = false): string[] {
     const colors = this.connection.debugPiecesColors;
+    if (colors === undefined) return [];
+    return [...colors.keys()]
+      .filter((piece) => this.matches(piece))
+      .filter(
+        (piece) => !onlyVisible || !this.connection.pieceMeshHidden(piece),
+      )
+      .map((piece) => piece.toString());
+  }
+
+  private render() {
+    const colors = this.connection.debugPiecesColors;
+    const hasPieces = colors !== undefined;
+    this.queryElement.style.display = hasPieces ? "" : "none";
+    this.listElement.style.display = hasPieces ? "" : "none";
+    removeChildren(this.listElement);
+
     if (colors === undefined) {
-      const hint = document.createElement("div");
-      hint.className = "calcada-debug-tab-hint";
-      hint.textContent =
-        'Press "Debug" in the Piece split tool to inspect a segment\u2019s pieces here.';
-      element.appendChild(hint);
+      this.hintElement.textContent =
+        'Press "D" (or the Debug button in the Graph tab) and select a segment ' +
+        "to inspect its pieces here.";
+      this.statusMessage.textContent = "";
+      this.toggleAllButton.style.display = "none";
+      this.copyAllButton.style.display = "none";
+      this.copyVisibleButton.style.display = "none";
       return;
     }
-    const header = document.createElement("div");
-    header.className = "calcada-debug-tab-hint";
-    header.textContent =
+    this.toggleAllButton.style.display = "";
+    this.copyAllButton.style.display = "";
+    this.copyVisibleButton.style.display = "";
+    this.hintElement.textContent =
       `Root ${this.connection.debugPiecesRoot?.toString() ?? "?"} \u2014 ` +
       `${colors.size} piece(s). Double-click a piece (in 3D or below) to ` +
       "hide/show its mesh.";
-    element.appendChild(header);
-    const list = document.createElement("div");
-    list.className = "calcada-debug-piece-list";
-    element.appendChild(list);
-    for (const [piece, packedColor] of colors) {
+
+    const shown = [...colors].filter(([piece]) => this.matches(piece));
+    const visible = shown.filter(
+      ([piece]) => !this.connection.pieceMeshHidden(piece),
+    ).length;
+    this.statusMessage.textContent = `${visible}/${shown.length} visible`;
+    const filtered = this.query !== "";
+    this.copyAllButton.title = `Copy all ${shown.length} ${filtered ? "matching " : ""}piece ID(s)`;
+    this.copyVisibleButton.title = `Copy ${visible} visible ${
+      filtered ? "matching " : ""
+    }piece ID(s)`;
+    this.toggleAllButton.classList.toggle(
+      "neuroglancer-visible",
+      !this.connection.allPieceMeshesHidden(),
+    );
+
+    for (const [piece, packedColor] of shown) {
       // Mirror the native segment-list row (same classes and widgets) so the
       // debug piece list reads exactly like the Seg. tab, with the eye wired
       // to per-piece mesh visibility instead of visibleSegments.
@@ -1177,10 +1376,13 @@ class CalcadaDebugTab extends Tab {
       idElement.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
       idElement.style.color = useWhiteBackground(color) ? "white" : "black";
       idContainer.appendChild(idElement);
+      row.addEventListener("action:calcada-debug-go-to-piece", () =>
+        this.connection.goToPiece(piece),
+      );
       row.addEventListener("dblclick", () =>
         this.connection.togglePieceMesh(piece),
       );
-      list.appendChild(row);
+      this.listElement.appendChild(row);
     }
   }
 }
@@ -1193,6 +1395,7 @@ class CalcadaState extends RefCounted implements Trackable {
   public findPathState = new FindPathState();
   public pieceSplitState = new PieceSplitState();
   public zettaTraceState = new ZettaTraceState();
+  public calcadaDebugState = new CalcadaDebugState();
   public branchId = new TrackableValue<number>(0, (x) =>
     typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : 0,
   );
@@ -1220,6 +1423,9 @@ class CalcadaState extends RefCounted implements Trackable {
       }),
     );
     this.registerDisposer(
+      this.calcadaDebugState.changed.add(() => this.changed.dispatch()),
+    );
+    this.registerDisposer(
       this.zettaTraceState.changed.add(() => {
         this.changed.dispatch();
       }),
@@ -1237,6 +1443,7 @@ class CalcadaState extends RefCounted implements Trackable {
     this.findPathState.replaceSegments(oldValues, newValues);
     this.pieceSplitState.replaceSegments(oldValues, newValues);
     this.zettaTraceState.replaceSegments(oldValues, newValues);
+    this.calcadaDebugState.replaceSegments(oldValues, newValues);
   }
 
   reset() {
@@ -1245,6 +1452,7 @@ class CalcadaState extends RefCounted implements Trackable {
     this.findPathState.reset();
     this.pieceSplitState.reset();
     this.zettaTraceState.reset();
+    this.calcadaDebugState.reset();
   }
 
   toJSON() {
@@ -1254,6 +1462,7 @@ class CalcadaState extends RefCounted implements Trackable {
       [FIND_PATH_JSON_KEY]: this.findPathState.toJSON(),
       [PIECE_SPLIT_JSON_KEY]: this.pieceSplitState.toJSON(),
       [ZETTA_TRACE_JSON_KEY]: this.zettaTraceState.toJSON(),
+      [CALCADA_DEBUG_JSON_KEY]: this.calcadaDebugState.toJSON(),
       [CALCADA_BRANCH_JSON_KEY]: this.branchId.toJSON(),
     };
   }
@@ -1270,6 +1479,9 @@ class CalcadaState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, PIECE_SPLIT_JSON_KEY, (value) => {
       this.pieceSplitState.restoreState(value);
+    });
+    verifyOptionalObjectProperty(x, CALCADA_DEBUG_JSON_KEY, (value) => {
+      this.calcadaDebugState.restoreState(value);
     });
     verifyOptionalObjectProperty(x, ZETTA_TRACE_JSON_KEY, (value) => {
       this.zettaTraceState.restoreState(value);
@@ -1912,6 +2124,398 @@ const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
 // (1.2s -> 13s), which is unusable between swipes. Retrying an empty result
 // costs nothing in the common case.
 const EMPTY_RETRY_DELAYS_MS = [300, 700, 1500];
+
+/**
+ * Drives the debug overlay: fetching each visible segment's piece graph, tinting
+ * every piece distinctly and drawing a line per edge.
+ *
+ * Like the trace, this lives on the GraphConnection rather than in a tool: the
+ * whole point of looking at a segment's pieces is to then act on them, and a
+ * tool activation would be torn down the moment the proofreader picked up merge
+ * or cut, taking the overlay with it.
+ */
+class CalcadaDebugSession extends RefCounted {
+  readonly changed = new NullarySignal();
+  private priorBaseSegmentHighlighting = false;
+  private priorHighlightColor: vec4 | undefined;
+  private priorHideSegmentZero = false;
+  private saved = false;
+  private modePanel: StatusMessage | undefined;
+  private modePanelStatus: HTMLElement | undefined;
+  private status = "Select a segment to debug it";
+  // Selecting a segment fires once per id, and showing a segment made of many
+  // pieces fires once per piece; refetching on each would be a burst of whole
+  // -segment queries for one user action.
+  private readonly refetch = this.registerCancellable(
+    debounce(() => void this.enter(), 150),
+  );
+  private watchingSelection: RefCounted | undefined;
+  // One entry per SELECTED id, keyed by what was asked for rather than by the
+  // root it resolved to: deselecting a segment then has nothing to refetch, and
+  // the ids that stayed selected are served from here.
+  private readonly graphCache = new Map<bigint, RootDebugGraph>();
+  // A refresh landing after the mode was switched off would repaint an overlay
+  // nothing is going to clear.
+  private fetchToken = 0;
+  private revealedTab = false;
+
+  constructor(
+    private connection: GraphConnection,
+    private layer: SegmentationUserLayer,
+    private state: CalcadaDebugState,
+  ) {
+    super();
+    this.registerDisposer(
+      state.active.changed.add(() => {
+        if (state.active.value) {
+          this.enterMode();
+        } else {
+          this.exit();
+        }
+      }),
+    );
+    this.registerDisposer(
+      state.graphEdited.add(() => {
+        // An edit rewrites the very piece ids the cache holds.
+        this.graphCache.clear();
+        void this.enter();
+      }),
+    );
+    if (state.active.value) this.enterMode();
+    this.registerDisposer(() => this.exit());
+  }
+
+  private get segmentsState() {
+    return this.layer.displayState.segmentationGroupState.value;
+  }
+
+  private saveDisplayState() {
+    if (this.saved) return;
+    const { displayState } = this.layer;
+    this.priorBaseSegmentHighlighting =
+      displayState.baseSegmentHighlighting.value;
+    this.priorHighlightColor = displayState.highlightColor.value;
+    this.priorHideSegmentZero = displayState.hideSegmentZero.value;
+    this.saved = true;
+  }
+
+  private restoreDisplayState() {
+    if (!this.saved) return;
+    const { displayState } = this.layer;
+    displayState.baseSegmentHighlighting.value =
+      this.priorBaseSegmentHighlighting;
+    displayState.highlightColor.value = this.priorHighlightColor;
+    displayState.hideSegmentZero.value = this.priorHideSegmentZero;
+    this.saved = false;
+  }
+
+  // Turning the mode on is not the same as having something to draw: the panel
+  // goes up immediately and the overlay follows whatever gets selected, so the
+  // mode can be armed before picking a segment.
+  private enterMode() {
+    this.showModePanel();
+    const watcher = new RefCounted();
+    watcher.registerDisposer(
+      this.segmentsState.visibleSegments.changed.add(() => this.refetch()),
+    );
+    this.layer.toolBinder.globalBinder.inputEventMapBinder(
+      CALCADA_DEBUG_INPUT_EVENT_MAP,
+      watcher,
+    );
+    watcher.registerDisposer(
+      registerActionListener(
+        window,
+        "calcada-debug-toggle-piece",
+        (event: ActionEvent<unknown>) => {
+          event.stopPropagation();
+          this.toggleUnderCursor();
+        },
+      ),
+    );
+    this.watchingSelection = watcher;
+    this.revealedTab = false;
+    void this.enter();
+  }
+
+  /**
+   * Double-click on the segmentation. A segment that is not on screen yet is
+   * brought in — that is the gesture for adding one to the comparison — and
+   * only once it is does the same gesture start acting on its individual
+   * pieces. Removing a segment stays with the Seg. tab, so this gesture can
+   * never take one away by surprise.
+   */
+  private toggleUnderCursor() {
+    const selection = this.layer.displayState.segmentSelectionState;
+    const piece = selection.baseValue;
+    if (piece === undefined || piece === null || piece === 0n) return;
+    const { visibleSegments } = this.segmentsState;
+    const segment = selection.hasSelectedSegment
+      ? selection.selectedSegment
+      : undefined;
+    if (
+      segment !== undefined &&
+      !visibleSegments.has(segment) &&
+      !visibleSegments.has(piece)
+    ) {
+      visibleSegments.add(segment);
+      return;
+    }
+    this.connection.togglePieceMesh(piece);
+  }
+
+  private async enter() {
+    const selected = [...this.segmentsState.visibleSegments];
+    if (selected.length === 0) {
+      this.clearOverlay();
+      this.setStatus("Select a segment to debug it");
+      return;
+    }
+    const capped = selected.slice(0, DEBUG_MAX_ROOTS);
+    const wanted = new Set(capped);
+    for (const cached of this.graphCache.keys()) {
+      if (!wanted.has(cached)) this.graphCache.delete(cached);
+    }
+    const missing = capped.filter((id) => !this.graphCache.has(id));
+    const token = ++this.fetchToken;
+    try {
+      if (missing.length > 0) {
+        const timestamp = this.segmentsState.timestamp.value ?? 0;
+        const branchId = this.connection.graph.branchId.value;
+        const fetched = await Promise.all(
+          missing.map((id) =>
+            this.connection.graph.graphServer.debugGraph(
+              id,
+              timestamp,
+              branchId,
+            ),
+          ),
+        );
+        if (token !== this.fetchToken || !this.state.active.value) return;
+        missing.forEach((id, i) => this.graphCache.set(id, fetched[i]));
+      }
+      const graphs = capped
+        .map((id) => this.graphCache.get(id))
+        .filter((graph): graph is RootDebugGraph => graph !== undefined);
+      if (token !== this.fetchToken || !this.state.active.value) return;
+      // Two selected ids can resolve to one segment -- a click that landed on a
+      // piece, or two pieces of the same root -- so the roots are taken from
+      // what the server resolved, not from what was asked for.
+      const roots = [...new Set(graphs.map((graph) => graph.rootId))];
+      this.paint(roots, mergeDebugGraphs(graphs));
+      if (selected.length > capped.length) {
+        this.setStatus(
+          `${this.status} \u2014 first ${DEBUG_MAX_ROOTS} of ` +
+            `${selected.length} selected`,
+        );
+      }
+    } catch (e: unknown) {
+      if (token !== this.fetchToken) return;
+      // A failed fetch leaves the mode on: the usual cause is a segment that an
+      // edit has just superseded, and switching the mode off would make the
+      // next selection need two keypresses instead of one.
+      this.setStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private paint(roots: bigint[], graph: DebugGraph) {
+    const { displayState } = this.layer;
+    const { segmentsState } = this;
+    this.saveDisplayState();
+
+    const colors = new Map<bigint, bigint>();
+    const centerById = new Map<bigint, [number, number, number]>();
+    let owned = 0;
+    let bboxAnchored = 0;
+    for (const piece of graph.pieces) {
+      centerById.set(piece.id, piece.center);
+      if (piece.anchor === "bbox") bboxAnchored++;
+      if (piece.external) continue;
+      colors.set(
+        piece.id,
+        DEBUG_PIECE_PALETTE[owned % DEBUG_PIECE_PALETTE.length],
+      );
+      owned++;
+    }
+
+    const edgeLines: Line[] = [];
+    const siblingLines: Line[] = [];
+    let undrawable = 0;
+    let siblingEdgeCount = 0;
+    const lineBetween = (from: vec3, to: vec3): Line => ({
+      pointA: from,
+      pointB: to,
+      id: "",
+      type: AnnotationType.LINE,
+      properties: [],
+    });
+    for (const edge of graph.edges) {
+      const centerA = centerById.get(edge.a);
+      const centerB = centerById.get(edge.b);
+      if (!centerA || !centerB) {
+        undrawable++;
+        continue;
+      }
+      // An edge is a pair of piece ids: draw it between the two anchors and
+      // nothing else. Edge rows also carry a contact position, but bulk merge
+      // stores it divided by the resolution rather than multiplied, so on a
+      // merge-heavy graph most of them point far outside the volume.
+      const line = lineBetween(
+        vec3.fromValues(centerA[0], centerA[1], centerA[2]),
+        vec3.fromValues(centerB[0], centerB[1], centerB[2]),
+      );
+      if (edge.affinity === 0 && edge.status === "enabled") {
+        siblingEdgeCount++;
+        siblingLines.push(line);
+      } else {
+        edgeLines.push(line);
+      }
+    }
+
+    this.connection.setDebugEdges(edgeLines, siblingLines);
+    this.connection.setDebugPieces(roots[0], colors, centerById);
+
+    // Piece view: 2D hover picks out a single piece and MeshLayer colours each
+    // fragment separately. Both are display-only and restored on exit.
+    displayState.baseSegmentHighlighting.value = true;
+    displayState.highlightColor.value = BLUE_COLOR_HIGHTLIGHT;
+    displayState.hideSegmentZero.value = false;
+
+    resetTemporaryVisibleSegmentsState(segmentsState);
+    displayState.tempSegmentStatedColors2d.value.clear();
+    displayState.tempSegmentDefaultColor2d.value = undefined;
+    segmentsState.useTemporaryVisibleSegments.value = true;
+    segmentsState.useTemporarySegmentEquivalences.value = true;
+    for (const root of roots) segmentsState.temporaryVisibleSegments.add(root);
+    for (const [piece, color] of colors) {
+      // Skip the ones already hidden, colour included: a refetch on a selection
+      // change would otherwise put every hidden piece back on screen, and the
+      // colour alone is enough to do that.
+      if (this.connection.pieceMeshHidden(piece)) continue;
+      segmentsState.temporaryVisibleSegments.add(piece);
+      displayState.tempSegmentStatedColors2d.value.set(piece, color);
+    }
+    displayState.useTempSegmentStatedColors2d.value = true;
+
+    // Reveal the Debug tab once, when the mode first paints. A repaint fires on
+    // every selection change, and merge and cut are driven from the Graph tab —
+    // switching again would pull the proofreader off it mid-edit. exit() guards
+    // the same way, with onlyIfCurrent.
+    if (!this.revealedTab) {
+      this.revealedTab = true;
+      this.selectLayerPanelTab("calcada-debug");
+    }
+    this.changed.dispatch();
+
+    this.setStatus(
+      `${roots.length} segment(s), ${graph.pieces.length} pieces, ` +
+        `${graph.edges.length} edges \u2014 ${siblingEdgeCount} green ` +
+        "zero-affinity split edge(s)" +
+        (undrawable > 0 ? `, ${undrawable} not drawable` : "") +
+        (bboxAnchored > 0
+          ? `, ${bboxAnchored} on bbox centre (no rep point)`
+          : ""),
+    );
+  }
+
+  // Drops everything the overlay draws but leaves the mode armed.
+  private clearOverlay() {
+    this.fetchToken++;
+    const { displayState } = this.layer;
+    this.connection.clearDebugEdges();
+    this.connection.setDebugPieces(undefined, undefined);
+    resetTemporaryVisibleSegmentsState(this.segmentsState);
+    displayState.useTempSegmentStatedColors2d.value = false;
+    displayState.tempSegmentStatedColors2d.value.clear();
+    displayState.tempSegmentDefaultColor2d.value = undefined;
+    this.restoreDisplayState();
+    this.changed.dispatch();
+  }
+
+  private exit() {
+    this.refetch.cancel();
+    this.watchingSelection?.dispose();
+    this.watchingSelection = undefined;
+    this.clearOverlay();
+    this.hideModePanel();
+    this.selectLayerPanelTab("segments", "calcada-debug");
+  }
+
+  private setStatus(text: string) {
+    this.status = text;
+    if (this.modePanelStatus !== undefined) {
+      this.modePanelStatus.textContent = text;
+    }
+    this.changed.dispatch();
+  }
+
+  /**
+   * The mode's own section in the status list, built the way a tool activation
+   * builds one — same header and body as merge and cut, so the three read as one
+   * family. It cannot use makeToolActivationStatusMessage: the activation
+   * releases the tool slot immediately, and the section has to outlive it.
+   */
+  private showModePanel() {
+    if (this.modePanel !== undefined) return;
+    const message = new StatusMessage(false);
+    message.element.classList.add(
+      "neuroglancer-tool-status",
+      "calcada-debug-mode",
+    );
+
+    const content = document.createElement("div");
+    content.classList.add("neuroglancer-tool-status-content");
+    message.element.appendChild(content);
+
+    const headerContainer = document.createElement("div");
+    headerContainer.classList.add("neuroglancer-tool-status-header-container");
+    const header = document.createElement("div");
+    header.classList.add("neuroglancer-tool-status-header");
+    header.textContent = "Debug mode";
+    headerContainer.appendChild(header);
+    content.appendChild(headerContainer);
+
+    const body = document.createElement("div");
+    body.classList.add("neuroglancer-tool-status-body", "calcada-tool-status");
+    const status = document.createElement("span");
+    status.className = "calcada-debug-mode-status";
+    status.textContent = this.status;
+    body.appendChild(status);
+    content.appendChild(body);
+
+    const hint = document.createElement("div");
+    hint.textContent =
+      "Select segments to debug them \u00b7 double-click a piece to hide its " +
+      "mesh \u00b7 D to exit";
+    hint.classList.add("neuroglancer-tool-status-bindings");
+    message.element.appendChild(hint);
+
+    this.modePanel = message;
+    this.modePanelStatus = status;
+  }
+
+  private hideModePanel() {
+    this.modePanel?.dispose();
+    this.modePanel = undefined;
+    this.modePanelStatus = undefined;
+  }
+
+  // Shows a tab, optionally only when the panel is currently on another named
+  // one — so leaving debug mode returns to Segments without hijacking a panel
+  // the proofreader has moved elsewhere.
+  private selectLayerPanelTab(id: string, onlyIfCurrent?: string) {
+    for (const panel of this.layer.panels.panels) {
+      if (!panel.tabs.includes(id)) continue;
+      if (
+        onlyIfCurrent !== undefined &&
+        panel.selectedTab.value !== onlyIfCurrent
+      ) {
+        return;
+      }
+      panel.selectedTab.value = id;
+      return;
+    }
+  }
+}
 
 /**
  * Drives Zetta Trace: fetching candidates for the seed segment, drawing the
@@ -2777,6 +3381,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public debugSiblingAnnotationState!: AnnotationLayerState;
   public traceAnnotationState!: AnnotationLayerState;
   public traceSession!: ZettaTraceSession;
+  public debugSession!: CalcadaDebugSession;
 
   // Debug piece view shared between the piece-split tool (which enters/leaves
   // debug mode) and the layer's "Debug" tab (which lists the pieces and drives
@@ -2785,6 +3390,9 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   readonly debugTabHidden = new WatchableValue<boolean>(true);
   debugPiecesRoot: bigint | undefined;
   debugPiecesColors: Map<bigint, bigint> | undefined;
+  // Where each piece is drawn — its representative voxel, or its bbox centre
+  // when it has none. The tab jumps to these.
+  debugPieceCenters: Map<bigint, [number, number, number]> | undefined;
 
   constructor(
     public graph: CalcadaGraphSource,
@@ -3191,6 +3799,9 @@ void main() {
     this.traceSession = this.registerDisposer(
       new ZettaTraceSession(this, layer, state.zettaTraceState),
     );
+    this.debugSession = this.registerDisposer(
+      new CalcadaDebugSession(this, layer, state.calcadaDebugState),
+    );
   }
 
   private graphRenderLayer: SliceViewPanelChunkedGraphLayer | undefined;
@@ -3518,7 +4129,18 @@ void main() {
    * caller keeping its own bookkeeping does not have to guess: an empty stack
    * and a failed revert both leave the graph untouched.
    */
+  // Serialised because every keybinding calls this fire-and-forget: two quick
+  // presses would pop two entries and revert both at once, and a stepped
+  // split's operations share roots, so the second revert loses the server lock
+  // and comes back 409. Queued rather than dropped — two presses should undo
+  // two edits, one after the other.
+  private readonly runUndoSerially = createSerialRunner();
+
   async undo(): Promise<boolean> {
+    return this.runUndoSerially(() => this.undoOnce());
+  }
+
+  private async undoOnce(): Promise<boolean> {
     const entry = this.undoStack.pop();
     if (entry === undefined) {
       StatusMessage.showTemporaryMessage("Nothing to undo", 2500);
@@ -3571,9 +4193,11 @@ void main() {
   setDebugPieces(
     rootId: bigint | undefined,
     colors: Map<bigint, bigint> | undefined,
+    centers?: Map<bigint, [number, number, number]>,
   ) {
     this.debugPiecesRoot = rootId;
     this.debugPiecesColors = colors;
+    this.debugPieceCenters = centers;
     this.debugTabHidden.value = colors === undefined;
     if (colors === undefined) {
       const meshSource = this.getMeshSource();
@@ -3588,6 +4212,47 @@ void main() {
     this.debugPiecesChanged.dispatch();
   }
 
+  // Hides or shows every debugged piece's mesh at once. The tab's per-piece eyes
+  // are the only way to do this today, and a segment routinely holds dozens of
+  // pieces, so clearing the view to look at one bridge means dozens of clicks.
+  setAllPieceMeshesHidden(hidden: boolean) {
+    const meshSource = this.getMeshSource();
+    if (!(meshSource instanceof MeshSource)) return;
+    const colors = this.debugPiecesColors;
+    if (colors === undefined) return;
+    for (const piece of colors.keys()) {
+      if (hidden) {
+        meshSource.hiddenFragmentSegments.add(piece);
+      } else {
+        meshSource.hiddenFragmentSegments.delete(piece);
+      }
+      this.setPieceVisibleIn2d(piece, !hidden);
+    }
+    this.redrawRenderLayers();
+    this.debugPiecesChanged.dispatch();
+  }
+
+  // Whether every debugged piece's mesh is currently hidden, which is what the
+  // tab's show/hide-all control toggles on.
+  allPieceMeshesHidden(): boolean {
+    const colors = this.debugPiecesColors;
+    if (colors === undefined || colors.size === 0) return false;
+    for (const piece of colors.keys()) {
+      if (!this.pieceMeshHidden(piece)) return false;
+    }
+    return true;
+  }
+
+  // Centres the viewer on a piece. Assumes the layer's three dimensions are the
+  // global ones, which holds for a calcada layer; Position.value ignores an
+  // array whose length does not match the coordinate space rank, so on a
+  // higher-rank space this does not move rather than moving somewhere wrong.
+  goToPiece(piece: bigint) {
+    const center = this.debugPieceCenters?.get(piece);
+    if (center === undefined) return;
+    this.layer.manager.root.globalPosition.value = Float32Array.from(center);
+  }
+
   pieceMeshHidden(piece: bigint): boolean {
     const meshSource = this.getMeshSource();
     return (
@@ -3596,17 +4261,47 @@ void main() {
     );
   }
 
-  // Toggles one piece's mesh in the debug piece view. MeshLayer skips hidden
-  // fragments only while per-fragment colouring is active, so normal rendering
-  // is unaffected.
+  // Hiding a piece has to reach BOTH views, and 2D needs TWO things done, not
+  // one. Leaving the set is not enough: the slice shader assigns
+  // uNotSelectedAlpha to a segment that is not visible, and then overrides it
+  // with the stated colour's own alpha whenever the segment has one --
+  //
+  //     } else if (!has) { alpha = uNotSelectedAlpha; }
+  //     vec4 rgba = getMappedIdColor(valueForColor);
+  //     if (rgba.a > 0.0) { alpha = rgba.a; }
+  //
+  // -- so a piece that still carries a debug colour keeps drawing at full
+  // alpha however invisible it is. The colour has to come off with it. Other
+  // segments vanish only because they have no stated colour at all.
+  private setPieceVisibleIn2d(piece: bigint, visible: boolean) {
+    const segmentsState = this.layer.displayState.segmentationGroupState.value;
+    if (!segmentsState.useTemporaryVisibleSegments.value) return;
+    const { tempSegmentStatedColors2d } = this.layer.displayState;
+    const color = this.debugPiecesColors?.get(piece);
+    if (visible) {
+      segmentsState.temporaryVisibleSegments.add(piece);
+      if (color !== undefined) {
+        tempSegmentStatedColors2d.value.set(piece, color);
+      }
+    } else {
+      segmentsState.temporaryVisibleSegments.delete(piece);
+      tempSegmentStatedColors2d.value.delete(piece);
+    }
+  }
+
+  // Toggles one piece in the debug piece view. MeshLayer skips hidden fragments
+  // only while per-fragment colouring is active, so normal rendering is
+  // unaffected.
   togglePieceMesh(piece: bigint) {
     const meshSource = this.getMeshSource();
     if (!(meshSource instanceof MeshSource)) return;
-    if (meshSource.hiddenFragmentSegments.has(piece)) {
+    const nowVisible = meshSource.hiddenFragmentSegments.has(piece);
+    if (nowVisible) {
       meshSource.hiddenFragmentSegments.delete(piece);
     } else {
       meshSource.hiddenFragmentSegments.add(piece);
     }
+    this.setPieceVisibleIn2d(piece, nowVisible);
     this.redrawRenderLayers();
     this.debugPiecesChanged.dispatch();
   }
@@ -4065,47 +4760,6 @@ const selectionInNanometers = (
   };
 };
 
-function defaultParentForNewBranch(graph: CalcadaGraphSource): number {
-  return graph.branchId.value;
-}
-
-const BRANCH_CREATING_POLL_MS = 2000;
-const BRANCH_CREATING_POLL_LIMIT = 300;
-
-function watchBranchUntilActive(
-  graph: CalcadaGraphSource,
-  id: number,
-  originBranchId: number,
-  isCancelled: () => boolean,
-  attempt = 0,
-): void {
-  if (isCancelled() || attempt >= BRANCH_CREATING_POLL_LIMIT) return;
-  const entry = graph.branches.value.find((branch) => branch.id === id);
-  if (entry !== undefined && entry.status === "active") {
-    // Only follow the user onto the new branch if they're still where they
-    // were when the fork was requested — a slow copy can take minutes, and
-    // switching branchId out from under someone who navigated elsewhere
-    // would wipe their selected segments and undo stack.
-    if (graph.branchId.value === originBranchId) {
-      graph.branchId.value = id;
-    }
-    return;
-  }
-  if (entry !== undefined && entry.status === "abandoned") return;
-  graph.triggerBranchRefresh();
-  setTimeout(
-    () =>
-      watchBranchUntilActive(
-        graph,
-        id,
-        originBranchId,
-        isCancelled,
-        attempt + 1,
-      ),
-    BRANCH_CREATING_POLL_MS,
-  );
-}
-
 function appendCoordParams(
   url: string,
   coord: { timestamp?: number; branchId?: number },
@@ -4222,7 +4876,8 @@ class CalcadaGraphServerInterface {
     return components.map((c) => c.map(parseUint64));
   }
 
-  // debugGraph fetches a root's pieces (with bbox centres) and edges (with
+  // debugGraph fetches a root's pieces (anchored at their representative voxel,
+  // or their bbox centre when they have none) and edges (with
   // status), for the piece-split tool's debug overlay: colour each piece
   // distinctly and draw a line per edge. Reveals a kept-whole segment's internal
   // structure once a piece split has left it a single colour.
@@ -4231,9 +4886,14 @@ class CalcadaGraphServerInterface {
     timestamp = 0,
     branchId = 0,
   ): Promise<{
+    rootId: bigint;
     pieces: {
       id: bigint;
       center: [number, number, number];
+      // Where center came from: a piece's ingested representative voxel, or its
+      // bbox centre when there is none. A bbox centre can sit outside its own
+      // mesh, so a node drawn off the object is worth being able to explain.
+      anchor: "rep" | "bbox";
       external: boolean;
     }[];
     edges: {
@@ -4263,10 +4923,12 @@ class CalcadaGraphServerInterface {
       (p: {
         id: string;
         center: [number, number, number];
+        anchor?: string;
         external?: boolean;
       }) => ({
         id: parseUint64(p.id),
         center: p.center,
+        anchor: p.anchor === "rep" ? ("rep" as const) : ("bbox" as const),
         external: p.external === true,
       }),
     );
@@ -4284,10 +4946,11 @@ class CalcadaGraphServerInterface {
         affinity: e.affinity,
         area: e.area,
         status: e.status,
-        pos: e.pos ?? ([0, 0, 0] as [number, number, number]),
       }),
     );
-    return { pieces, edges };
+    // The server resolves whatever id it was given to a root, so this is how a
+    // click that landed on a piece is folded onto the segment it belongs to.
+    return { rootId: parseUint64(jsonResp.root_id), pieces, edges };
   }
 
   async mergeSegments(
@@ -4503,7 +5166,12 @@ class CalcadaGraphServerInterface {
     operationId: number;
     roots: bigint[];
     components: bigint[][];
-    splitPieces: { old: bigint; blue: bigint; red: bigint }[];
+    splitPieces: {
+      old: bigint;
+      blue: bigint;
+      red: bigint;
+      origin: "user" | "auto";
+    }[];
   }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     let response: Response;
@@ -4535,7 +5203,7 @@ class CalcadaGraphServerInterface {
     const jsonResp = await response.json();
     const rootIds: string[] = jsonResp.new_root_ids ?? [];
     const comps: string[][] = jsonResp.components ?? [];
-    const subs: { old: string; blue: string; red: string }[] =
+    const subs: { old: string; blue: string; red: string; origin?: string }[] =
       jsonResp.split_pieces ?? [];
     return {
       operationId: Number(jsonResp.operation_id ?? 0),
@@ -4545,6 +5213,9 @@ class CalcadaGraphServerInterface {
         old: parseUint64(sp.old),
         blue: parseUint64(sp.blue),
         red: parseUint64(sp.red),
+        // "auto" marks a piece the backend had to cut on its own to satisfy the
+        // request; nothing renders it, it exists for debugging.
+        origin: sp.origin === "auto" ? ("auto" as const) : ("user" as const),
       })),
     };
   }
@@ -4669,14 +5340,23 @@ export interface CalcadaLabeledTimestamp {
   visibility: string;
 }
 
-class CalcadaGraphSource extends SegmentationGraphSource {
+export interface CalcadaBranch {
+  id: number;
+  name: string;
+  status: string;
+  parentId: number;
+  // 0..1 while a fork is being copied, from the create operation's own
+  // status. Only the session that started the fork has the operation id, so
+  // everyone else sees a plain "creating…" until it finishes.
+  progress?: number;
+}
+
+export class CalcadaGraphSource extends SegmentationGraphSource {
   public graphServer: CalcadaGraphServerInterface;
   private l2CacheAvailable: boolean | undefined = undefined;
   private httpSource: HttpSource;
   public timestampLimit = new TrackableValue<number>(0, (x) => x);
-  public branches = new WatchableValue<
-    { id: number; name: string; status: string; parentId: number }[]
-  >([]);
+  public branches = new WatchableValue<CalcadaBranch[]>([]);
   public labeledTimestamps = new WatchableValue<CalcadaLabeledTimestamp[]>([]);
   private branchesFetched = false;
 
@@ -4742,12 +5422,7 @@ class CalcadaGraphSource extends SegmentationGraphSource {
       this.branches.value = [];
       return;
     }
-    const parsed: {
-      id: number;
-      name: string;
-      status: string;
-      parentId: number;
-    }[] = [];
+    const parsed: CalcadaBranch[] = [];
     for (const entry of data) {
       if (!entry || typeof entry !== "object") continue;
       const id = (entry as any).branch_id;
@@ -4830,6 +5505,24 @@ class CalcadaGraphSource extends SegmentationGraphSource {
     this.refreshLabeledTimestamps().catch((e) => {
       console.warn("Failed to refresh calcada labeled timestamps:", e);
     });
+  }
+
+  // Status of an async create-from-branch copy. `progress` spans BOTH copy
+  // phases — rows and overlay objects — in weighted units, so it does not
+  // advance at a constant rate.
+  public async createBranchStatus(
+    operationId: number,
+  ): Promise<{ status: string; progress: number }> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/branch/create/${operationId}`,
+      {},
+    );
+    const body = await response.json();
+    return {
+      status: typeof body?.status === "string" ? body.status : "running",
+      progress: typeof body?.progress === "number" ? body.progress : 0,
+    };
   }
 
   public async createBranch(
@@ -5015,8 +5708,18 @@ class CalcadaGraphSource extends SegmentationGraphSource {
     toolbox.appendChild(
       makeToolButton(context, layer.toolBinder, {
         toolJson: CALCADA_PIECE_SPLIT_TOOL_ID,
-        label: "Piece Split",
-        title: "Split a piece using blue/red points",
+        label: "Cut",
+        title: "Cut a segment using blue/red points",
+      }),
+    );
+    toolbox.appendChild(
+      makeToolButton(context, layer.toolBinder, {
+        toolJson: CALCADA_DEBUG_TOOL_ID,
+        label: "Debug",
+        title:
+          "Debug overlay: colour every piece of the visible segments and draw " +
+          "a line per edge (green = zero-affinity split edges). Bind a key to " +
+          "it from this button to toggle it without the mouse.",
       }),
     );
     parent.appendChild(toolbox);
@@ -5240,6 +5943,7 @@ const CALCADA_MERGE_SEGMENTS_TOOL_ID = "calcadaMergeSegments";
 const CALCADA_FIND_PATH_TOOL_ID = "calcadaFindPath";
 const CALCADA_PIECE_SPLIT_TOOL_ID = "calcadaPieceSplit";
 const CALCADA_ZETTA_TRACE_TOOL_ID = "calcadaZettaTrace";
+const CALCADA_DEBUG_TOOL_ID = "calcadaDebug";
 
 class MulticutAnnotationLayerView extends AnnotationLayerView {
   declare private _annotationStates: MergedAnnotationStates;
@@ -5370,8 +6074,6 @@ const timeControl = {
 registerLayerControl(SegmentationUserLayer, timeControl);
 
 const CALCADA_LABELED_TIMESTAMP_JSON_KEY = "calcadaLabeledTimestamp";
-const LABELED_TIMESTAMP_CONTROL_TITLE =
-  "Labeled timestamps for the current branch. Selecting one switches the view to that point in time (read-only).";
 
 const labeledTimestampControl = {
   label: "Label",
@@ -5390,289 +6092,23 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       const {
         graph: { value: graph },
       } = segmentationGroupState;
+      const calcadaGraph =
+        graph instanceof CalcadaGraphSource ? graph : undefined;
       const branchId =
-        graph instanceof CalcadaGraphSource
-          ? graph.branchId
-          : new TrackableValue<number>(0, (x) => x);
+        calcadaGraph?.branchId ?? new TrackableValue<number>(0, (x) => x);
 
       const controlElement = document.createElement("div");
       controlElement.classList.add("neuroglancer-calcada-branch-control");
 
-      const select = document.createElement("select");
-      select.classList.add("neuroglancer-layer-control-control");
-      select.title =
-        "Calcada branch (main = 0). Switching clears segments not present on the new branch.";
+      context.registerDisposer(
+        mountComponent(controlElement, CalcadaBranchPicker, {
+          graph: calcadaGraph,
+          branchId,
+          segmentationGroupState,
+        }),
+      );
 
-      const renderOptions = () => {
-        const branches =
-          graph instanceof CalcadaGraphSource ? graph.branches.value : [];
-        while (select.firstChild) {
-          select.removeChild(select.firstChild);
-        }
-        const mainOption = document.createElement("option");
-        mainOption.value = "0";
-        mainOption.textContent = "main";
-        select.appendChild(mainOption);
-        // Show active and creating branches in the dropdown; creating
-        // branches are disabled until their copy completes. Other
-        // non-active branches (merged/abandoned) are hidden unless the
-        // layer state points at one of them — restoring such state without
-        // that option would leave the select stuck on "main" even though
-        // branchId.value is set, making it look like state restore didn't
-        // work.
-        const selectedId = branchId.value;
-        for (const { id, name, status, parentId } of branches) {
-          const isActive = status === "active";
-          const isCreating = status === "creating";
-          if (!isActive && !isCreating && id !== selectedId) continue;
-          const opt = document.createElement("option");
-          opt.value = String(id);
-          if (isCreating) {
-            opt.textContent = `${name} (creating…)`;
-          } else if (!isActive) {
-            opt.textContent = `${name} (${status})`;
-          } else if (parentId !== 0) {
-            const parentName =
-              branches.find((branch) => branch.id === parentId)?.name ??
-              `#${parentId}`;
-            opt.textContent = `${name} ← ${parentName}`;
-          } else {
-            opt.textContent = name;
-          }
-          opt.disabled = isCreating;
-          select.appendChild(opt);
-        }
-        select.value = String(selectedId);
-      };
-      renderOptions();
-
-      select.addEventListener("change", () => {
-        const parsed = Number.parseInt(select.value, 10);
-        if (!Number.isFinite(parsed) || parsed < 0) {
-          select.value = String(branchId.value);
-          return;
-        }
-        if (parsed === branchId.value) return;
-        const targetBranch =
-          graph instanceof CalcadaGraphSource
-            ? graph.branches.value.find((branch) => branch.id === parsed)
-            : undefined;
-        if (targetBranch !== undefined && targetBranch.status === "creating") {
-          select.value = String(branchId.value);
-          return;
-        }
-        // Drop selected segments synchronously before switching — the
-        // branchId.changed listener also clears, but doing it here too
-        // suppresses the "Could not fetch root: piece not found" spam
-        // that would otherwise fire from any in-flight selectedSegments
-        // changes referencing pieces local to the previous branch.
-        segmentationGroupState.selectedSegments.clear();
-        segmentationGroupState.visibleSegments.clear();
-        segmentationGroupState.segmentEquivalences.clear();
-        branchId.value = parsed;
-      });
-
-      select.addEventListener("focus", () => {
-        if (graph instanceof CalcadaGraphSource) {
-          graph.triggerBranchRefresh();
-        }
-      });
-
-      const sync = () => {
-        // Re-render so a non-active branch becomes a visible option when
-        // branchId points at it; otherwise the select silently falls back
-        // to "main" because the matching <option> doesn't exist.
-        renderOptions();
-      };
-      context.registerDisposer(branchId.changed.add(sync));
-      if (graph instanceof CalcadaGraphSource) {
-        context.registerDisposer(graph.branches.changed.add(renderOptions));
-      }
-      controlElement.appendChild(select);
-
-      const newBranchButton = document.createElement("button");
-      newBranchButton.type = "button";
-      newBranchButton.textContent = "+ New branch";
-      controlElement.appendChild(newBranchButton);
-
-      const createForm = document.createElement("div");
-      createForm.style.display = "none";
-      const parentSelect = document.createElement("select");
-      parentSelect.name = "parent_branch";
-      // resetToDefault distinguishes "form just opened" (jump to the
-      // default parent) from "branches list refreshed under an open form"
-      // (keep whatever the user already picked, unless that option is gone).
-      const renderParentOptions = (resetToDefault: boolean) => {
-        const previousValue = parentSelect.value;
-        parentSelect.textContent = "";
-        const mainOption = document.createElement("option");
-        mainOption.value = "0";
-        mainOption.textContent = "from: main";
-        parentSelect.appendChild(mainOption);
-        const branches =
-          graph instanceof CalcadaGraphSource ? graph.branches.value : [];
-        for (const { id, name, status } of branches) {
-          if (status !== "active") continue;
-          const option = document.createElement("option");
-          option.value = String(id);
-          option.textContent = `from: ${name}`;
-          parentSelect.appendChild(option);
-        }
-        const defaultValue = String(
-          graph instanceof CalcadaGraphSource
-            ? defaultParentForNewBranch(graph)
-            : 0,
-        );
-        parentSelect.value = resetToDefault ? defaultValue : previousValue;
-        if (parentSelect.selectedIndex === -1) {
-          parentSelect.value = defaultValue;
-        }
-        if (parentSelect.selectedIndex === -1) parentSelect.value = "0";
-      };
-      renderParentOptions(true);
-      if (graph instanceof CalcadaGraphSource) {
-        context.registerDisposer(
-          graph.branches.changed.add(() => renderParentOptions(false)),
-        );
-      }
-      createForm.appendChild(parentSelect);
-      const nameInput = document.createElement("input");
-      nameInput.type = "text";
-      nameInput.name = "branch_name";
-      const createButton = document.createElement("button");
-      createButton.type = "submit";
-      createButton.textContent = "Create";
-      const errorSpan = document.createElement("span");
-      errorSpan.className = "branch-create-error";
-      createForm.appendChild(nameInput);
-      createForm.appendChild(createButton);
-      createForm.appendChild(errorSpan);
-      controlElement.appendChild(createForm);
-
-      newBranchButton.addEventListener("click", () => {
-        const isHidden = createForm.style.display === "none";
-        createForm.style.display = isHidden ? "" : "none";
-        if (isHidden) {
-          renderParentOptions(true);
-          nameInput.focus();
-        }
-      });
-
-      const submitCreate = async () => {
-        if (!(graph instanceof CalcadaGraphSource)) return;
-        const name = String(nameInput.value).trim();
-        if (name.length === 0) return;
-        const originBranchId = graph.branchId.value;
-        createButton.disabled = true;
-        try {
-          let response: Response;
-          const parsedParentId = Number.parseInt(parentSelect.value, 10);
-          const resolvedParentId = Number.isFinite(parsedParentId)
-            ? parsedParentId
-            : defaultParentForNewBranch(graph);
-          try {
-            response = await graph.createBranch(name, resolvedParentId);
-          } catch (e: any) {
-            const resp: Response | undefined = e?.response;
-            let msg = "";
-            if (resp) {
-              try {
-                const errBody = await resp.json();
-                msg = errBody?.error || errBody?.message || "";
-              } catch {
-                msg = "";
-              }
-              if (!msg) msg = `${resp.status} ${resp.statusText}`;
-            } else {
-              msg = e instanceof Error ? e.message : String(e);
-            }
-            errorSpan.textContent = msg;
-            return;
-          }
-          let body: any = {};
-          try {
-            body = await response.json();
-          } catch {
-            body = {};
-          }
-          const newId = body?.branch_id;
-          const newName = body?.branch_name;
-          if (typeof newId !== "number" || typeof newName !== "string") {
-            errorSpan.textContent = "Invalid response from server";
-            return;
-          }
-          const newStatus =
-            typeof body?.status === "string" ? body.status : "active";
-          graph.branches.value = [
-            ...graph.branches.value,
-            {
-              id: newId,
-              name: newName,
-              status: newStatus,
-              parentId: resolvedParentId,
-            },
-          ];
-          if (newStatus === "active") {
-            graph.branchId.value = newId;
-          } else {
-            let cancelled = false;
-            context.registerDisposer(() => {
-              cancelled = true;
-            });
-            watchBranchUntilActive(
-              graph,
-              newId,
-              originBranchId,
-              () => cancelled,
-            );
-          }
-          nameInput.value = "";
-          createForm.style.display = "none";
-          errorSpan.textContent = "";
-          graph.triggerBranchRefresh();
-        } finally {
-          createButton.disabled = false;
-        }
-      };
-
-      createButton.addEventListener("click", (e) => {
-        e.preventDefault();
-        submitCreate();
-      });
-      nameInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          submitCreate();
-        }
-      });
-
-      const diffLink = document.createElement("a");
-      diffLink.className = "calcada-open-diff";
-      diffLink.textContent = "Open diff";
-      diffLink.target = "_blank";
-      diffLink.rel = "noopener";
-      controlElement.appendChild(diffLink);
-
-      const updateDiffLink = () => {
-        if (!(graph instanceof CalcadaGraphSource)) {
-          diffLink.style.display = "none";
-          return;
-        }
-        // segmentationUrl may carry a "middleauth+" scheme prefix from the
-        // kvstore parser; strip it before passing to new URL() so .origin
-        // yields a plain https:// URL the browser can navigate to.
-        const rawUrl = graph.info.app!.segmentationUrl.replace(
-          /^middleauth\+/,
-          "",
-        );
-        const adminOrigin = new URL(rawUrl).origin;
-        diffLink.href = `${adminOrigin}/admin/graphs/${graph.info.app!.table}/branches/${branchId.value}/diff`;
-        diffLink.style.display = branchId.value === 0 ? "none" : "";
-      };
-      updateDiffLink();
-      context.registerDisposer(branchId.changed.add(updateDiffLink));
-
-      return { controlElement, control: select };
+      return { controlElement, control: controlElement };
     },
     activateTool: (_activation) => {},
   };
@@ -5682,6 +6118,7 @@ const branchControl = {
   label: "Branch",
   title: "Calcada branch (0 = main)",
   toolJson: CALCADA_BRANCH_JSON_KEY,
+  noImplicitLabel: true,
   ...branchLayerControl(),
 };
 
@@ -5804,69 +6241,22 @@ function labeledTimestampLayerControl(): LayerControlFactory<SegmentationUserLay
         context,
       );
 
+      const calcadaGraph =
+        graph instanceof CalcadaGraphSource ? graph : undefined;
+
       const controlElement = document.createElement("div");
       controlElement.classList.add(
         "neuroglancer-calcada-labeled-timestamp-control",
       );
-      const labelSelect = document.createElement("select");
-      labelSelect.classList.add("neuroglancer-layer-control-control");
-      labelSelect.title = LABELED_TIMESTAMP_CONTROL_TITLE;
-      const LIVE_VALUE = "";
-      const renderLabelOptions = () => {
-        const labels =
-          graph instanceof CalcadaGraphSource
-            ? graph.labeledTimestamps.value
-            : [];
-        while (labelSelect.firstChild) {
-          labelSelect.removeChild(labelSelect.firstChild);
-        }
-        const liveOption = document.createElement("option");
-        liveOption.value = LIVE_VALUE;
-        liveOption.textContent = "— live —";
-        labelSelect.appendChild(liveOption);
-        for (const { id, label, timestampMs, visibility } of labels) {
-          const option = document.createElement("option");
-          option.value = String(timestampMs);
-          option.dataset.labelId = id;
-          option.textContent =
-            visibility === "admin" ? `${label} (admins)` : label;
-          labelSelect.appendChild(option);
-        }
-        // Reflect the PENDING value: on a rejected switch the guard snaps
-        // intermediateTimestamp back, which re-renders the select to reality.
-        const currentTimestamp = intermediateTimestamp.value;
-        const match =
-          currentTimestamp === undefined
-            ? undefined
-            : labels.find(
-                (candidate) => candidate.timestampMs === currentTimestamp,
-              );
-        labelSelect.value = match ? String(match.timestampMs) : LIVE_VALUE;
-      };
-      renderLabelOptions();
-
-      labelSelect.addEventListener("change", () => {
-        intermediateTimestamp.value =
-          labelSelect.value === LIVE_VALUE
-            ? undefined
-            : Number.parseInt(labelSelect.value, 10);
-      });
-      labelSelect.addEventListener("focus", () => {
-        if (graph instanceof CalcadaGraphSource) {
-          graph.triggerLabeledTimestampRefresh();
-        }
-      });
 
       context.registerDisposer(
-        intermediateTimestamp.changed.add(renderLabelOptions),
+        mountComponent(controlElement, CalcadaLabeledTimestampPicker, {
+          graph: calcadaGraph,
+          intermediateTimestamp,
+        }),
       );
-      if (graph instanceof CalcadaGraphSource) {
-        context.registerDisposer(
-          graph.labeledTimestamps.changed.add(renderLabelOptions),
-        );
-      }
-      controlElement.appendChild(labelSelect);
-      return { controlElement, control: labelSelect };
+
+      return { controlElement, control: controlElement };
     },
     activateTool: (_activation) => {},
   };
@@ -6768,7 +7158,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
   }
 
   get description() {
-    return "piece split";
+    return "cut";
   }
 
   activate(activation: ToolActivation<this>) {
@@ -6790,7 +7180,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
-    header.textContent = "Piece split";
+    header.textContent = "Cut tool";
     body.classList.add("calcada-tool-status", "calcada-piece-split");
 
     // Dim the segmentation overlay (same mechanism as MulticutSegmentsTool) so
@@ -6806,12 +7196,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // The tool renders the segment the way the rest of the app does: as one
     // segment. Breaking it into its pieces — hover highlighting a single piece in
     // 2D, and tinting each mesh fragment separately in 3D — is a debugging view,
-    // so it is turned on only while Debug is active (see setPieceView).
+    // so it is turned on only by the debug mode (see CalcadaDebugSession).
 
-    // Debug overlay state (toggled by the Debug button): the debugged root and a
-    // per-piece colour map fetched from the backend. When on, every piece of the
-    // root is tinted a distinct colour so a kept-whole segment's internal pieces
-    // are individually visible; edge lines are drawn via the annotation states.
     // Result of a stepped split's first half, held until the second runs. Cleared
     // whenever the points change, since it names sub-pieces derived from them.
     let steppedSplit:
@@ -6823,9 +7209,13 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         }
       | undefined;
 
-    let debugMode = false;
-    let debugRootId: bigint | undefined;
-    let debugPieceColors: Map<bigint, bigint> | undefined;
+    // The debug overlay is its own mode now (CalcadaDebugSession). A split
+    // rewrites the very piece ids it is drawing, so tell it to re-read rather
+    // than leaving stale ids on screen.
+    const refreshDebugOverlay = () => {
+      const debugState = graphConnection.state.calcadaDebugState;
+      if (debugState.active.value) debugState.graphEdited.dispatch();
+    };
 
     // The focused segment is DERIVED from the placed points rather than stored:
     // it is the current root of the first point's piece. Storing it would let it
@@ -6849,52 +7239,19 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       return root === first.pieceId ? undefined : root;
     };
 
-    // setPieceView switches between showing the selection as one segment (the
-    // default, matching the rest of the app) and breaking it into its pieces.
-    // baseSegmentHighlighting makes 2D hover pick out a single piece, and a
-    // defined highlightColor is what gates per-fragment mesh colouring in
-    // MeshLayer.draw — together they are the "piece view". Neither touches the
-    // persisted baseSegmentColoring toggle, so leaving the tool restores whatever
-    // the user had.
-    const setPieceView = (on: boolean) => {
-      displayState.baseSegmentHighlighting.value = on
-        ? true
-        : priorBaseSegmentHighlighting;
-      displayState.highlightColor.value = on
-        ? pieceSplitState.blueGroup.value
-          ? BLUE_COLOR_HIGHTLIGHT
-          : RED_COLOR_HIGHLIGHT
-        : priorHighlightColor;
-    };
-
     const resetPieceSplitDisplay = () => {
+      // Debug mode paints the same temporary state. Resetting it here would
+      // silently undo the overlay the moment any split point changed.
+      if (graphConnection.state.calcadaDebugState.active.value) return;
       resetTemporaryVisibleSegmentsState(segmentationGroupState);
       displayState.useTempSegmentStatedColors2d.value = false;
       displayState.tempSegmentStatedColors2d.value.clear();
       displayState.tempSegmentDefaultColor2d.value = undefined;
     };
     const updatePieceSplitDisplay = () => {
+      if (graphConnection.state.calcadaDebugState.active.value) return;
       resetPieceSplitDisplay();
       displayState.hideSegmentZero.value = false;
-      // Keep the hover tint matching the active colour, but only while the piece
-      // view is on — otherwise this would silently re-enable it.
-      if (debugMode) {
-        setPieceView(true);
-      }
-
-      // Debug overlay takes precedence: colour every piece of the debugged root
-      // distinctly from the authoritative backend piece list.
-      if (debugMode && debugRootId !== undefined && debugPieceColors) {
-        segmentationGroupState.useTemporaryVisibleSegments.value = true;
-        segmentationGroupState.useTemporarySegmentEquivalences.value = true;
-        segmentationGroupState.temporaryVisibleSegments.add(debugRootId);
-        for (const [piece, color] of debugPieceColors) {
-          segmentationGroupState.temporaryVisibleSegments.add(piece);
-          displayState.tempSegmentStatedColors2d.value.set(piece, color);
-        }
-        displayState.useTempSegmentStatedColors2d.value = true;
-        return;
-      }
 
       const focus = currentFocusRoot();
       if (focus === undefined) {
@@ -6979,7 +7336,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       displayState.hideSegmentZero.value = priorHideSegmentZero;
       displayState.baseSegmentHighlighting.value = priorBaseSegmentHighlighting;
       displayState.highlightColor.value = priorHighlightColor;
-      graphConnection.clearDebugEdges();
     });
     activation.registerDisposer(
       pieceSplitState.changed.add(updatePieceSplitDisplay),
@@ -7010,9 +7366,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     });
     const clearButton = makeIcon({
       text: "Clear",
-      title: "Remove all points, reset focus piece, and hide debug overlay",
+      title: "Remove all points and reset the focus piece",
       onClick: () => {
-        clearDebug();
         pieceSplitState.reset();
       },
     });
@@ -7037,29 +7392,11 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       title: "Undo the last edit (Ctrl+Z)",
       onClick: () => void runUndo(),
     });
-    const DEBUG_OFF_TITLE =
-      "Show debug overlay: colour each piece distinctly and draw a line per edge (green = zero-affinity split edges)";
-    const debugButton = makeIcon({
-      text: "Debug",
-      title: DEBUG_OFF_TITLE,
-      onClick: () => void runDebug(),
-    });
-    // Reflect the toggle state on the button itself: without this the overlay
-    // looks impossible to remove because nothing signals it is currently on.
-    const setDebugButtonActive = (active: boolean) => {
-      debugButton.textContent = active ? "Hide Debug" : "Debug";
-      debugButton.title = active
-        ? "Debug overlay is ON — click to hide it"
-        : DEBUG_OFF_TITLE;
-      debugButton.style.backgroundColor = active ? "rgba(0, 200, 0, 0.35)" : "";
-      debugButton.style.outline = active ? "1px solid rgba(0,255,0,0.85)" : "";
-    };
     actions.appendChild(swapButton);
     actions.appendChild(clearButton);
     actions.appendChild(splitPiecesButton);
     actions.appendChild(cutButton);
     actions.appendChild(undoButton);
-    actions.appendChild(debugButton);
     const spinner = document.createElement("div");
     spinner.className = "piece-split-spinner";
     spinner.style.display = "none";
@@ -7106,7 +7443,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         splitPiecesButton,
         cutButton,
         undoButton,
-        debugButton,
       ]) {
         button.classList.toggle("disabled", busy);
       }
@@ -7195,164 +7531,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       setBusy(true);
       try {
         await graphConnection.undo();
-        clearDebug(); // the overlay's piece ids are now stale
-      } finally {
-        setBusy(false);
-      }
-    };
-
-    // Pick the root to debug: the root step 1 produced if a stepped split is in
-    // flight, else the focus piece, else the single visible segment.
-    //
-    // Step 1 is checked first because it supersedes the pieces the points were
-    // placed on. currentFocusRoot() maps the first point's piece id through the
-    // equivalences, which keep resolving it to the pre-split root until the
-    // re-fetched chunks repopulate them — debugging that root returns an empty
-    // graph and reads as the split having wiped the segment's edges.
-    const debugTargetRoot = (): bigint | undefined => {
-      if (steppedSplit?.rootId !== undefined) return steppedSplit.rootId;
-      const focusRoot = currentFocusRoot();
-      if (focusRoot !== undefined) return focusRoot;
-      let only: bigint | undefined;
-      for (const segment of segmentationGroupState.visibleSegments) {
-        if (segment === 0n) continue;
-        if (only !== undefined) return undefined; // ambiguous
-        only = segment;
-      }
-      return only;
-    };
-
-    // Selects `id` in whichever layer panel hosts it. With `onlyIfCurrent`
-    // set, switches only when that tab is the one currently selected (used to
-    // leave the debug tab when debug mode ends without hijacking the panel
-    // otherwise).
-    const selectLayerPanelTab = (id: string, onlyIfCurrent?: string) => {
-      for (const panel of layer.panels.panels) {
-        if (!panel.tabs.includes(id)) continue;
-        if (
-          onlyIfCurrent !== undefined &&
-          panel.selectedTab.value !== onlyIfCurrent
-        ) {
-          return;
-        }
-        panel.selectedTab.value = id;
-        return;
-      }
-    };
-
-    const clearDebug = () => {
-      if (!debugMode) return;
-      debugMode = false;
-      setPieceView(false);
-      debugRootId = undefined;
-      debugPieceColors = undefined;
-      graphConnection.setDebugPieces(undefined, undefined);
-      selectLayerPanelTab("segments", "calcada-debug");
-      graphConnection.clearDebugEdges();
-      setDebugButtonActive(false);
-      updatePieceSplitDisplay();
-    };
-
-    const runDebug = async () => {
-      if (busy) return;
-      if (debugMode) {
-        clearDebug();
-        return;
-      }
-      const root = debugTargetRoot();
-      if (root === undefined) {
-        StatusMessage.showTemporaryMessage(
-          "Select a single segment (or place a point) to debug",
-          5000,
-        );
-        return;
-      }
-      setBusy(true);
-      try {
-        const { pieces, edges } =
-          await graphConnection.graph.graphServer.debugGraph(
-            root,
-            layer.displayState.segmentationGroupState.value.timestamp.value ??
-              0,
-            graphConnection.graph.branchId.value,
-          );
-        debugRootId = root;
-        debugPieceColors = new Map<bigint, bigint>();
-        const centerById = new Map<bigint, [number, number, number]>();
-        let owned = 0;
-        for (const piece of pieces) {
-          centerById.set(piece.id, piece.center);
-          if (piece.external) continue;
-          debugPieceColors!.set(
-            piece.id,
-            DEBUG_PIECE_PALETTE[owned % DEBUG_PIECE_PALETTE.length],
-          );
-          owned++;
-        }
-        const edgeLines: Line[] = [];
-        const siblingLines: Line[] = [];
-        let undrawable = 0;
-        let siblingEdgeCount = 0;
-        const lineBetween = (from: vec3, to: vec3): Line => ({
-          pointA: from,
-          pointB: to,
-          id: "",
-          type: AnnotationType.LINE,
-          properties: [],
-        });
-        for (const edge of edges) {
-          const centerA = centerById.get(edge.a);
-          const centerB = centerById.get(edge.b);
-          if (!centerA || !centerB) {
-            undrawable++;
-            continue;
-          }
-          const pointA = vec3.fromValues(centerA[0], centerA[1], centerA[2]);
-          const pointB = vec3.fromValues(centerB[0], centerB[1], centerB[2]);
-          // Bend the line through the edge's stored contact position when the
-          // server provides one, so it marks where the pieces actually touch —
-          // bbox centres alone can put the whole line inside one mesh.
-          const hasContactPos = edge.pos.some((coordinate) => coordinate !== 0);
-          const segments: Line[] = [];
-          if (hasContactPos) {
-            const contactPos = vec3.fromValues(
-              edge.pos[0],
-              edge.pos[1],
-              edge.pos[2],
-            );
-            segments.push(
-              lineBetween(pointA, contactPos),
-              lineBetween(contactPos, pointB),
-            );
-          } else {
-            segments.push(lineBetween(pointA, pointB));
-          }
-          if (edge.affinity === 0 && edge.status === "enabled") {
-            siblingEdgeCount++;
-            siblingLines.push(...segments);
-          } else {
-            edgeLines.push(...segments);
-          }
-        }
-        graphConnection.setDebugEdges(edgeLines, siblingLines);
-        debugMode = true;
-        graphConnection.setDebugPieces(debugRootId, debugPieceColors);
-        selectLayerPanelTab("calcada-debug");
-        setDebugButtonActive(true);
-        setPieceView(true);
-        updatePieceSplitDisplay();
-        StatusMessage.showTemporaryMessage(
-          `Debug: ${pieces.length} pieces, ${edges.length} edges ` +
-            `(${siblingEdgeCount} green zero-affinity split edge(s)` +
-            (undrawable > 0 ? `, ${undrawable} not drawable` : "") +
-            `). Press Debug again to hide.`,
-          6000,
-        );
-      } catch (e: unknown) {
-        StatusMessage.showTemporaryMessage(
-          `Debug failed: ${e instanceof Error ? e.message : String(e)}`,
-          8000,
-        );
+        refreshDebugOverlay(); // the overlay's piece ids are now stale
       } finally {
         setBusy(false);
       }
@@ -7441,7 +7620,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           newRootSet.add(newRoots);
           graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         }
-        clearDebug();
+        refreshDebugOverlay();
         StatusMessage.showTemporaryMessage(
           `Step 1 done — ${splitPieces.length} piece(s) split, segment still whole. ` +
             `Press Debug to inspect the edges, then "2. Cut".`,
@@ -7505,7 +7684,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           }
           graphConnection.meshAddNewSegments(newRoots);
         }
-        clearDebug();
+        refreshDebugOverlay();
         steppedSplit = undefined;
         pieceSplitState.reset();
         StatusMessage.showTemporaryMessage(
@@ -7581,18 +7760,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     };
     activation.bindAction("toggle-piece-mesh", (event) => {
       event.stopPropagation();
-      const { baseValue } = layer.displayState.segmentSelectionState;
-      if (
-        debugMode &&
-        baseValue !== undefined &&
-        baseValue !== null &&
-        baseValue !== 0n
-      ) {
-        graphConnection.togglePieceMesh(baseValue);
-        return;
-      }
-      // Outside debug mode keep the stock double-click behaviour: toggle the
-      // hovered segment's visibility.
+      // Debug mode binds this same gesture at mode scope and owns the piece
+      // behaviour there; handling it here as well would fire both handlers on
+      // one double-click and cancel out.
+      if (graphConnection.state.calcadaDebugState.active.value) return;
       const sss = layer.displayState.segmentSelectionState;
       if (sss.hasSelectedSegment) {
         const seg = sss.selectedSegment;
@@ -7665,6 +7836,36 @@ const CANDIDATE_FETCH_LIMIT = 50;
  * not deactivate: this is a toggle whose "off" is Esc or pressing the button
  * again.
  */
+// Toggles the debug overlay. Like the trace this is a mode, not a modal tool:
+// looking at a segment's pieces is what you do BEFORE merging or cutting them,
+// so the overlay has to survive picking up another tool.
+class CalcadaDebugTool extends LayerTool<SegmentationUserLayer> {
+  activate(activation: ToolActivation<this>) {
+    const {
+      graphConnection: { value: graphConnection },
+    } = this.layer;
+    if (!graphConnection || !(graphConnection instanceof GraphConnection)) {
+      activation.cancel();
+      return;
+    }
+    const { calcadaDebugState } = graphConnection.state;
+    calcadaDebugState.active.value = !calcadaDebugState.active.value;
+    activation.cancel();
+  }
+
+  get description() {
+    return "debug";
+  }
+
+  toJSON() {
+    return CALCADA_DEBUG_TOOL_ID;
+  }
+}
+
+registerTool(SegmentationUserLayer, CALCADA_DEBUG_TOOL_ID, (layer) => {
+  return new CalcadaDebugTool(layer);
+});
+
 class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
   activate(activation: ToolActivation<this>) {
     const {

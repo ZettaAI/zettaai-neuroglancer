@@ -239,118 +239,6 @@
   line-height: 1.4;
 }
 
-/* Listbox dropdown (shared by the Region + per-layer Resolution pickers) ---- */
-
-.neuroglancer-edit-session-listbox {
-  display: block;
-  width: 100%;
-}
-
-.neuroglancer-edit-session-listbox-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  box-sizing: border-box;
-  background-color: var(--neuroglancer-edit-session-bg-elev);
-  color: var(--neuroglancer-edit-session-text);
-  border: 1px solid var(--neuroglancer-edit-session-border);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.neuroglancer-edit-session-listbox-trigger:hover:not(:disabled) {
-  border-color: var(--neuroglancer-edit-session-accent);
-}
-
-.neuroglancer-edit-session-listbox-trigger:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-
-.neuroglancer-edit-session-listbox-summary {
-  flex: 1 1 auto;
-  text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.neuroglancer-edit-session-listbox-caret {
-  flex: 0 0 auto;
-  /* Lucide SVG inherits `color` via stroke="currentColor"; `block` removes the
-     inline-svg baseline gap so it sits centered against the summary text. */
-  display: block;
-  color: var(--neuroglancer-edit-session-text-dim);
-}
-
-.neuroglancer-edit-session-listbox-panel {
-  /*
-   * Portaled into the modal backdrop and positioned with `fixed` so the panel
-   * escapes any `overflow: hidden` clipping while still inheriting the modal's
-   * tokens. top/left/min-width are set inline from the trigger's rect; z-index
-   * sits above the modal frame (backdrop is z-index 200). The backdrop, not the
-   * modal body, is the portal host, so set the font cascade explicitly here.
-   */
-  position: fixed;
-  background-color: var(--neuroglancer-edit-session-bg, #1a1a1a);
-  color: var(--neuroglancer-edit-session-text, #e5e7eb);
-  border: 1px solid var(--neuroglancer-edit-session-border, #3a3a3a);
-  border-radius: 4px;
-  padding: 4px 0;
-  z-index: 300;
-  font-family: sans-serif;
-  font-size: 13px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-  /* Cap the popup height and scroll internally so a long option list (e.g. many
-     bounding-box annotations in the Region picker) stays reachable instead of
-     running off-screen. `updateRect` tightens `max-height` inline to the real
-     space below/above the trigger; this is the fallback ceiling. `none` stops
-     wheel-scroll at the panel edge from chaining to the modal body AND
-     suppresses the macOS elastic rubber-band, which would otherwise open a gap
-     between the list and the trigger when overscrolled past its top. */
-  max-height: 320px;
-  overflow-y: auto;
-  overscroll-behavior: none;
-}
-
-.neuroglancer-edit-session-listbox-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  color: var(--neuroglancer-edit-session-text);
-  outline: none;
-}
-
-/* Hover and the roving keyboard cursor share one highlight — `:focus` because
-   the active option is programmatically focused as the arrow keys move it. */
-.neuroglancer-edit-session-listbox-option:hover,
-.neuroglancer-edit-session-listbox-option:focus {
-  background-color: var(--neuroglancer-edit-session-bg-elev, #232323);
-}
-
-/* Fixed-width leading slot for the selected-row check; kept (empty) on the
-   other rows so every label stays aligned to the same left edge. */
-.neuroglancer-edit-session-listbox-check {
-  flex: 0 0 auto;
-  width: 14px;
-  height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--neuroglancer-edit-session-accent);
-}
-
-.neuroglancer-edit-session-listbox-check svg {
-  display: block;
-}
-
 /* Layers card -------------------------------------------------------------- */
 
 .neuroglancer-edit-session-entry-modal-layers-card {
@@ -454,7 +342,7 @@
 /*
  * Force the picker wrapper to block-fill so the listbox trigger stretches to
  * the slot's width — matching the static-value cell on single-res rows. The
- * shared `.neuroglancer-edit-session-listbox` is already block/100%, so the
+ * shared `.neuroglancer-listbox-dropdown` is already block/100%, so the
  * wrapper just needs to stop shrinking to content.
  */
 .neuroglancer-edit-session-entry-modal-layer-resolution-picker {
@@ -886,8 +774,7 @@
  */
 .neuroglancer-edit-session-entry-modal-close:focus-visible,
 .neuroglancer-edit-session-entry-modal-btn:focus-visible,
-.neuroglancer-edit-session-entry-modal-role-segment:focus-visible,
-.neuroglancer-edit-session-listbox-trigger:focus-visible {
+.neuroglancer-edit-session-entry-modal-role-segment:focus-visible {
   outline: 2px solid var(--neuroglancer-edit-session-accent);
   outline-offset: 1px;
 }

@@ -38,6 +38,13 @@ export interface LayerControlLabelOptions<
   toolDescription?: string;
   toolJson: any;
   isValid?: (layer: LayerType) => WatchableValueInterface<boolean>;
+  /**
+   * Render the row container as a plain <div> rather than a <label>. Set this
+   * for composite controls hosting several interactive elements: a <label>
+   * forwards hover and click from anywhere in the row to its first labelable
+   * descendant, misdirecting them to whichever control happens to be first.
+   */
+  noImplicitLabel?: boolean;
 }
 
 export interface LayerControlFactory<
@@ -75,7 +82,9 @@ function makeControl<LayerType extends UserLayer>(
   options: LayerControlDefinition<LayerType>,
   visibility: WatchableVisibilityPriority,
 ) {
-  const controlContainer = document.createElement("label");
+  const controlContainer = document.createElement(
+    options.noImplicitLabel === true ? "div" : "label",
+  );
   controlContainer.classList.add("neuroglancer-layer-control-container");
   const labelContainer = document.createElement("div");
   labelContainer.classList.add("neuroglancer-layer-control-label-container");
