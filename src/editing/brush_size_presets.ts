@@ -29,20 +29,21 @@ export const BRUSH_SIZE_PRESETS: readonly number[] = [
 ];
 
 export const MIN_BRUSH_SIZE = 1;
-export const MAX_BRUSH_SIZE = 1025; // size = radius * 2 + 1.
+export const MAX_BRUSH_SIZE = 1025;
 
 /**
- * Normalise a raw size to a valid brush size: a finite, odd integer within
- * [MIN_BRUSH_SIZE, MAX_BRUSH_SIZE]. Non-finite input falls back to the minimum.
- * Size is a voxel count and must be odd, so even values snap up by one. Shared
- * by the Brush and Eraser panels (and applied on commit, never per-keystroke).
+ * Normalise a raw size to a valid brush size: a whole number of voxels, at least
+ * {@link MIN_BRUSH_SIZE}. Non-finite input falls back to the minimum.
+ *
+ * Sizes used to be forced odd, because the radius was an integer and the disk had
+ * to centre on a voxel. It no longer does: an even size anchors the stamp on a
+ * voxel boundary instead (`brush_disk_footprint.ts`), so every whole size is a
+ * real, symmetric footprint. There is no upper clamp — the number box may exceed
+ * the largest preset.
  */
 export function clampBrushSize(value: number): number {
   if (!Number.isFinite(value)) return MIN_BRUSH_SIZE;
-  const n = Math.round(value);
-  const odd = n % 2 === 0 ? n + 1 : n;
-  // return Math.max(MIN_BRUSH_SIZE, Math.min(MAX_BRUSH_SIZE, odd));
-  return Math.max(MIN_BRUSH_SIZE, odd);
+  return Math.max(MIN_BRUSH_SIZE, Math.round(value));
 }
 
 /**
@@ -66,12 +67,17 @@ export function nearestPresetSize(value: number): number {
   return best;
 }
 
-/** size → radius (`radius = (size - 1) / 2`). */
+/**
+ * size → radius (`radius = (size - 1) / 2`). A HALF-INTEGER for an even size —
+ * see `brush_disk_footprint.ts`, which reads the fraction as "anchor the stamp on
+ * a voxel boundary".
+ */
 export function sizeToRadius(size: number): number {
-  return Math.max(0, Math.floor((size - 1) / 2));
+  return Math.max(0, (clampBrushSize(size) - 1) / 2);
 }
 
 /** radius → size (`size = radius * 2 + 1`). */
 export function radiusToSize(radius: number): number {
-  return Math.max(0, Math.floor(radius)) * 2 + 1;
+  if (!Number.isFinite(radius)) return MIN_BRUSH_SIZE;
+  return Math.max(MIN_BRUSH_SIZE, Math.round(2 * radius + 1));
 }
