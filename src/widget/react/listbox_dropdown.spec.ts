@@ -90,9 +90,7 @@ function pressKey(target: HTMLElement, key: string) {
   });
 }
 
-// React installs a value tracker on controlled inputs and drops "input" events
-// whose value it already knows about, so a plain `input.value = x` assignment
-// never reaches onChange. Write through the prototype setter the tracker wraps.
+// React's value tracker swallows plain `input.value = x`; use the prototype setter.
 const nativeInputValue = Object.getOwnPropertyDescriptor(
   HTMLInputElement.prototype,
   "value",

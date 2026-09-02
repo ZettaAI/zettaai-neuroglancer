@@ -10,16 +10,27 @@
 
 import type { ComponentType, PropsWithChildren } from "react";
 import { createElement } from "react";
+import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 
 import type { Disposer } from "#src/util/disposable.js";
+
+const rootsByTarget = new WeakMap<HTMLElement, Root>();
 
 export function mountComponent<T extends object>(
   target: HTMLElement,
   component: ComponentType<T>,
   props: PropsWithChildren<T>,
 ): Disposer {
-  const root = createRoot(target);
+  let root = rootsByTarget.get(target);
+  if (root === undefined) {
+    root = createRoot(target);
+    rootsByTarget.set(target, root);
+  }
   root.render(createElement<T>(component, props));
-  return () => root.unmount();
+  return () => {
+    if (rootsByTarget.get(target) !== root) return;
+    rootsByTarget.delete(target);
+    root.unmount();
+  };
 }
