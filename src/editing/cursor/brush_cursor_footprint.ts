@@ -52,7 +52,6 @@ import {
   globalToTargetVoxel,
   targetVoxelToGlobal,
 } from "#src/editing/raster/global_voxel_conversion.js";
-import { brushStampAnchor } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import { vec3 } from "#src/util/geom.js";
 
@@ -173,29 +172,36 @@ export function resolveCursorVoxelFrame(
 }
 
 /**
- * Snap a pointer position to the stamp's centre, so cursor geometry sits on the
- * target voxel grid instead of sliding around inside a voxel as the pointer
- * moves.
- *
- * Which point that is depends on the brush size, so it comes from the shared
- * `brushStampAnchor`: the centre of a voxel for an odd size, a voxel BOUNDARY
- * for an even one. (The anchor lives in the voxel-index frame the distance test
- * measures in, which is half a voxel below the centre — hence the `+ 0.5`.)
- * Global dimensions the view does not render are passed through unchanged.
+ * The stamp center: the target-grid voxel the paint path would treat as the
+ * center of the disk for a pointer at `worldCenter`. Uses the same
+ * `globalToTargetVoxel` + `floor` the paint path uses, so the cursor and the
+ * paint agree on the center voxel even at an exact voxel boundary.
  */
-export function snapWorldCenterToStampCenter(
+export function footprintCenterVoxel(
   worldCenter: vec3,
   frame: CursorVoxelFrame,
-  radiusVoxels: number,
-): vec3 {
+): [number, number, number] {
   const voxel = globalToTargetVoxel(
     [worldCenter[0], worldCenter[1], worldCenter[2]],
     frame.globalVoxelSizeNm,
     frame.targetVoxelSizeNm,
   );
-  const anchor = brushStampAnchor(voxel, radiusVoxels);
+  return [Math.floor(voxel[0]), Math.floor(voxel[1]), Math.floor(voxel[2])];
+}
+
+/**
+ * Snap a pointer position to the center of the voxel the stamp would land on,
+ * so cursor geometry sits on the voxel grid instead of sliding around inside a
+ * voxel as the pointer moves. Global dimensions the view does not render are
+ * passed through unchanged.
+ */
+export function snapWorldCenterToVoxelCenter(
+  worldCenter: vec3,
+  frame: CursorVoxelFrame,
+): vec3 {
+  const centerVoxel = footprintCenterVoxel(worldCenter, frame);
   const snapped = targetVoxelToGlobal(
-    [anchor[0] + 0.5, anchor[1] + 0.5, anchor[2] + 0.5],
+    [centerVoxel[0] + 0.5, centerVoxel[1] + 0.5, centerVoxel[2] + 0.5],
     frame.globalVoxelSizeNm,
     frame.targetVoxelSizeNm,
   );

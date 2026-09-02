@@ -11,11 +11,11 @@
 import { Resolution } from "@zettaai/edit-session";
 import { describe, it, expect } from "vitest";
 
-import { sizeToRadius } from "#src/editing/brush_size_presets.js";
 import {
   computeBrushFootprintAxes,
+  footprintCenterVoxel,
   resolveCursorVoxelFrame,
-  snapWorldCenterToStampCenter,
+  snapWorldCenterToVoxelCenter,
 } from "#src/editing/cursor/brush_cursor_footprint.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import { vec3 } from "#src/util/geom.js";
@@ -154,52 +154,36 @@ describe("resolveCursorVoxelFrame", () => {
   });
 });
 
-describe("snapWorldCenterToStampCenter", () => {
+describe("footprintCenterVoxel / snapWorldCenterToVoxelCenter", () => {
   // Global space at 4 nm; target voxels at 16 nm → 4 global units per voxel.
   const info = displayInfo([0, 1, 2], [4e-9, 4e-9, 4e-9]);
   const frame = resolveCursorVoxelFrame(Resolution.from([16, 16, 16]), info)!;
-  // Voxel 102 spans [408, 412) global units: centre 410, boundaries 408 / 412.
-  const oddRadius = sizeToRadius(5);
-  const evenRadius = sizeToRadius(4);
 
-  it("snaps an odd size to the centre of the pointer's voxel", () => {
-    const snapped = snapWorldCenterToStampCenter(
-      vec3.fromValues(409, 5, 1),
+  it("floors the pointer position onto the target grid", () => {
+    // 410 global units = 102.5 target voxels.
+    expect(footprintCenterVoxel(vec3.fromValues(410, 4, 0), frame)).toEqual([
+      102, 1, 0,
+    ]);
+    expect(
+      footprintCenterVoxel(vec3.fromValues(411.9, 7.9, 3.9), frame),
+    ).toEqual([102, 1, 0]);
+  });
+
+  it("snaps anywhere inside a voxel to that voxel's center", () => {
+    const snapped = snapWorldCenterToVoxelCenter(
+      vec3.fromValues(410, 4, 0),
       frame,
-      oddRadius,
     );
+    // Voxel 102 spans [408, 412) global units; its center is 410.
     expect(snapped[0]).toBeCloseTo(410, 9);
     expect(snapped[1]).toBeCloseTo(6, 9);
     expect(snapped[2]).toBeCloseTo(2, 9);
     // Every position inside the voxel snaps to the same point.
-    expect(
-      Array.from(
-        snapWorldCenterToStampCenter(
-          vec3.fromValues(411.9, 7.9, 3.9),
-          frame,
-          oddRadius,
-        ),
-      ),
-    ).toEqual(Array.from(snapped));
-  });
-
-  it("snaps an even size to the nearest voxel BOUNDARY", () => {
-    // An even size has no middle voxel to sit on. Below the voxel's midpoint
-    // (410) the nearest boundary is 408; above it, 412.
-    expect(
-      snapWorldCenterToStampCenter(
-        vec3.fromValues(409, 5, 1),
-        frame,
-        evenRadius,
-      )[0],
-    ).toBeCloseTo(408, 9);
-    expect(
-      snapWorldCenterToStampCenter(
-        vec3.fromValues(411, 5, 1),
-        frame,
-        evenRadius,
-      )[0],
-    ).toBeCloseTo(412, 9);
+    const alsoSnapped = snapWorldCenterToVoxelCenter(
+      vec3.fromValues(411.9, 7.9, 3.9),
+      frame,
+    );
+    expect(Array.from(alsoSnapped)).toEqual(Array.from(snapped));
   });
 
   it("leaves undisplayed dimensions untouched", () => {
@@ -208,10 +192,9 @@ describe("snapWorldCenterToStampCenter", () => {
       Resolution.from([16, 16, 16]),
       xzInfo,
     )!;
-    const snapped = snapWorldCenterToStampCenter(
+    const snapped = snapWorldCenterToVoxelCenter(
       vec3.fromValues(410, 123.456, 0),
       xzFrame,
-      oddRadius,
     );
     expect(snapped[0]).toBeCloseTo(410, 9);
     // `vec3` is a Float32Array, so the passed-through value is the float32 of
