@@ -3873,6 +3873,26 @@ void main() {
         active.value = !active.value;
       }),
     );
+
+    // Zetta Trace is a mode for the same reason and bound the same way. The
+    // stale-segmentation guard applies only to entering it: it exists to keep
+    // edits off an old state, and leaving a mode is not an edit — a trace
+    // started before the timestamp moved would otherwise be impossible to end.
+    this.registerDisposer(
+      registerActionListener(window, CALCADA_TRACE_TOGGLE_ACTION, () => {
+        const { active } = state.zettaTraceState;
+        if (!active.value) {
+          const { timestamp } = layer.displayState.segmentationGroupState.value;
+          if (timestamp.value !== undefined) {
+            StatusMessage.showTemporaryMessage(
+              "Editing can not be performed with a segmentation at an older state.",
+            );
+            return;
+          }
+        }
+        active.value = !active.value;
+      }),
+    );
   }
 
   private graphRenderLayer: SliceViewPanelChunkedGraphLayer | undefined;
@@ -6061,6 +6081,9 @@ const CALCADA_FIND_PATH_TOOL_ID = "calcadaFindPath";
 const CALCADA_PIECE_SPLIT_TOOL_ID = "calcadaPieceSplit";
 const CALCADA_ZETTA_TRACE_TOOL_ID = "calcadaZettaTrace";
 const DEBUG_EDGE_COLOR_PROPERTY = "color";
+// Bound straight to a key like the debug toggle: both are modes that must
+// survive the proofreader picking up a tool.
+const CALCADA_TRACE_TOGGLE_ACTION = "calcada-toggle-zetta-trace";
 const CALCADA_DEBUG_TOOL_ID = "calcadaDebug";
 // Bound straight to a key in config/custom-keybinds.json, bypassing the tool
 // slot so toggling the overlay never puts down the tool in hand.
