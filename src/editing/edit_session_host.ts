@@ -462,6 +462,21 @@ const VERIFY_CONCURRENCY = 5;
 const REGION_SPANS_SESSIONS = Symbol("committed-region-spans-sessions");
 
 /**
+ * A cheap value that changes whenever the session's dirty set does.
+ *
+ * `DirtyTracker` bumps a per-layer counter on every `markChunkDirty` /
+ * `markChunkRestoredToBaseline`, so comparing this across a window detects any
+ * paint, erase or undo that landed inside it — including one that re-dirties a
+ * chunk already in the set, which a size comparison alone would miss.
+ */
+function dirtyFingerprint(session: EditSession): string {
+  const versions = session.config.layers.map((layer) =>
+    session.dirty.getLayerVersion(layer.layerId),
+  );
+  return `${session.dirty.getDirtyChunks().size}:${versions.join(",")}`;
+}
+
+/**
  * Target on-screen brush diameter, in CSS pixels, used to seed the brush size
  * from the current zoom on first paint-tool activation. Chosen to be clearly
  * visible without dominating the slice; the user adjusts from here with `+`/`-`.
@@ -1629,12 +1644,30 @@ export class EditSessionHost extends RefCounted {
       this.saveProgress.value = { kind: "writing" };
       const layerFilter =
         layerIds !== undefined ? new Set<LayerId>(layerIds) : undefined;
+      // The host and the library collect the dirty set separately — this
+      // snapshot for verification, `session.save()`'s own for the write — and
+      // the owned box is only guaranteed identical because nothing can mutate
+      // the overlay between them: every mutation source is a macrotask, and
+      // this window awaits only already-resolved promises. That is an
+      // invariant, not a mechanism, so measure it rather than trust it.
+      const dirtyBefore = dirtyFingerprint(session);
       const snapshot: OwnedChunkWrite[] = await this.planOwnedWrites(
         await collectDirtyChunks(session.overlay, layerFilter),
       );
       // 2. Write to the backend. The library builds the payload and calls the
       //    save target itself, so the region is installed around the call
       //    rather than passed in; `withSessionRegions` clears it unconditionally.
+      if (dirtyFingerprint(session) !== dirtyBefore) {
+        // Something edited the overlay while the save was being planned, so the
+        // library is about to collect a different set of chunks than the one
+        // verification will check. Refuse rather than report a durability that
+        // was measured against different bytes; the paint stays dirty and the
+        // user can save again.
+        throw new Error(
+          "the edit overlay changed while the save was being prepared: " +
+            "refusing to verify a save against a different set of chunks",
+        );
+      }
       const regions = this.requireSessionRegions();
       const result = await this.saveTarget.withSessionRegions(regions, () =>
         session.save(layerIds, controller.signal),
