@@ -134,8 +134,6 @@
       "node": "./src/async_computation/decode_zstd_node.ts",
       "default": "./src/async_computation/decode_zstd.ts"
     },
-    "#src/alignment_link/ui/alignment_link_menu.js": "./src/alignment_link/ui/alignment_link_menu.tsx",
-    "#src/layer_group_viewer_menu.js": "./src/layer_group_viewer_menu.tsx",
     "#src/editing/ui/confirm_dialog.js": "./src/editing/ui/confirm_dialog.tsx",
     "#src/editing/ui/session_entry/session_entry.js": "./src/editing/ui/session_entry/session_entry.tsx",
     "#src/editing/ui/session_entry/bbox_picker.js": "./src/editing/ui/session_entry/bbox_picker.tsx",
@@ -151,7 +149,6 @@
     "#src/editing/ui/topbar/chunk_load_progress.js": "./src/editing/ui/topbar/chunk_load_progress.tsx",
     "#src/editing/ui/topbar/editing_topbar.js": "./src/editing/ui/topbar/editing_topbar.tsx",
     "#src/editing/ui/topbar/topbar_edit_button.js": "./src/editing/ui/topbar/topbar_edit_button.tsx",
-    "#src/editing/ui/tool_settings/brush_size_field.js": "./src/editing/ui/tool_settings/brush_size_field.tsx",
     "#src/editing/ui/tool_settings/correspondence.js": "./src/editing/ui/tool_settings/correspondence.tsx",
     "#src/editing/ui/tool_settings/navigation_summary.js": "./src/editing/ui/tool_settings/navigation_summary.tsx",
     "#src/editing/ui/tool_settings/painting_brush.js": "./src/editing/ui/tool_settings/painting_brush.tsx",

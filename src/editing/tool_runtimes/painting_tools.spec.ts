@@ -21,8 +21,6 @@ import type {
 import { Resolution as ResolutionCtor, layerId } from "@zettaai/edit-session";
 import { describe, it, expect, afterEach } from "vitest";
 
-import { sizeToRadius } from "#src/editing/brush_size_presets.js";
-
 import { paintScheduler } from "#src/editing/tool_runtimes/paint_scheduler_config.js";
 
 import type {
@@ -146,11 +144,11 @@ function fakeCompute(calls: ComputeCalls): PaintCompute {
   };
 }
 
-function initialState(radius = 3): PaintingSharedState {
+function initialState(): PaintingSharedState {
   return {
     targetLayerId: TARGET,
     targetResolution: RES,
-    radius,
+    radius: 3,
     radiusCycle: [1, 3, 5],
     activeValue: 7,
     eraseValue: 0,
@@ -162,7 +160,7 @@ function initialState(radius = 3): PaintingSharedState {
   };
 }
 
-function setup(overrides: { radius?: number } = {}) {
+function setup() {
   const log: EditLog = { metas: [], records: 0, discards: 0, writeRegions: 0 };
   const calls: ComputeCalls = {
     applyBrush: [],
@@ -186,7 +184,7 @@ function setup(overrides: { radius?: number } = {}) {
       byteLength: 0,
       asView: () => new Uint32Array(0),
     }),
-    initialState: initialState(overrides.radius),
+    initialState: initialState(),
   });
   return { tools, log, calls };
 }
@@ -293,39 +291,6 @@ describe("ConsumerPaintingTools — stroke lifecycle (TM-315)", () => {
       expect(via[i][0]).toBeLessThan(9);
       if (i > 0) {
         expect(via[i][0] - via[i - 1][0]).toBeCloseTo(1, 5);
-      }
-    }
-  });
-
-  it("hands every stroke consumer stamp anchors, not raw pointer positions", async () => {
-    // The tool anchors the path ONCE so all four consumers rasterize the same
-    // footprint: the unmasked worker kernel, the chunk enumeration that bounds
-    // what it may write, the masked worker footprint, and this synchronous
-    // fallback. It used to anchor only inside `PaintingCompute`, so the worker
-    // kernel measured from the raw fractional position and painted a different,
-    // drifting footprint.
-    paintScheduler.mode = "coalesce";
-    for (const [size, expectAnchor] of [
-      [5, (v: number) => Number.isInteger(v)], // odd → on a voxel
-      [4, (v: number) => Number.isInteger(v - 0.5)], // even → on a boundary
-    ] as const) {
-      const { tools, calls } = setup({ radius: sizeToRadius(size) });
-      await tools.brush.handleInput(down(10.37, 20.62, 30.5));
-      await tools.brush.handleInput(move(18.37, 20.62, 30.5));
-      await tools.brush.handleInput(up(18.37, 20.62, 30.5));
-
-      const strokes = calls.applyBrushStroke;
-      expect(strokes.length).toBeGreaterThanOrEqual(1);
-      for (const stroke of strokes) {
-        for (const point of [stroke.from, stroke.to, ...(stroke.via ?? [])]) {
-          expect(expectAnchor(point[0]), `size ${size} x=${point[0]}`).toBe(
-            true,
-          );
-          expect(expectAnchor(point[1]), `size ${size} y=${point[1]}`).toBe(
-            true,
-          );
-          expect(Number.isInteger(point[2])).toBe(true);
-        }
       }
     }
   });

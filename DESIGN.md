@@ -98,8 +98,6 @@ topbar and dialog can no longer drift off on hardcoded values:
 - `--nge-control-h-compact` `24px` — dense topbar row controls.
 - `--nge-control-h` `28px` — panel inputs, selects, buttons (the default).
 - `--nge-control-h-lg` `32px` — prominent modal/dialog action buttons.
-- `--nge-slider-thumb` `16px` — slider thumb diameter, and the inset its travel
-  keeps from each end of the rail (what the Size slider's ticks align to).
 
 ## Components
 
@@ -109,15 +107,9 @@ topbar and dialog can no longer drift off on hardcoded values:
 - **Inputs / selects**: one hover (border-strong) and one focus treatment
   (accent ring + accent border). Native widget chrome rendered dark via
   `color-scheme: dark`.
-- **Sliders**: one visual language everywhere — a `5px` rail with a
-  `--nge-slider-thumb` (`16px`) white thumb ringed in accent. The Brush "Size"
-  range and the dual-handle Threshold now match.
-- **Size slider** (`.neuroglancer-brush-size-scale`): the rail over a tick strip,
-  one `1px` tick per rung of the brush-size ladder (taller at the ends and at the
-  rung where single-voxel granularity gives way to doubling). Ticks are positioned
-  against `--nge-slider-thumb`, because a range input's thumb travels half a thumb
-  width inside each end of the rail. The scale is logarithmic: size grows
-  exponentially along the track, so the small brushes get most of the travel.
+- **Sliders**: one visual language everywhere — a `5px` rail with a `16px`
+  white thumb ringed in accent. The Brush "Size" range and the dual-handle
+  Threshold now match.
 - **Toggle** (`role="switch"`): `38×20` pill, accent when on.
 - **Validation**: invalid inputs get `aria-invalid` → danger border + tinted
   fill, with an inline `role="alert"` message; the typed value is preserved,
@@ -197,5 +189,4 @@ tokens are present even when no panel is mounted.
 - Brush/Eraser/Fill remain three panels; a unified panel with a tool switch and
   grouped "Target"/"Settings" sections was considered and deferred.
 - A few one-off values remain un-tokenized (fast-tooltip bg/fg, slider-thumb
-  fill + shadow, the topbar unsaved-badge font size). The thumb's _size_ is now
-  `--nge-slider-thumb`, since the Size slider's ticks must align to it.
+  fill + shadow, the topbar unsaved-badge font size).

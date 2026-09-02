@@ -11,14 +11,6 @@
 import type { SessionVoxelBounds } from "@zettaai/edit-session";
 import { describe, it, expect } from "vitest";
 
-import { sizeToRadius } from "#src/editing/brush_size_presets.js";
-import {
-  brushBoundsPadding,
-  brushFootprintContains,
-  brushRadiusSquared,
-  brushStampAnchor,
-} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
-
 import type { Vec3 } from "#src/editing/tool_runtimes/paint_rasterize.js";
 import {
   chunksForStroke,
@@ -96,59 +88,6 @@ describe("chunksForStroke", () => {
       hiZ: 64,
     };
     expect(chunksForStroke([[10, 10, 100]], 4, CS, bounds)).toEqual([]);
-  });
-
-  /**
-   * The safety property: `paintSegment` only writes the tiles this returns, so a
-   * short box drops paint at a chunk boundary. Its per-segment padding is
-   * `floor(radius)`, which is exact only because the points are stamp ANCHORS —
-   * an even size's half-voxel anchor supplies the half voxel the smaller padding
-   * leaves out. That is subtle enough to pin directly against the shape.
-   */
-  it("covers the painted footprint at every size", () => {
-    const chunkSize: [number, number, number] = [8, 8, 8];
-    for (let size = 1; size <= 12; ++size) {
-      const radius = sizeToRadius(size);
-      for (const fraction of [0, 0.1, 0.5, 0.9]) {
-        const anchor = brushStampAnchor(
-          [40 + fraction, 40 + fraction, 5],
-          radius,
-        );
-        const tiles = chunksForStroke([anchor], radius, chunkSize);
-        const covered = new Set(tiles.map((t) => `${t.coord.x},${t.coord.y}`));
-        const radiusSquared = brushRadiusSquared(radius);
-        const sweep = brushBoundsPadding(radius) + 2;
-        for (
-          let voxelY = Math.floor(anchor[1]) - sweep;
-          voxelY <= Math.ceil(anchor[1]) + sweep;
-          ++voxelY
-        ) {
-          for (
-            let voxelX = Math.floor(anchor[0]) - sweep;
-            voxelX <= Math.ceil(anchor[0]) + sweep;
-            ++voxelX
-          ) {
-            if (
-              !brushFootprintContains(
-                voxelX - anchor[0],
-                voxelY - anchor[1],
-                0,
-                radiusSquared,
-              )
-            ) {
-              continue;
-            }
-            const tile = `${Math.floor(voxelX / chunkSize[0])},${Math.floor(
-              voxelY / chunkSize[1],
-            )}`;
-            expect(
-              covered.has(tile),
-              `size ${size} fraction ${fraction}: voxel (${voxelX}, ${voxelY}) is in tile ${tile}, which was not enumerated`,
-            ).toBe(true);
-          }
-        }
-      }
-    }
   });
 
   it("returns nothing for an empty point list", () => {

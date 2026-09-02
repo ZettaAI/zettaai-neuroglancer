@@ -23,7 +23,6 @@ import svg_layers from "ikonate/icons/layers.svg?raw";
 import svg_list from "ikonate/icons/list.svg?raw";
 import svg_settings from "ikonate/icons/settings.svg?raw";
 import { debounce } from "lodash-es";
-import { AlignmentLinkSession } from "#src/alignment_link/alignment_link_session.js";
 import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
@@ -304,7 +303,6 @@ class TrackableViewerState extends CompoundTrackable {
     this.add("toolPalettes", viewer.toolPalettes);
     this.add("editSession", viewer.editSessionHost.state);
     this.add("editPreferences", viewer.editSessionHost.editPreferences);
-    this.add("alignmentLink", viewer.alignmentLink.state);
   }
 
   restoreState(obj: any) {
@@ -442,12 +440,6 @@ export class Viewer extends RefCounted implements ViewerState {
    * fields that need to precede the constructor body.
    */
   editSessionHost!: EditSessionHost;
-  /**
-   * Annotation-linked side-by-side view sync. Constructed in the constructor
-   * body alongside `editSessionHost`; its layout hook attaches lazily since
-   * `this.layout` is only built inside `makeUI()`.
-   */
-  alignmentLink!: AlignmentLinkSession;
   showAxisLines = new TrackableBoolean(true, true);
   wireFrame = new TrackableBoolean(false, false);
   enableAdaptiveDownsampling = new TrackableBoolean(true, true);
@@ -629,8 +621,6 @@ export class Viewer extends RefCounted implements ViewerState {
     // `host.sessionLock.isLayerDataSourceLocked(...)` without taking a
     // direct Viewer dependency.
     this.layerSpecification.editSessionHost = this.editSessionHost;
-
-    this.alignmentLink = this.registerDisposer(new AlignmentLinkSession(this));
 
     this.registerDisposer(
       display.updateStarted.add(() => {

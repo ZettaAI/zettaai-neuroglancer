@@ -18,9 +18,6 @@ import type {
 import { Resolution as ResolutionCtor, layerId } from "@zettaai/edit-session";
 import { describe, it, expect } from "vitest";
 
-import { sizeToRadius } from "#src/editing/brush_size_presets.js";
-import { brushStampAnchor } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
-
 import {
   rasterizeStrokeIntoChunk,
   stampMaskIntoChunk,
@@ -176,58 +173,6 @@ describe("rasterizeStrokeIntoChunk — parity with PaintingCompute", () => {
     ]);
     expect(actual.size).toBeGreaterThan(0);
     expectSameSet(actual, expected);
-  });
-});
-
-/**
- * The two rasterizers must agree for a pointer ANYWHERE inside a voxel, not just
- * on the lattice. The existing parity cases all use whole-number points, so they
- * stayed green while the unmasked worker kernel measured from the raw fractional
- * position and `PaintingCompute` measured from the stamp anchor — a footprint
- * that disagreed for every real pointer position. `applyStrokeSegment` anchors
- * the path once for both, so feeding the anchor here is what the tools do.
- */
-describe("rasterizeStrokeIntoChunk — parity at sub-voxel pointer positions", () => {
-  // Sizes 1 and 2 (radius < 1) never reach this kernel — `applyStrokeSegment`
-  // routes them to the synchronous per-dab fallback, which is a chain of disks
-  // rather than a capsule, so the two are not required to agree there.
-  it("matches PaintingCompute for every fraction, at odd and even sizes", async () => {
-    for (const size of [3, 4, 5, 6, 9]) {
-      const radius = sizeToRadius(size);
-      for (const fraction of [0, 0.1, 0.49, 0.5, 0.9]) {
-        const pointer: Vec3[] = [
-          [200 + fraction, 200 + fraction, 32],
-          [210 + fraction, 204 + fraction, 32],
-        ];
-        const points = pointer.map((p) => brushStampAnchor(p, radius));
-        expectSameSet(
-          kernelVoxelSet(points, radius, [[192, 192, 0]]),
-          await computeVoxelSet(points, radius),
-        );
-      }
-    }
-  });
-
-  it("paints the same voxels wherever the pointer sits inside one voxel", async () => {
-    // The whole point of anchoring: the footprint may not drift with the
-    // pointer's sub-voxel position.
-    const radius = sizeToRadius(5);
-    const reference = kernelVoxelSet(
-      [[200, 200, 32] as Vec3, [206, 200, 32] as Vec3].map((p) =>
-        brushStampAnchor(p, radius),
-      ),
-      radius,
-      [[192, 192, 0]],
-    );
-    for (const fraction of [0.1, 0.5, 0.99]) {
-      const points = (
-        [
-          [200 + fraction, 200 + fraction, 32],
-          [206 + fraction, 200 + fraction, 32],
-        ] as Vec3[]
-      ).map((p) => brushStampAnchor(p, radius));
-      expectSameSet(kernelVoxelSet(points, radius, [[192, 192, 0]]), reference);
-    }
   });
 });
 

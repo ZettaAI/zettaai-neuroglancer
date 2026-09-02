@@ -9,195 +9,129 @@
  */
 
 /**
- * @file Slice-view brush cursor overlay. Draws the EXACT set of voxels the
- * brush would write — a translucent fill with a staircase outline that traces
- * target-layer voxel boundaries.
+ * @file Slice-view brush cursor overlay. Renders a translucent filled disk
+ * + outline at the brush cursor position, shaped to the painting tool's
+ * footprint.
  *
- * A smooth circle was a lie: the brush stamps whole voxels of the TARGET layer's
- * grid (`brush_cursor_footprint.ts`), so a circular cursor promised paint on
- * partially-covered voxels that the stamp never touches, and drifted up to half
- * a voxel off the stamp center as the pointer moved inside a voxel. The cursor
- * now sits on the target grid: it is symmetric about the stamp's center voxel
- * and translates a whole voxel at a time, never changing shape.
+ * The painted brush is a circle in TARGET voxel-index space, so on an
+ * anisotropic grid its on-screen footprint is an ELLIPSE (TM-300). Rather than
+ * collapse voxel size to one scalar, we derive the two painted-plane basis
+ * steps as display-space vectors (`computeBrushFootprintAxes`) and project them
+ * through `viewProjectionMat`. The two clip-space differences become the
+ * ellipse's semi-axis vectors — exact for any per-layer resolution and for
+ * rotated / oblique views.
  *
- * The footprint is quantized on the TARGET layer's resolution, which is
- * generally not the resolution of the image layer being displayed — the cursor's
- * "pixels" are the ones the write lands on, not the ones on screen.
- *
- * IMPLEMENTATION. One screen quad covering the footprint's projected bounds
- * (`painted_footprint_slice_quad.ts`), with each fragment's target-voxel
- * coordinate interpolated across it. The fragment shader floors that to a voxel
- * and evaluates the painted-set test directly, so the drawn shape is the painted
- * shape by construction — at any brush size, on any voxel aspect ratio, and in
- * every slice orientation. In the XZ / YZ orthogonal views the disk is edge-on
- * and this yields the one-voxel-thick slab the stamp actually writes (where a
- * projected ellipse collapsed to a zero-height line); in an oblique view it
- * yields the true cross-section.
- *
- * The outline is derived in the same pass: a fragment is on the boundary when
- * one of its six voxel neighbours falls on the other side of the painted-set
- * test, and its distance to that shared face — converted to pixels via the
- * fragment derivatives of the voxel coordinate — gives an antialiased line of
- * constant screen width. Faces that are edge-on (their axis runs into the
- * screen) measure as infinitely far and drop out on their own, which is what
- * keeps the slab's front and back faces from flooding an axis-aligned view.
+ * Approach: a 24-sided unit polygon (TRIANGLE_FAN for fill, LINE_LOOP for
+ * outline) whose unit-circle `(cos, sin)` offsets are mapped to clip space via
+ * `center + cos·axisX + sin·axisY`. Inline shader; binding pattern mirrors
+ * `src/axes_lines.ts:AxesLineHelper.draw` (133).
  */
 
-import { resolveCursorVoxelFrame } from "#src/editing/cursor/brush_cursor_footprint.js";
+import { computeBrushFootprintAxes } from "#src/editing/cursor/brush_cursor_footprint.js";
 import type { BrushCursorState } from "#src/editing/cursor/brush_cursor_state.js";
-import type { PaintedFootprintSliceQuad } from "#src/editing/cursor/painted_footprint_slice_quad.js";
-import { computePaintedFootprintSliceQuad } from "#src/editing/cursor/painted_footprint_slice_quad.js";
-import {
-  brushRadius,
-  brushRadiusSquared,
-  glsl_brushFootprintContains,
-} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 import type {
   SliceViewPanelRenderContext,
   SliceViewPanelReadyRenderContext,
 } from "#src/sliceview/renderlayer.js";
 import { SliceViewPanelRenderLayer } from "#src/sliceview/renderlayer.js";
-import { RefCounted } from "#src/util/disposable.js";
+import type { mat4 } from "#src/util/geom.js";
+import { vec3 } from "#src/util/geom.js";
 import { GLBuffer } from "#src/webgl/buffer.js";
 import type { GL } from "#src/webgl/context.js";
 import type { ShaderProgram } from "#src/webgl/shader.js";
 import { ShaderBuilder } from "#src/webgl/shader.js";
 
-const CORNER_COUNT = 4;
-/** Interleaved per-corner vertex: NDC (x, y) then voxel offset (x, y, z). */
-const FLOATS_PER_CORNER = 5;
-const NDC_OFFSET_BYTES = 0;
-const VOXEL_OFFSET_BYTES = 2 * Float32Array.BYTES_PER_ELEMENT;
-const VERTEX_STRIDE_BYTES = FLOATS_PER_CORNER * Float32Array.BYTES_PER_ELEMENT;
+const DISK_SEGMENTS = 24;
+// One center vertex + (DISK_SEGMENTS + 1) rim vertices for a triangle-fan.
+const FAN_VERTEX_COUNT = DISK_SEGMENTS + 2;
+// One loop of DISK_SEGMENTS vertices for the outline.
+const LOOP_VERTEX_COUNT = DISK_SEGMENTS;
 
-// Brush and eraser share one neutral cursor: a soft white fill that gently
+// Unit-circle (x,y) offsets in [-1, 1]; center is (0, 0).
+function buildFanVertices(): Float32Array {
+  const out = new Float32Array(FAN_VERTEX_COUNT * 2);
+  // Center vertex.
+  out[0] = 0;
+  out[1] = 0;
+  for (let i = 0; i <= DISK_SEGMENTS; ++i) {
+    const a = (i / DISK_SEGMENTS) * 2 * Math.PI;
+    out[(i + 1) * 2 + 0] = Math.cos(a);
+    out[(i + 1) * 2 + 1] = Math.sin(a);
+  }
+  return out;
+}
+
+function buildLoopVertices(): Float32Array {
+  const out = new Float32Array(LOOP_VERTEX_COUNT * 2);
+  for (let i = 0; i < LOOP_VERTEX_COUNT; ++i) {
+    const a = (i / LOOP_VERTEX_COUNT) * 2 * Math.PI;
+    out[i * 2 + 0] = Math.cos(a);
+    out[i * 2 + 1] = Math.sin(a);
+  }
+  return out;
+}
+
+// Brush and eraser share one neutral cursor: a soft white disk that gently
 // brightens the slice (no color cast), with a subtle rim. Identical for both
 // tools so the cursor reads the same regardless of brush vs eraser.
-const CURSOR_OUTLINE_ALPHA = 0.5;
-const CURSOR_FILL_ALPHA = 0.12;
+const CURSOR_OUTLINE = new Float32Array([1.0, 1.0, 1.0, 0.5]);
+const CURSOR_FILL = new Float32Array([1.0, 1.0, 1.0, 0.12]);
+
+const tempCenterClip = vec3.create();
+const tempAxisPoint = vec3.create();
+const tempWorldOffset = vec3.create();
 
 /**
- * Half-width of the staircase outline in pixels. The line straddles the voxel
- * boundary, so the drawn width is twice this plus the antialiasing ramp.
+ * Project `worldCenter + offset` to NDC and return the difference from the
+ * already-projected center `(cx, cy)` — i.e. one ellipse semi-axis in clip
+ * space. Returns a fresh 2-element array so the two axis calls don't clobber
+ * each other's result.
  */
-const OUTLINE_HALF_WIDTH_PIXELS = 0.75;
-
-/**
- * Slack around the footprint's projected bounds, so the outline's outer half
- * (which falls on voxels outside the painted set) is not clipped away.
- */
-const QUAD_MARGIN_PIXELS = OUTLINE_HALF_WIDTH_PIXELS + 1.5;
-
-/**
- * Owns the shader and vertex buffer, and draws one footprint quad. Separated
- * from the render layer so it can be driven without a panel — see
- * `brush_cursor_slice_overlay.browser_test.ts`, which rasterizes a footprint and
- * checks the resulting pixels against the painted voxel set.
- */
-export class PaintedFootprintRenderer extends RefCounted {
-  private cornerBuffer: GLBuffer;
-  private cornerData = new Float32Array(CORNER_COUNT * FLOATS_PER_CORNER);
-  private shader: ShaderProgram;
-
-  constructor(public gl: GL) {
-    super();
-    this.cornerBuffer = this.registerDisposer(
-      new GLBuffer(gl, gl.ARRAY_BUFFER),
-    );
-    this.shader = this.registerDisposer(buildFootprintShader(gl));
-  }
-
-  draw(quad: PaintedFootprintSliceQuad, radiusSquared: number): void {
-    const { gl, shader } = this;
-    this.uploadQuad(quad.cornersNdc, quad.cornerVoxelOffsets);
-
-    shader.bind();
-    this.setFootprintUniforms(radiusSquared, quad.anchorOffset);
-
-    const aCornerNdc = shader.attribute("aCornerNdc");
-    const aVoxelOffset = shader.attribute("aVoxelOffset");
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.disable(gl.DEPTH_TEST);
-
-    this.cornerBuffer.bindToVertexAttrib(
-      aCornerNdc,
-      2,
-      gl.FLOAT,
-      false,
-      VERTEX_STRIDE_BYTES,
-      NDC_OFFSET_BYTES,
-    );
-    this.cornerBuffer.bindToVertexAttrib(
-      aVoxelOffset,
-      3,
-      gl.FLOAT,
-      false,
-      VERTEX_STRIDE_BYTES,
-      VOXEL_OFFSET_BYTES,
-    );
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, CORNER_COUNT);
-
-    gl.enable(gl.DEPTH_TEST);
-    gl.disable(gl.BLEND);
-    gl.disableVertexAttribArray(aCornerNdc);
-    gl.disableVertexAttribArray(aVoxelOffset);
-  }
-
-  /** The painted-set test and the fill / outline appearance, for one draw. */
-  private setFootprintUniforms(
-    radiusSquared: number,
-    anchorOffset: readonly [number, number],
-  ): void {
-    const { gl, shader } = this;
-    gl.uniform1f(shader.uniform("uRadiusSquared"), radiusSquared);
-    gl.uniform2f(
-      shader.uniform("uAnchorOffset"),
-      anchorOffset[0],
-      anchorOffset[1],
-    );
-    gl.uniform1f(
-      shader.uniform("uOutlineHalfWidthPixels"),
-      OUTLINE_HALF_WIDTH_PIXELS,
-    );
-    gl.uniform1f(shader.uniform("uFillAlpha"), CURSOR_FILL_ALPHA);
-    gl.uniform1f(shader.uniform("uOutlineAlpha"), CURSOR_OUTLINE_ALPHA);
-  }
-
-  /** Interleave the quad's NDC corners and voxel offsets into the vertex buffer. */
-  private uploadQuad(
-    cornersNdc: Float32Array,
-    cornerVoxelOffsets: Float32Array,
-  ): void {
-    const { cornerData } = this;
-    for (let corner = 0; corner < CORNER_COUNT; ++corner) {
-      const vertex = corner * FLOATS_PER_CORNER;
-      cornerData[vertex + 0] = cornersNdc[corner * 2 + 0];
-      cornerData[vertex + 1] = cornersNdc[corner * 2 + 1];
-      cornerData[vertex + 2] = cornerVoxelOffsets[corner * 3 + 0];
-      cornerData[vertex + 3] = cornerVoxelOffsets[corner * 3 + 1];
-      cornerData[vertex + 4] = cornerVoxelOffsets[corner * 3 + 2];
-    }
-    this.cornerBuffer.setData(cornerData, this.gl.DYNAMIC_DRAW);
-  }
+function projectOffsetToNdc(
+  worldCenter: vec3,
+  offset: vec3,
+  cx: number,
+  cy: number,
+  viewProjectionMat: mat4,
+): [number, number] {
+  vec3.add(tempWorldOffset, worldCenter, offset);
+  vec3.transformMat4(tempAxisPoint, tempWorldOffset, viewProjectionMat);
+  return [tempAxisPoint[0] - cx, tempAxisPoint[1] - cy];
 }
 
 /**
- * Slice-view render layer that draws the brush / eraser footprint. Visibility,
- * radius, and the target resolution the footprint is quantized on all come from
- * `BrushCursorState`.
+ * Slice-view render layer that draws a 2D disk cursor for brush and eraser
+ * tools. Visibility and radius are derived from `BrushCursorState`.
  */
 export class BrushCursorSliceOverlay extends SliceViewPanelRenderLayer {
   // Topmost session visual: above ordinary layers and the region outline.
   override drawOrderPriority = 20;
-  private renderer: PaintedFootprintRenderer;
+  private fanBuffer: GLBuffer;
+  private loopBuffer: GLBuffer;
+  private shader: ShaderProgram;
 
   constructor(
     public gl: GL,
     public state: BrushCursorState,
   ) {
     super();
-    this.renderer = this.registerDisposer(new PaintedFootprintRenderer(gl));
+    this.fanBuffer = this.registerDisposer(
+      GLBuffer.fromData(
+        gl,
+        buildFanVertices(),
+        gl.ARRAY_BUFFER,
+        gl.STATIC_DRAW,
+      ),
+    );
+    this.loopBuffer = this.registerDisposer(
+      GLBuffer.fromData(
+        gl,
+        buildLoopVertices(),
+        gl.ARRAY_BUFFER,
+        gl.STATIC_DRAW,
+      ),
+    );
+    this.shader = this.registerDisposer(buildDiskShader(gl));
 
     // Trigger panel redraw on any cursor-state change.
     this.registerDisposer(
@@ -212,9 +146,6 @@ export class BrushCursorSliceOverlay extends SliceViewPanelRenderLayer {
     this.registerDisposer(
       state.toolKind.changed.add(this.redrawNeeded.dispatch),
     );
-    this.registerDisposer(
-      state.targetResolution.changed.add(this.redrawNeeded.dispatch),
-    );
   }
 
   override isReady(_renderContext: SliceViewPanelReadyRenderContext): boolean {
@@ -223,109 +154,114 @@ export class BrushCursorSliceOverlay extends SliceViewPanelRenderLayer {
 
   override draw(renderContext: SliceViewPanelRenderContext): void {
     if (!renderContext.emitColor) return;
-    const { state } = this;
+    const { state, gl, shader, fanBuffer, loopBuffer } = this;
     if (state.visible.value !== true) return;
     const worldCenter = state.worldCenter.value;
     if (worldCenter === undefined) return;
     const radiusVoxels = state.radiusVoxels.value;
-    if (!Number.isFinite(radiusVoxels) || radiusVoxels < 0) return;
+    if (!Number.isFinite(radiusVoxels) || radiusVoxels <= 0) return;
 
     const projectionParameters = renderContext.projectionParameters;
     const { width, height } = projectionParameters;
-    const frame = resolveCursorVoxelFrame(
+    if (width <= 0 || height <= 0) return;
+
+    // Two painted-plane basis steps, in display coords (the frame
+    // `viewProjectionMat` consumes), scaled to the visual brush radius.
+    const { offsetX, offsetY } = computeBrushFootprintAxes(
+      radiusVoxels,
       state.targetResolution.value,
       projectionParameters.displayDimensionRenderInfo,
     );
-    if (frame === undefined) return;
 
-    // A brush size of 1 is radius 0 — a single voxel, not an empty footprint.
-    const quad = computePaintedFootprintSliceQuad({
-      radiusVoxels: brushRadius(radiusVoxels),
+    // Project worldCenter → NDC. `vec3.transformMat4` includes the perspective
+    // divide, so these are normalized device coords ([-1, 1]).
+    vec3.transformMat4(
+      tempCenterClip,
       worldCenter,
-      frame,
-      viewProjectionMat: projectionParameters.viewProjectionMat,
-      invViewProjectionMat: projectionParameters.invViewProjectionMat,
-      viewportWidth: width,
-      viewportHeight: height,
-      marginPixels: QUAD_MARGIN_PIXELS,
-    });
-    if (quad === undefined) return;
+      projectionParameters.viewProjectionMat,
+    );
+    const cx = tempCenterClip[0];
+    const cy = tempCenterClip[1];
 
-    this.renderer.draw(quad, brushRadiusSquared(radiusVoxels));
+    // Project worldCenter ± each display-space offset and take the NDC
+    // difference → the ellipse's semi-axis vectors in clip space.
+    const axisX = projectOffsetToNdc(
+      worldCenter,
+      offsetX,
+      cx,
+      cy,
+      projectionParameters.viewProjectionMat,
+    );
+    const axisY = projectOffsetToNdc(
+      worldCenter,
+      offsetY,
+      cx,
+      cy,
+      projectionParameters.viewProjectionMat,
+    );
+
+    // Sub-pixel guard: skip drawing when both semi-axes are under half a pixel.
+    // NDC spans [-1, 1] across each dimension, so one pixel is `2 / dimension`
+    // NDC units; pixel length = ndcLength × dimension / 2.
+    const axisXPx = Math.hypot(axisX[0] * width, axisX[1] * height) / 2;
+    const axisYPx = Math.hypot(axisY[0] * width, axisY[1] * height) / 2;
+    if (axisXPx < 0.5 && axisYPx < 0.5) return;
+
+    const outline = CURSOR_OUTLINE;
+    const fill = CURSOR_FILL;
+
+    shader.bind();
+    gl.uniform2f(shader.uniform("uCenterClip"), cx, cy);
+    gl.uniform2f(shader.uniform("uAxisX"), axisX[0], axisX[1]);
+    gl.uniform2f(shader.uniform("uAxisY"), axisY[0], axisY[1]);
+
+    const aVertexOffset = shader.attribute("aVertexOffset");
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.DEPTH_TEST);
+
+    // Draw filled disk.
+    fanBuffer.bindToVertexAttrib(aVertexOffset, 2);
+    gl.uniform4fv(shader.uniform("uColor"), fill);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, FAN_VERTEX_COUNT);
+
+    // Draw outline (line loop) — 2px requested though most drivers cap at 1.
+    loopBuffer.bindToVertexAttrib(aVertexOffset, 2);
+    gl.uniform4fv(shader.uniform("uColor"), outline);
+    gl.lineWidth(2);
+    gl.drawArrays(gl.LINE_LOOP, 0, LOOP_VERTEX_COUNT);
+    gl.lineWidth(1);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.disableVertexAttribArray(aVertexOffset);
   }
 }
 
 /**
- * Footprint shader. Writes to BOTH slice-panel attachments (color + pickId)
+ * Inline disk shader. Writes to BOTH slice-panel attachments (color + pickId)
  * because the panel's main draw loop binds both via
- * `sliceViewPanelEmitColorAndPickID`. Writing to only one attachment while both
- * are active triggers `GL_INVALID_OPERATION: Active draw buffers with missing
- * fragment shader outputs`. The cursor is non-pickable, so we emit a constant
- * zero pickId.
- *
- * The fragment stage is the whole cursor: it decides membership in the painted
- * set per fragment and derives the staircase outline from the same test, so no
- * per-voxel geometry is ever built on the CPU.
+ * `sliceViewPanelEmitColorAndPickID`. Writing to only one attachment while
+ * both are active triggers `GL_INVALID_OPERATION: Active draw buffers with
+ * missing fragment shader outputs`. The cursor is non-pickable, so we emit
+ * a constant zero pickId.
  */
-export function buildFootprintShader(gl: GL): ShaderProgram {
+function buildDiskShader(gl: GL): ShaderProgram {
   const builder = new ShaderBuilder(gl);
-  builder.addAttribute("vec2", "aCornerNdc");
-  builder.addAttribute("vec3", "aVoxelOffset");
-  builder.addVarying("highp vec3", "vVoxelOffset");
-  builder.addUniform("highp float", "uRadiusSquared");
-  builder.addUniform("highp vec2", "uAnchorOffset");
-  builder.addUniform("highp float", "uOutlineHalfWidthPixels");
-  builder.addUniform("highp float", "uFillAlpha");
-  builder.addUniform("highp float", "uOutlineAlpha");
+  builder.addAttribute("vec2", "aVertexOffset");
+  builder.addUniform("vec2", "uCenterClip");
+  builder.addUniform("vec2", "uAxisX");
+  builder.addUniform("vec2", "uAxisY");
+  builder.addUniform("vec4", "uColor");
   builder.addOutputBuffer("vec4", "out_fragColor", 0);
   builder.addOutputBuffer("highp vec4", "out_pickId", 1);
-  builder.setVertexMain(`
-vVoxelOffset = aVoxelOffset;
-gl_Position = vec4(aCornerNdc, 0.0, 1.0);
-`);
-  // The disk the paint path stamps in the target grid's X/Y plane, one voxel
-  // thick in Z — the same predicate `brushFootprintContains` states on the CPU.
-  builder.addFragmentCode(glsl_brushFootprintContains);
-  builder.setFragmentMain(`
-vec3 voxelOffset = vVoxelOffset;
-// Voxels traversed per pixel along each axis. The slice projection is affine,
-// so these derivatives are constant across the quad — an exact scale factor,
-// not an estimate. An axis running into the screen yields ~0, which turns into
-// an effectively infinite distance below and drops its faces from the outline.
-vec3 voxelsPerPixelX = dFdx(voxelOffset);
-vec3 voxelsPerPixelY = dFdy(voxelOffset);
-// Voxel index of this fragment, relative to the stamp anchor. The anchor is
-// offset half a voxel for an even brush size, where the footprint straddles a
-// voxel boundary rather than centring on a voxel.
-vec3 cell = floor(voxelOffset);
-vec3 fromAnchor = vec3(cell.xy - uAnchorOffset, cell.z);
-bool inside = footprintContains(fromAnchor, uRadiusSquared);
-float edgeDistancePixels = 1.0e6;
-for (int axis = 0; axis < 3; ++axis) {
-  float voxelsPerPixel =
-      length(vec2(voxelsPerPixelX[axis], voxelsPerPixelY[axis]));
-  if (voxelsPerPixel <= 0.0) continue;
-  vec3 lowerNeighbor = fromAnchor;
-  lowerNeighbor[axis] -= 1.0;
-  vec3 upperNeighbor = fromAnchor;
-  upperNeighbor[axis] += 1.0;
-  if (footprintContains(lowerNeighbor, uRadiusSquared) != inside) {
-    edgeDistancePixels = min(
-        edgeDistancePixels, (voxelOffset[axis] - cell[axis]) / voxelsPerPixel);
-  }
-  if (footprintContains(upperNeighbor, uRadiusSquared) != inside) {
-    edgeDistancePixels = min(
-        edgeDistancePixels,
-        (cell[axis] + 1.0 - voxelOffset[axis]) / voxelsPerPixel);
-  }
-}
-float outlineCoverage = 1.0 - smoothstep(uOutlineHalfWidthPixels - 0.5,
-                                         uOutlineHalfWidthPixels + 0.5,
-                                         edgeDistancePixels);
-float alpha = max(inside ? uFillAlpha : 0.0, outlineCoverage * uOutlineAlpha);
-if (alpha <= 0.0) discard;
-out_fragColor = vec4(1.0, 1.0, 1.0, alpha);
-out_pickId = vec4(0.0, 0.0, 0.0, 1.0);
-`);
+  // `aVertexOffset` carries unit-circle (cos, sin); map it onto the ellipse's
+  // clip-space semi-axis vectors so anisotropic footprints render correctly.
+  builder.setVertexMain(
+    "gl_Position = vec4(uCenterClip + aVertexOffset.x * uAxisX + aVertexOffset.y * uAxisY, 0.0, 1.0);",
+  );
+  builder.setFragmentMain(
+    "out_fragColor = uColor; out_pickId = vec4(0.0, 0.0, 0.0, 1.0);",
+  );
   return builder.build();
 }
