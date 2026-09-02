@@ -39,6 +39,11 @@ export const BRUSH_SIZE_PRESETS: readonly number[] = [
 ];
 
 export const MIN_BRUSH_SIZE = 1;
+/**
+ * The largest preset — the top of the slider's travel, not a cap: the number box
+ * deliberately accepts more (`clampBrushSize`). Declared rather than derived so
+ * the ladder is pinned to it by a test.
+ */
 export const MAX_BRUSH_SIZE = 1025;
 
 /**
