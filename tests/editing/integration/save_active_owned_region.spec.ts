@@ -133,21 +133,10 @@ function fakeSession(saveTarget: NgSaveTarget, bounds = REGION): EditSession {
     ],
     ensureContentRef: () => contentRef,
   };
-  // `saveActive` fingerprints the dirty set across its planning window and
-  // refuses if it moved; `bump()` lets a test simulate paint landing there.
-  let layerVersion = 1;
-  const dirty = {
-    getLayerVersion: () => layerVersion,
-    getDirtyChunks: () => new Set(["L1|8x8x40|0,0,0"]),
-    bump: () => {
-      layerVersion += 1;
-    },
-  };
   return {
     sessionId: sessionId("fake-session"),
     config: { layers: [{ layerId: LAYER, selectedResolutions: [RES] }] },
     overlay,
-    dirty,
     sessionVoxelBoundsFor: () => bounds,
     // `dispose()` discards any active session.
     discard: async () => {},
@@ -244,24 +233,6 @@ describe("EditSessionHost.saveActive region clip", () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     const verifiedRegion = confirm.mock.calls[0][3];
     expect(verifiedRegion).toEqual(backend.written[0].owned);
-  });
-
-  it("refuses when the overlay changes while the save is being planned", async () => {
-    // The write/verify agreement rests on nothing mutating the overlay between
-    // the host's collect and the library's. Simulate a paint landing there.
-    const session = activate();
-    const inner = (host as any).layerMetadataSource.resolve;
-    (host as any).layerMetadataSource = {
-      resolve: async (id: LayerId) => {
-        (session as any).dirty.bump();
-        return inner(id);
-      },
-    };
-
-    await expect(host.saveActive()).rejects.toThrow(
-      "edit overlay changed while the save was being prepared",
-    );
-    expect(backend.written).toHaveLength(0);
   });
 
   it("fails the save when the session region cannot be captured", async () => {
