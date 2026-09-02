@@ -1896,6 +1896,10 @@ class PieceSplitState extends RefCounted implements Trackable {
   // default: the image volume is then never read, which makes the split
   // several seconds faster; the cut runs on geometry and the data term alone.
   useImage = new WatchableValue<boolean>(false);
+  // Whether the Cut tool is open. Session-only, never serialised: the point
+  // markers belong to the act of cutting, so nothing should draw them once the
+  // tool is put down.
+  active = new WatchableValue<boolean>(false);
 
   constructor() {
     super();
@@ -3711,10 +3715,15 @@ void main() {
       PIECE_SPLIT_POINT_SHADER;
     pieceSplitRedAnnotation.displayState.shader.value =
       PIECE_SPLIT_POINT_SHADER;
+    // The markers describe a cut in progress, so they are drawn only while the
+    // Cut tool is open. The points themselves outlive the tool — reopening it
+    // restores them — but leaving them on screen makes the viewer look like it
+    // is mid-edit when nothing is.
     const syncPieceSplitAnnotations = (
       points: PointEntry[],
       state: AnnotationLayerState,
     ) => {
+      if (!pieceSplitState.active.value) points = [];
       const src = state.source;
       // Drop every existing annotation in the source, then re-add the current
       // points. Simpler than tracking per-point identity since the lists are
@@ -3747,15 +3756,21 @@ void main() {
         ),
       ),
     );
+    const syncBothPieceSplitAnnotations = () => {
+      syncPieceSplitAnnotations(
+        pieceSplitState.bluePoints.value,
+        pieceSplitBlueAnnotation,
+      );
+      syncPieceSplitAnnotations(
+        pieceSplitState.redPoints.value,
+        pieceSplitRedAnnotation,
+      );
+    };
+    this.registerDisposer(
+      pieceSplitState.active.changed.add(syncBothPieceSplitAnnotations),
+    );
     // Initial sync from restored state.
-    syncPieceSplitAnnotations(
-      pieceSplitState.bluePoints.value,
-      pieceSplitBlueAnnotation,
-    );
-    syncPieceSplitAnnotations(
-      pieceSplitState.redPoints.value,
-      pieceSplitRedAnnotation,
-    );
+    syncBothPieceSplitAnnotations();
 
     this.registerDisposer(
       findPathState.triggerPathUpdate.add(() => {
@@ -7652,6 +7667,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const {
       state: { pieceSplitState },
     } = graphConnection;
+    pieceSplitState.active.value = true;
+    activation.registerDisposer(() => {
+      pieceSplitState.active.value = false;
+    });
 
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
@@ -7812,6 +7831,23 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       displayState.baseSegmentHighlighting.value = priorBaseSegmentHighlighting;
       displayState.highlightColor.value = priorHighlightColor;
     });
+    // A cut belongs to the segment its points were placed on. Once that segment
+    // is hidden or deselected the points describe something the proofreader can
+    // no longer see, and the display override that forces its pieces on screen
+    // would also stop a double-click from ever hiding it. Drop them instead —
+    // on entry, so reopening the tool after deselecting starts clean, and while
+    // open, so hiding the segment takes effect immediately.
+    const dropPointsIfFocusGone = () => {
+      const focus = currentFocusRoot();
+      if (focus === undefined) return;
+      if (segmentationGroupState.visibleSegments.has(focus)) return;
+      pieceSplitState.reset();
+    };
+    dropPointsIfFocusGone();
+    activation.registerDisposer(
+      segmentationGroupState.visibleSegments.changed.add(dropPointsIfFocusGone),
+    );
+
     activation.registerDisposer(
       pieceSplitState.changed.add(updatePieceSplitDisplay),
     );
