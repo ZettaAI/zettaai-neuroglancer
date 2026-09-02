@@ -28,7 +28,10 @@ import {
   fetchBaselineWithRetry,
   NgChunkSource,
 } from "#src/editing/adapters/ng_chunk_source.js";
-import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
+import type {
+  ChunkOwnedGeometry,
+  OwnedRegion,
+} from "#src/editing/region/owned_chunk_write.js";
 import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
 
 import type { LayerManager } from "#src/layer/index.js";
@@ -479,23 +482,18 @@ describe("NgChunkSource.confirmChunkPersisted", () => {
     // repainted its half of a shared boundary chunk since we snapshotted.
     // Hashing the whole chunk could never match; hashing the owned half must.
     const ours = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
-    const owned: OwnedRegion = {
+    // x:[0,1) — the first column of every row, i.e. indices 0,2,4,6.
+    const firstColumn: ChunkOwnedGeometry = {
       chunkDataSize: [2, 2, 2],
       bytesPerVoxel: 4,
       channels: 1,
       chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
-      // x:[0,1) — the first column of every row, i.e. indices 0,2,4,6.
       ownedBox: { start: [0, 0, 0], end: [1, 2, 2] },
       coversWholeChunk: false,
-      hash: ownedRegionHash(ours, {
-        chunkDataSize: [2, 2, 2],
-        bytesPerVoxel: 4,
-        channels: 1,
-        chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
-        ownedBox: { start: [0, 0, 0], end: [1, 2, 2] },
-        coversWholeChunk: false,
-        hash: "",
-      }),
+    };
+    const owned: OwnedRegion = {
+      ...firstColumn,
+      hash: ownedRegionHash(ours, firstColumn),
     };
     // Neighbour rewrote every odd index; ours (even indices) are untouched.
     const readBack = Uint32Array.from([1, 99, 3, 99, 5, 99, 7, 99]);
@@ -508,16 +506,15 @@ describe("NgChunkSource.confirmChunkPersisted", () => {
 
   it("rejects when OUR half of a shared chunk was clobbered", async () => {
     const ours = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
-    const region: OwnedRegion = {
+    const geometry: ChunkOwnedGeometry = {
       chunkDataSize: [2, 2, 2],
       bytesPerVoxel: 4,
       channels: 1,
       chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
       ownedBox: { start: [0, 0, 0], end: [1, 2, 2] },
       coversWholeChunk: false,
-      hash: "",
     };
-    const owned = { ...region, hash: ownedRegionHash(ours, region) };
+    const owned = { ...geometry, hash: ownedRegionHash(ours, geometry) };
     const readBack = Uint32Array.from([77, 2, 77, 4, 77, 6, 77, 8]);
     const chunkSource = makeChunkSourceResolving(fakeSource(readBack));
 
