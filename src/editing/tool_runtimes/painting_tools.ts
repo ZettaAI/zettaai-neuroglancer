@@ -37,6 +37,8 @@ import type {
 } from "@zettaai/edit-session";
 import { ChunkId, scaleFor } from "@zettaai/edit-session";
 
+import { brushSizeVoxels } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
+
 import { applyPaintBatch } from "#src/editing/tool_runtimes/paint_batch_apply.js";
 import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
 import { paintScheduler } from "#src/editing/tool_runtimes/paint_scheduler_config.js";
@@ -595,7 +597,7 @@ export class StrokeTool implements EditTool {
       this.geometry =
         r >= 1
           ? new StrokeGeometry({
-              diameterVoxels: 2 * r + 1,
+              diameterVoxels: brushSizeVoxels(shared.radius),
               spacingFraction: shared.spacingFraction,
             })
           : null;
@@ -655,7 +657,7 @@ export class StrokeTool implements EditTool {
           if (dist3(this.lastVoxel, cursor) > cap) {
             this.lastVoxel = cursor;
             this.geometry = new StrokeGeometry({
-              diameterVoxels: 2 * Math.floor(shared.radius) + 1,
+              diameterVoxels: brushSizeVoxels(shared.radius),
               spacingFraction: shared.spacingFraction,
             });
             this.geometry.pushSamples([cursor]);
