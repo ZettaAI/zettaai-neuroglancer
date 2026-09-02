@@ -2151,6 +2151,7 @@ class CalcadaDebugSession extends RefCounted {
   // A refresh landing after the mode was switched off would repaint an overlay
   // nothing is going to clear.
   private fetchToken = 0;
+  private revealedTab = false;
 
   constructor(
     private connection: GraphConnection,
@@ -2226,6 +2227,7 @@ class CalcadaDebugSession extends RefCounted {
       ),
     );
     this.watchingSelection = watcher;
+    this.revealedTab = false;
     void this.enter();
   }
 
@@ -2388,7 +2390,14 @@ class CalcadaDebugSession extends RefCounted {
     }
     displayState.useTempSegmentStatedColors2d.value = true;
 
-    this.selectLayerPanelTab("calcada-debug");
+    // Reveal the Debug tab once, when the mode first paints. A repaint fires on
+    // every selection change, and merge and cut are driven from the Graph tab —
+    // switching again would pull the proofreader off it mid-edit. exit() guards
+    // the same way, with onlyIfCurrent.
+    if (!this.revealedTab) {
+      this.revealedTab = true;
+      this.selectLayerPanelTab("calcada-debug");
+    }
     this.changed.dispatch();
 
     this.setStatus(
@@ -6353,16 +6362,16 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
             },
           ];
           const operationId = body?.operation_id;
+          let cancelled = false;
+          context.registerDisposer(() => {
+            cancelled = true;
+          });
           if (newStatus === "creating" && typeof operationId === "number") {
-            void pollBranchCreate(graph, newId, operationId);
+            void pollBranchCreate(graph, newId, operationId, () => cancelled);
           }
           if (newStatus === "active") {
             graph.branchId.value = newId;
           } else {
-            let cancelled = false;
-            context.registerDisposer(() => {
-              cancelled = true;
-            });
             watchBranchUntilActive(
               graph,
               newId,
@@ -6428,11 +6437,16 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
 // returned by the create call and stored nowhere else, so a reload or another
 // user keeps the plain "creating…" the branch list already gives them.
 const BRANCH_CREATE_POLL_MS = 1000;
+// The operation id lives only in this session, so a fork we can no longer reach
+// is one nobody will ever get an answer about. Give up rather than polling for
+// the life of the tab; the branch list still refreshes on its own.
+const BRANCH_CREATE_MAX_FAILURES = 10;
 
 async function pollBranchCreate(
   graph: CalcadaGraphSource,
   branchId: number,
   operationId: number,
+  isCancelled: () => boolean,
 ) {
   const patch = (
     change: Partial<{ status: string; progress: number | undefined }>,
@@ -6441,17 +6455,27 @@ async function pollBranchCreate(
       branch.id === branchId ? { ...branch, ...change } : branch,
     );
   };
+  let failures = 0;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, BRANCH_CREATE_POLL_MS));
+    if (isCancelled()) return;
     let status: string;
     let progress: number;
     try {
       ({ status, progress } = await graph.createBranchStatus(operationId));
+      failures = 0;
     } catch {
       // A dropped poll is not a failed copy — the server is still working. Keep
       // the last percentage and try again rather than declaring the fork dead.
+      if (++failures >= BRANCH_CREATE_MAX_FAILURES) {
+        // Stop claiming a percentage we can no longer confirm; the row keeps
+        // saying "creating" until the branch list says otherwise.
+        patch({ progress: undefined });
+        return;
+      }
       continue;
     }
+    if (isCancelled()) return;
     if (status === "completed") {
       patch({ status: "active", progress: undefined });
       return;

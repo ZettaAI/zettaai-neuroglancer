@@ -254,28 +254,9 @@
   overflow-y: auto;
 }
 
-.calcada-debug-tab-hint,
-.calcada-debug-tab-header {
+.calcada-debug-tab-hint {
   color: #ccc;
   margin-bottom: 4px;
-}
-
-/* The header carries the hint and the show/hide-all eye. The hint takes the
-   slack so the eye stays pinned to the right, where the per-piece eyes below
-   it are. */
-.calcada-debug-tab-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 4px;
-}
-
-.calcada-debug-tab-header .calcada-debug-tab-hint {
-  flex: 1;
-  margin-bottom: 0;
-}
-
-.calcada-debug-tab-toggle-all {
-  flex: none;
 }
 
 .calcada-debug-piece-list {
