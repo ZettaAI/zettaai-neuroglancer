@@ -278,9 +278,20 @@ describe("saveCommitted region pinning", () => {
   });
 
   /** Commit one chunk for L1 under a session with the given id and region. */
-  async function commitUnder(id: string, bounds = REGION): Promise<void> {
+  async function commitUnder(
+    id: string,
+    bounds = REGION,
+    configLayers: readonly LayerId[] = [LAYER],
+    pendingLayers: readonly LayerId[] = [LAYER],
+  ): Promise<void> {
     const session = fakeSession((host as any).saveTarget, bounds);
     (session as any).sessionId = sessionId(id);
+    (session as any).config = {
+      layers: configLayers.map((id) => ({
+        layerId: id,
+        selectedResolutions: [RES],
+      })),
+    };
     (session as any).commit = async () => ({ overall: "all-succeeded" });
     host.activeSession.value = session;
     (host as any).sessionRegions = captureSessionRegions(session);
@@ -290,7 +301,7 @@ describe("saveCommitted region pinning", () => {
     // fail for that reason and the refusal under test would pass vacuously.
     const bytes = chunkBytes();
     (host as any).commitTarget = {
-      pendingLayerIds: () => [LAYER],
+      pendingLayerIds: () => pendingLayers,
       layerChunks: () => [
         {
           layerId: LAYER,
@@ -333,5 +344,25 @@ describe("saveCommitted region pinning", () => {
     const pinned = (host as any).committedRegions.get(LAYER);
     expect(pinned).toBeDefined();
     expect(typeof pinned).not.toBe("symbol");
+  });
+
+  it("leaves an earlier session's pin alone when a later session commits another layer", async () => {
+    // `pendingLayerIds()` returns every layer in the store, not just the ones
+    // this commit touched. Marking an untouched layer ambiguous would strand
+    // work whose region is known exactly, and the only escape would be
+    // `resetLayer`, which discards it.
+    const other = layerId("L3");
+    await commitUnder("session-a", REGION, [LAYER], [LAYER]);
+    const pinnedAfterA = (host as any).committedRegions.get(LAYER);
+
+    // Session B selects only L3; the store still reports L1 alongside it.
+    await commitUnder(
+      "session-b",
+      { ...REGION, hiX: 4 },
+      [other],
+      [LAYER, other],
+    );
+
+    expect((host as any).committedRegions.get(LAYER)).toBe(pinnedAfterA);
   });
 });
