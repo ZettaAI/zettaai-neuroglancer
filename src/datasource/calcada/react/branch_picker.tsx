@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 /**
  * @license
  * Copyright 2026 Calcada AI / Zetta AI
@@ -8,7 +9,7 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "react";
 
 import {
   BRANCH_PICKER_TITLE,
@@ -22,11 +23,11 @@ import {
   watchBranchUntilActive,
 } from "#src/datasource/calcada/branch_picker_logic.js";
 import type { CalcadaGraphSource } from "#src/datasource/calcada/frontend.js";
-import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
+import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
-import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
-import { ListboxDropdown } from "#src/widget/listbox_dropdown.js";
+import type { ListboxOption } from "#src/widget/react/listbox_dropdown.js";
+import { ListboxDropdown } from "#src/widget/react/listbox_dropdown.js";
 
 export {
   branchOptions,
@@ -56,7 +57,7 @@ function BranchSelect({
   title?: string;
 }) {
   return (
-    <span class="neuroglancer-calcada-branch-select" title={title}>
+    <span className="neuroglancer-calcada-branch-select" title={title}>
       <ListboxDropdown
         options={options}
         value={value}
@@ -237,17 +238,17 @@ export function CalcadaBranchPicker({
         title={BRANCH_PICKER_TITLE}
       />
 
-      <div class="neuroglancer-calcada-branch-new-group">
+      <div className="neuroglancer-calcada-branch-new-group">
         <button
           type="button"
-          class="neuroglancer-calcada-branch-new"
+          className="neuroglancer-calcada-branch-new"
           onClick={toggleForm}
         >
           + New branch
         </button>
 
         <div
-          class="neuroglancer-calcada-branch-create-form"
+          className="neuroglancer-calcada-branch-create-form"
           style={{ display: formOpen ? undefined : "none" }}
         >
           <BranchSelect
@@ -262,9 +263,7 @@ export function CalcadaBranchPicker({
             type="text"
             name="branch_name"
             value={newBranchName}
-            onInput={(e) =>
-              setNewBranchName((e.currentTarget as HTMLInputElement).value)
-            }
+            onChange={(e) => setNewBranchName(e.currentTarget.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -284,13 +283,13 @@ export function CalcadaBranchPicker({
             Create
           </button>
 
-          <span class="branch-create-error">{createError}</span>
+          <span className="branch-create-error">{createError}</span>
         </div>
       </div>
 
       {graph !== undefined && selectedId !== MAIN_BRANCH_ID && (
         <a
-          class="calcada-open-diff"
+          className="calcada-open-diff"
           href={diffUrl(graph, selectedId)}
           target="_blank"
           rel="noopener"

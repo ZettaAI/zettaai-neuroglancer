@@ -64,7 +64,6 @@ import {
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
-import { CalcadaBranchPicker } from "#src/datasource/calcada/branch_picker.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
   dropDecided,
@@ -75,11 +74,12 @@ import type {
   RootDebugGraph,
 } from "#src/datasource/calcada/debug_graph.js";
 import { mergeDebugGraphs } from "#src/datasource/calcada/debug_graph.js";
+import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
+import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
   CalcadaLabeledTimestampPicker,
   LABELED_TIMESTAMP_CONTROL_TITLE,
-} from "#src/datasource/calcada/labeled_timestamp_picker.js";
-import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
+} from "#src/datasource/calcada/react/labeled_timestamp_picker.js";
 import {
   interceptedRemovals,
   TRACE_CANDIDATE_COLOR_PACKED,
@@ -110,7 +110,7 @@ import {
   parseMultiscaleVolumeInfo,
   PrecomputedMultiscaleVolumeChunkSource,
 } from "#src/datasource/precomputed/frontend.js";
-import { mountComponent } from "#src/editing/ui/interop/component_mount.js";
+import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WithSharedKvStoreContext } from "#src/kvstore/chunk_source_frontend.js";
 import type { SharedKvStoreContext } from "#src/kvstore/frontend.js";
 import {
