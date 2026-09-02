@@ -6147,13 +6147,18 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       select.title =
         "Calcada branch (main = 0). Switching clears segments not present on the new branch.";
 
-      const renderOptions = () => {
+      // A fork rewrites branches.value once a second to move its percentage.
+      // Chrome re-lays-out an open dropdown whenever the options behind it are
+      // touched — even one option's text — which throws away the scroll
+      // position, so on a graph with hundreds of branches the list cannot be
+      // read while a branch is being created. Writes are therefore held back
+      // for as long as the control is being used and applied once it is not.
+      let interacting = false;
+      let missedRender = false;
+
+      const applyOptions = () => {
         const branches =
           graph instanceof CalcadaGraphSource ? graph.branches.value : [];
-        // Built as a description first and applied in place below. A fork
-        // rewrites branches.value once a second to move its percentage, and
-        // replacing every option on each of those ticks resets the scroll of an
-        // open dropdown — unusable on a graph with hundreds of branches.
         const wanted: { value: string; text: string; disabled: boolean }[] = [
           { value: "0", text: "main", disabled: false },
         ];
@@ -6204,7 +6209,40 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
           select.value = String(selectedId);
         }
       };
-      renderOptions();
+
+      const renderOptions = () => {
+        if (interacting) {
+          missedRender = true;
+          return;
+        }
+        applyOptions();
+      };
+
+      // The dropdown gives no open/closed signal, so the control counts as in
+      // use from the gesture that opens it until focus or a choice leaves it.
+      // Worst case a percentage is a moment stale; it catches up on close.
+      const beginInteraction = () => {
+        interacting = true;
+      };
+      const endInteraction = () => {
+        if (!interacting) return;
+        interacting = false;
+        if (missedRender) {
+          missedRender = false;
+          applyOptions();
+        }
+      };
+      select.addEventListener("mousedown", beginInteraction);
+      select.addEventListener("keydown", beginInteraction);
+      select.addEventListener("blur", endInteraction);
+      context.registerDisposer(() => {
+        select.removeEventListener("mousedown", beginInteraction);
+        select.removeEventListener("keydown", beginInteraction);
+        select.removeEventListener("blur", endInteraction);
+        select.removeEventListener("change", endInteraction);
+      });
+
+      applyOptions();
 
       select.addEventListener("change", () => {
         const parsed = Number.parseInt(select.value, 10);
@@ -6231,6 +6269,11 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         segmentationGroupState.segmentEquivalences.clear();
         branchId.value = parsed;
       });
+
+      // Registered after the handler above so the pending options land only
+      // once that one has read the chosen value — applying them first would
+      // reset select.value to the branch being switched away from.
+      select.addEventListener("change", endInteraction);
 
       select.addEventListener("focus", () => {
         if (graph instanceof CalcadaGraphSource) {
