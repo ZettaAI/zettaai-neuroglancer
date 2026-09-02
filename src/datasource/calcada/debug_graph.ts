@@ -19,7 +19,6 @@ export interface DebugEdge {
   affinity: number;
   area: number;
   status: string;
-  pos: [number, number, number];
 }
 
 export interface DebugGraph {

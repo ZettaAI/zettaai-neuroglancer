@@ -2347,33 +2347,19 @@ class CalcadaDebugSession extends RefCounted {
         undrawable++;
         continue;
       }
-      const pointA = vec3.fromValues(centerA[0], centerA[1], centerA[2]);
-      const pointB = vec3.fromValues(centerB[0], centerB[1], centerB[2]);
-      // Bend the line through the edge's stored contact position when the server
-      // provides one, so it marks where the pieces actually touch — anchors
-      // alone can put the whole line inside one mesh.
-      const hasContactPos = edge.pos.some(
-        (coordinate: number) => coordinate !== 0,
+      // An edge is a pair of piece ids: draw it between the two anchors and
+      // nothing else. Edge rows also carry a contact position, but bulk merge
+      // stores it divided by the resolution rather than multiplied, so on a
+      // merge-heavy graph most of them point far outside the volume.
+      const line = lineBetween(
+        vec3.fromValues(centerA[0], centerA[1], centerA[2]),
+        vec3.fromValues(centerB[0], centerB[1], centerB[2]),
       );
-      const segments: Line[] = [];
-      if (hasContactPos) {
-        const contactPos = vec3.fromValues(
-          edge.pos[0],
-          edge.pos[1],
-          edge.pos[2],
-        );
-        segments.push(
-          lineBetween(pointA, contactPos),
-          lineBetween(contactPos, pointB),
-        );
-      } else {
-        segments.push(lineBetween(pointA, pointB));
-      }
       if (edge.affinity === 0 && edge.status === "enabled") {
         siblingEdgeCount++;
-        siblingLines.push(...segments);
+        siblingLines.push(line);
       } else {
-        edgeLines.push(...segments);
+        edgeLines.push(line);
       }
     }
 
@@ -4986,7 +4972,6 @@ class CalcadaGraphServerInterface {
         affinity: e.affinity,
         area: e.area,
         status: e.status,
-        pos: e.pos ?? ([0, 0, 0] as [number, number, number]),
       }),
     );
     // The server resolves whatever id it was given to a root, so this is how a

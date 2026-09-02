@@ -11,7 +11,7 @@ function piece(id: bigint, external = false): DebugPiece {
 }
 
 function edge(a: bigint, b: bigint): DebugEdge {
-  return { a, b, affinity: 1, area: 1, status: "enabled", pos: [0, 0, 0] };
+  return { a, b, affinity: 1, area: 1, status: "enabled" };
 }
 
 describe("mergeDebugGraphs", () => {
