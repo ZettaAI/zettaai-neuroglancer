@@ -20,13 +20,6 @@ import type {
 } from "@zettaai/edit-session";
 import { ChunkId, scaleFor } from "@zettaai/edit-session";
 
-import {
-  brushBoundsPadding,
-  brushRadius,
-  brushRadiusSquared,
-  brushSizeVoxels,
-  brushStampAnchor,
-} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 import { applyMorphologyPipeline } from "#src/editing/tool_runtimes/mask_compute.js";
 import {
   clampToVoxelDataType,
@@ -96,9 +89,10 @@ function recordPaintContext(
   targetDataType: VoxelDataType,
 ): void {
   if (!paintProfiler.enabled) return;
+  const r = Math.max(0, Math.floor(radius));
   const ctx: Record<string, string | number | boolean> = {
-    brush: brushSizeVoxels(radius),
-    r: brushRadius(radius),
+    brush: 2 * r + 1,
+    r,
     mask: maskCtx === undefined ? "off" : "on",
     path,
     target: targetDataType,
@@ -217,9 +211,9 @@ export class PaintingCompute implements PaintCompute {
       input.metadata.voxelDataType,
     );
     // A single click is a degenerate (from === to) capsule, so route it through
-    // the capsule stamps to get the fast slice write path (TM-304). Anchored to
-    // the voxel lattice first — see `brushStampAnchor`.
-    const pos = brushStampAnchor(input.voxelPosition, input.radius);
+    // the capsule stamps to get the fast slice write path (TM-304). Snapped to
+    // the voxel lattice first — see `stampCenterVoxel`.
+    const pos = stampCenterVoxel(input.voxelPosition);
     if (maskCtx === undefined) {
       stampCapsule2D(builder, pos, pos, input.radius, input.value);
     } else {
@@ -257,28 +251,26 @@ export class PaintingCompute implements PaintCompute {
       input.targetResolution,
     );
     const maskCtx = resolveMaskContext(input, this.imageChunkCache);
-    const radiusVoxels = brushRadius(input.radius);
+    const r = Math.max(0, Math.floor(input.radius));
     // The swept path `from → …via → to`. `via` is present when the host
     // coalesced pointer positions while the previous segment was still in
     // flight (latest-wins backpressure); rasterizing the whole polyline as ONE
     // footprint keeps morphology at one round-trip per delivered segment no
     // matter how many positions were coalesced. Consecutive duplicates add
     // nothing to the swept shape — drop them.
-    // Anchor every sample to the voxel lattice before rasterizing, so the swept
-    // shape is a capsule between stamp CENTERS with exact disk end caps — see
-    // `brushStampAnchor`. Anchoring first also lets the dedup collapse samples
-    // that landed on the same anchor.
+    // Snap every sample to the voxel lattice before rasterizing, so the swept
+    // shape is a capsule between voxel CENTERS with exact disk end caps — see
+    // `stampCenterVoxel`. Snapping first also lets the dedup collapse samples
+    // that landed in the same voxel.
     const pts = dedupConsecutivePoints(
-      [input.from, ...(input.via ?? []), input.to].map((point) =>
-        brushStampAnchor(point, input.radius),
-      ),
+      [input.from, ...(input.via ?? []), input.to].map(stampCenterVoxel),
     );
     const cz = Math.floor(pts[0][2]);
     const sameZ = pts.every((p) => Math.floor(p[2]) === cz);
     recordPaintContext(
       input.radius,
       maskCtx,
-      radiusVoxels >= 1 && sameZ
+      r >= 1 && sameZ
         ? pts.length > 2
           ? `polyline(${pts.length - 1})`
           : "capsule"
@@ -294,7 +286,7 @@ export class PaintingCompute implements PaintCompute {
     // many overlapping dabs. Each voxel — and the morphology over the whole
     // footprint — is computed exactly once, eliminating per-dab overlap
     // recompute and collapsing N morphology round-trips into one (TM-304).
-    if (radiusVoxels >= 1 && sameZ) {
+    if (r >= 1 && sameZ) {
       if (pts.length <= 2) {
         const from = pts[0];
         const to = pts[pts.length - 1];
@@ -400,23 +392,20 @@ export class PaintingCompute implements PaintCompute {
     const pipeline = this.pipelineRoute();
     if (pipeline === undefined || !pipeline.ready) return null;
 
-    const radiusVoxels = brushRadius(input.radius);
-    const boundsPadding = brushBoundsPadding(input.radius);
-    // Anchor every sample to the voxel lattice before rasterizing, so the swept
-    // shape is a capsule between stamp CENTERS with exact disk end caps — see
-    // `brushStampAnchor`. Anchoring first also lets the dedup collapse samples
-    // that landed on the same anchor.
+    const r = Math.max(0, Math.floor(input.radius));
+    // Snap every sample to the voxel lattice before rasterizing, so the swept
+    // shape is a capsule between voxel CENTERS with exact disk end caps — see
+    // `stampCenterVoxel`. Snapping first also lets the dedup collapse samples
+    // that landed in the same voxel.
     const pts = dedupConsecutivePoints(
-      [input.from, ...(input.via ?? []), input.to].map((point) =>
-        brushStampAnchor(point, input.radius),
-      ),
+      [input.from, ...(input.via ?? []), input.to].map(stampCenterVoxel),
     );
     const cz = Math.floor(pts[0][2]);
     const sameZ = pts.every((p) => Math.floor(p[2]) === cz);
     // Only the capsule / polyline-union route (single z-slice, real radius) is
     // worker-stamped; the 1-voxel brush and z-varying paths stay on the
     // synchronous per-dab path (small footprints, not the measured bottleneck).
-    if (radiusVoxels < 1 || !sameZ) return null;
+    if (r < 1 || !sameZ) return null;
 
     // Footprint bbox in target voxels — identical to `stampCapsule2DMasked` /
     // `stampPolyline2DMasked`. The pyodide path rebuilds the footprint from
@@ -432,12 +421,10 @@ export class PaintingCompute implements PaintCompute {
       if (p[1] < minY) minY = p[1];
       if (p[1] > maxY) maxY = p[1];
     }
-    const {
-      loX: loTx,
-      loY: loTy,
-      hiX: hiTx,
-      hiY: hiTy,
-    } = footprintBounds(minX, minY, maxX, maxY, boundsPadding);
+    const loTx = Math.floor(minX) - r;
+    const loTy = Math.floor(minY) - r;
+    const hiTx = Math.ceil(maxX) + r;
+    const hiTy = Math.ceil(maxY) + r;
     const tShapeX = hiTx - loTx + 1;
     const tShapeY = hiTy - loTy + 1;
     const points = new Float64Array(pts.length * 2);
@@ -461,7 +448,7 @@ export class PaintingCompute implements PaintCompute {
       cz,
       maskCtx,
       pipeline.run,
-      { points, radius: radiusVoxels },
+      { points, radius: r },
     );
     if (mask === null) return null;
     return { loTx, loTy, maskW: tShapeX, maskH: tShapeY, cz, mask };
@@ -773,53 +760,54 @@ const FILL_FLUSH_INTERVAL_MS = 12;
 // Disk stamp — 2D disk in the XY plane at fixed Z (matches v1 behavior).
 // ---------------------------------------------------------------------------
 
+/**
+ * The voxel a stamp is centered on.
+ *
+ * Pointer positions arrive as FRACTIONAL target-voxel coordinates, while every
+ * rasterizer below works on the integer voxel lattice, where voxel `i` spans
+ * `[i, i+1)`. Snapping once, here at the entry points — rather than separately
+ * inside each stamp — is what makes the footprint symmetric about its center
+ * voxel and identical wherever the pointer sits inside that voxel: a brush of
+ * size `2r + 1` always writes the same `dx² + dy² ≤ r²` disk.
+ *
+ * Only `stampDisk2D` used to snap. The capsule stamps measured distances from
+ * the raw fractional position to integer lattice points, so a click at x.5
+ * produced an even-width, off-center blob that slid a whole voxel as the pointer
+ * crossed the voxel — and every click and drag goes through those.
+ */
+function stampCenterVoxel(
+  position: readonly [number, number, number],
+): [number, number, number] {
+  return [
+    Math.floor(position[0]),
+    Math.floor(position[1]),
+    Math.floor(position[2]),
+  ];
+}
+
 function stampDisk2D(
   builder: PaintBatchBuilder,
   voxelPosition: readonly [number, number, number],
   radius: number,
   value: number | bigint,
 ): void {
-  const [anchorX, anchorY, anchorZ] = brushStampAnchor(voxelPosition, radius);
-  const radiusSquared = brushRadiusSquared(radius);
-  const { loX, loY, hiX, hiY } = footprintBounds(
-    anchorX,
-    anchorY,
-    anchorX,
-    anchorY,
-    brushBoundsPadding(radius),
-  );
+  const r = Math.max(0, Math.floor(radius));
+  const cx = Math.floor(voxelPosition[0]);
+  const cy = Math.floor(voxelPosition[1]);
+  const cz = Math.floor(voxelPosition[2]);
+  const r2 = r * r;
   // No slice mode here: stampDisk2D is used by the per-dab fallback (many
   // stamps per builder), which must accumulate on the legacy path.
-  for (let vy = loY; vy <= hiY; vy++) {
-    const dy = vy - anchorY;
-    for (let vx = loX; vx <= hiX; vx++) {
-      const dx = vx - anchorX;
-      if (dx * dx + dy * dy > radiusSquared) continue;
-      builder.writeVoxel(vx, vy, anchorZ, value);
+  if (r === 0) {
+    builder.writeVoxel(cx, cy, cz, value);
+    return;
+  }
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy > r2) continue;
+      builder.writeVoxel(cx + dx, cy + dy, cz, value);
     }
   }
-}
-
-/**
- * Voxel-index window that contains the footprint swept between two anchors.
- * `padding` is the whole-voxel reach of the brush (`brushBoundsPadding`); an even
- * size puts the anchors on half-voxels, so the window is floored/ceiled outward
- * to stay a superset. `python_painter.py::_footprint_mask` computes the same
- * window for its scan.
- */
-function footprintBounds(
-  fromX: number,
-  fromY: number,
-  toX: number,
-  toY: number,
-  padding: number,
-): { loX: number; loY: number; hiX: number; hiY: number } {
-  return {
-    loX: Math.floor(Math.min(fromX, toX)) - padding,
-    loY: Math.floor(Math.min(fromY, toY)) - padding,
-    hiX: Math.ceil(Math.max(fromX, toX)) + padding,
-    hiY: Math.ceil(Math.max(fromY, toY)) + padding,
-  };
 }
 
 /**
@@ -863,22 +851,21 @@ function stampCapsule2D(
   radius: number,
   value: number | bigint,
 ): void {
-  const radiusSquared = brushRadiusSquared(radius);
+  const r = Math.max(0, Math.floor(radius));
+  const r2 = r * r;
   const ax = from[0];
   const ay = from[1];
   const bx = to[0];
   const by = to[1];
   const cz = Math.floor(from[2]);
-  const {
-    loX: loTx,
-    loY: loTy,
-    hiX: hiTx,
-    hiY: hiTy,
-  } = footprintBounds(ax, ay, bx, by, brushBoundsPadding(radius));
+  const loTx = Math.floor(Math.min(ax, bx)) - r;
+  const loTy = Math.floor(Math.min(ay, by)) - r;
+  const hiTx = Math.ceil(Math.max(ax, bx)) + r;
+  const hiTy = Math.ceil(Math.max(ay, by)) + r;
   builder.beginSliceStamp(loTx, loTy, hiTx, hiTy, cz);
   for (let vy = loTy; vy <= hiTy; vy++) {
     for (let vx = loTx; vx <= hiTx; vx++) {
-      if (segmentDistanceSq(vx, vy, ax, ay, bx, by) <= radiusSquared) {
+      if (segmentDistanceSq(vx, vy, ax, ay, bx, by) <= r2) {
         builder.writeVoxel(vx, vy, cz, value);
       }
     }
@@ -917,8 +904,7 @@ interface PolylineFootprint {
 
 function rasterizePolylineFootprint(
   pts: readonly (readonly [number, number, number])[],
-  padding: number,
-  radiusSquared: number,
+  r: number,
 ): PolylineFootprint {
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
@@ -930,33 +916,29 @@ function rasterizePolylineFootprint(
     if (p[1] < minY) minY = p[1];
     if (p[1] > maxY) maxY = p[1];
   }
-  const {
-    loX: loTx,
-    loY: loTy,
-    hiX: hiTx,
-    hiY: hiTy,
-  } = footprintBounds(minX, minY, maxX, maxY, padding);
+  const loTx = Math.floor(minX) - r;
+  const loTy = Math.floor(minY) - r;
+  const hiTx = Math.ceil(maxX) + r;
+  const hiTy = Math.ceil(maxY) + r;
   const w = hiTx - loTx + 1;
   const h = hiTy - loTy + 1;
   const bitmap = new Uint8Array(w * h);
+  const r2 = r * r;
   for (let s = 0; s + 1 < pts.length; s++) {
     const ax = pts[s][0];
     const ay = pts[s][1];
     const bx = pts[s + 1][0];
     const by = pts[s + 1][1];
-    const segment = footprintBounds(ax, ay, bx, by, padding);
-    const sLoX = Math.max(loTx, segment.loX);
-    const sLoY = Math.max(loTy, segment.loY);
-    const sHiX = Math.min(hiTx, segment.hiX);
-    const sHiY = Math.min(hiTy, segment.hiY);
+    const sLoX = Math.max(loTx, Math.floor(Math.min(ax, bx)) - r);
+    const sLoY = Math.max(loTy, Math.floor(Math.min(ay, by)) - r);
+    const sHiX = Math.min(hiTx, Math.ceil(Math.max(ax, bx)) + r);
+    const sHiY = Math.min(hiTy, Math.ceil(Math.max(ay, by)) + r);
     for (let vy = sLoY; vy <= sHiY; vy++) {
       const row = (vy - loTy) * w;
       for (let vx = sLoX; vx <= sHiX; vx++) {
         const idx = row + (vx - loTx);
         if (bitmap[idx] !== 0) continue;
-        if (segmentDistanceSq(vx, vy, ax, ay, bx, by) <= radiusSquared) {
-          bitmap[idx] = 1;
-        }
+        if (segmentDistanceSq(vx, vy, ax, ay, bx, by) <= r2) bitmap[idx] = 1;
       }
     }
   }
@@ -976,12 +958,9 @@ function stampPolyline2D(
   radius: number,
   value: number | bigint,
 ): void {
+  const r = Math.max(0, Math.floor(radius));
   const cz = Math.floor(pts[0][2]);
-  const fp = rasterizePolylineFootprint(
-    pts,
-    brushBoundsPadding(radius),
-    brushRadiusSquared(radius),
-  );
+  const fp = rasterizePolylineFootprint(pts, r);
   builder.beginSliceStamp(
     fp.loTx,
     fp.loTy,
@@ -1685,29 +1664,25 @@ function stampDisk2DMasked(
   ctx: MaskContext,
   runMorphology: RunMorphology,
 ): Promise<void> {
-  const [anchorX, anchorY, anchorZ] = brushStampAnchor(voxelPosition, radius);
-  const radiusSquared = brushRadiusSquared(radius);
-  const { loX, loY, hiX, hiY } = footprintBounds(
-    anchorX,
-    anchorY,
-    anchorX,
-    anchorY,
-    brushBoundsPadding(radius),
-  );
+  const r = Math.max(0, Math.floor(radius));
+  const cx = Math.floor(voxelPosition[0]);
+  const cy = Math.floor(voxelPosition[1]);
+  const cz = Math.floor(voxelPosition[2]);
+  const r2 = r * r;
   return stampShape2DMasked(
     builder,
-    loX,
-    loY,
-    hiX - loX + 1,
-    hiY - loY + 1,
-    anchorZ,
+    cx - r,
+    cy - r,
+    2 * r + 1,
+    2 * r + 1,
+    cz,
     value,
     ctx,
     runMorphology,
     (vx, vy) => {
-      const dx = vx - anchorX;
-      const dy = vy - anchorY;
-      return dx * dx + dy * dy <= radiusSquared;
+      const dx = vx - cx;
+      const dy = vy - cy;
+      return dx * dx + dy * dy <= r2;
     },
     // Disk masked stamp is used by the per-dab fallback (many stamps per
     // builder) → must accumulate on the legacy path, not slice mode.
@@ -1733,18 +1708,17 @@ function stampCapsule2DMasked(
   runMorphology: RunMorphology,
   pipeline?: PipelineRoute,
 ): Promise<void> {
-  const radiusSquared = brushRadiusSquared(radius);
+  const r = Math.max(0, Math.floor(radius));
+  const r2 = r * r;
   const ax = from[0];
   const ay = from[1];
   const bx = to[0];
   const by = to[1];
   const cz = Math.floor(from[2]);
-  const {
-    loX: loTx,
-    loY: loTy,
-    hiX: hiTx,
-    hiY: hiTy,
-  } = footprintBounds(ax, ay, bx, by, brushBoundsPadding(radius));
+  const loTx = Math.floor(Math.min(ax, bx)) - r;
+  const loTy = Math.floor(Math.min(ay, by)) - r;
+  const hiTx = Math.ceil(Math.max(ax, bx)) + r;
+  const hiTy = Math.ceil(Math.max(ay, by)) + r;
   return stampShape2DMasked(
     builder,
     loTx,
@@ -1755,12 +1729,12 @@ function stampCapsule2DMasked(
     value,
     ctx,
     runMorphology,
-    (vx, vy) => segmentDistanceSq(vx, vy, ax, ay, bx, by) <= radiusSquared,
+    (vx, vy) => segmentDistanceSq(vx, vy, ax, ay, bx, by) <= r2,
     // Single capsule per builder → safe to use the fast slice write path.
     /* useSlice */ true,
     pipeline,
     // Capsule (incl. degenerate single click, from === to) = one segment.
-    { points: new Float64Array([ax, ay, bx, by]), radius: brushRadius(radius) },
+    { points: new Float64Array([ax, ay, bx, by]), radius: r },
   );
 }
 
@@ -1781,13 +1755,10 @@ function stampPolyline2DMasked(
   runMorphology: RunMorphology,
   pipeline?: PipelineRoute,
 ): Promise<void> {
+  const r = Math.max(0, Math.floor(radius));
   const cz = Math.floor(pts[0][2]);
   const fp = paintProfiler.time("cmp.footprint(cpu)", () =>
-    rasterizePolylineFootprint(
-      pts,
-      brushBoundsPadding(radius),
-      brushRadiusSquared(radius),
-    ),
+    rasterizePolylineFootprint(pts, r),
   );
   // Flatten the polyline's xy points for the worker. Its segment-distance
   // footprint is the exact union the `fp.bitmap` predicate encodes (both use
@@ -1812,7 +1783,7 @@ function stampPolyline2DMasked(
     // Single polyline stamp per builder → safe to use the fast slice path.
     /* useSlice */ true,
     pipeline,
-    { points, radius: brushRadius(radius) },
+    { points, radius: r },
   );
 }
 

@@ -101,7 +101,7 @@ export function PaintingEraser({
         <ParamInput<number>
           type="number"
           min={MIN_BRUSH_SIZE}
-          step={1}
+          step={2}
           value={size}
           parse={parseSize}
           onCommit={commitSize}

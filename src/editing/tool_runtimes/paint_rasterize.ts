@@ -29,11 +29,6 @@
  * the library's `voxelOffsetInBlock` (edit-session `shared/voxel-grid`).
  */
 
-import {
-  brushBoundsPadding,
-  brushRadiusSquared,
-} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
-
 export type Vec3 = readonly [number, number, number];
 
 /** The typed-array views a chunk's `slot.data` can be (edit-session ChunkVoxelBuffer). */
@@ -51,7 +46,7 @@ export type VoxelView =
 export interface RasterizeStrokeParams {
   /** Polyline points in global voxel coords; all share one z-slice. */
   readonly points: readonly Vec3[];
-  /** Brush radius in voxels, `(size - 1) / 2` (half-integer for an even size). */
+  /** Brush radius in voxels (matches `Math.max(0, Math.floor(radius))`). */
   readonly radius: number;
   /** Value written at covered voxels (bigint for 64-bit views). */
   readonly value: number | bigint;
@@ -105,9 +100,8 @@ export function rasterizeStrokeIntoChunk(
 ): RasterizedSubregion | undefined {
   const { points, radius, value, chunkOrigin, chunkSize } = params;
   if (points.length === 0) return undefined;
-  // The shape's definition, shared with the main-thread stamps and the cursor.
-  const padding = brushBoundsPadding(radius);
-  const radiusSquared = brushRadiusSquared(radius);
+  const r = Math.max(0, Math.floor(radius));
+  const r2 = r * r;
   const [ox, oy, oz] = chunkOrigin;
   const [sx, sy, sz] = chunkSize;
 
@@ -143,15 +137,15 @@ export function rasterizeStrokeIntoChunk(
     const bx = b[0];
     const by = b[1];
     // Per-segment bbox (matches stampCapsule2D), clipped to this chunk.
-    const segLoX = Math.max(chunkLoX, Math.floor(Math.min(ax, bx)) - padding);
-    const segHiX = Math.min(chunkHiX, Math.ceil(Math.max(ax, bx)) + padding);
-    const segLoY = Math.max(chunkLoY, Math.floor(Math.min(ay, by)) - padding);
-    const segHiY = Math.min(chunkHiY, Math.ceil(Math.max(ay, by)) + padding);
+    const segLoX = Math.max(chunkLoX, Math.floor(Math.min(ax, bx)) - r);
+    const segHiX = Math.min(chunkHiX, Math.ceil(Math.max(ax, bx)) + r);
+    const segLoY = Math.max(chunkLoY, Math.floor(Math.min(ay, by)) - r);
+    const segHiY = Math.min(chunkHiY, Math.ceil(Math.max(ay, by)) + r);
     for (let vy = segLoY; vy <= segHiY; vy++) {
       if (shouldCancel?.()) return undefined;
       const rowBase = (zBase + (vy - oy)) * sx;
       for (let vx = segLoX; vx <= segHiX; vx++) {
-        if (segmentDistanceSq(vx, vy, ax, ay, bx, by) > radiusSquared) continue;
+        if (segmentDistanceSq(vx, vy, ax, ay, bx, by) > r2) continue;
         const idx = rowBase + (vx - ox);
         if (big) {
           (view as BigUint64Array)[idx] = bigValue;

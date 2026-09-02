@@ -118,18 +118,13 @@ export interface PaintPipelineRequest {
   readonly coverageThreshold?: number;
 
   /**
-   * Footprint geometry: the swept-capsule polyline points in ABSOLUTE target
-   * voxel coordinates — stamp ANCHORS, matching the main-thread
-   * `segmentDistanceSq` inputs — flattened as `[x0, y0, x1, y1, …]`. A single
+   * Footprint geometry: the swept-capsule polyline points in ABSOLUTE
+   * target voxel coordinates (un-floored, matching the main-thread
+   * `segmentDistanceSq` inputs), flattened as `[x0, y0, x1, y1, …]`. A single
    * point (length 2) is a disk; two points a capsule; more a polyline union.
    */
   readonly pathPoints: Float64Array;
-  /**
-   * Brush radius in target voxels, `(size - 1) / 2` — a HALF-INTEGER for an even
-   * brush size. The worker derives its scan padding and squared radius from it
-   * exactly as `brush_disk_footprint.ts` does (`brushBoundsPadding` /
-   * `brushRadiusSquared`), which is the shared definition of the shape.
-   */
+  /** Brush radius in target voxels (already `floor`ed by the caller). */
   readonly radius: number;
 
   /** Binary-closing iterations; `0` skips closing. */
