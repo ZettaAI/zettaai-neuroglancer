@@ -37,10 +37,7 @@ import type {
 } from "@zettaai/edit-session";
 import { ChunkId, scaleFor } from "@zettaai/edit-session";
 
-import {
-  brushSizeVoxels,
-  brushStampAnchor,
-} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
+import { brushSizeVoxels } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 
 import { applyPaintBatch } from "#src/editing/tool_runtimes/paint_batch_apply.js";
 import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
@@ -348,19 +345,6 @@ export class StrokeTool implements EditTool {
       edit.readChunk({ ...target, chunkId });
     const targetScale = scaleFor(metadata, shared.targetResolution);
     const chunkSize = targetScale.chunkDataSize;
-    // Anchor the path to the stamp lattice ONCE, here, so every consumer below
-    // rasterizes the same footprint: the unmasked worker kernel
-    // (`paintSegment` → `rasterizeStrokeIntoChunk`) and the chunk enumeration
-    // that decides which tiles it may write (`chunksForStroke`), the masked
-    // worker footprint, and the synchronous `applyBrushStroke` fallback. Without
-    // it the worker kernel measured from the raw FRACTIONAL pointer position
-    // while the synchronous path measured from the anchor, so the two disagreed
-    // on the footprint for any pointer that was not exactly on a voxel.
-    // `brushStampAnchor` is idempotent, so `PaintingCompute` re-anchoring
-    // downstream is a no-op safety net.
-    const stampPath = path.map((point) =>
-      brushStampAnchor(point, shared.radius),
-    );
     // P1 (TM-317): warm the overlay chunks under the stroke footprint NOW, in
     // parallel, so they are resident by the time the apply (worker OR
     // synchronous) calls `beginWrite` → `materializeForWrite.fetchBaseline`. For
@@ -372,7 +356,7 @@ export class StrokeTool implements EditTool {
     const warm = warmStrokeFootprint(
       edit,
       target,
-      stampPath,
+      path,
       shared.radius,
       chunkSize,
       targetScale.voxelOffset,
@@ -388,8 +372,8 @@ export class StrokeTool implements EditTool {
     // 1-voxel brush (r === 0), z-varying paths, and replay-redo always take the
     // synchronous path.
     const r = Math.floor(shared.radius);
-    const z0 = Math.floor(stampPath[0][2]);
-    const sameZ = stampPath.every((p) => Math.floor(p[2]) === z0);
+    const z0 = Math.floor(path[0][2]);
+    const sameZ = path.every((p) => Math.floor(p[2]) === z0);
     if (useWorker && this.deps.pipeline.available && r >= 1 && sameZ) {
       if (maskFields.mask === undefined) {
         try {
@@ -397,7 +381,7 @@ export class StrokeTool implements EditTool {
             edit,
             target,
             metadata,
-            stampPath,
+            path,
             shared.radius,
             value,
           );
@@ -409,14 +393,14 @@ export class StrokeTool implements EditTool {
         }
       } else if (this.deps.compute.computeMaskedStrokeFootprint !== undefined) {
         try {
-          const wvia = stampPath.slice(1, -1);
+          const wvia = path.slice(1, -1);
           const footprint =
             await this.deps.compute.computeMaskedStrokeFootprint({
               targetLayerId: shared.targetLayerId,
               targetResolution: shared.targetResolution,
               metadata,
-              from: stampPath[0],
-              to: stampPath[stampPath.length - 1],
+              from: path[0],
+              to: path[path.length - 1],
               ...(wvia.length > 0 ? { via: wvia } : {}),
               stepVoxels,
               radius: shared.radius,
@@ -445,13 +429,13 @@ export class StrokeTool implements EditTool {
       }
     }
 
-    const via = stampPath.slice(1, -1);
+    const via = path.slice(1, -1);
     const batch = await this.deps.compute.applyBrushStroke({
       targetLayerId: shared.targetLayerId,
       targetResolution: shared.targetResolution,
       metadata,
-      from: stampPath[0],
-      to: stampPath[stampPath.length - 1],
+      from: path[0],
+      to: path[path.length - 1],
       ...(via.length > 0 ? { via } : {}),
       stepVoxels,
       radius: shared.radius,
@@ -1082,15 +1066,16 @@ function warmStrokeFootprint(
   voxelOffset: readonly [number, number, number],
 ): Promise<void> {
   if (path.length === 0) return Promise.resolve();
+  const r = Math.floor(radius);
   const z0 = Math.floor(path[0][2]);
-  if (radius < 1 || !path.every((p) => Math.floor(p[2]) === z0)) {
+  if (r < 1 || !path.every((p) => Math.floor(p[2]) === z0)) {
     return Promise.resolve();
   }
   const bounds = edit.sessionVoxelBoundsFor({
     ...target,
     chunkId: ChunkId.fromCoord({ x: 0, y: 0, z: 0 }),
   });
-  const tiles = chunksForStroke(path, radius, chunkSize, bounds, voxelOffset);
+  const tiles = chunksForStroke(path, r, chunkSize, bounds, voxelOffset);
   if (tiles.length === 0) return Promise.resolve();
   return Promise.all(
     tiles.map((tile) =>

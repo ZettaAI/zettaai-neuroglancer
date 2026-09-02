@@ -49,12 +49,7 @@ export type VoxelView =
   | BigInt64Array;
 
 export interface RasterizeStrokeParams {
-  /**
-   * Polyline points in global voxel coords, all sharing one z-slice, as stamp
-   * ANCHORS (`brushStampAnchor`) — NOT raw pointer positions. The footprint is
-   * measured from these, so an unanchored position paints a disk centred between
-   * voxels that disagrees with every other rasterizer.
-   */
+  /** Polyline points in global voxel coords; all share one z-slice. */
   readonly points: readonly Vec3[];
   /** Brush radius in voxels, `(size - 1) / 2` (half-integer for an even size). */
   readonly radius: number;

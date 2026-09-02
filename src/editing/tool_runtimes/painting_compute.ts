@@ -80,11 +80,7 @@ interface PipelineRoute {
 interface PipelineGeometry {
   /** Swept-capsule polyline, ABSOLUTE target voxel coords `[x0,y0,x1,y1,…]`. */
   readonly points: Float64Array;
-  /**
-   * Brush radius in target voxels, `(size - 1) / 2` — a HALF-INTEGER for an even
-   * size. The worker and TS pipelines derive the squared radius and the scan
-   * padding from it exactly as `brush_disk_footprint.ts` does.
-   */
+  /** Brush radius in target voxels (already `floor`ed). */
   readonly radius: number;
 }
 
