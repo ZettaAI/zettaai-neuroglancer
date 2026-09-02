@@ -17,7 +17,7 @@ import type {
   SaveTarget,
   SessionError,
 } from "@zettaai/edit-session";
-import { sessionError, scaleFor } from "@zettaai/edit-session";
+import { sessionError } from "@zettaai/edit-session";
 
 import type { NgLayerMetadataSource } from "#src/editing/adapters/ng_layer_metadata_source.js";
 import type { NgLogger } from "#src/editing/adapters/ng_logger.js";
@@ -29,9 +29,6 @@ import {
   getDefaultSaveBackend,
   getSaveBackend,
 } from "#src/editing/adapters/save_backend.js";
-import type { OwnedChunkWrite } from "#src/editing/region/owned_chunk_write.js";
-import { planOwnedWrite } from "#src/editing/region/owned_chunk_write.js";
-import type { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
 import type { LayerManager, UserLayer } from "#src/layer/index.js";
 
 /**
@@ -51,39 +48,6 @@ export class NgSaveTarget implements SaveTarget {
     private readonly metadataSource: NgLayerMetadataSource,
     private readonly logger: NgLogger,
   ) {}
-
-  /**
-   * The edit region every chunk of the next save is clipped to.
-   *
-   * The library owns the `saveActive` seam — `EditSession.save` builds the
-   * payload itself and calls `save(payload)`, so the host cannot pass the
-   * region in as an argument. It is installed around that call instead, by
-   * {@link withSessionRegions}, which clears it in an UNCONDITIONAL `finally`.
-   * That is the whole difference from the field this replaces: there is no
-   * condition under which it survives its save, so it can never answer for a
-   * session that has ended.
-   */
-  private sessionRegions: SessionRegionSnapshot | undefined;
-
-  /**
-   * Run `body` with `regions` in force. Nested saves are refused rather than
-   * silently sharing a region — the host already rejects concurrent saves, and
-   * a second one here would mean that guard was bypassed.
-   */
-  async withSessionRegions<T>(
-    regions: SessionRegionSnapshot,
-    body: () => Promise<T>,
-  ): Promise<T> {
-    if (this.sessionRegions !== undefined) {
-      throw new Error("A save is already in flight");
-    }
-    this.sessionRegions = regions;
-    try {
-      return await body();
-    } finally {
-      this.sessionRegions = undefined;
-    }
-  }
 
   async save(payload: SavePayload, signal?: AbortSignal): Promise<SaveResult> {
     const chunksByLayer = groupChunksByLayer(payload.chunks);
@@ -167,36 +131,7 @@ export class NgSaveTarget implements SaveTarget {
       });
     }
     const metadata = await this.metadataSource.resolve(layerId);
-
-    // Pair every chunk with the voxels this save owns, BEFORE the backend sees
-    // it. A chunk that owns nothing never becomes a write, so the backend has
-    // no skip branch that could be miscounted as a successful upload; and a
-    // chunk whose scale has no region fails the layer rather than being written
-    // whole over a neighbour's voxels.
-    const writes: OwnedChunkWrite[] = [];
-    const refusals: string[] = [];
-    for (const chunk of chunks) {
-      const plan = planOwnedWrite(
-        chunk,
-        metadata,
-        scaleFor(metadata, chunk.resolution),
-        this.sessionRegions?.boundsFor(layerId, chunk.resolution),
-      );
-      if ("write" in plan) writes.push(plan.write);
-      else refusals.push(`${chunk.chunkId}:${plan.refusal.kind}`);
-    }
-    if (refusals.length > 0) {
-      // Reported failed on purpose. The library rebaselines a layer it is told
-      // succeeded, which would make the host's copy the only copy — so a layer
-      // with any unwritten chunk must stay dirty.
-      return toOutcome(layerId, {
-        status: "failed",
-        layerId,
-        error: `${refusals.length} of ${chunks.length} chunks not writable: ${refusals.slice(0, 3).join(", ")}`,
-      });
-    }
-
-    const result = await backend.saveLayer(layerId, writes, metadata, signal);
+    const result = await backend.saveLayer(layerId, chunks, metadata, signal);
     // Write only — a backend `ok` is just a write ack. Durability is confirmed
     // by the host's read-back verification after `save()` (TM-352).
     return toOutcome(layerId, result);

@@ -60,7 +60,6 @@ import {
   unregisterSaveBackend,
 } from "#src/editing/adapters/save_backend.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
-import { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
 import { SaveTracker } from "#src/editing/ui/session_controls/save_tracker.js";
 
 import { FakeLayerManager } from "#tests/editing/fakes/fake_layer_manager.js";
@@ -366,40 +365,13 @@ describe("locked/writable — NgSaveTarget aggregation across counts", () => {
     );
   }
 
-  /**
-   * Saves clip to the session region, so a target with none installed refuses
-   * every chunk by design. These cases are about outcome AGGREGATION, so give
-   * them a region that covers the whole test chunk.
-   */
-  function saveWithRegion(
-    target: NgSaveTarget,
-    names: readonly string[],
-  ): Promise<SaveResult> {
-    const bounds = new Map(
-      names.map((name) => [
-        `${layerId(name)}|${RESOLUTION}`,
-        { loX: 0, loY: 0, loZ: 0, hiX: 64, hiY: 64, hiZ: 64 },
-      ]),
-    );
-    const regions = new SessionRegionSnapshot(
-      sessionId("test-session"),
-      bounds,
-    );
-    return target.withSessionRegions(regions, () =>
-      target.save(payload(names)),
-    );
-  }
-
   for (const n of [1, 3, 5]) {
     it(`${n} writable layers all succeed → all-succeeded with ${n} outcomes`, async () => {
       registerSaveBackend(OK_SCHEME, okBackend);
       const names = Array.from({ length: n }, (_, i) => `L${i + 1}`);
-      const result = await saveWithRegion(
-        targetFor(
-          names.map((name) => ({ name, canonicalUrl: `${OK_SCHEME}://x` })),
-        ),
-        names,
-      );
+      const result = await targetFor(
+        names.map((name) => ({ name, canonicalUrl: `${OK_SCHEME}://x` })),
+      ).save(payload(names));
       expect(result.overall).toBe("all-succeeded");
       expect(result.outcomes).toHaveLength(n);
     });
@@ -409,15 +381,12 @@ describe("locked/writable — NgSaveTarget aggregation across counts", () => {
     registerSaveBackend(OK_SCHEME, okBackend);
     registerSaveBackend(BAD_SCHEME, badBackend);
     const names = ["L1", "L2", "L3", "L4"];
-    const result = await saveWithRegion(
-      targetFor([
-        { name: "L1", canonicalUrl: `${OK_SCHEME}://x` },
-        { name: "L2", canonicalUrl: `${BAD_SCHEME}://x` },
-        { name: "L3", canonicalUrl: `${OK_SCHEME}://x` },
-        { name: "L4", canonicalUrl: `${BAD_SCHEME}://x` },
-      ]),
-      names,
-    );
+    const result = await targetFor([
+      { name: "L1", canonicalUrl: `${OK_SCHEME}://x` },
+      { name: "L2", canonicalUrl: `${BAD_SCHEME}://x` },
+      { name: "L3", canonicalUrl: `${OK_SCHEME}://x` },
+      { name: "L4", canonicalUrl: `${BAD_SCHEME}://x` },
+    ]).save(payload(names));
     expect(result.overall).toBe("partial");
     expect(result.outcomes.filter((o) => o.status === "failed")).toHaveLength(
       2,
@@ -427,12 +396,9 @@ describe("locked/writable — NgSaveTarget aggregation across counts", () => {
   it("all writable layers fail → all-failed", async () => {
     registerSaveBackend(BAD_SCHEME, badBackend);
     const names = ["L1", "L2", "L3"];
-    const result = await saveWithRegion(
-      targetFor(
-        names.map((name) => ({ name, canonicalUrl: `${BAD_SCHEME}://x` })),
-      ),
-      names,
-    );
+    const result = await targetFor(
+      names.map((name) => ({ name, canonicalUrl: `${BAD_SCHEME}://x` })),
+    ).save(payload(names));
     expect(result.overall).toBe("all-failed");
     expect(result.outcomes).toHaveLength(3);
   });
