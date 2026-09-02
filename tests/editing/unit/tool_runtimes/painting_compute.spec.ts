@@ -17,6 +17,12 @@ import { ChunkId, Resolution, layerId } from "@zettaai/edit-session";
 
 import { describe, it, expect, vi } from "vitest";
 
+import {
+  brushBoundsPadding,
+  brushFootprintContains,
+  brushRadiusSquared,
+  brushStampAnchor,
+} from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 import type { MorphologyClient } from "#src/editing/tool_runtimes/morphology_client.js";
 import type { MorphologyRequest } from "#src/editing/tool_runtimes/morphology_request.js";
 import type {
@@ -390,22 +396,39 @@ function writtenVoxels(
 }
 
 /**
- * The exact voxel set a brush of `radius` writes, as `"x,y,z"` keys, centered on
- * the voxel containing `position`.
+ * The exact voxel set a brush of `radius` writes for a pointer at `position`, as
+ * `"x,y,z"` keys — read straight off the shared shape definition
+ * (`brush_disk_footprint.ts`), which is also what the cursor draws. A stamp that
+ * disagrees with it is a cursor that lies about where paint will land.
  */
 function expectedDiskKeys(
   position: readonly [number, number, number],
   radius: number,
 ): Set<string> {
-  const r = Math.max(0, Math.floor(radius));
-  const centerX = Math.floor(position[0]);
-  const centerY = Math.floor(position[1]);
-  const centerZ = Math.floor(position[2]);
+  const [anchorX, anchorY, anchorZ] = brushStampAnchor(position, radius);
+  const radiusSquared = brushRadiusSquared(radius);
+  const sweep = brushBoundsPadding(radius) + 2;
   const keys = new Set<string>();
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      keys.add(`${centerX + dx},${centerY + dy},${centerZ}`);
+  for (
+    let voxelY = Math.floor(anchorY) - sweep;
+    voxelY <= Math.ceil(anchorY) + sweep;
+    voxelY++
+  ) {
+    for (
+      let voxelX = Math.floor(anchorX) - sweep;
+      voxelX <= Math.ceil(anchorX) + sweep;
+      voxelX++
+    ) {
+      if (
+        brushFootprintContains(
+          voxelX - anchorX,
+          voxelY - anchorY,
+          0,
+          radiusSquared,
+        )
+      ) {
+        keys.add(`${voxelX},${voxelY},${anchorZ}`);
+      }
     }
   }
   return keys;
@@ -424,7 +447,8 @@ function voxelKeys(
  * The footprint must be the symmetric disk about the voxel the pointer is in —
  * whatever the sub-voxel fraction. The capsule stamps used to measure distances
  * from the raw fractional position to integer voxel indices, so a pointer at
- * x.5 painted an even-width blob that slid a whole voxel across the voxel.
+ * x.5 painted an even-width blob that slid a whole voxel across the voxel and
+ * disagreed with the cursor outline (TM-300).
  */
 describe("brush footprint is voxel-snapped and fraction-independent", () => {
   const CHUNK: readonly [number, number, number] = [64, 64, 64];
@@ -435,15 +459,38 @@ describe("brush footprint is voxel-snapped and fraction-independent", () => {
 
   const brushInput = (
     position: readonly [number, number, number],
+    radius: number = RADIUS,
   ): BrushApplyInput => ({
     targetLayerId: TARGET_LAYER,
     targetResolution: TARGET_RES,
     metadata: metadata(CHUNK),
     voxelPosition: [position[0], position[1], position[2]],
-    radius: RADIUS,
+    radius,
     value: 9n,
     readChunk: zeroReader(CHUNK),
     readChunkAt: unusedReadChunkAt,
+  });
+
+  it("a click paints the shared footprint, at odd and even sizes", async () => {
+    const compute = new PaintingCompute();
+    // Radii of both parities: whole = odd size (anchored on a voxel), half =
+    // even size (anchored on a voxel boundary).
+    for (const radius of [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5]) {
+      for (const fractionX of FRACTIONS) {
+        for (const fractionY of FRACTIONS) {
+          const position: [number, number, number] = [
+            32 + fractionX,
+            32 + fractionY,
+            16.5,
+          ];
+          const batch = await compute.applyBrush(brushInput(position, radius));
+          expect(
+            voxelKeys(batch, CHUNK),
+            `radius ${radius} at fraction (${fractionX}, ${fractionY})`,
+          ).toEqual(expectedDiskKeys(position, radius));
+        }
+      }
+    }
   });
 
   it("paints the same disk from anywhere inside one voxel", async () => {
