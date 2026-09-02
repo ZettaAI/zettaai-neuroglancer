@@ -18,20 +18,24 @@
  * tool compute backends also carries the URL + auth for the save write, so save
  * needs no separate wiring.
  *
- * The request is reconstructed entirely from NG-local data — `scaleFor` yields
- * the scale's `voxelOffset` + `chunkDataSize`, so it does not fetch the layer's
- * `info` file. Bytes are posted native dtype, X-fastest, gzipped, with no axis
- * reorder — the `/cutout` default `is_fortran=true` consumes that layout.
+ * The request is reconstructed entirely from NG-local data: the chunk arrives
+ * carrying the `OwnedRegion` `planOwnedWrite` computed for it, which already
+ * holds the grid and the bbox to post, so this never resolves a scale or
+ * fetches the layer's `info` file. Bytes are posted native dtype, X-fastest,
+ * gzipped, with no axis reorder — the `/cutout` default `is_fortran=true`
+ * consumes that layout.
  */
 
 import type { LayerId, LayerMetadata, SavedChunk } from "@zettaai/edit-session";
-import { scaleFor } from "@zettaai/edit-session";
 
 import type {
   SaveBackend,
   SaveBackendResult,
 } from "#src/editing/adapters/save_backend.js";
 import type { BackendClient } from "#src/editing/backend/backend_client.js";
+import type { OwnedChunkWrite } from "#src/editing/region/owned_chunk_write.js";
+import { ownedRegionBytes } from "#src/editing/region/owned_chunk_write.js";
+import { delayUnlessAborted, HttpError } from "#src/util/http_request.js";
 
 /** Default backend path for the chunk write (relative to the endpoint root). */
 const DEFAULT_CUTOUT_PATH = "/painting/cutout";
@@ -48,13 +52,42 @@ const DEFAULT_CUTOUT_PATH = "/painting/cutout";
 export const SAVE_UPLOAD_CONCURRENCY = 5;
 
 /**
- * Per-chunk retry budget for the upload (TM-455). Without a per-attempt
+ * Per-chunk retry budget for ONE upload attempt (TM-455). Without a per-attempt
  * deadline a stuck POST hangs forever, and the default 32 transient retries
  * burn ~4–5 min per chunk against a cold-starting backend. Five attempts of at
- * most 30 s each bounds a chunk at roughly 3 min and lets a cancel land within
- * one attempt.
+ * most 30 s each bound a single attempt at roughly 3 min and let a cancel land
+ * within one attempt.
+ *
+ * NOT the per-chunk total. {@link CONFLICT_BACKOFF_MS} re-enters
+ * `client.request` on a lost CAS race, so a chunk that alternates transient
+ * failures with conflicts costs up to 4 x this budget — ~12 min while holding
+ * one of {@link SAVE_UPLOAD_CONCURRENCY} slots. The two budgets are defined
+ * independently and neither knows about the other; unifying them means teaching
+ * `RetryOptions` a caller-supplied retryable-status predicate, which is
+ * deliberately left out of this change.
  */
 const SAVE_RETRY_OPTIONS = { maxAttempts: 5, attemptTimeoutMs: 30_000 };
+
+/**
+ * `detail` the backend returns on a lost compare-and-swap race for one chunk
+ * object. The write is reported as PARTLY applied — the server writes chunks
+ * one at a time with no rollback — so the client must replay the whole request.
+ * With one POST per chunk "the whole request" is this chunk, and every payload
+ * is an absolute replacement of the voxels it covers, so the replay is
+ * idempotent.
+ */
+const CONFLICT_DETAIL = "conditional_write_conflict";
+
+/**
+ * Replays of one chunk after a lost CAS race. The backend already retries each
+ * chunk internally before ever answering 409, so reaching the client means it
+ * lost repeatedly on the same object. Task cutouts do not overlap in voxels
+ * (measured across a real project: 0 overlapping task pairs, 78 pairs sharing a
+ * boundary chunk), so the writers are racing over DISJOINT voxels and a replay
+ * converges — hence a short, aggressive backoff rather than one tuned for
+ * genuine contention.
+ */
+const CONFLICT_BACKOFF_MS: readonly number[] = [50, 150, 400];
 
 export type Vec3 = [number, number, number];
 
@@ -97,24 +130,6 @@ export function parseResolution(resolution: string): Vec3 {
   return [parts[0], parts[1], parts[2]];
 }
 
-/**
- * Absolute voxel bounding box of a chunk:
- *   start = voxelOffset + chunkCoord * chunkDataSize
- *   end   = start + chunkDataSize
- */
-export function cutoutBbox(
-  chunkCoord: { x: number; y: number; z: number },
-  chunkDataSize: readonly [number, number, number],
-  voxelOffset: readonly [number, number, number],
-): { start: Vec3; end: Vec3 } {
-  const coord: Vec3 = [chunkCoord.x, chunkCoord.y, chunkCoord.z];
-  const start = coord.map(
-    (c, i) => voxelOffset[i] + c * chunkDataSize[i],
-  ) as Vec3;
-  const end = start.map((s, i) => s + chunkDataSize[i]) as Vec3;
-  return { start, end };
-}
-
 /** Build the `/cutout` query string (path + resolution + bbox), repeated-key form. */
 export function buildCutoutParams(input: {
   path: string;
@@ -130,19 +145,32 @@ export function buildCutoutParams(input: {
   return params;
 }
 
-/** Copy a chunk's voxel buffer into a standalone `Uint8Array` (native dtype, X-fastest). */
-function chunkToBytes(chunk: SavedChunk): Uint8Array {
-  const view = chunk.bytes.asView();
-  return new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
-}
-
-/** Gzip-compress a byte buffer, as `/cutout` requires (it always `gzip.decompress`es the body). */
+/** Gzip a byte buffer, as `/cutout` requires (it always `gzip.decompress`es the body). */
 async function gzip(bytes: Uint8Array): Promise<ArrayBuffer> {
-  const cs = new CompressionStream("gzip");
-  const writer = cs.writable.getWriter();
+  const compression = new CompressionStream("gzip");
+  const writer = compression.writable.getWriter();
   void writer.write(bytes);
   void writer.close();
-  return new Response(cs.readable).arrayBuffer();
+  return new Response(compression.readable).arrayBuffer();
+}
+
+/**
+ * Is this a lost compare-and-swap race the client should replay? Matches the
+ * backend's structured `detail` rather than its prose, so the check does not
+ * drift with wording.
+ */
+async function isConditionalWriteConflict(error: unknown): Promise<boolean> {
+  if (!(error instanceof HttpError) || error.status !== 409) return false;
+  const { response } = error;
+  if (response === undefined) return false;
+  try {
+    const body = await response.clone().json();
+    return body?.detail === CONFLICT_DETAIL;
+  } catch {
+    // A 409 whose body is unreadable or not the structured shape is not a
+    // conflict we know how to replay safely.
+    return false;
+  }
 }
 
 export interface HttpSaveBackendDeps {
@@ -175,7 +203,7 @@ export class HttpSaveBackend implements SaveBackend {
   async saveLayer(
     layerId: LayerId,
     chunks: readonly SavedChunk[],
-    metadata: LayerMetadata,
+    _metadata: LayerMetadata,
     signal: AbortSignal,
   ): Promise<SaveBackendResult> {
     if (chunks.length === 0) {
@@ -211,7 +239,7 @@ export class HttpSaveBackend implements SaveBackend {
         }
         const chunk = chunks[nextChunk++];
         try {
-          await this.sendChunk(chunk, metadata, path, signal);
+          await this.sendChunk(asOwnedWrite(chunk), path, signal);
           succeeded += 1;
         } catch (err) {
           if (signal.aborted) {
@@ -258,34 +286,70 @@ export class HttpSaveBackend implements SaveBackend {
     };
   }
 
+  /**
+   * Write the owned part of one chunk. The box and its hash were pinned by
+   * `planOwnedWrite` when the bytes were snapshotted; nothing here re-derives
+   * them, so a replay writes exactly what the first attempt did.
+   */
   private async sendChunk(
-    chunk: SavedChunk,
-    metadata: LayerMetadata,
+    write: OwnedChunkWrite,
     path: string,
     signal: AbortSignal,
   ): Promise<void> {
-    const scale = scaleFor(metadata, chunk.resolution);
-    const { start, end } = cutoutBbox(
-      chunk.chunkCoord,
-      scale.chunkDataSize,
-      scale.voxelOffset,
-    );
+    const { owned } = write;
     const params = buildCutoutParams({
       path,
-      resolution: parseResolution(chunk.resolution),
-      start,
-      end,
+      resolution: parseResolution(write.resolution),
+      start: owned.ownedBox.start,
+      end: owned.ownedBox.end,
     });
+    // A whole-chunk region keeps the request chunk-aligned, which is what lets
+    // the backend take its lock-free fast path instead of a read-modify-write.
+    // `ownedRegionBytes` returns the live overlay buffer uncopied in that case,
+    // so copy before handing it to the async gzip.
+    const bytes = ownedRegionBytes(write.bytes.asView(), owned);
+    const body = await gzip(owned.coversWholeChunk ? bytes.slice() : bytes);
 
-    const body = await gzip(chunkToBytes(chunk));
     // `is_fortran` is left at its `/cutout` default (true), which consumes the
     // native-dtype, X-fastest bytes NG produces — no axis reorder needed.
-    await this.client.request(`${this.cutoutPath}?${params.toString()}`, {
-      method: "POST",
-      body,
-      headers: { "Content-Type": "application/octet-stream" },
-      signal,
-      retryOptions: SAVE_RETRY_OPTIONS,
-    });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.client.request(`${this.cutoutPath}?${params.toString()}`, {
+          method: "POST",
+          body,
+          headers: { "Content-Type": "application/octet-stream" },
+          signal,
+          retryOptions: SAVE_RETRY_OPTIONS,
+        });
+        return;
+      } catch (error) {
+        if (
+          signal.aborted ||
+          attempt >= CONFLICT_BACKOFF_MS.length ||
+          !(await isConditionalWriteConflict(error))
+        ) {
+          throw error;
+        }
+        await delayUnlessAborted(CONFLICT_BACKOFF_MS[attempt], signal);
+      }
+    }
   }
+}
+
+/**
+ * Every chunk reaching a save backend is planned by `planOwnedWrite` in
+ * `NgSaveTarget`, so it carries its owned region. A chunk without one means the
+ * planner was bypassed — writing it whole would overwrite voxels this task does
+ * not own, silently, which is the bug this plumbing exists to prevent. Refuse
+ * instead; the chunk is reported failed and its paint stays dirty.
+ */
+function asOwnedWrite(chunk: SavedChunk): OwnedChunkWrite {
+  const write = chunk as OwnedChunkWrite;
+  if (write.owned === undefined) {
+    throw new Error(
+      `chunk ${chunk.layerId}@${chunk.resolution}/${chunk.chunkId} has no ` +
+        "owned region: refusing to write voxels this task may not own",
+    );
+  }
+  return write;
 }
