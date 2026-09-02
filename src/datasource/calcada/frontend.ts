@@ -3811,6 +3811,18 @@ void main() {
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
     );
+
+    // Debug is a mode, not a tool: it is meant to sit alongside whatever the
+    // proofreader is holding. Its key is bound as a plain action rather than
+    // through the tool binder for exactly that reason — activating a tool
+    // deactivates the current one, so routing it through a tool would drop the
+    // cut the moment the overlay was asked for.
+    this.registerDisposer(
+      registerActionListener(window, CALCADA_DEBUG_TOGGLE_ACTION, () => {
+        const { active } = state.calcadaDebugState;
+        active.value = !active.value;
+      }),
+    );
   }
 
   private graphRenderLayer: SliceViewPanelChunkedGraphLayer | undefined;
@@ -5999,6 +6011,9 @@ const CALCADA_FIND_PATH_TOOL_ID = "calcadaFindPath";
 const CALCADA_PIECE_SPLIT_TOOL_ID = "calcadaPieceSplit";
 const CALCADA_ZETTA_TRACE_TOOL_ID = "calcadaZettaTrace";
 const CALCADA_DEBUG_TOOL_ID = "calcadaDebug";
+// Bound straight to a key in config/custom-keybinds.json, bypassing the tool
+// slot so toggling the overlay never puts down the tool in hand.
+const CALCADA_DEBUG_TOGGLE_ACTION = "calcada-toggle-debug-mode";
 
 class MulticutAnnotationLayerView extends AnnotationLayerView {
   declare private _annotationStates: MergedAnnotationStates;

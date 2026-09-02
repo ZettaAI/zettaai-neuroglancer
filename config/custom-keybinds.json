@@ -30,12 +30,7 @@
       "calcada": "calcadaZettaTrace"
     }
   },
-  "keyd": {
-    "layer": "segmentation",
-    "tool": {
-      "calcada": "calcadaDebug"
-    }
-  },
+  "keyd": "calcada-toggle-debug-mode",
   "keyx": false,
   "control+shift+keyx": "clear-segments",
   "bracketleft": "select-previous",
