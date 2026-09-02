@@ -11,24 +11,34 @@
 import { Resolution } from "@zettaai/edit-session";
 import { describe, it, expect } from "vitest";
 
-import { computeBrushFootprintAxes } from "#src/editing/cursor/brush_cursor_footprint.js";
+import {
+  computeBrushFootprintAxes,
+  footprintCenterVoxel,
+  resolveCursorVoxelFrame,
+  snapWorldCenterToVoxelCenter,
+} from "#src/editing/cursor/brush_cursor_footprint.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
+import { vec3 } from "#src/util/geom.js";
 
 // Minimal `DisplayDimensionRenderInfo` covering only the fields the footprint
-// helper reads (`displayRank`, `displayDimensionIndices`, `voxelPhysicalScales`).
+// helper reads (`displayRank`, `displayDimensionIndices`,
+// `displayDimensionScales`, `displayDimensionUnits`). Scales are per display
+// slot, in metres — the same quantity `coordinateSpace.scales` holds, which is
+// what the frame the view matrices consume is measured in.
 function displayInfo(
   displayDimensionIndices: readonly number[],
-  voxelPhysicalScales: readonly number[],
+  displayDimensionScales: readonly number[],
 ): DisplayDimensionRenderInfo {
   const displayRank = displayDimensionIndices.filter((i) => i >= 0).length;
   return {
     displayRank,
     displayDimensionIndices: Int32Array.from(displayDimensionIndices),
-    voxelPhysicalScales: Float64Array.from(voxelPhysicalScales),
+    displayDimensionScales: Float64Array.from(displayDimensionScales),
+    displayDimensionUnits: displayDimensionIndices.map(() => "m"),
   } as unknown as DisplayDimensionRenderInfo;
 }
 
-// Identity XYZ display with 1 meter per display unit, so display-space lengths
+// Identity XYZ display with 1 meter per global unit, so global-frame lengths
 // equal `radiusVoxels × voxelSizeNm × 1e-9`.
 const IDENTITY_XYZ = displayInfo([0, 1, 2], [1, 1, 1]);
 
@@ -65,7 +75,7 @@ describe("computeBrushFootprintAxes", () => {
     expect(offsetX[0] / offsetY[1]).toBeCloseTo(56 / 432, 6);
   });
 
-  it("scales each axis by its display voxelPhysicalScale", () => {
+  it("scales each axis by its global coordinate scale", () => {
     const res = Resolution.from([64, 64, 42]);
     // X display axis is 2× coarser (meters per unit) than Y → half the length.
     const info = displayInfo([0, 1, 2], [2e-9, 1e-9, 1e-9]);
@@ -105,5 +115,91 @@ describe("computeBrushFootprintAxes", () => {
       expect(Array.from(offsetX)).toEqual([0, 0, 0]);
       expect(Array.from(offsetY)).toEqual([0, 0, 0]);
     }
+  });
+});
+
+describe("resolveCursorVoxelFrame", () => {
+  it("reports the target voxel size and the global unit size per axis", () => {
+    // Global space at 4 nm, paint target at 32 nm.
+    const info = displayInfo([0, 1, 2], [4e-9, 4e-9, 4e-9]);
+    const frame = resolveCursorVoxelFrame(Resolution.from([32, 32, 32]), info);
+    expect(frame).toBeDefined();
+    expect(Array.from(frame!.globalDimForSlot)).toEqual([0, 1, 2]);
+    for (const nm of frame!.globalVoxelSizeNm) expect(nm).toBeCloseTo(4, 9);
+    expect(Array.from(frame!.targetVoxelSizeNm)).toEqual([32, 32, 32]);
+  });
+
+  it("marks an undisplayed global dimension as absent", () => {
+    // XZ-only display: global dim 1 is not rendered.
+    const info = displayInfo([0, 2, -1], [1, 1, 1]);
+    const frame = resolveCursorVoxelFrame(Resolution.from([8, 8, 8]), info);
+    expect(frame).toBeDefined();
+    expect(Array.from(frame!.globalDimForSlot)).toEqual([0, 2, -1]);
+    expect(frame!.globalVoxelSizeNm[1]).toBe(0);
+  });
+
+  it("declines a displayed dimension outside the painted volume", () => {
+    // A fourth global dimension (e.g. time) on screen: no footprint to draw.
+    const info = displayInfo([0, 1, 3], [1, 1, 1]);
+    expect(
+      resolveCursorVoxelFrame(Resolution.from([8, 8, 8]), info),
+    ).toBeUndefined();
+  });
+
+  it("declines an unusable global scale", () => {
+    const info = displayInfo([0, 1, 2], [1, 0, 1]);
+    expect(
+      resolveCursorVoxelFrame(Resolution.from([8, 8, 8]), info),
+    ).toBeUndefined();
+  });
+});
+
+describe("footprintCenterVoxel / snapWorldCenterToVoxelCenter", () => {
+  // Global space at 4 nm; target voxels at 16 nm → 4 global units per voxel.
+  const info = displayInfo([0, 1, 2], [4e-9, 4e-9, 4e-9]);
+  const frame = resolveCursorVoxelFrame(Resolution.from([16, 16, 16]), info)!;
+
+  it("floors the pointer position onto the target grid", () => {
+    // 410 global units = 102.5 target voxels.
+    expect(footprintCenterVoxel(vec3.fromValues(410, 4, 0), frame)).toEqual([
+      102, 1, 0,
+    ]);
+    expect(
+      footprintCenterVoxel(vec3.fromValues(411.9, 7.9, 3.9), frame),
+    ).toEqual([102, 1, 0]);
+  });
+
+  it("snaps anywhere inside a voxel to that voxel's center", () => {
+    const snapped = snapWorldCenterToVoxelCenter(
+      vec3.fromValues(410, 4, 0),
+      frame,
+    );
+    // Voxel 102 spans [408, 412) global units; its center is 410.
+    expect(snapped[0]).toBeCloseTo(410, 9);
+    expect(snapped[1]).toBeCloseTo(6, 9);
+    expect(snapped[2]).toBeCloseTo(2, 9);
+    // Every position inside the voxel snaps to the same point.
+    const alsoSnapped = snapWorldCenterToVoxelCenter(
+      vec3.fromValues(411.9, 7.9, 3.9),
+      frame,
+    );
+    expect(Array.from(alsoSnapped)).toEqual(Array.from(snapped));
+  });
+
+  it("leaves undisplayed dimensions untouched", () => {
+    const xzInfo = displayInfo([0, 2, -1], [4e-9, 4e-9, 4e-9]);
+    const xzFrame = resolveCursorVoxelFrame(
+      Resolution.from([16, 16, 16]),
+      xzInfo,
+    )!;
+    const snapped = snapWorldCenterToVoxelCenter(
+      vec3.fromValues(410, 123.456, 0),
+      xzFrame,
+    );
+    expect(snapped[0]).toBeCloseTo(410, 9);
+    // `vec3` is a Float32Array, so the passed-through value is the float32 of
+    // the input, not a snapped one.
+    expect(snapped[1]).toBeCloseTo(123.456, 4);
+    expect(snapped[2]).toBeCloseTo(2, 9);
   });
 });
