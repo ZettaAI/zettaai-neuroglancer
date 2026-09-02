@@ -236,7 +236,7 @@ async function hedgeResponseHeaders(
 }
 
 /** Resolve after `ms`, or early when `signal` aborts.  Never rejects. */
-function delayUnlessAborted(
+export function delayUnlessAborted(
   ms: number,
   signal: AbortSignal | null | undefined,
 ): Promise<void> {
