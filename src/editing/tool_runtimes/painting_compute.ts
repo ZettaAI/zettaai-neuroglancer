@@ -211,9 +211,8 @@ export class PaintingCompute implements PaintCompute {
       input.metadata.voxelDataType,
     );
     // A single click is a degenerate (from === to) capsule, so route it through
-    // the capsule stamps to get the fast slice write path (TM-304). Snapped to
-    // the voxel lattice first — see `stampCenterVoxel`.
-    const pos = stampCenterVoxel(input.voxelPosition);
+    // the capsule stamps to get the fast slice write path (TM-304).
+    const pos = input.voxelPosition;
     if (maskCtx === undefined) {
       stampCapsule2D(builder, pos, pos, input.radius, input.value);
     } else {
@@ -258,13 +257,11 @@ export class PaintingCompute implements PaintCompute {
     // footprint keeps morphology at one round-trip per delivered segment no
     // matter how many positions were coalesced. Consecutive duplicates add
     // nothing to the swept shape — drop them.
-    // Snap every sample to the voxel lattice before rasterizing, so the swept
-    // shape is a capsule between voxel CENTERS with exact disk end caps — see
-    // `stampCenterVoxel`. Snapping first also lets the dedup collapse samples
-    // that landed in the same voxel.
-    const pts = dedupConsecutivePoints(
-      [input.from, ...(input.via ?? []), input.to].map(stampCenterVoxel),
-    );
+    const pts = dedupConsecutivePoints([
+      input.from,
+      ...(input.via ?? []),
+      input.to,
+    ]);
     const cz = Math.floor(pts[0][2]);
     const sameZ = pts.every((p) => Math.floor(p[2]) === cz);
     recordPaintContext(
@@ -393,13 +390,11 @@ export class PaintingCompute implements PaintCompute {
     if (pipeline === undefined || !pipeline.ready) return null;
 
     const r = Math.max(0, Math.floor(input.radius));
-    // Snap every sample to the voxel lattice before rasterizing, so the swept
-    // shape is a capsule between voxel CENTERS with exact disk end caps — see
-    // `stampCenterVoxel`. Snapping first also lets the dedup collapse samples
-    // that landed in the same voxel.
-    const pts = dedupConsecutivePoints(
-      [input.from, ...(input.via ?? []), input.to].map(stampCenterVoxel),
-    );
+    const pts = dedupConsecutivePoints([
+      input.from,
+      ...(input.via ?? []),
+      input.to,
+    ]);
     const cz = Math.floor(pts[0][2]);
     const sameZ = pts.every((p) => Math.floor(p[2]) === cz);
     // Only the capsule / polyline-union route (single z-slice, real radius) is
@@ -759,31 +754,6 @@ const FILL_FLUSH_INTERVAL_MS = 12;
 // ---------------------------------------------------------------------------
 // Disk stamp — 2D disk in the XY plane at fixed Z (matches v1 behavior).
 // ---------------------------------------------------------------------------
-
-/**
- * The voxel a stamp is centered on.
- *
- * Pointer positions arrive as FRACTIONAL target-voxel coordinates, while every
- * rasterizer below works on the integer voxel lattice, where voxel `i` spans
- * `[i, i+1)`. Snapping once, here at the entry points — rather than separately
- * inside each stamp — is what makes the footprint symmetric about its center
- * voxel and identical wherever the pointer sits inside that voxel: a brush of
- * size `2r + 1` always writes the same `dx² + dy² ≤ r²` disk.
- *
- * Only `stampDisk2D` used to snap. The capsule stamps measured distances from
- * the raw fractional position to integer lattice points, so a click at x.5
- * produced an even-width, off-center blob that slid a whole voxel as the pointer
- * crossed the voxel — and every click and drag goes through those.
- */
-function stampCenterVoxel(
-  position: readonly [number, number, number],
-): [number, number, number] {
-  return [
-    Math.floor(position[0]),
-    Math.floor(position[1]),
-    Math.floor(position[2]),
-  ];
-}
 
 function stampDisk2D(
   builder: PaintBatchBuilder,
