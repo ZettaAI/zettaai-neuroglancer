@@ -28,6 +28,9 @@ import {
   fetchBaselineWithRetry,
   NgChunkSource,
 } from "#src/editing/adapters/ng_chunk_source.js";
+import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
+import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
+
 import type { LayerManager } from "#src/layer/index.js";
 import type { VolumeChunkSource } from "#src/sliceview/volume/frontend.js";
 import { DataType } from "#src/util/data_type.js";
@@ -434,136 +437,92 @@ describe("NgChunkSource.readDatasourceBaseline (render base)", () => {
   });
 });
 
-describe("NgChunkSource.confirmChunkPersisted (read-back verify)", () => {
-  it("confirms when the fresh read-back matches the saved hash", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
-
-    expect(
-      await chunkSource.confirmChunkPersisted(
-        LAYER,
-        RES_8,
-        CHUNK_ID,
-        CHUNK_COORD,
-      ),
-    ).toBe(true);
-  });
-
-  it("rejects a value mismatch", async () => {
-    const chunkSource = makeChunkSourceResolving(
-      fakeSource(Uint32Array.from([0, 0, 0, 0, 0, 0, 0, 99])),
-    );
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
-
-    expect(
-      await chunkSource.confirmChunkPersisted(
-        LAYER,
-        RES_8,
-        CHUNK_ID,
-        CHUNK_COORD,
-      ),
-    ).toBe(false);
-  });
-
-  it("rejects a sparse/empty read-back (saved non-zero data)", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource(null));
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
-
-    expect(
-      await chunkSource.confirmChunkPersisted(
-        LAYER,
-        RES_8,
-        CHUNK_ID,
-        CHUNK_COORD,
-      ),
-    ).toBe(false);
-  });
-
-  it("propagates a read error so the caller can retry", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource("throw"));
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
-
-    await expect(
-      chunkSource.confirmChunkPersisted(LAYER, RES_8, CHUNK_ID, CHUNK_COORD),
-    ).rejects.toThrow();
-  });
-
-  it("is false when nothing was recorded as saved", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
-
-    expect(
-      await chunkSource.confirmChunkPersisted(
-        LAYER,
-        RES_8,
-        CHUNK_ID,
-        CHUNK_COORD,
-      ),
-    ).toBe(false);
-  });
-});
-
 const OTHER = Uint32Array.from([90, 91, 92, 93, 94, 95, 96, 97]);
 
-describe("NgChunkSource.confirmChunkPersisted (explicit expectedHash)", () => {
-  it("confirms with an explicit expectedHash when no baseline was recorded", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
+describe("NgChunkSource.confirmChunkPersisted", () => {
+  const wholeChunkRegion = (bytes: Uint32Array): OwnedRegion => ({
+    chunkDataSize: [2, 2, 2],
+    bytesPerVoxel: 4,
+    channels: 1,
+    chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
+    ownedBox: { start: [0, 0, 0], end: [2, 2, 2] },
+    coversWholeChunk: true,
+    hash: contentRefFromBuffer(bytes).hash,
+  });
 
+  it("confirms when the read-back matches the owned region's hash", async () => {
+    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
     expect(
       await chunkSource.confirmChunkPersisted(
         LAYER,
         RES_8,
-        CHUNK_ID,
         CHUNK_COORD,
-        undefined,
-        contentRefFromBuffer(SAVED).hash,
+        wholeChunkRegion(SAVED),
       ),
     ).toBe(true);
   });
 
-  it("rejects an explicit expectedHash that does not match the read-back", async () => {
+  it("rejects a read-back that does not match", async () => {
     const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
-
     expect(
       await chunkSource.confirmChunkPersisted(
         LAYER,
         RES_8,
-        CHUNK_ID,
         CHUNK_COORD,
-        undefined,
-        contentRefFromBuffer(OTHER).hash,
+        wholeChunkRegion(OTHER),
       ),
     ).toBe(false);
   });
 
-  it("prefers a matching expectedHash over a recorded baseline that differs", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(OTHER));
+  it("confirms a partly-owned chunk even when the un-owned half differs", async () => {
+    // The regression this whole change exists for: a neighbouring task has
+    // repainted its half of a shared boundary chunk since we snapshotted.
+    // Hashing the whole chunk could never match; hashing the owned half must.
+    const ours = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
+    const owned: OwnedRegion = {
+      chunkDataSize: [2, 2, 2],
+      bytesPerVoxel: 4,
+      channels: 1,
+      chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
+      // x:[0,1) — the first column of every row, i.e. indices 0,2,4,6.
+      ownedBox: { start: [0, 0, 0], end: [1, 2, 2] },
+      coversWholeChunk: false,
+      hash: ownedRegionHash(ours, {
+        chunkDataSize: [2, 2, 2],
+        bytesPerVoxel: 4,
+        channels: 1,
+        chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
+        ownedBox: { start: [0, 0, 0], end: [1, 2, 2] },
+        coversWholeChunk: false,
+        hash: "",
+      }),
+    };
+    // Neighbour rewrote every odd index; ours (even indices) are untouched.
+    const readBack = Uint32Array.from([1, 99, 3, 99, 5, 99, 7, 99]);
+    const chunkSource = makeChunkSourceResolving(fakeSource(readBack));
 
     expect(
-      await chunkSource.confirmChunkPersisted(
-        LAYER,
-        RES_8,
-        CHUNK_ID,
-        CHUNK_COORD,
-        undefined,
-        contentRefFromBuffer(SAVED).hash,
-      ),
+      await chunkSource.confirmChunkPersisted(LAYER, RES_8, CHUNK_COORD, owned),
     ).toBe(true);
   });
 
-  it("prefers a mismatching expectedHash over a recorded baseline that matches", async () => {
-    const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
+  it("rejects when OUR half of a shared chunk was clobbered", async () => {
+    const ours = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
+    const region: OwnedRegion = {
+      chunkDataSize: [2, 2, 2],
+      bytesPerVoxel: 4,
+      channels: 1,
+      chunkBox: { start: [0, 0, 0], end: [2, 2, 2] },
+      ownedBox: { start: [0, 0, 0], end: [1, 2, 2] },
+      coversWholeChunk: false,
+      hash: "",
+    };
+    const owned = { ...region, hash: ownedRegionHash(ours, region) };
+    const readBack = Uint32Array.from([77, 2, 77, 4, 77, 6, 77, 8]);
+    const chunkSource = makeChunkSourceResolving(fakeSource(readBack));
 
     expect(
-      await chunkSource.confirmChunkPersisted(
-        LAYER,
-        RES_8,
-        CHUNK_ID,
-        CHUNK_COORD,
-        undefined,
-        contentRefFromBuffer(OTHER).hash,
-      ),
+      await chunkSource.confirmChunkPersisted(LAYER, RES_8, CHUNK_COORD, owned),
     ).toBe(false);
   });
 });
