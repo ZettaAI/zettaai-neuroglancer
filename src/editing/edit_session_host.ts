@@ -1561,19 +1561,9 @@ export class EditSessionHost extends RefCounted {
       // session's region — the exact corruption this pinning exists to prevent.
       // There is no correct single answer, so record the ambiguity and let
       // `saveCommitted` refuse.
-      //
-      // Only THIS session's layers, though. `pendingLayerIds()` returns every
-      // layer in the store, including ones an earlier session committed and
-      // this one never selected; those keep the pin they already have. Marking
-      // them ambiguous would strand work whose region is known perfectly well,
-      // and the only way out would be `resetLayer`, which discards it.
       const regions = this.sessionRegions;
       if (regions !== undefined) {
-        const sessionLayers = new Set(
-          session.config.layers.map((layer) => layer.layerId),
-        );
         for (const committedLayer of this.commitTarget.pendingLayerIds()) {
-          if (!sessionLayers.has(committedLayer)) continue;
           const pinned = this.committedRegions.get(committedLayer);
           const spansSessions =
             pinned !== undefined &&
@@ -2067,12 +2057,9 @@ export class EditSessionHost extends RefCounted {
         continue;
       }
       for (const o of layerResult.outcomes) outcomes.push(o);
-      // NOTE: `succeeded` here is a WRITE ACK, not confirmed durability.
-      // `NgSaveTarget.saveOneLayer` says so itself, and read-back verification
-      // runs only in `saveActive` and `retryUnconfirmedSaves` — never here. So
-      // `resetLayer` below drops the client's only copy on the strength of that
-      // ack. Whether this path should verify is a separate question; the
-      // comment previously claimed it already did.
+      // `NgSaveTarget.save` (used above) read-back-verifies each chunk before
+      // reporting `succeeded` (TM-352), so a success here is confirmed durable.
+      // Clear the committed buffer + render machinery for any succeeded layer.
       for (const o of layerResult.outcomes) {
         if (o.status === "succeeded") this.resetLayer(o.layerId);
       }

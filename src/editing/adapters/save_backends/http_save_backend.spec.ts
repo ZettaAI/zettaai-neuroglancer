@@ -516,6 +516,7 @@ describe("HttpSaveBackend writes only the owned sub-box", () => {
           chunkBox: { start: [0, 0, 0], end: [4, 3, 2] },
           ownedBox: { start: [1, 0, 0], end: [3, 3, 2] },
           coversWholeChunk: false,
+          hash: "",
         }),
       ),
     );

@@ -82,12 +82,10 @@ export interface VoxelBoxBounds {
 }
 
 /**
- * Where the owned part of a chunk sits, and how to index it. Everything
- * {@link ownedRegionBytes} needs and nothing it does not — so the byte
- * accessors cannot be handed a half-built region and quietly read a hash that
- * has not been computed yet.
+ * The part of one chunk a save owns, plus everything both consumers need to
+ * read that part out of the chunk buffer identically.
  */
-export interface ChunkOwnedGeometry {
+export interface OwnedRegion {
   /** The chunk grid both sides index with. */
   readonly chunkDataSize: readonly [number, number, number];
   /** Bytes per voxel position, channels EXCLUDED — see {@link ownedRegionBytes}. */
@@ -99,11 +97,7 @@ export interface ChunkOwnedGeometry {
   readonly ownedBox: VoxelBoxBounds;
   /** True when {@link ownedBox} is the whole chunk — the aligned fast path. */
   readonly coversWholeChunk: boolean;
-}
-
-/** {@link ChunkOwnedGeometry} plus the hash of the bytes it selects. */
-export interface OwnedRegion extends ChunkOwnedGeometry {
-  /** `ownedRegionHash(chunk.bytes, geometry)`, pinned at creation. */
+  /** `fnv1aHashView(ownedRegionBytes(chunk.bytes, this))`, pinned at creation. */
   readonly hash: string;
 }
 
@@ -211,7 +205,7 @@ function extractPlaneSubBox(
  */
 export function ownedRegionBytes(
   view: ArrayBufferView,
-  owned: ChunkOwnedGeometry,
+  owned: OwnedRegion,
 ): Uint8Array {
   const chunkBytes = new Uint8Array(
     view.buffer,
@@ -252,7 +246,7 @@ export function ownedRegionBytes(
 /** Content hash of the owned voxels only. The one comparison both sides make. */
 export function ownedRegionHash(
   view: ArrayBufferView,
-  owned: ChunkOwnedGeometry,
+  owned: OwnedRegion,
 ): string {
   return fnv1aHashView(ownedRegionBytes(view, owned));
 }
@@ -287,7 +281,7 @@ export function planOwnedWrite(
     (lo, axis) =>
       lo === chunkBox.start[axis] && ownedBox.end[axis] === chunkBox.end[axis],
   );
-  const geometry: ChunkOwnedGeometry = {
+  const owned: Omit<OwnedRegion, "hash"> = {
     chunkDataSize: scale.chunkDataSize,
     bytesPerVoxel: bytesPerVoxel(metadata.voxelDataType),
     channels: metadata.channels,
@@ -300,6 +294,6 @@ export function planOwnedWrite(
   // keeps this off the hot path for interior chunks.
   const hash = coversWholeChunk
     ? chunk.contentRef.hash
-    : ownedRegionHash(chunk.bytes.asView(), geometry);
-  return { write: { ...chunk, owned: { ...geometry, hash } } };
+    : ownedRegionHash(chunk.bytes.asView(), { ...owned, hash: "" });
+  return { write: { ...chunk, owned: { ...owned, hash } } };
 }

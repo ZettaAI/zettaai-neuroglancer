@@ -17,7 +17,7 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import type {
-  ChunkOwnedGeometry,
+  OwnedRegion,
   VoxelBoxBounds,
 } from "#src/editing/region/owned_chunk_write.js";
 import {
@@ -51,9 +51,7 @@ function filledChunk(
   );
 }
 
-function region(
-  overrides: Partial<ChunkOwnedGeometry> = {},
-): ChunkOwnedGeometry {
+function region(overrides: Partial<OwnedRegion> = {}): OwnedRegion {
   return {
     chunkDataSize: CHUNK,
     bytesPerVoxel: 1,
@@ -61,6 +59,7 @@ function region(
     chunkBox: { start: [0, 0, 0], end: [4, 3, 2] },
     ownedBox: { start: [0, 0, 0], end: [4, 3, 2] },
     coversWholeChunk: true,
+    hash: "",
     ...overrides,
   };
 }
