@@ -151,6 +151,7 @@
     "#src/editing/ui/topbar/chunk_load_progress.js": "./src/editing/ui/topbar/chunk_load_progress.tsx",
     "#src/editing/ui/topbar/editing_topbar.js": "./src/editing/ui/topbar/editing_topbar.tsx",
     "#src/editing/ui/topbar/topbar_edit_button.js": "./src/editing/ui/topbar/topbar_edit_button.tsx",
+    "#src/editing/ui/tool_settings/brush_size_field.js": "./src/editing/ui/tool_settings/brush_size_field.tsx",
     "#src/editing/ui/tool_settings/correspondence.js": "./src/editing/ui/tool_settings/correspondence.tsx",
     "#src/editing/ui/tool_settings/navigation_summary.js": "./src/editing/ui/tool_settings/navigation_summary.tsx",
     "#src/editing/ui/tool_settings/painting_brush.js": "./src/editing/ui/tool_settings/painting_brush.tsx",
