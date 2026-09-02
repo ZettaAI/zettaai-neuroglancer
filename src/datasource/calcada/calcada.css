@@ -260,9 +260,38 @@
   margin-bottom: 4px;
 }
 
+/* The header carries the hint and the show/hide-all eye. The hint takes the
+   slack so the eye stays pinned to the right, where the per-piece eyes below
+   it are. */
+.calcada-debug-tab-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.calcada-debug-tab-header .calcada-debug-tab-hint {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.calcada-debug-tab-toggle-all {
+  flex: none;
+}
+
 .calcada-debug-piece-list {
   display: flex;
   flex-direction: column;
+}
+
+/* Same rule the Seg. tab applies to its rows, scoped to this list because that
+   one is written against a .neuroglancer-segment-list ancestor we deliberately
+   do not adopt (it brings its own scroll container). A HIDDEN piece's eye shows
+   only while its row is hovered, so the list does not read as a wall of
+   crossed-out eyes; a shown piece keeps its eye on. */
+.calcada-debug-piece-list
+  .neuroglancer-segment-list-entry:not(:hover)
+  .neuroglancer-eye-icon:not(.neuroglancer-visible) {
+  visibility: hidden;
 }
 
 /* Lives in the Graph tab rather than a tool-activation bubble, so it stacks:
@@ -280,6 +309,12 @@
    after a merge/cut activation creates theirs. Ordering it first keeps it in
    one place regardless — above whichever tool the proofreader picks up. */
 .calcada-zetta-trace-mode {
+  order: -1;
+}
+
+/* Same reasoning as the trace mode's section: it outlives any activation, so it
+   is ordered to a fixed place rather than wherever it happened to be created. */
+.calcada-debug-mode {
   order: -1;
 }
 
