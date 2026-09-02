@@ -15,6 +15,7 @@ import type {
   ReadonlyChunkVoxelBuffer,
   SavedChunk,
   SavePayload,
+  SaveResult,
 } from "@zettaai/edit-session";
 import { Resolution, layerId, sessionId } from "@zettaai/edit-session";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -29,6 +30,7 @@ import {
   registerSaveBackend,
   unregisterSaveBackend,
 } from "#src/editing/adapters/save_backend.js";
+import { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
 
 import { FakeLayerManager } from "#tests/editing/fakes/fake_layer_manager.js";
 import { FakeLogger } from "#tests/editing/fakes/fake_logger.js";
@@ -65,6 +67,29 @@ function payload(layerNames: readonly string[]): SavePayload {
     layerIds: layerNames.map((n) => layerId(n)),
     chunks: layerNames.map((n) => chunk(n)),
   };
+}
+
+/**
+ * Saves clip to the session region, so a target with none installed refuses
+ * every chunk by design. These cases exercise backend dispatch and outcome
+ * aggregation, so give them a region covering the whole test chunk.
+ */
+function saveWithRegion(
+  target: NgSaveTarget,
+  layerNames: readonly string[],
+): Promise<SaveResult> {
+  const regions = new SessionRegionSnapshot(
+    sessionId("test-session"),
+    new Map(
+      layerNames.map((n) => [
+        `${layerId(n)}|${RESOLUTION}`,
+        { loX: 0, loY: 0, loZ: 0, hiX: 64, hiY: 64, hiZ: 64 },
+      ]),
+    ),
+  );
+  return target.withSessionRegions(regions, () =>
+    target.save(payload(layerNames)),
+  );
 }
 
 function fakeMetadataSource(): NgLayerMetadataSource {
@@ -111,7 +136,7 @@ describe("NgSaveTarget", () => {
       fakeMetadataSource(),
       logger.asNgLogger(),
     );
-    const result = await target.save(payload(["L1"]));
+    const result = await saveWithRegion(target, ["L1"]);
     expect(result.overall).toBe("all-failed");
     expect(result.outcomes).toHaveLength(1);
     const outcome = result.outcomes[0];
@@ -129,7 +154,7 @@ describe("NgSaveTarget", () => {
       fakeMetadataSource(),
       logger.asNgLogger(),
     );
-    const result = await target.save(payload(["L1"]));
+    const result = await saveWithRegion(target, ["L1"]);
     expect(result.overall).toBe("all-failed");
     const outcome = result.outcomes[0];
     expect(outcome.status).toBe("failed");
@@ -158,7 +183,7 @@ describe("NgSaveTarget", () => {
       logger.asNgLogger(),
     );
 
-    const result = await target.save(payload(["L1"]));
+    const result = await saveWithRegion(target, ["L1"]);
     expect(result.overall).toBe("all-succeeded");
     expect(result.outcomes).toHaveLength(1);
     expect(result.outcomes[0].status).toBe("succeeded");
@@ -183,7 +208,7 @@ describe("NgSaveTarget", () => {
       logger.asNgLogger(),
     );
 
-    const result = await target.save(payload(["L1"]));
+    const result = await saveWithRegion(target, ["L1"]);
     expect(result.overall).toBe("all-failed");
     const outcome = result.outcomes[0];
     expect(outcome.status).toBe("failed");
@@ -224,7 +249,7 @@ describe("NgSaveTarget", () => {
       logger.asNgLogger(),
     );
 
-    const result = await target.save(payload(["L1", "L2"]));
+    const result = await saveWithRegion(target, ["L1", "L2"]);
     expect(result.overall).toBe("partial");
     expect(result.outcomes.map((o) => o.status)).toEqual([
       "succeeded",

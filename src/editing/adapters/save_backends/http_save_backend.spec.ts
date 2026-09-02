@@ -9,28 +9,19 @@
  */
 
 import type { LayerId, LayerMetadata, SavedChunk } from "@zettaai/edit-session";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   buildCutoutParams,
-  cutoutBbox,
   dataSourceUrlToCutoutPath,
   HttpSaveBackend,
   parseResolution,
   SAVE_UPLOAD_CONCURRENCY,
 } from "#src/editing/adapters/save_backends/http_save_backend.js";
 import type { BackendClient } from "#src/editing/backend/backend_client.js";
-
-// Stub `scaleFor` so a fake chunk resolves to a known scale (voxelOffset +
-// chunkDataSize) without constructing real layer metadata. `vi.mock` and
-// `vi.hoisted` are hoisted above the imports above, so the mock is registered
-// before `@zettaai/edit-session` is loaded by the module under test.
-const { scaleForSpy } = vi.hoisted(() => ({ scaleForSpy: vi.fn() }));
-vi.mock("@zettaai/edit-session", () => ({ scaleFor: scaleForSpy }));
-
-afterEach(() => {
-  scaleForSpy.mockReset();
-});
+import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
+import { ownedRegionBytes } from "#src/editing/region/owned_chunk_write.js";
+import { HttpError } from "#src/util/http_request.js";
 
 describe("cutout request helpers", () => {
   it("maps precomputed / calcada / plain URLs to a storage path", () => {
@@ -47,12 +38,6 @@ describe("cutout request helpers", () => {
     expect(() => parseResolution("axbxc")).toThrow();
   });
 
-  it("computes an absolute bbox from chunk grid coords + voxel offset", () => {
-    expect(cutoutBbox({ x: 2, y: 0, z: 1 }, [64, 64, 8], [10, 20, 30])).toEqual(
-      { start: [138, 20, 38], end: [202, 84, 46] },
-    );
-  });
-
   it("builds repeated-key cutout params", () => {
     const params = buildCutoutParams({
       path: "gs://b/p",
@@ -67,16 +52,47 @@ describe("cutout request helpers", () => {
   });
 });
 
+const CHUNK_SIZE = [64, 64, 8] as const;
+
+/** A whole-chunk owned region over a `size`-shaped single-channel uint8 chunk. */
+function wholeChunkOwned(
+  size: readonly [number, number, number],
+  start: readonly [number, number, number],
+): OwnedRegion {
+  const end = start.map((lo, axis) => lo + size[axis]) as [
+    number,
+    number,
+    number,
+  ];
+  return {
+    chunkDataSize: size,
+    bytesPerVoxel: 1,
+    channels: 1,
+    chunkBox: { start: [...start] as [number, number, number], end },
+    ownedBox: { start: [...start] as [number, number, number], end },
+    coversWholeChunk: true,
+    hash: "whole-chunk-hash",
+  };
+}
+
 function fakeChunk(coord: { x: number; y: number; z: number }): SavedChunk {
+  const size = CHUNK_SIZE;
+  const start = [coord.x * size[0], coord.y * size[1], coord.z * size[2]] as [
+    number,
+    number,
+    number,
+  ];
   return {
     layerId: "layer-1" as LayerId,
     resolution: "8x8x40",
+    chunkId: `${coord.x},${coord.y},${coord.z}`,
     chunkCoord: coord,
     bytes: { asView: () => new Uint8Array([1, 2, 3, 4]) },
+    owned: wholeChunkOwned(size, start),
   } as unknown as SavedChunk;
 }
 
-const metadata = {} as LayerMetadata;
+const metadata = { channels: 1 } as unknown as LayerMetadata;
 
 function makeClient(request: BackendClient["request"]): BackendClient {
   return { request } as unknown as BackendClient;
@@ -84,10 +100,6 @@ function makeClient(request: BackendClient["request"]): BackendClient {
 
 describe("HttpSaveBackend.saveLayer", () => {
   it("posts each chunk to /painting/cutout with the derived bbox + gzipped body", async () => {
-    scaleForSpy.mockReturnValue({
-      chunkDataSize: [64, 64, 8],
-      voxelOffset: [0, 0, 0],
-    });
     const request = vi.fn(
       async (_path: string, _init?: RequestInit) =>
         new Response("", { status: 200 }),
@@ -137,10 +149,6 @@ describe("HttpSaveBackend.saveLayer", () => {
   });
 
   it("reports partial when some chunks fail", async () => {
-    scaleForSpy.mockReturnValue({
-      chunkDataSize: [64, 64, 8],
-      voxelOffset: [0, 0, 0],
-    });
     const request = vi
       .fn()
       .mockResolvedValueOnce(new Response("", { status: 200 }))
@@ -182,8 +190,6 @@ describe("HttpSaveBackend.saveLayer", () => {
     expect(request).not.toHaveBeenCalled();
   });
 });
-
-const CHUNK_SIZE = [64, 64, 8] as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -262,10 +268,6 @@ function asAggregate(result: unknown): AggregateShape {
 
 describe("HttpSaveBackend.saveLayer parallel uploads", () => {
   it("uploads every chunk exactly once without exceeding SAVE_UPLOAD_CONCURRENCY in flight", async () => {
-    scaleForSpy.mockReturnValue({
-      chunkDataSize: [...CHUNK_SIZE],
-      voxelOffset: [0, 0, 0],
-    });
     const chunkCount = 20;
     const probe = makeConcurrencyProbe(SAVE_UPLOAD_CONCURRENCY);
     const backend = new HttpSaveBackend({
@@ -297,10 +299,6 @@ describe("HttpSaveBackend.saveLayer parallel uploads", () => {
   });
 
   it("stops dispatching and reports cancelled counts when the signal aborts mid-pool", async () => {
-    scaleForSpy.mockReturnValue({
-      chunkDataSize: [...CHUNK_SIZE],
-      voxelOffset: [0, 0, 0],
-    });
     const chunkCount = 20;
     const controller = new AbortController();
     const request = makeAbortingProbe(6, controller);
@@ -330,10 +328,6 @@ describe("HttpSaveBackend.saveLayer parallel uploads", () => {
   });
 
   it("aggregates mixed successes and failures across the pool into a partial result", async () => {
-    scaleForSpy.mockReturnValue({
-      chunkDataSize: [...CHUNK_SIZE],
-      voxelOffset: [0, 0, 0],
-    });
     const chunkCount = 12;
     const request = makeMixedProbe(3);
     const backend = new HttpSaveBackend({
@@ -358,5 +352,205 @@ describe("HttpSaveBackend.saveLayer parallel uploads", () => {
     const aggregate = asAggregate(result);
     expect(aggregate.succeeded + aggregate.failed).toBe(chunkCount);
     expect(request).toHaveBeenCalledTimes(chunkCount);
+  });
+});
+
+/** A 409 carrying the backend's structured conditional-write-conflict body. */
+function conflictError(detail = "conditional_write_conflict"): HttpError {
+  return HttpError.fromResponse(
+    new Response(
+      JSON.stringify({
+        detail,
+        retryable: true,
+        partially_applied: true,
+        chunk: "8_8_40/0-512_0-512_0-1",
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ),
+  );
+}
+
+describe("HttpSaveBackend conditional-write conflicts", () => {
+  function backend(request: BackendClient["request"]): HttpSaveBackend {
+    return new HttpSaveBackend({
+      client: makeClient(request),
+      resolveDataSourceUrl: () => "gs://b/p",
+    });
+  }
+
+  it("replays the chunk after a lost CAS race and reports success", async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(conflictError())
+      .mockRejectedValueOnce(conflictError())
+      .mockResolvedValueOnce(okResponse());
+
+    const result = await backend(request).saveLayer(
+      "layer-1" as LayerId,
+      [fakeChunk({ x: 0, y: 0, z: 0 })],
+      metadata,
+      new AbortController().signal,
+    );
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({
+      status: "succeeded",
+      layerId: "layer-1",
+      chunkCount: 1,
+    });
+  });
+
+  it("gives up after exhausting the replay budget", async () => {
+    const request = vi.fn().mockRejectedValue(conflictError());
+
+    const result = await backend(request).saveLayer(
+      "layer-1" as LayerId,
+      [fakeChunk({ x: 0, y: 0, z: 0 })],
+      metadata,
+      new AbortController().signal,
+    );
+
+    // One initial attempt plus one per backoff step.
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(result.status).toBe("failed");
+  });
+
+  it("does not replay a 409 that is not a conditional-write conflict", async () => {
+    const request = vi.fn().mockRejectedValue(conflictError("some_other_409"));
+
+    const result = await backend(request).saveLayer(
+      "layer-1" as LayerId,
+      [fakeChunk({ x: 0, y: 0, z: 0 })],
+      metadata,
+      new AbortController().signal,
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("failed");
+  });
+
+  it("does not replay a non-409 failure", async () => {
+    const request = vi.fn().mockRejectedValue(new Error("boom"));
+
+    await backend(request).saveLayer(
+      "layer-1" as LayerId,
+      [fakeChunk({ x: 0, y: 0, z: 0 })],
+      metadata,
+      new AbortController().signal,
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Decompress a gzipped request body back to raw voxel bytes. */
+async function gunzip(body: ArrayBuffer): Promise<Uint8Array> {
+  const stream = new DecompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  void writer.write(new Uint8Array(body));
+  void writer.close();
+  return new Uint8Array(await new Response(stream.readable).arrayBuffer());
+}
+
+describe("HttpSaveBackend writes only the owned sub-box", () => {
+  const SMALL: readonly [number, number, number] = [4, 3, 2];
+
+  /** A 4x3x2 chunk filled with each voxel's linear index. */
+  function partlyOwnedChunk(ownedBox: {
+    start: [number, number, number];
+    end: [number, number, number];
+  }): SavedChunk {
+    const bytes = new Uint8Array(4 * 3 * 2).map((_unused, index) => index);
+    const owned: OwnedRegion = {
+      chunkDataSize: SMALL,
+      bytesPerVoxel: 1,
+      channels: 1,
+      chunkBox: { start: [0, 0, 0], end: [4, 3, 2] },
+      ownedBox,
+      coversWholeChunk: false,
+      hash: "sub-box-hash",
+    };
+    return {
+      layerId: "layer-1" as LayerId,
+      resolution: "8x8x40",
+      chunkId: "0,0,0",
+      chunkCoord: { x: 0, y: 0, z: 0 },
+      bytes: { asView: () => bytes },
+      owned,
+    } as unknown as SavedChunk;
+  }
+
+  it("posts the owned bbox, not the chunk bbox", async () => {
+    // Reverting the clip — posting the whole chunk's bbox and body — is the
+    // neighbour-clobbering write this PR exists to remove, so it has to be
+    // visible here rather than only at the planner.
+    const request = vi.fn(async (_path: string, _init?: RequestInit) =>
+      okResponse(),
+    );
+    const backend = new HttpSaveBackend({
+      client: makeClient(request),
+      resolveDataSourceUrl: () => "gs://b/p",
+    });
+
+    await backend.saveLayer(
+      "layer-1" as LayerId,
+      [partlyOwnedChunk({ start: [1, 0, 0], end: [3, 3, 2] })],
+      metadata,
+      new AbortController().signal,
+    );
+
+    const [path, init] = request.mock.calls[0] as [string, RequestInit];
+    const params = new URLSearchParams(path.slice(path.indexOf("?") + 1));
+    expect(params.getAll("bbox_start")).toEqual(["1", "0", "0"]);
+    expect(params.getAll("bbox_end")).toEqual(["3", "3", "2"]);
+
+    // And the BODY is the sub-box, not the whole chunk.
+    const sent = await gunzip(init.body as ArrayBuffer);
+    const whole = new Uint8Array(4 * 3 * 2).map((_unused, i) => i);
+    expect(Array.from(sent)).toEqual(
+      Array.from(
+        ownedRegionBytes(whole, {
+          chunkDataSize: SMALL,
+          bytesPerVoxel: 1,
+          channels: 1,
+          chunkBox: { start: [0, 0, 0], end: [4, 3, 2] },
+          ownedBox: { start: [1, 0, 0], end: [3, 3, 2] },
+          coversWholeChunk: false,
+        }),
+      ),
+    );
+    expect(sent.length).toBeLessThan(whole.length);
+  });
+
+  it("refuses a chunk that arrives without an owned region", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) =>
+      okResponse(),
+    );
+    const backend = new HttpSaveBackend({
+      client: makeClient(request),
+      resolveDataSourceUrl: () => "gs://b/p",
+    });
+    const unplanned = {
+      layerId: "layer-1" as LayerId,
+      resolution: "8x8x40",
+      chunkId: "0,0,0",
+      chunkCoord: { x: 0, y: 0, z: 0 },
+      bytes: { asView: () => new Uint8Array(24) },
+    } as unknown as SavedChunk;
+
+    const result = await backend.saveLayer(
+      "layer-1" as LayerId,
+      [unplanned],
+      metadata,
+      new AbortController().signal,
+    );
+
+    expect(request).not.toHaveBeenCalled();
+    expect(result.status).toBe("failed");
+    // Match the guard's own wording: without it `sendChunk` still fails, but
+    // with a TypeError on `ownedBox` rather than a message naming the cause.
+    expect(result).toMatchObject({
+      error: expect.stringContaining("may not own"),
+    });
   });
 });

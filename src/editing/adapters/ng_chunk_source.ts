@@ -30,6 +30,8 @@ import { makeChunkGridPosition } from "#src/editing/adapters/ng_chunk_grid.js";
 import { resolutionFor } from "#src/editing/adapters/ng_layer_metadata_source.js";
 import type { ChunkLoadProgressState } from "#src/editing/adapters/session_chunk_preloader.js";
 import { SessionChunkPreloader } from "#src/editing/adapters/session_chunk_preloader.js";
+import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
+import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
 import type { LayerManager, UserLayer } from "#src/layer/index.js";
 import type { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
 import { decodeChannels } from "#src/sliceview/compressed_segmentation/decode_common.js";
@@ -116,7 +118,15 @@ export class NgChunkSource implements LibraryChunkSource {
     );
   }
 
-  /** Content hash of the saved bytes for a chunk, for read-back comparison. */
+  /**
+   * Content hash of the saved bytes for a chunk.
+   *
+   * No longer used for read-back comparison: `confirmChunkPersisted` compares
+   * through the pinned `OwnedRegion` instead, because a whole-chunk hash cannot
+   * match once a neighbouring task has repainted its half of a shared boundary
+   * chunk. Retained as a lookup over the saved-baseline store, whose bytes
+   * `getSavedBytes` still serves to the resend path.
+   */
   getSavedBaselineHash(
     layerId: LayerId,
     resolution: Resolution,
@@ -378,29 +388,22 @@ export class NgChunkSource implements LibraryChunkSource {
 
   /**
    * One read-back attempt for the save verification (TM-352): fresh-read the
-   * chunk and compare its content hash to the bytes we recorded as saved for it.
-   * Returns `true` only on a confirmed match. Throws on a read error (the caller
-   * retries); returns `false` on a value mismatch or when there is no expected
-   * hash / no resolvable source.
+   * chunk and compare the OWNED part of it against what we sent.
    *
-   * `expectedHash` — the hash from the caller's own `SavedChunk` snapshot —
-   * takes precedence over the {@link SavedBaselineStore} lookup, and is what
-   * makes verification work for a save larger than the store's FIFO capacity
-   * (TM-455): past 512 chunks the store has already evicted the earliest
-   * entries, and a lookup-only verify could never confirm them. Both hashes come
-   * from `contentRefFromBuffer`, so they are directly comparable.
+   * `owned` is the same {@link OwnedRegion} the write path used, carrying both
+   * the sub-box and the hash of the bytes actually POSTed. Comparing through it
+   * is what keeps write and verify in agreement — see the header of
+   * `owned_chunk_write.ts`. Returns `true` only on a confirmed match; throws on
+   * a read error (the caller retries), returns `false` on a value mismatch or
+   * when the source no longer resolves.
    */
   async confirmChunkPersisted(
     layerId: LayerId,
     resolution: Resolution,
-    chunkId: ChunkId,
     chunkCoord: ChunkCoord,
+    owned: OwnedRegion,
     signal?: AbortSignal,
-    expectedHash?: string,
   ): Promise<boolean> {
-    const savedHash =
-      expectedHash ?? this.getSavedBaselineHash(layerId, resolution, chunkId);
-    if (savedHash === undefined) return false;
     const readBack = await this.readFreshDecoded(
       layerId,
       resolution,
@@ -408,7 +411,13 @@ export class NgChunkSource implements LibraryChunkSource {
       signal,
     );
     if (readBack === undefined) return false;
-    return contentRefFromBuffer(readBack.asView()).hash === savedHash;
+    // Hash ONLY the voxels this save wrote. A boundary chunk's other half
+    // belongs to a neighbouring task that may have painted it since this
+    // session opened, so hashing the whole chunk would compare our snapshot
+    // against their newer data and never match — the save would sit in
+    // "couldn't be confirmed" forever. `owned` is the same value the write
+    // path used, so the two sides cannot disagree about what was sent.
+    return ownedRegionHash(readBack.asView(), owned) === owned.hash;
   }
 
   private resolveVolumeChunkSource(
