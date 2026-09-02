@@ -11,6 +11,13 @@ export interface DebugPiece {
   center: [number, number, number];
   anchor: "rep" | "bbox";
   external: boolean;
+  /**
+   * Which debugged root owns this piece, stamped by mergeDebugGraphs. The
+   * server answers one root at a time and does not repeat it per piece, so it
+   * is only known once a response is attributed to the root it came from.
+   * Absent on a piece that is external to every root being debugged.
+   */
+  root?: bigint;
 }
 
 export interface DebugEdge {
@@ -49,13 +56,19 @@ export interface RootDebugGraph extends DebugGraph {
  * Edges are deduplicated on the unordered pair for the same reason: an edge
  * between two debugged roots is returned by both.
  */
-export function mergeDebugGraphs(graphs: DebugGraph[]): DebugGraph {
+export function mergeDebugGraphs(graphs: RootDebugGraph[]): DebugGraph {
   const pieceById = new Map<bigint, DebugPiece>();
   for (const graph of graphs) {
     for (const piece of graph.pieces) {
       const existing = pieceById.get(piece.id);
       if (existing === undefined || (existing.external && !piece.external)) {
-        pieceById.set(piece.id, piece);
+        // The owning root travels with the piece so the overlay can colour by
+        // segment. An external piece belongs to no debugged root, unless
+        // another root owns it — and that copy is the one kept here.
+        pieceById.set(
+          piece.id,
+          piece.external ? piece : { ...piece, root: graph.rootId },
+        );
       }
     }
   }

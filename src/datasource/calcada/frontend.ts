@@ -33,6 +33,7 @@ import type {
 } from "#src/annotation/index.js";
 import {
   AnnotationType,
+  type AnnotationPropertySpec,
   LocalAnnotationSource,
   makeDataBoundsBoundingBoxAnnotationSet,
 } from "#src/annotation/index.js";
@@ -138,6 +139,7 @@ import type {
   Uint64MapEntry,
 } from "#src/segmentation_display_state/frontend.js";
 import {
+  getBaseObjectColor,
   augmentSegmentId,
   resetTemporaryVisibleSegmentsState,
   SegmentationLayerSharedObject,
@@ -1006,11 +1008,12 @@ function makeColoredAnnotationState(
   loadedSubsource: LoadedDataSubsource,
   subsubsourceId: string,
   color: vec3,
+  properties: AnnotationPropertySpec[] = [],
 ) {
   const { subsourceEntry } = loadedSubsource;
   const source = new LocalAnnotationSource(
     loadedSubsource.loadedDataSource.transform,
-    new WatchableValue([]),
+    new WatchableValue(properties),
     ["associated segments"],
   );
 
@@ -2339,13 +2342,41 @@ class CalcadaDebugSession extends RefCounted {
     const siblingLines: Line[] = [];
     let undrawable = 0;
     let siblingEdgeCount = 0;
-    const lineBetween = (from: vec3, to: vec3): Line => ({
+    const lineBetween = (from: vec3, to: vec3, color: number): Line => ({
       pointA: from,
       pointB: to,
       id: "",
       type: AnnotationType.LINE,
-      properties: [],
+      properties: [color],
     });
+
+    // Which segment an edge belongs to, and what that segment looked like
+    // before the mode recoloured its pieces. Reading the colour off the root
+    // rather than a piece is what makes it the pre-D colour: the temporary
+    // stated colours applied below are keyed by piece.
+    const rootByPiece = new Map<bigint, bigint>();
+    for (const piece of graph.pieces) {
+      if (piece.root !== undefined) rootByPiece.set(piece.id, piece.root);
+    }
+    const segmentColor = new Map<bigint, number>();
+    const colorOfRoot = (root: bigint) => {
+      let packed = segmentColor.get(root);
+      if (packed === undefined) {
+        // getBaseObjectColor writes into a shared scratch buffer typed as a
+        // plain Float32Array; packColor wants a vec3, and the first three
+        // components are exactly that.
+        const rgb = getBaseObjectColor(displayState, root);
+        packed = packColor(vec3.fromValues(rgb[0], rgb[1], rgb[2]));
+        segmentColor.set(root, packed);
+      }
+      return packed;
+    };
+
+    // Telling zero-affinity edges apart is a cut-tool concern — it marks the
+    // sibling edges a split just wrote. In debug on its own it says nothing, so
+    // edges are coloured by the segment they belong to instead.
+    const cutting = this.connection.state.pieceSplitState.active.value;
+    const fallbackColor = packColor(WHITE_COLOR);
     for (const edge of graph.edges) {
       const centerA = centerById.get(edge.a);
       const centerB = centerById.get(edge.b);
@@ -2353,6 +2384,8 @@ class CalcadaDebugSession extends RefCounted {
         undrawable++;
         continue;
       }
+      const isSibling = edge.affinity === 0 && edge.status === "enabled";
+      const root = rootByPiece.get(edge.a) ?? rootByPiece.get(edge.b);
       // An edge is a pair of piece ids: draw it between the two anchors and
       // nothing else. Edge rows also carry a contact position, but bulk merge
       // stores it divided by the resolution rather than multiplied, so on a
@@ -2360,9 +2393,10 @@ class CalcadaDebugSession extends RefCounted {
       const line = lineBetween(
         vec3.fromValues(centerA[0], centerA[1], centerA[2]),
         vec3.fromValues(centerB[0], centerB[1], centerB[2]),
+        root === undefined ? fallbackColor : colorOfRoot(root),
       );
-      if (edge.affinity === 0 && edge.status === "enabled") {
-        siblingEdgeCount++;
+      if (isSibling) siblingEdgeCount++;
+      if (cutting && isSibling) {
         siblingLines.push(line);
       } else {
         edgeLines.push(line);
@@ -3527,12 +3561,28 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       RED_COLOR,
     );
 
+    // Each line carries its own colour so the overlay can paint an edge in the
+    // colour of the segment it belongs to, the way it looked before the mode
+    // was entered. The layer colour is the fallback the shader never reaches.
     this.debugEdgeAnnotationState = makeColoredAnnotationState(
       layer,
       loadedSubsource,
       "calcadaDebugEdges",
       WHITE_COLOR,
+      [
+        {
+          type: "rgb",
+          identifier: DEBUG_EDGE_COLOR_PROPERTY,
+          description: undefined,
+          default: packColor(WHITE_COLOR),
+        },
+      ],
     );
+    this.debugEdgeAnnotationState.displayState.shader.value = `
+void main() {
+  setColor(vec4(prop_${DEBUG_EDGE_COLOR_PROPERTY}(), 1.0));
+}
+`;
     // Its own source, not the merge one. Anything added to the merge source is
     // turned into a pending merge submission by the childAdded handler below,
     // so borrowing it would both queue phantom merges and leave the lines
@@ -6010,6 +6060,7 @@ const CALCADA_MERGE_SEGMENTS_TOOL_ID = "calcadaMergeSegments";
 const CALCADA_FIND_PATH_TOOL_ID = "calcadaFindPath";
 const CALCADA_PIECE_SPLIT_TOOL_ID = "calcadaPieceSplit";
 const CALCADA_ZETTA_TRACE_TOOL_ID = "calcadaZettaTrace";
+const DEBUG_EDGE_COLOR_PROPERTY = "color";
 const CALCADA_DEBUG_TOOL_ID = "calcadaDebug";
 // Bound straight to a key in config/custom-keybinds.json, bypassing the tool
 // slot so toggling the overlay never puts down the tool in hand.

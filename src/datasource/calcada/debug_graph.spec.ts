@@ -17,8 +17,8 @@ function edge(a: bigint, b: bigint): DebugEdge {
 describe("mergeDebugGraphs", () => {
   it("keeps every piece of every root", () => {
     const merged = mergeDebugGraphs([
-      { pieces: [piece(1n), piece(2n)], edges: [] },
-      { pieces: [piece(3n)], edges: [] },
+      { rootId: 0n, pieces: [piece(1n), piece(2n)], edges: [] },
+      { rootId: 0n, pieces: [piece(3n)], edges: [] },
     ]);
     expect(merged.pieces.map((p) => p.id).sort()).toEqual([1n, 2n, 3n]);
   });
@@ -28,17 +28,35 @@ describe("mergeDebugGraphs", () => {
   // were outside it.
   it("prefers the owned copy of a piece over an external one", () => {
     const merged = mergeDebugGraphs([
-      { pieces: [piece(1n), piece(2n, true)], edges: [] },
-      { pieces: [piece(2n), piece(1n, true)], edges: [] },
+      { rootId: 10n, pieces: [piece(1n), piece(2n, true)], edges: [] },
+      { rootId: 20n, pieces: [piece(2n), piece(1n, true)], edges: [] },
     ]);
     expect(merged.pieces).toHaveLength(2);
     expect(merged.pieces.every((p) => !p.external)).toBe(true);
   });
 
+  // Colouring an edge by the segment it belongs to needs the piece to know
+  // which root answered for it; the server never says so per piece.
+  it("stamps each owned piece with the root that reported it", () => {
+    const merged = mergeDebugGraphs([
+      { rootId: 10n, pieces: [piece(1n)], edges: [] },
+      { rootId: 20n, pieces: [piece(2n)], edges: [] },
+    ]);
+    expect(merged.pieces.find((p) => p.id === 1n)?.root).toBe(10n);
+    expect(merged.pieces.find((p) => p.id === 2n)?.root).toBe(20n);
+  });
+
+  it("leaves a piece no root owns without one", () => {
+    const merged = mergeDebugGraphs([
+      { rootId: 10n, pieces: [piece(1n), piece(9n, true)], edges: [] },
+    ]);
+    expect(merged.pieces.find((p) => p.id === 9n)?.root).toBeUndefined();
+  });
+
   it("keeps a piece external when no root owns it", () => {
     const merged = mergeDebugGraphs([
-      { pieces: [piece(1n), piece(9n, true)], edges: [] },
-      { pieces: [piece(2n), piece(9n, true)], edges: [] },
+      { rootId: 0n, pieces: [piece(1n), piece(9n, true)], edges: [] },
+      { rootId: 0n, pieces: [piece(2n), piece(9n, true)], edges: [] },
     ]);
     expect(merged.pieces.find((p) => p.id === 9n)?.external).toBe(true);
   });
@@ -47,8 +65,8 @@ describe("mergeDebugGraphs", () => {
   // orientation. Drawing it twice doubles the line and the reported edge count.
   it("deduplicates an edge reported by both of its roots", () => {
     const merged = mergeDebugGraphs([
-      { pieces: [], edges: [edge(1n, 2n)] },
-      { pieces: [], edges: [edge(2n, 1n)] },
+      { rootId: 0n, pieces: [], edges: [edge(1n, 2n)] },
+      { rootId: 0n, pieces: [], edges: [edge(2n, 1n)] },
     ]);
     expect(merged.edges).toHaveLength(1);
   });
