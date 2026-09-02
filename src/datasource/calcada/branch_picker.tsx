@@ -33,6 +33,63 @@ const NO_BRANCHES = new WatchableValue<CalcadaBranch[]>([]);
 const BRANCH_CREATING_POLL_MS = 2000;
 const BRANCH_CREATING_POLL_LIMIT = 300;
 
+// Follows an async fork to completion, feeding the dropdown a percentage.
+//
+// Only the session that started the fork can do this: the operation id is
+// returned by the create call and stored nowhere else, so a reload or another
+// user keeps the plain "creating…" the branch list already gives them.
+const BRANCH_CREATE_POLL_MS = 1000;
+// The operation id lives only in this session, so a fork we can no longer reach
+// is one nobody will ever get an answer about. Give up rather than polling for
+// the life of the tab; the branch list still refreshes on its own.
+const BRANCH_CREATE_MAX_FAILURES = 10;
+
+async function pollBranchCreate(
+  graph: CalcadaGraphSource,
+  branchId: number,
+  operationId: number,
+  isCancelled: () => boolean,
+) {
+  const patch = (
+    change: Partial<{ status: string; progress: number | undefined }>,
+  ) => {
+    graph.branches.value = graph.branches.value.map((branch) =>
+      branch.id === branchId ? { ...branch, ...change } : branch,
+    );
+  };
+  let failures = 0;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, BRANCH_CREATE_POLL_MS));
+    if (isCancelled()) return;
+    let status: string;
+    let progress: number;
+    try {
+      ({ status, progress } = await graph.createBranchStatus(operationId));
+      failures = 0;
+    } catch {
+      // A dropped poll is not a failed copy — the server is still working. Keep
+      // the last percentage and try again rather than declaring the fork dead.
+      if (++failures >= BRANCH_CREATE_MAX_FAILURES) {
+        // Stop claiming a percentage we can no longer confirm; the row keeps
+        // saying "creating" until the branch list says otherwise.
+        patch({ progress: undefined });
+        return;
+      }
+      continue;
+    }
+    if (isCancelled()) return;
+    if (status === "completed") {
+      patch({ status: "active", progress: undefined });
+      return;
+    }
+    if (status === "failed") {
+      patch({ status: "abandoned", progress: undefined });
+      return;
+    }
+    patch({ progress });
+  }
+}
+
 export function defaultParentForNewBranch(graph: CalcadaGraphSource): number {
   return graph.branchId.value;
 }
@@ -75,8 +132,14 @@ function branchLabel(
   branch: CalcadaBranch,
   branches: readonly CalcadaBranch[],
 ) {
-  const { name, status, parentId } = branch;
-  if (status === "creating") return `${name} (creating…)`;
+  const { name, status, parentId, progress } = branch;
+  if (status === "creating") {
+    const pct =
+      progress === undefined
+        ? ""
+        : ` ${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`;
+    return `${name} (creating…${pct})`;
+  }
   if (status !== "active") return `${name} (${status})`;
   if (parentId !== MAIN_BRANCH_ID) {
     const parentName =
@@ -299,8 +362,18 @@ export function CalcadaBranchPicker({
           name: newName,
           status: newStatus,
           parentId: resolvedParentId,
+          progress: newStatus === "creating" ? 0 : undefined,
         },
       ];
+      const operationId = body?.operation_id;
+      if (newStatus === "creating" && typeof operationId === "number") {
+        void pollBranchCreate(
+          graph,
+          newId,
+          operationId,
+          () => unmounted.current,
+        );
+      }
       if (newStatus === "active") {
         graph.branchId.value = newId;
       } else {
