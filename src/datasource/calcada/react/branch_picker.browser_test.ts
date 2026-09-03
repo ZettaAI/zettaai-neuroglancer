@@ -9,7 +9,7 @@
  */
 
 import { userEvent } from "@vitest/browser/context";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "#src/datasource/calcada/calcada.css";
 
@@ -81,7 +81,7 @@ beforeEach(async () => {
     branchId,
     segmentationGroupState,
   });
-  await settle(50);
+  await pickerRendered();
 });
 
 afterEach(() => {
@@ -89,6 +89,17 @@ afterEach(() => {
   target.remove();
   window.getSelection()?.removeAllRanges();
 });
+
+// createRoot().render commits asynchronously, and a loaded CI runner can take
+// far longer to get there than any fixed delay allows — waiting on the trigger
+// itself rather than on a stopwatch is what keeps this suite from flaking.
+function pickerRendered() {
+  return vi.waitFor(() => {
+    if (target.querySelector('[data-slot="combobox-trigger"]') === null) {
+      throw new Error("CalcadaBranchPicker has not rendered yet");
+    }
+  });
+}
 
 function options() {
   return [
@@ -134,10 +145,14 @@ describe("CalcadaBranchPicker in a narrow panel", () => {
     await userEvent.click(
       target.querySelector<HTMLElement>(".neuroglancer-calcada-branch-new")!,
     );
-    await settle(50);
     const form = target.querySelector<HTMLElement>(
       ".neuroglancer-calcada-branch-create-form",
     )!;
+    await vi.waitFor(() => {
+      if (form.style.display === "none") {
+        throw new Error("the new-branch form has not opened yet");
+      }
+    });
     const parent = form
       .querySelector<HTMLElement>(".neuroglancer-calcada-branch-select")!
       .getBoundingClientRect();

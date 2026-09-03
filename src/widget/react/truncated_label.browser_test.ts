@@ -9,7 +9,7 @@
  */
 
 import { userEvent } from "@vitest/browser/context";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import type { Disposer } from "#src/util/disposable.js";
@@ -32,8 +32,7 @@ beforeEach(async () => {
     "position: fixed; top: 200px; left: 200px; width: 120px; display: flex;";
   document.body.appendChild(target);
   disposer = mountComponent(target, TruncatedLabel, { text: LABEL });
-  // createRoot().render commits asynchronously; nothing is in the DOM yet.
-  await settle(50);
+  await labelRendered();
 });
 
 afterEach(() => {
@@ -44,6 +43,17 @@ afterEach(() => {
 
 function labelElement() {
   return target.querySelector<HTMLElement>('[data-slot="tooltip-trigger"]')!;
+}
+
+// createRoot().render commits asynchronously, and a loaded CI runner can take
+// far longer to get there than any fixed delay allows — waiting on the label
+// itself rather than on a stopwatch is what keeps this suite from flaking.
+function labelRendered() {
+  return vi.waitFor(() => {
+    if (target.querySelector('[data-slot="tooltip-trigger"]') === null) {
+      throw new Error("TruncatedLabel has not rendered yet");
+    }
+  });
 }
 
 function bubble() {
