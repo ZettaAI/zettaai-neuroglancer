@@ -71,6 +71,15 @@ async function settle(ms: number) {
 /** The bubble's zoom/fade, once it has actually been put in the DOM. */
 const OPEN_ANIMATION = 200;
 
+/** The provider's hover delay (`component_mount.ts`), plus room to spare. */
+const HOVER_DELAY = 500;
+
+async function remount(text: string) {
+  invokeDisposer(disposer);
+  disposer = mountComponent(target, TruncatedLabel, { text });
+  await labelRendered();
+}
+
 async function hoverLabel() {
   await userEvent.hover(labelElement());
   // The provider's hover delay is the other stopwatch a loaded runner
@@ -97,6 +106,18 @@ describe("TruncatedLabel", () => {
     expect(bubble()).toBeNull();
     await hoverLabel();
     expect(bubble()?.textContent).toContain(LABEL);
+  });
+
+  it("says nothing about a label that fits its row", async () => {
+    await remount("main");
+    const label = labelElement();
+    expect(label.scrollWidth).toBeLessThanOrEqual(label.clientWidth);
+
+    await userEvent.hover(label);
+    // Absence is the assertion, so this one genuinely has to sit out the
+    // hover delay rather than poll for something to appear.
+    await settle(HOVER_DELAY + OPEN_ANIMATION);
+    expect(bubble()).toBeNull();
   });
 
   it("hard-wraps the unbroken name inside the bubble", async () => {
