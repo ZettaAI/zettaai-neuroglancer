@@ -81,6 +81,10 @@ import {
   LABELED_TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/labeled_timestamp_picker.js";
 import {
+  CalcadaTimestampPicker,
+  TIMESTAMP_CONTROL_TITLE,
+} from "#src/datasource/calcada/react/timestamp_picker.js";
+import {
   interceptedRemovals,
   TRACE_CANDIDATE_COLOR_PACKED,
   TRACE_CANDIDATE_DIM_COLOR_PACKED,
@@ -251,7 +255,6 @@ import { ProgressSpan } from "#src/util/progress_listener.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
-import { DateTimeInputWidget } from "#src/widget/datetime.js";
 import { makeDeleteButton } from "#src/widget/delete_button.js";
 import type { DependentViewContext } from "#src/widget/dependent_view_widget.js";
 import { makeEyeButton } from "#src/widget/eye_button.js";
@@ -6066,7 +6069,7 @@ const CALCADA_TIME_JSON_KEY = "grapheneTime";
 
 const timeControl = {
   label: "Time",
-  title: "View segmentation at earlier point of time",
+  title: TIMESTAMP_CONTROL_TITLE,
   toolJson: CALCADA_TIME_JSON_KEY,
   ...timeLayerControl(),
 };
@@ -6216,18 +6219,13 @@ function timeLayerControl(): LayerControlFactory<SegmentationUserLayer> {
 
       const controlElement = document.createElement("div");
       controlElement.classList.add("neuroglancer-time-control");
-      const widget = context.registerDisposer(
-        new DateTimeInputWidget(
+      context.registerDisposer(
+        mountComponent(controlElement, CalcadaTimestampPicker, {
           intermediateTimestamp,
-          new Date(timestampLimit.value),
-          new Date(),
-        ),
+          timestampLimit,
+        }),
       );
-      timestampLimit.changed.add(() => {
-        widget.setMin(new Date(timestampLimit.value));
-      });
-      controlElement.appendChild(widget.element);
-      return { controlElement, control: widget };
+      return { controlElement, control: controlElement };
     },
     activateTool: (_activation) => {},
   };

@@ -107,9 +107,9 @@ function mount(harness: Harness) {
   });
 }
 
-function openPanel() {
-  const trigger = container.querySelector<HTMLButtonElement>(
-    ".neuroglancer-listbox-dropdown-trigger",
+function openPanel(scope: HTMLElement = container) {
+  const trigger = scope.querySelector<HTMLButtonElement>(
+    '[data-slot="combobox-trigger"]',
   )!;
   act(() => {
     trigger.click();
@@ -118,9 +118,7 @@ function openPanel() {
 
 function optionElements(): HTMLElement[] {
   return [
-    ...document.querySelectorAll<HTMLElement>(
-      ".neuroglancer-listbox-dropdown-option",
-    ),
+    ...document.querySelectorAll<HTMLElement>('[data-slot="combobox-item"]'),
   ];
 }
 
@@ -185,8 +183,7 @@ describe("CalcadaBranchPicker", () => {
     const harness = makeHarness(2);
     mount(harness);
     expect(
-      container.querySelector(".neuroglancer-listbox-dropdown-summary")
-        ?.textContent,
+      container.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("child ← feature");
   });
 
@@ -243,7 +240,7 @@ describe("CalcadaBranchPicker", () => {
     mount(harness);
     openPanel();
     const search = document.querySelector<HTMLInputElement>(
-      ".neuroglancer-listbox-dropdown-search",
+      '[data-slot="combobox-content"] input',
     )!;
     typeQuery(search, "CHI");
     expect(optionLabels()).toEqual(["child ← feature"]);
@@ -275,7 +272,7 @@ describe("CalcadaBranchPicker", () => {
     });
     expect(form.style.display).toBe("");
     expect(
-      form.querySelector(".neuroglancer-listbox-dropdown-summary")?.textContent,
+      form.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("from: feature");
   });
 
@@ -290,13 +287,7 @@ describe("CalcadaBranchPicker", () => {
     const form = container.querySelector<HTMLElement>(
       ".neuroglancer-calcada-branch-create-form",
     )!;
-    act(() => {
-      form
-        .querySelector<HTMLButtonElement>(
-          ".neuroglancer-listbox-dropdown-trigger",
-        )!
-        .click();
-    });
+    openPanel(form);
     const childOption = optionElements().find(
       (el) => el.textContent === "from: child",
     )!;
@@ -304,7 +295,7 @@ describe("CalcadaBranchPicker", () => {
       childOption.click();
     });
     expect(
-      form.querySelector(".neuroglancer-listbox-dropdown-summary")?.textContent,
+      form.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("from: child");
   });
 });

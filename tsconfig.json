@@ -24,6 +24,7 @@
     "target": "ES2022",
     "newLine": "LF",
     "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] },
     "lib": ["dom", "webworker", "esnext", "dom.iterable"],
     "typeRoots": [],
     "module": "ESNext",

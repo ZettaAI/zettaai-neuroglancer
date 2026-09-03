@@ -14,6 +14,8 @@ import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 
 import type { Disposer } from "#src/util/disposable.js";
+import { UI_SCOPE_CLASSES } from "@/lib/ui_scope";
+import "@/styles/globals.css";
 
 const rootsByTarget = new WeakMap<HTMLElement, Root>();
 
@@ -24,6 +26,7 @@ export function mountComponent<T extends object>(
 ): Disposer {
   let root = rootsByTarget.get(target);
   if (root === undefined) {
+    target.classList.add(...UI_SCOPE_CLASSES);
     root = createRoot(target);
     rootsByTarget.set(target, root);
   }

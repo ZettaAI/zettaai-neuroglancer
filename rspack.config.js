@@ -86,6 +86,12 @@ export default (env, args) => {
           type: "javascript/auto",
         },
         {
+          test: /\.css$/,
+          include: path.resolve(import.meta.dirname, "src", "styles"),
+          use: ["postcss-loader"],
+          type: "css",
+        },
+        {
           test: /\.wasm$/,
           generator: {
             filename: "[name].[contenthash][ext]",
@@ -107,6 +113,12 @@ export default (env, args) => {
           },
         },
       ],
+    },
+    resolve: {
+      alias: {
+        "@": path.resolve(import.meta.dirname, "src"),
+      },
+      extensions: [".ts", ".tsx", "..."],
     },
     devServer: {
       port: 3008,

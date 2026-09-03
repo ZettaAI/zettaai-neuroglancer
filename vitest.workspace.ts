@@ -45,9 +45,12 @@ const nodeDefines = {
   ...commonDefines,
 };
 
+const srcAlias = { "@": path.resolve(import.meta.dirname, "src") };
+
 function defaultNodeProject(): ViteUserConfig {
   return {
     define: { ...nodeDefines },
+    resolve: { alias: srcAlias },
     test: {
       environment: "jsdom",
       setupFiles: [
@@ -102,6 +105,7 @@ export default defineWorkspace([
   ),
   {
     define: browserDefines,
+    resolve: { alias: srcAlias },
     esbuild: {
       target: "es2022",
     },
