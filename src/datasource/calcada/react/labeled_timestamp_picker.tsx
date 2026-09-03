@@ -17,7 +17,6 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
-import { isPressInsideTooltip } from "#src/widget/react/tooltip_press.js";
 import { TruncatedLabel } from "#src/widget/react/truncated_label.js";
 import {
   Select,
@@ -85,11 +84,7 @@ export function CalcadaLabeledTimestampPicker({
           intermediateTimestamp.value =
             key === LIVE_VALUE ? undefined : Number.parseInt(key, 10);
         }}
-        onOpenChange={(open, eventDetails) => {
-          if (!open && isPressInsideTooltip(eventDetails)) {
-            eventDetails.cancel();
-            return;
-          }
+        onOpenChange={(open: boolean) => {
           if (open) graph?.triggerLabeledTimestampRefresh();
         }}
       >

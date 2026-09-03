@@ -87,23 +87,17 @@ describe("TruncatedLabel", () => {
     expect(content.scrollWidth).toBeLessThanOrEqual(content.clientWidth + 1);
   });
 
-  it("lets the pointer move into the bubble without closing it", async () => {
-    await hoverLabel();
-    await userEvent.hover(bubble()!);
-    await settle(500);
-    expect(bubble()?.textContent).toContain(LABEL);
-  });
-
-  it("allows the tooltip text to be selected with the mouse", async () => {
+  it("does not intercept the pointer", async () => {
     await hoverLabel();
     const content = bubble()!;
-    expect(getComputedStyle(content).userSelect).not.toBe("none");
-
-    // A real triple-click, so this fails if the bubble is pointer-events:none,
-    // closes on press, or is marked unselectable.
-    await userEvent.tripleClick(content);
-    await settle(100);
-
-    expect(window.getSelection()?.toString()).toContain(LABEL);
+    expect(getComputedStyle(content).pointerEvents).toBe("none");
+    // What is under the bubble stays reachable: hit-testing its own centre
+    // must never come back with the bubble itself.
+    const rect = content.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+    );
+    expect(content.contains(hit)).toBe(false);
   });
 });

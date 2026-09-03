@@ -26,7 +26,6 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
-import { isPressInsideTooltip } from "#src/widget/react/tooltip_press.js";
 import { TruncatedLabel } from "#src/widget/react/truncated_label.js";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -78,11 +77,7 @@ function BranchSelect({
           if (option === null || option.disabled === true) return;
           onChange(option.key);
         }}
-        onOpenChange={(open, eventDetails) => {
-          if (!open && isPressInsideTooltip(eventDetails)) {
-            eventDetails.cancel();
-            return;
-          }
+        onOpenChange={(open: boolean) => {
           if (open) onOpen?.();
         }}
       >

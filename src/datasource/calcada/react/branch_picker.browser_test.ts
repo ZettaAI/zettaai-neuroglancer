@@ -88,10 +88,6 @@ afterEach(() => {
   window.getSelection()?.removeAllRanges();
 });
 
-function dropdown() {
-  return document.querySelector<HTMLElement>('[data-slot="combobox-content"]');
-}
-
 function options() {
   return [
     ...document.querySelectorAll<HTMLElement>('[data-slot="combobox-item"]'),
@@ -132,34 +128,22 @@ describe("CalcadaBranchPicker in a narrow panel", () => {
     expect(bubble()?.textContent).toContain(LONG_NAME);
   });
 
-  it("does not select the option when its tooltip is pressed", async () => {
+  it("keeps the option's tooltip out of the pointer's way", async () => {
     await openDropdown();
     const long = options().find((option) => option.textContent === LONG_NAME)!;
     await userEvent.hover(long);
     await settle(OPEN_WAIT);
 
-    await userEvent.click(bubble()!);
-    await settle(150);
-
-    // React portals bubble through the React tree, so the bubble sits inside
-    // the option as far as events are concerned. Reaching for the name must
-    // not commit a branch switch or tear the list down.
-    expect(dropdown()).not.toBeNull();
-    expect(bubble()).not.toBeNull();
-    expect(branchId.value).toBe(0);
-  });
-
-  it("allows the closed trigger's tooltip text to be selected", async () => {
-    branchId.value = 1;
-    await settle(100);
-    const trigger = target.querySelector<HTMLElement>(
-      '[data-slot="combobox-trigger"]',
-    )!;
-    await userEvent.hover(trigger);
-    await settle(OPEN_WAIT);
     const content = bubble()!;
-    await userEvent.tripleClick(content);
-    await settle(150);
-    expect(window.getSelection()?.toString()).toContain(LONG_NAME);
+    expect(getComputedStyle(content).pointerEvents).toBe("none");
+    // The bubble overlaps neighbouring rows, so if it swallowed the pointer
+    // it would block the very options it is describing.
+    const rect = content.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+    );
+    expect(content.contains(hit)).toBe(false);
+    expect(branchId.value).toBe(0);
   });
 });
