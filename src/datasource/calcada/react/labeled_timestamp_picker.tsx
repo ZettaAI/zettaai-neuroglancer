@@ -17,12 +17,12 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
+import { TruncatedLabel } from "#src/widget/react/truncated_label.js";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 
 export const LABELED_TIMESTAMP_CONTROL_TITLE =
@@ -88,17 +88,15 @@ export function CalcadaLabeledTimestampPicker({
           if (open) graph?.triggerLabeledTimestampRefresh();
         }}
       >
-        <SelectTrigger
-          aria-label="Label"
-          title={LABELED_TIMESTAMP_CONTROL_TITLE}
-          className="w-full min-w-0"
-        >
-          <SelectValue className="truncate" />
+        <SelectTrigger aria-label="Label" className="w-full min-w-0">
+          <TruncatedLabel
+            text={items.find((item) => item.value === value)?.label ?? ""}
+          />
         </SelectTrigger>
         <SelectContent>
           {items.map((item) => (
             <SelectItem key={item.value} value={item.value}>
-              {item.label}
+              <TruncatedLabel text={item.label} />
             </SelectItem>
           ))}
         </SelectContent>

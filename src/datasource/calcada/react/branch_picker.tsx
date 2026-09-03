@@ -12,7 +12,6 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
-  BRANCH_PICKER_TITLE,
   branchOptions,
   defaultParentForNewBranch,
   diffUrl,
@@ -27,6 +26,7 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
+import { TruncatedLabel } from "#src/widget/react/truncated_label.js";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Combobox,
@@ -36,7 +36,6 @@ import {
   ComboboxItem,
   ComboboxList,
   ComboboxTrigger,
-  ComboboxValue,
 } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -59,56 +58,55 @@ function BranchSelect({
   onChange,
   onOpen,
   ariaLabel,
-  title,
 }: {
   options: ListboxOption[];
   value: string;
   onChange: (key: string) => void;
   onOpen?: () => void;
   ariaLabel: string;
-  title?: string;
 }) {
   const selected = options.find((option) => option.key === value) ?? null;
   return (
-    <Combobox
-      items={options}
-      value={selected}
-      itemToStringLabel={(option: ListboxOption) => option.label}
-      itemToStringValue={(option: ListboxOption) => option.key}
-      onValueChange={(option: ListboxOption | null) => {
-        if (option === null || option.disabled === true) return;
-        onChange(option.key);
-      }}
-      onOpenChange={(open: boolean) => {
-        if (open) onOpen?.();
-      }}
-    >
-      <ComboboxTrigger
-        aria-label={ariaLabel}
-        title={title}
-        className={cn(
-          buttonVariants({ variant: "outline", size: "sm" }),
-          "w-full min-w-0 justify-between overflow-hidden font-normal",
-        )}
+    <span className="neuroglancer-calcada-branch-select">
+      <Combobox
+        items={options}
+        value={selected}
+        itemToStringLabel={(option: ListboxOption) => option.label}
+        itemToStringValue={(option: ListboxOption) => option.key}
+        onValueChange={(option: ListboxOption | null) => {
+          if (option === null || option.disabled === true) return;
+          onChange(option.key);
+        }}
+        onOpenChange={(open: boolean) => {
+          if (open) onOpen?.();
+        }}
       >
-        <ComboboxValue />
-      </ComboboxTrigger>
-      <ComboboxContent>
-        <ComboboxInput showTrigger={false} placeholder="Search branches" />
-        <ComboboxEmpty>No branches found.</ComboboxEmpty>
-        <ComboboxList>
-          {(option: ListboxOption) => (
-            <ComboboxItem
-              key={option.key}
-              value={option}
-              disabled={option.disabled === true}
-            >
-              {option.label}
-            </ComboboxItem>
+        <ComboboxTrigger
+          aria-label={ariaLabel}
+          className={cn(
+            buttonVariants({ variant: "outline", size: "sm" }),
+            "w-full min-w-0 justify-between overflow-hidden font-normal",
           )}
-        </ComboboxList>
-      </ComboboxContent>
-    </Combobox>
+        >
+          <TruncatedLabel text={selected?.label ?? ""} />
+        </ComboboxTrigger>
+        <ComboboxContent>
+          <ComboboxInput showTrigger={false} placeholder="Search branches" />
+          <ComboboxEmpty>No branches found.</ComboboxEmpty>
+          <ComboboxList>
+            {(option: ListboxOption) => (
+              <ComboboxItem
+                key={option.key}
+                value={option}
+                disabled={option.disabled === true}
+              >
+                <TruncatedLabel text={option.label} />
+              </ComboboxItem>
+            )}
+          </ComboboxList>
+        </ComboboxContent>
+      </Combobox>
+    </span>
   );
 }
 
@@ -271,16 +269,13 @@ export function CalcadaBranchPicker({
 
   return (
     <>
-      <span className="neuroglancer-calcada-branch-select">
-        <BranchSelect
-          options={options}
-          value={String(selectedId)}
-          onChange={onBranchChange}
-          onOpen={() => graph?.triggerBranchRefresh()}
-          ariaLabel="Branch"
-          title={BRANCH_PICKER_TITLE}
-        />
-      </span>
+      <BranchSelect
+        options={options}
+        value={String(selectedId)}
+        onChange={onBranchChange}
+        onOpen={() => graph?.triggerBranchRefresh()}
+        ariaLabel="Branch"
+      />
 
       <div className="neuroglancer-calcada-branch-new-group">
         <Button
@@ -297,14 +292,12 @@ export function CalcadaBranchPicker({
           className="neuroglancer-calcada-branch-create-form"
           style={{ display: formOpen ? undefined : "none" }}
         >
-          <span className="neuroglancer-calcada-branch-select">
-            <BranchSelect
-              options={parentOptions}
-              value={parentValue}
-              onChange={setParentChoice}
-              ariaLabel="Parent branch"
-            />
-          </span>
+          <BranchSelect
+            options={parentOptions}
+            value={parentValue}
+            onChange={setParentChoice}
+            ariaLabel="Parent branch"
+          />
 
           <Input
             ref={nameInputRef}

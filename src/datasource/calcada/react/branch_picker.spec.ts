@@ -235,6 +235,17 @@ describe("CalcadaBranchPicker", () => {
     expect(optionLabels()).toContain("fresh");
   });
 
+  it("gives every option a single-line label that carries its full text", () => {
+    const harness = makeHarness();
+    mount(harness);
+    openPanel();
+    const labels = optionElements().map((option) =>
+      option.querySelector('[data-slot="tooltip-trigger"]'),
+    );
+    expect(labels.every((label) => label !== null)).toBe(true);
+    expect(labels.map((label) => label!.textContent)).toEqual(optionLabels());
+  });
+
   it("filters the options by substring", () => {
     const harness = makeHarness();
     mount(harness);

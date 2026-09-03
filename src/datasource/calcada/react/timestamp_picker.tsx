@@ -23,6 +23,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 export const TIMESTAMP_CONTROL_TITLE =
@@ -76,10 +81,7 @@ export function CalcadaTimestampPicker({
   };
 
   return (
-    <div
-      className="neuroglancer-calcada-timestamp-picker"
-      title={TIMESTAMP_CONTROL_TITLE}
-    >
+    <div className="neuroglancer-calcada-timestamp-picker">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
           className={cn(
@@ -132,18 +134,24 @@ export function CalcadaTimestampPicker({
         }}
       />
 
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label="Return to live"
-        title="Return to live"
-        disabled={selected === undefined}
-        onClick={() => {
-          intermediateTimestamp.value = undefined;
-        }}
-      >
-        <XIcon />
-      </Button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Return to live"
+              disabled={selected === undefined}
+              onClick={() => {
+                intermediateTimestamp.value = undefined;
+              }}
+            />
+          }
+        >
+          <XIcon />
+        </TooltipTrigger>
+        <TooltipContent>Return to live</TooltipContent>
+      </Tooltip>
     </div>
   );
 }

@@ -180,6 +180,7 @@
     "#src/editing/ui/tool_settings/param_label.js": "./src/editing/ui/tool_settings/param_label.tsx",
     "#src/editing/ui/tool_settings/painting_threshold.js": "./src/editing/ui/tool_settings/painting_threshold.tsx",
     "#src/editing/ui/tool_settings/z_extrapolation.js": "./src/editing/ui/tool_settings/z_extrapolation.tsx",
+    "#src/widget/react/truncated_label.js": "./src/widget/react/truncated_label.tsx",
     "#src/datasource/calcada/react/branch_picker.js": "./src/datasource/calcada/react/branch_picker.tsx",
     "#src/datasource/calcada/react/labeled_timestamp_picker.js": "./src/datasource/calcada/react/labeled_timestamp_picker.tsx",
     "#src/datasource/calcada/react/timestamp_picker.js": "./src/datasource/calcada/react/timestamp_picker.tsx",

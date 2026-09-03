@@ -64,6 +64,7 @@ import {
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
+import { BRANCH_PICKER_TITLE } from "#src/datasource/calcada/branch_picker_logic.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
   dropDecided,
@@ -6119,7 +6120,7 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
 
 const branchControl = {
   label: "Branch",
-  title: "Calcada branch (0 = main)",
+  title: BRANCH_PICKER_TITLE,
   toolJson: CALCADA_BRANCH_JSON_KEY,
   noImplicitLabel: true,
   ...branchLayerControl(),

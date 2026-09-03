@@ -14,6 +14,7 @@ import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 
 import type { Disposer } from "#src/util/disposable.js";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { UI_SCOPE_CLASSES } from "@/lib/ui_scope";
 import "@/styles/globals.css";
 
@@ -30,7 +31,13 @@ export function mountComponent<T extends object>(
     root = createRoot(target);
     rootsByTarget.set(target, root);
   }
-  root.render(createElement<T>(component, props));
+  root.render(
+    createElement(
+      TooltipProvider,
+      { delay: 500 },
+      createElement<T>(component, props),
+    ),
+  );
   return () => {
     if (rootsByTarget.get(target) !== root) return;
     rootsByTarget.delete(target);
