@@ -148,4 +148,18 @@ describe("CalcadaBranchPicker in a narrow panel", () => {
     expect(bubble()).not.toBeNull();
     expect(branchId.value).toBe(0);
   });
+
+  it("allows the closed trigger's tooltip text to be selected", async () => {
+    branchId.value = 1;
+    await settle(100);
+    const trigger = target.querySelector<HTMLElement>(
+      '[data-slot="combobox-trigger"]',
+    )!;
+    await userEvent.hover(trigger);
+    await settle(OPEN_WAIT);
+    const content = bubble()!;
+    await userEvent.tripleClick(content);
+    await settle(150);
+    expect(window.getSelection()?.toString()).toContain(LONG_NAME);
+  });
 });
