@@ -150,6 +150,12 @@ export function branchLabel(
  * points at one of them — dropping that option on restore would leave the
  * picker reading "main" while `branchId` says otherwise, looking like state
  * restore had failed.
+ *
+ * A selected branch missing from the list entirely gets a placeholder option
+ * for the same reason: restoring state puts `branchId` on a branch before
+ * /branches answers (its middleauth handshake can retry for seconds), and
+ * without an option to match the picker renders a blank row instead of the
+ * branch the state asked for.
  */
 export function branchOptions(
   branches: readonly CalcadaBranch[],
@@ -167,6 +173,10 @@ export function branchOptions(
       label: branchLabel(branch, branches),
       disabled: isCreating,
     });
+  }
+  const selectedKey = String(selectedId);
+  if (!options.some((option) => option.key === selectedKey)) {
+    options.push({ key: selectedKey, label: `#${selectedId}` });
   }
   return options;
 }

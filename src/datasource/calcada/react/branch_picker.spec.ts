@@ -176,6 +176,22 @@ describe("branchOptions", () => {
     ];
     expect(branchOptions(orphan, 0)[1].label).toBe("orphan ← #42");
   });
+
+  it("stands in for a selected branch the list has not loaded yet", () => {
+    expect(branchOptions([], 50)).toEqual([
+      { key: "0", label: "main" },
+      { key: "50", label: "#50" },
+    ]);
+  });
+
+  it("drops the stand-in once the real branch arrives", () => {
+    expect(branchOptions(BRANCHES, 1).map((option) => option.label)).toEqual([
+      "main",
+      "feature",
+      "child ← feature",
+      "copying (creating…)",
+    ]);
+  });
 });
 
 describe("CalcadaBranchPicker", () => {
@@ -185,6 +201,20 @@ describe("CalcadaBranchPicker", () => {
     expect(
       container.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("child ← feature");
+  });
+
+  it("names the restored branch before the branch list arrives", () => {
+    const harness = makeHarness(50);
+    harness.branches.value = [];
+    mount(harness);
+    const trigger = container.querySelector('[data-slot="combobox-trigger"]')!;
+    expect(trigger.textContent).toBe("#50");
+    act(() => {
+      harness.branches.value = [
+        { id: 50, name: "dendrite", status: "active", parentId: 0 },
+      ];
+    });
+    expect(trigger.textContent).toBe("dendrite");
   });
 
   it("refreshes the branch list when the panel opens", () => {
