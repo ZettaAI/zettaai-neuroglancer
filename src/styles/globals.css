@@ -52,6 +52,8 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-tooltip: var(--tooltip);
+  --color-tooltip-foreground: var(--tooltip-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -86,6 +88,8 @@
   --accent-foreground: var(--nge-text);
   --destructive: var(--nge-danger);
   --destructive-foreground: var(--nge-accent-fg);
+  --tooltip: var(--nge-tooltip-bg);
+  --tooltip-foreground: var(--nge-tooltip-fg);
   --border: var(--nge-border);
   --input: var(--nge-border-strong);
   --ring: var(--nge-accent);

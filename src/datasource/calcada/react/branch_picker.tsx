@@ -327,7 +327,9 @@ export function CalcadaBranchPicker({
             Create
           </Button>
 
-          <span className="branch-create-error">{createError}</span>
+          <span className="branch-create-error min-w-0 wrap-anywhere text-destructive">
+            {createError}
+          </span>
         </div>
       </div>
 
