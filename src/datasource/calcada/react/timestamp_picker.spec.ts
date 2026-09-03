@@ -85,9 +85,9 @@ function typeTime(value: string) {
 }
 
 describe("CalcadaTimestampPicker", () => {
-  it("reads as live while no timestamp is set", () => {
+  it("shows no date while no timestamp is set", () => {
     mount();
-    expect(trigger().textContent).toContain("— live —");
+    expect(trigger().textContent).toBe("");
     expect(timeField().value).toBe("");
     expect(clearButton().disabled).toBe(true);
   });
@@ -137,7 +137,7 @@ describe("CalcadaTimestampPicker", () => {
       clearButton().click();
     });
     expect(intermediateTimestamp.value).toBeUndefined();
-    expect(trigger().textContent).toContain("— live —");
+    expect(trigger().textContent).toBe("");
   });
 
   it("opens a calendar limited to the selectable range", () => {

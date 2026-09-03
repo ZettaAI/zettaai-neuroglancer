@@ -33,8 +33,6 @@ import { cn } from "@/lib/utils";
 export const TIMESTAMP_CONTROL_TITLE =
   "View segmentation at an earlier point in time (read-only). Clear to return to live.";
 
-const LIVE_LABEL = "— live —";
-
 function timeOfDay(date: Date) {
   return format(date, "HH:mm:ss");
 }
@@ -92,7 +90,7 @@ export function CalcadaTimestampPicker({
           <CalendarIcon />
           <span className="truncate">
             {selected === undefined
-              ? LIVE_LABEL
+              ? ""
               : format(selected, "yyyy-MM-dd HH:mm:ss")}
           </span>
         </PopoverTrigger>
