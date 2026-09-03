@@ -34,7 +34,9 @@ export function mountComponent<T extends object>(
   root.render(
     createElement(
       TooltipProvider,
-      { delay: 500 },
+      // closeDelay buys time to move the pointer off the trigger and into the
+      // bubble, which is what makes its text selectable rather than a flash.
+      { delay: 500, closeDelay: 300 },
       createElement<T>(component, props),
     ),
   );
