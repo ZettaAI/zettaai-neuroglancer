@@ -14,8 +14,8 @@ import type {
   BboxAnnotationSelection,
   BboxEntry,
 } from "#src/editing/ui/session_entry/bbox_candidates.js";
-import { ListboxDropdown } from "#src/editing/ui/session_entry/listbox_dropdown.js";
 import { setClipboard } from "#src/util/clipboard.js";
+import { ListboxDropdown } from "#src/widget/listbox_dropdown.js";
 
 export const BBOX_EMPTY_STATE_TEXT =
   "No bounding-box annotations found. Create a bounding box in the " +

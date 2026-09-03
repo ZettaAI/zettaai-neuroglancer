@@ -135,6 +135,11 @@ describe("EditSessionHost — integration (state surface)", () => {
  * which the slice-view tests already exercise but at a different layer of
  * the system. See `docs/edit-session-integration/10-implementation-roadmap.md`
  * Step 27 (manual QA) for the smoke-test coverage that compensates.
+ *
+ * Scope of this deferral: OPENING a session. It does not extend to everything
+ * that needs one. `save_active_owned_region.spec.ts` drives `saveActive`
+ * end-to-end over a fake session and the real save target, because the members
+ * `saveActive` touches are a small subset of what `EditSession.open` builds.
  */
 describe.todo(
   "EditSessionHost — full open/discard cycle (deferred to manual QA)",

@@ -65,6 +65,7 @@ import {
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
+import { CalcadaBranchPicker } from "#src/datasource/calcada/branch_picker.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
   dropDecided,
@@ -75,6 +76,10 @@ import type {
   RootDebugGraph,
 } from "#src/datasource/calcada/debug_graph.js";
 import { mergeDebugGraphs } from "#src/datasource/calcada/debug_graph.js";
+import {
+  CalcadaLabeledTimestampPicker,
+  LABELED_TIMESTAMP_CONTROL_TITLE,
+} from "#src/datasource/calcada/labeled_timestamp_picker.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import {
   interceptedRemovals,
@@ -111,6 +116,7 @@ import {
   parseMultiscaleVolumeInfo,
   PrecomputedMultiscaleVolumeChunkSource,
 } from "#src/datasource/precomputed/frontend.js";
+import { mountComponent } from "#src/editing/ui/interop/component_mount.js";
 import { WithSharedKvStoreContext } from "#src/kvstore/chunk_source_frontend.js";
 import type { SharedKvStoreContext } from "#src/kvstore/frontend.js";
 import {
@@ -4864,47 +4870,6 @@ const selectionInNanometers = (
   };
 };
 
-function defaultParentForNewBranch(graph: CalcadaGraphSource): number {
-  return graph.branchId.value;
-}
-
-const BRANCH_CREATING_POLL_MS = 2000;
-const BRANCH_CREATING_POLL_LIMIT = 300;
-
-function watchBranchUntilActive(
-  graph: CalcadaGraphSource,
-  id: number,
-  originBranchId: number,
-  isCancelled: () => boolean,
-  attempt = 0,
-): void {
-  if (isCancelled() || attempt >= BRANCH_CREATING_POLL_LIMIT) return;
-  const entry = graph.branches.value.find((branch) => branch.id === id);
-  if (entry !== undefined && entry.status === "active") {
-    // Only follow the user onto the new branch if they're still where they
-    // were when the fork was requested — a slow copy can take minutes, and
-    // switching branchId out from under someone who navigated elsewhere
-    // would wipe their selected segments and undo stack.
-    if (graph.branchId.value === originBranchId) {
-      graph.branchId.value = id;
-    }
-    return;
-  }
-  if (entry !== undefined && entry.status === "abandoned") return;
-  graph.triggerBranchRefresh();
-  setTimeout(
-    () =>
-      watchBranchUntilActive(
-        graph,
-        id,
-        originBranchId,
-        isCancelled,
-        attempt + 1,
-      ),
-    BRANCH_CREATING_POLL_MS,
-  );
-}
-
 function appendCoordParams(
   url: string,
   coord: { timestamp?: number; branchId?: number },
@@ -5592,23 +5557,23 @@ export interface CalcadaLabeledTimestamp {
   visibility: string;
 }
 
-class CalcadaGraphSource extends SegmentationGraphSource {
+export interface CalcadaBranch {
+  id: number;
+  name: string;
+  status: string;
+  parentId: number;
+  // 0..1 while a fork is being copied, from the create operation's own
+  // status. Only the session that started the fork has the operation id, so
+  // everyone else sees a plain "creating…" until it finishes.
+  progress?: number;
+}
+
+export class CalcadaGraphSource extends SegmentationGraphSource {
   public graphServer: CalcadaGraphServerInterface;
   private l2CacheAvailable: boolean | undefined = undefined;
   private httpSource: HttpSource;
   public timestampLimit = new TrackableValue<number>(0, (x) => x);
-  public branches = new WatchableValue<
-    {
-      id: number;
-      name: string;
-      status: string;
-      parentId: number;
-      // 0..1 while a fork is being copied, from the create operation's own
-      // status. Only the session that started the fork has the operation id, so
-      // everyone else sees a plain "creating…" until it finishes.
-      progress?: number;
-    }[]
-  >([]);
+  public branches = new WatchableValue<CalcadaBranch[]>([]);
   public labeledTimestamps = new WatchableValue<CalcadaLabeledTimestamp[]>([]);
   private branchesFetched = false;
 
@@ -5674,12 +5639,7 @@ class CalcadaGraphSource extends SegmentationGraphSource {
       this.branches.value = [];
       return;
     }
-    const parsed: {
-      id: number;
-      name: string;
-      status: string;
-      parentId: number;
-    }[] = [];
+    const parsed: CalcadaBranch[] = [];
     for (const entry of data) {
       if (!entry || typeof entry !== "object") continue;
       const id = (entry as any).branch_id;
@@ -6338,8 +6298,6 @@ const timeControl = {
 registerLayerControl(SegmentationUserLayer, timeControl);
 
 const CALCADA_LABELED_TIMESTAMP_JSON_KEY = "calcadaLabeledTimestamp";
-const LABELED_TIMESTAMP_CONTROL_TITLE =
-  "Labeled timestamps for the current branch. Selecting one switches the view to that point in time (read-only).";
 
 const labeledTimestampControl = {
   label: "Label",
@@ -6358,419 +6316,33 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
       const {
         graph: { value: graph },
       } = segmentationGroupState;
+      const calcadaGraph =
+        graph instanceof CalcadaGraphSource ? graph : undefined;
       const branchId =
-        graph instanceof CalcadaGraphSource
-          ? graph.branchId
-          : new TrackableValue<number>(0, (x) => x);
+        calcadaGraph?.branchId ?? new TrackableValue<number>(0, (x) => x);
 
       const controlElement = document.createElement("div");
       controlElement.classList.add("neuroglancer-calcada-branch-control");
 
-      const select = document.createElement("select");
-      select.classList.add("neuroglancer-layer-control-control");
-      select.title =
-        "Calcada branch (main = 0). Switching clears segments not present on the new branch.";
+      context.registerDisposer(
+        mountComponent(controlElement, CalcadaBranchPicker, {
+          graph: calcadaGraph,
+          branchId,
+          segmentationGroupState,
+        }),
+      );
 
-      // A fork rewrites branches.value once a second to move its percentage.
-      // Chrome re-lays-out an open dropdown whenever the options behind it are
-      // touched — even one option's text — which throws away the scroll
-      // position, so on a graph with hundreds of branches the list cannot be
-      // read while a branch is being created. Writes are therefore held back
-      // for as long as the control is being used and applied once it is not.
-      let interacting = false;
-      let missedRender = false;
-
-      const applyOptions = () => {
-        const branches =
-          graph instanceof CalcadaGraphSource ? graph.branches.value : [];
-        const wanted: { value: string; text: string; disabled: boolean }[] = [
-          { value: "0", text: "main", disabled: false },
-        ];
-        // Show active and creating branches in the dropdown; creating
-        // branches are disabled until their copy completes. Other
-        // non-active branches (merged/abandoned) are hidden unless the
-        // layer state points at one of them — restoring such state without
-        // that option would leave the select stuck on "main" even though
-        // branchId.value is set, making it look like state restore didn't
-        // work.
-        const selectedId = branchId.value;
-        for (const { id, name, status, parentId, progress } of branches) {
-          const isActive = status === "active";
-          const isCreating = status === "creating";
-          if (!isActive && !isCreating && id !== selectedId) continue;
-          let text: string;
-          if (isCreating) {
-            const pct =
-              progress === undefined
-                ? ""
-                : ` ${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`;
-            text = `${name} (creating…${pct})`;
-          } else if (!isActive) {
-            text = `${name} (${status})`;
-          } else if (parentId !== 0) {
-            const parentName =
-              branches.find((branch) => branch.id === parentId)?.name ??
-              `#${parentId}`;
-            text = `${name} ← ${parentName}`;
-          } else {
-            text = name;
-          }
-          wanted.push({ value: String(id), text, disabled: isCreating });
-        }
-        while (select.childElementCount > wanted.length) {
-          select.removeChild(select.lastElementChild!);
-        }
-        while (select.childElementCount < wanted.length) {
-          select.appendChild(document.createElement("option"));
-        }
-        wanted.forEach((spec, index) => {
-          const opt = select.children[index] as HTMLOptionElement;
-          if (opt.value !== spec.value) opt.value = spec.value;
-          if (opt.textContent !== spec.text) opt.textContent = spec.text;
-          if (opt.disabled !== spec.disabled) opt.disabled = spec.disabled;
-        });
-        if (select.value !== String(selectedId)) {
-          select.value = String(selectedId);
-        }
-      };
-
-      const renderOptions = () => {
-        if (interacting) {
-          missedRender = true;
-          return;
-        }
-        applyOptions();
-      };
-
-      // The dropdown gives no open/closed signal, so the control counts as in
-      // use from the gesture that opens it until focus or a choice leaves it.
-      // Worst case a percentage is a moment stale; it catches up on close.
-      const beginInteraction = () => {
-        interacting = true;
-      };
-      const endInteraction = () => {
-        if (!interacting) return;
-        interacting = false;
-        if (missedRender) {
-          missedRender = false;
-          applyOptions();
-        }
-      };
-      select.addEventListener("mousedown", beginInteraction);
-      select.addEventListener("keydown", beginInteraction);
-      select.addEventListener("blur", endInteraction);
-      context.registerDisposer(() => {
-        select.removeEventListener("mousedown", beginInteraction);
-        select.removeEventListener("keydown", beginInteraction);
-        select.removeEventListener("blur", endInteraction);
-        select.removeEventListener("change", endInteraction);
-      });
-
-      applyOptions();
-
-      select.addEventListener("change", () => {
-        const parsed = Number.parseInt(select.value, 10);
-        if (!Number.isFinite(parsed) || parsed < 0) {
-          select.value = String(branchId.value);
-          return;
-        }
-        if (parsed === branchId.value) return;
-        const targetBranch =
-          graph instanceof CalcadaGraphSource
-            ? graph.branches.value.find((branch) => branch.id === parsed)
-            : undefined;
-        if (targetBranch !== undefined && targetBranch.status === "creating") {
-          select.value = String(branchId.value);
-          return;
-        }
-        // Drop selected segments synchronously before switching — the
-        // branchId.changed listener also clears, but doing it here too
-        // suppresses the "Could not fetch root: piece not found" spam
-        // that would otherwise fire from any in-flight selectedSegments
-        // changes referencing pieces local to the previous branch.
-        segmentationGroupState.selectedSegments.clear();
-        segmentationGroupState.visibleSegments.clear();
-        segmentationGroupState.segmentEquivalences.clear();
-        branchId.value = parsed;
-      });
-
-      // Registered after the handler above so the pending options land only
-      // once that one has read the chosen value — applying them first would
-      // reset select.value to the branch being switched away from.
-      select.addEventListener("change", endInteraction);
-
-      select.addEventListener("focus", () => {
-        if (graph instanceof CalcadaGraphSource) {
-          graph.triggerBranchRefresh();
-        }
-      });
-
-      const sync = () => {
-        // Re-render so a non-active branch becomes a visible option when
-        // branchId points at it; otherwise the select silently falls back
-        // to "main" because the matching <option> doesn't exist.
-        renderOptions();
-      };
-      context.registerDisposer(branchId.changed.add(sync));
-      if (graph instanceof CalcadaGraphSource) {
-        context.registerDisposer(graph.branches.changed.add(renderOptions));
-      }
-      controlElement.appendChild(select);
-
-      const newBranchButton = document.createElement("button");
-      newBranchButton.type = "button";
-      newBranchButton.textContent = "+ New branch";
-      controlElement.appendChild(newBranchButton);
-
-      const createForm = document.createElement("div");
-      createForm.style.display = "none";
-      const parentSelect = document.createElement("select");
-      parentSelect.name = "parent_branch";
-      // resetToDefault distinguishes "form just opened" (jump to the
-      // default parent) from "branches list refreshed under an open form"
-      // (keep whatever the user already picked, unless that option is gone).
-      const renderParentOptions = (resetToDefault: boolean) => {
-        const previousValue = parentSelect.value;
-        parentSelect.textContent = "";
-        const mainOption = document.createElement("option");
-        mainOption.value = "0";
-        mainOption.textContent = "from: main";
-        parentSelect.appendChild(mainOption);
-        const branches =
-          graph instanceof CalcadaGraphSource ? graph.branches.value : [];
-        for (const { id, name, status } of branches) {
-          if (status !== "active") continue;
-          const option = document.createElement("option");
-          option.value = String(id);
-          option.textContent = `from: ${name}`;
-          parentSelect.appendChild(option);
-        }
-        const defaultValue = String(
-          graph instanceof CalcadaGraphSource
-            ? defaultParentForNewBranch(graph)
-            : 0,
-        );
-        parentSelect.value = resetToDefault ? defaultValue : previousValue;
-        if (parentSelect.selectedIndex === -1) {
-          parentSelect.value = defaultValue;
-        }
-        if (parentSelect.selectedIndex === -1) parentSelect.value = "0";
-      };
-      renderParentOptions(true);
-      if (graph instanceof CalcadaGraphSource) {
-        context.registerDisposer(
-          graph.branches.changed.add(() => renderParentOptions(false)),
-        );
-      }
-      createForm.appendChild(parentSelect);
-      const nameInput = document.createElement("input");
-      nameInput.type = "text";
-      nameInput.name = "branch_name";
-      const createButton = document.createElement("button");
-      createButton.type = "submit";
-      createButton.textContent = "Create";
-      const errorSpan = document.createElement("span");
-      errorSpan.className = "branch-create-error";
-      createForm.appendChild(nameInput);
-      createForm.appendChild(createButton);
-      createForm.appendChild(errorSpan);
-      controlElement.appendChild(createForm);
-
-      newBranchButton.addEventListener("click", () => {
-        const isHidden = createForm.style.display === "none";
-        createForm.style.display = isHidden ? "" : "none";
-        if (isHidden) {
-          renderParentOptions(true);
-          nameInput.focus();
-        }
-      });
-
-      const submitCreate = async () => {
-        if (!(graph instanceof CalcadaGraphSource)) return;
-        const name = String(nameInput.value).trim();
-        if (name.length === 0) return;
-        const originBranchId = graph.branchId.value;
-        createButton.disabled = true;
-        try {
-          let response: Response;
-          const parsedParentId = Number.parseInt(parentSelect.value, 10);
-          const resolvedParentId = Number.isFinite(parsedParentId)
-            ? parsedParentId
-            : defaultParentForNewBranch(graph);
-          try {
-            response = await graph.createBranch(name, resolvedParentId);
-          } catch (e: any) {
-            const resp: Response | undefined = e?.response;
-            let msg = "";
-            if (resp) {
-              try {
-                const errBody = await resp.json();
-                msg = errBody?.error || errBody?.message || "";
-              } catch {
-                msg = "";
-              }
-              if (!msg) msg = `${resp.status} ${resp.statusText}`;
-            } else {
-              msg = e instanceof Error ? e.message : String(e);
-            }
-            errorSpan.textContent = msg;
-            return;
-          }
-          let body: any = {};
-          try {
-            body = await response.json();
-          } catch {
-            body = {};
-          }
-          const newId = body?.branch_id;
-          const newName = body?.branch_name;
-          if (typeof newId !== "number" || typeof newName !== "string") {
-            errorSpan.textContent = "Invalid response from server";
-            return;
-          }
-          const newStatus =
-            typeof body?.status === "string" ? body.status : "active";
-          graph.branches.value = [
-            ...graph.branches.value,
-            {
-              id: newId,
-              name: newName,
-              status: newStatus,
-              parentId: resolvedParentId,
-              progress: newStatus === "creating" ? 0 : undefined,
-            },
-          ];
-          const operationId = body?.operation_id;
-          let cancelled = false;
-          context.registerDisposer(() => {
-            cancelled = true;
-          });
-          if (newStatus === "creating" && typeof operationId === "number") {
-            void pollBranchCreate(graph, newId, operationId, () => cancelled);
-          }
-          if (newStatus === "active") {
-            graph.branchId.value = newId;
-          } else {
-            watchBranchUntilActive(
-              graph,
-              newId,
-              originBranchId,
-              () => cancelled,
-            );
-          }
-          nameInput.value = "";
-          createForm.style.display = "none";
-          errorSpan.textContent = "";
-          graph.triggerBranchRefresh();
-        } finally {
-          createButton.disabled = false;
-        }
-      };
-
-      createButton.addEventListener("click", (e) => {
-        e.preventDefault();
-        submitCreate();
-      });
-      nameInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          submitCreate();
-        }
-      });
-
-      const diffLink = document.createElement("a");
-      diffLink.className = "calcada-open-diff";
-      diffLink.textContent = "Open diff";
-      diffLink.target = "_blank";
-      diffLink.rel = "noopener";
-      controlElement.appendChild(diffLink);
-
-      const updateDiffLink = () => {
-        if (!(graph instanceof CalcadaGraphSource)) {
-          diffLink.style.display = "none";
-          return;
-        }
-        // segmentationUrl may carry a "middleauth+" scheme prefix from the
-        // kvstore parser; strip it before passing to new URL() so .origin
-        // yields a plain https:// URL the browser can navigate to.
-        const rawUrl = graph.info.app!.segmentationUrl.replace(
-          /^middleauth\+/,
-          "",
-        );
-        const adminOrigin = new URL(rawUrl).origin;
-        diffLink.href = `${adminOrigin}/admin/graphs/${graph.info.app!.table}/branches/${branchId.value}/diff`;
-        diffLink.style.display = branchId.value === 0 ? "none" : "";
-      };
-      updateDiffLink();
-      context.registerDisposer(branchId.changed.add(updateDiffLink));
-
-      return { controlElement, control: select };
+      return { controlElement, control: controlElement };
     },
     activateTool: (_activation) => {},
   };
-}
-
-// Follows an async fork to completion, feeding the dropdown a percentage.
-//
-// Only the session that started the fork can do this: the operation id is
-// returned by the create call and stored nowhere else, so a reload or another
-// user keeps the plain "creating…" the branch list already gives them.
-const BRANCH_CREATE_POLL_MS = 1000;
-// The operation id lives only in this session, so a fork we can no longer reach
-// is one nobody will ever get an answer about. Give up rather than polling for
-// the life of the tab; the branch list still refreshes on its own.
-const BRANCH_CREATE_MAX_FAILURES = 10;
-
-async function pollBranchCreate(
-  graph: CalcadaGraphSource,
-  branchId: number,
-  operationId: number,
-  isCancelled: () => boolean,
-) {
-  const patch = (
-    change: Partial<{ status: string; progress: number | undefined }>,
-  ) => {
-    graph.branches.value = graph.branches.value.map((branch) =>
-      branch.id === branchId ? { ...branch, ...change } : branch,
-    );
-  };
-  let failures = 0;
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, BRANCH_CREATE_POLL_MS));
-    if (isCancelled()) return;
-    let status: string;
-    let progress: number;
-    try {
-      ({ status, progress } = await graph.createBranchStatus(operationId));
-      failures = 0;
-    } catch {
-      // A dropped poll is not a failed copy — the server is still working. Keep
-      // the last percentage and try again rather than declaring the fork dead.
-      if (++failures >= BRANCH_CREATE_MAX_FAILURES) {
-        // Stop claiming a percentage we can no longer confirm; the row keeps
-        // saying "creating" until the branch list says otherwise.
-        patch({ progress: undefined });
-        return;
-      }
-      continue;
-    }
-    if (isCancelled()) return;
-    if (status === "completed") {
-      patch({ status: "active", progress: undefined });
-      return;
-    }
-    if (status === "failed") {
-      patch({ status: "abandoned", progress: undefined });
-      return;
-    }
-    patch({ progress });
-  }
 }
 
 const branchControl = {
   label: "Branch",
   title: "Calcada branch (0 = main)",
   toolJson: CALCADA_BRANCH_JSON_KEY,
+  noImplicitLabel: true,
   ...branchLayerControl(),
 };
 
@@ -6893,69 +6465,22 @@ function labeledTimestampLayerControl(): LayerControlFactory<SegmentationUserLay
         context,
       );
 
+      const calcadaGraph =
+        graph instanceof CalcadaGraphSource ? graph : undefined;
+
       const controlElement = document.createElement("div");
       controlElement.classList.add(
         "neuroglancer-calcada-labeled-timestamp-control",
       );
-      const labelSelect = document.createElement("select");
-      labelSelect.classList.add("neuroglancer-layer-control-control");
-      labelSelect.title = LABELED_TIMESTAMP_CONTROL_TITLE;
-      const LIVE_VALUE = "";
-      const renderLabelOptions = () => {
-        const labels =
-          graph instanceof CalcadaGraphSource
-            ? graph.labeledTimestamps.value
-            : [];
-        while (labelSelect.firstChild) {
-          labelSelect.removeChild(labelSelect.firstChild);
-        }
-        const liveOption = document.createElement("option");
-        liveOption.value = LIVE_VALUE;
-        liveOption.textContent = "— live —";
-        labelSelect.appendChild(liveOption);
-        for (const { id, label, timestampMs, visibility } of labels) {
-          const option = document.createElement("option");
-          option.value = String(timestampMs);
-          option.dataset.labelId = id;
-          option.textContent =
-            visibility === "admin" ? `${label} (admins)` : label;
-          labelSelect.appendChild(option);
-        }
-        // Reflect the PENDING value: on a rejected switch the guard snaps
-        // intermediateTimestamp back, which re-renders the select to reality.
-        const currentTimestamp = intermediateTimestamp.value;
-        const match =
-          currentTimestamp === undefined
-            ? undefined
-            : labels.find(
-                (candidate) => candidate.timestampMs === currentTimestamp,
-              );
-        labelSelect.value = match ? String(match.timestampMs) : LIVE_VALUE;
-      };
-      renderLabelOptions();
-
-      labelSelect.addEventListener("change", () => {
-        intermediateTimestamp.value =
-          labelSelect.value === LIVE_VALUE
-            ? undefined
-            : Number.parseInt(labelSelect.value, 10);
-      });
-      labelSelect.addEventListener("focus", () => {
-        if (graph instanceof CalcadaGraphSource) {
-          graph.triggerLabeledTimestampRefresh();
-        }
-      });
 
       context.registerDisposer(
-        intermediateTimestamp.changed.add(renderLabelOptions),
+        mountComponent(controlElement, CalcadaLabeledTimestampPicker, {
+          graph: calcadaGraph,
+          intermediateTimestamp,
+        }),
       );
-      if (graph instanceof CalcadaGraphSource) {
-        context.registerDisposer(
-          graph.labeledTimestamps.changed.add(renderLabelOptions),
-        );
-      }
-      controlElement.appendChild(labelSelect);
-      return { controlElement, control: labelSelect };
+
+      return { controlElement, control: controlElement };
     },
     activateTool: (_activation) => {},
   };
