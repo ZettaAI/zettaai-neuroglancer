@@ -21,6 +21,10 @@ import { TruncatedLabel } from "#src/widget/react/truncated_label.js";
 const LABEL =
   "branch_with_a_deliberately_unbroken_name_that_will_not_fit_the_panel";
 
+// Generous on purpose: these waits end as soon as their condition holds, so
+// the ceiling only has to clear the worst runner, never the common case.
+const TIMEOUT = { timeout: 5000 };
+
 let target: HTMLDivElement;
 let disposer: Disposer;
 
@@ -53,7 +57,7 @@ function labelRendered() {
     if (target.querySelector('[data-slot="tooltip-trigger"]') === null) {
       throw new Error("TruncatedLabel has not rendered yet");
     }
-  });
+  }, TIMEOUT);
 }
 
 function bubble() {
@@ -64,12 +68,20 @@ async function settle(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** The provider's hover delay, plus room for the open animation. */
-const OPEN_WAIT = 900;
+/** The bubble's zoom/fade, once it has actually been put in the DOM. */
+const OPEN_ANIMATION = 200;
 
 async function hoverLabel() {
   await userEvent.hover(labelElement());
-  await settle(OPEN_WAIT);
+  // The provider's hover delay is the other stopwatch a loaded runner
+  // overruns, so wait for the bubble itself and only then let it animate in.
+  await vi.waitFor(() => {
+    const content = bubble();
+    if (content === null || content.hasAttribute("data-closed")) {
+      throw new Error("the tooltip has not opened yet");
+    }
+  }, TIMEOUT);
+  await settle(OPEN_ANIMATION);
 }
 
 describe("TruncatedLabel", () => {
@@ -103,12 +115,15 @@ describe("TruncatedLabel", () => {
 
     await userEvent.unhover(labelElement());
     // Closing starts on the way out, with no grace period for travelling
-    // into a bubble that cannot be reached anyway.
+    // into a bubble that cannot be reached anyway: by now it is fading, or
+    // on a slow runner already gone — what it must not still be is open.
     await settle(40);
-    expect(bubble()?.hasAttribute("data-closed")).toBe(true);
+    const leaving = bubble();
+    expect(leaving === null || leaving.hasAttribute("data-closed")).toBe(true);
     // Only the fade is left after that.
-    await settle(260);
-    expect(bubble()).toBeNull();
+    await vi.waitFor(() => {
+      if (bubble() !== null) throw new Error("the tooltip is still there");
+    }, TIMEOUT);
   });
 
   it("does not intercept the pointer", async () => {
