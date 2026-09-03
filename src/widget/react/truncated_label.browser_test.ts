@@ -87,6 +87,20 @@ describe("TruncatedLabel", () => {
     expect(content.scrollWidth).toBeLessThanOrEqual(content.clientWidth + 1);
   });
 
+  it("disappears as soon as the pointer leaves the label", async () => {
+    await hoverLabel();
+    expect(bubble()).not.toBeNull();
+
+    await userEvent.unhover(labelElement());
+    // Closing starts on the way out, with no grace period for travelling
+    // into a bubble that cannot be reached anyway.
+    await settle(40);
+    expect(bubble()?.hasAttribute("data-closed")).toBe(true);
+    // Only the fade is left after that.
+    await settle(260);
+    expect(bubble()).toBeNull();
+  });
+
   it("does not intercept the pointer", async () => {
     await hoverLabel();
     const content = bubble()!;

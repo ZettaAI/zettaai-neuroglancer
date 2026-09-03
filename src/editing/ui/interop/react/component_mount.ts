@@ -34,7 +34,7 @@ export function mountComponent<T extends object>(
   root.render(
     createElement(
       TooltipProvider,
-      { delay: 500 },
+      { delay: 500, closeDelay: 0 },
       createElement<T>(component, props),
     ),
   );
