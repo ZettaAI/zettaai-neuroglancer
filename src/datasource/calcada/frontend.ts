@@ -7903,15 +7903,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
     // Result of a stepped split's first half, held until the second runs. Cleared
     // whenever the points change, since it names sub-pieces derived from them.
-    let steppedSplit:
-      | {
-          sources: bigint[];
-          sinks: bigint[];
-          branchId: number;
-          rootId?: bigint;
-        }
-      | undefined;
-
     // The debug overlay is its own mode now (CalcadaDebugSession). A split
     // rewrites the very piece ids it is drawing, so tell it to re-read rather
     // than leaving stale ids on screen.
@@ -7951,6 +7942,12 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       displayState.tempSegmentStatedColors2d.value.clear();
       displayState.tempSegmentDefaultColor2d.value = undefined;
     };
+    // Putting the tool down must put the temporary segment state back. Leaving
+    // useTemporarySegmentEquivalences on with an empty map un-merges the
+    // segment: every piece then renders as its own object in its own colour,
+    // with the cut tool closed and nothing on screen to explain it.
+    activation.registerDisposer(() => resetPieceSplitDisplay());
+
     const updatePieceSplitDisplay = () => {
       if (graphConnection.state.calcadaDebugState.active.value) return;
       resetPieceSplitDisplay();
@@ -8091,21 +8088,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         pieceSplitState.reset();
       },
     });
-    // The split in two halves, for inspecting the graph between them: the first
-    // writes the sub-pieces and their edges but leaves the segment whole, the
-    // second runs the ordinary multicut over what the first produced. Enter
-    // triggers whichever step is next.
-    const splitPiecesButton = makeIcon({
-      text: "1. Pieces",
-      title:
-        "Step 1: split the pieces and add their edges, keeping one segment (inspect with Debug). Enter runs this while step 2 is not available.",
-      onClick: () => void runSplitPieces(),
-    });
-    const cutButton = makeIcon({
-      text: "2. Cut",
-      title:
-        "Step 2: run the regular multicut over the pieces from step 1. Enter runs this once step 1 is done.",
-      onClick: () => void runCut(),
+    const applyButton = makeIcon({
+      text: "Apply",
+      title: "Run the split (Enter). Advanced mode steps it stage by stage.",
+      onClick: () => void runFullSplit(),
     });
     const undoButton = makeIcon({
       text: "Undo",
@@ -8114,8 +8100,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     });
     actions.appendChild(swapButton);
     actions.appendChild(clearButton);
-    actions.appendChild(splitPiecesButton);
-    actions.appendChild(cutButton);
+    actions.appendChild(applyButton);
     actions.appendChild(undoButton);
     const spinner = document.createElement("div");
     spinner.className = "piece-split-spinner";
@@ -8180,12 +8165,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
     let busy = false;
     const setStepButtonsEnabled = (enabled: boolean) => {
-      splitPiecesButton.classList.toggle("disabled", busy || !enabled);
-      // Step 2 only means anything once step 1 has produced pieces to cut.
-      cutButton.classList.toggle(
-        "disabled",
-        busy || steppedSplit === undefined,
-      );
+      applyButton.classList.toggle("disabled", busy || !enabled);
     };
     // The stage row exists only in advanced mode, and a stage already behind the
     // session is a rewind rather than a re-run — the server serves it from the
@@ -8237,13 +8217,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       busy = nextBusy;
       spinner.style.display = busy ? "" : "none";
       useImageCheckbox.disabled = busy;
-      for (const button of [
-        swapButton,
-        clearButton,
-        splitPiecesButton,
-        cutButton,
-        undoButton,
-      ]) {
+      for (const button of [swapButton, clearButton, applyButton, undoButton]) {
         button.classList.toggle("disabled", busy);
       }
       renderStages();
@@ -8310,7 +8284,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       );
 
       useImageCheckbox.checked = pieceSplitState.useImage.value;
-      // Step 1 is enabled once both colours have at least one point.
+      // Applying needs at least one point of each colour.
       setStepButtonsEnabled(
         pieceSplitState.bluePoints.value.length > 0 &&
           pieceSplitState.redPoints.value.length > 0,
@@ -8322,9 +8296,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
     // --- Actions ---
     const runUndo = async () => {
-      // An undo may take step 1's sub-pieces back out of the graph, so the
-      // pending cut no longer refers to anything.
-      steppedSplit = undefined;
       if (busy) return;
       if (!graphConnection.canUndo()) {
         StatusMessage.showTemporaryMessage("Nothing to undo", 2500);
@@ -8342,11 +8313,16 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // Step 1: cut every multi-colour piece and write the edges its halves inherit,
     // but leave everything in one segment. What the multicut will act on is then
     // in the graph and can be looked at with Debug before anything is separated.
-    const runSplitPieces = async () => {
-      if (
-        pieceSplitState.bluePoints.value.length === 0 ||
-        pieceSplitState.redPoints.value.length === 0
-      ) {
+
+    // Step 2: the ordinary multicut, over the pieces step 1 left behind.
+    // Normal mode: the whole split in one call. The two-step Pieces/Cut pair it
+    // replaces existed to make the intermediate graph inspectable, which is
+    // what advanced mode now does properly.
+    const runFullSplit = async () => {
+      if (busy) return;
+      const blue = pieceSplitState.bluePoints.value;
+      const red = pieceSplitState.redPoints.value;
+      if (blue.length === 0 || red.length === 0) {
         StatusMessage.showTemporaryMessage(
           "Place at least one blue and one red point",
           5000,
@@ -8355,6 +8331,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
       setBusy(true);
       const branchId = graphConnection.graph.branchId.value;
+      const oldRoot = currentFocusRoot();
       try {
         const toPayload = (p: PointEntry, color: "blue" | "red") => ({
           color,
@@ -8364,74 +8341,47 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           z: p.voxel[2],
           origin: p.origin,
         });
-        const points = [
-          ...pieceSplitState.bluePoints.value.map((p) => toPayload(p, "blue")),
-          ...pieceSplitState.redPoints.value.map((p) => toPayload(p, "red")),
-        ];
-        const { roots, components, operationId, splitPieces } =
+        const { roots, components, operationId } =
           await graphConnection.graph.graphServer.generalSplit(
-            points,
+            [
+              ...blue.map((p) => toPayload(p, "blue")),
+              ...red.map((p) => toPayload(p, "red")),
+            ],
             branchId,
-            true,
+            false,
             pieceSplitState.useImage.value,
           );
-        graphConnection.pushUndo(operationId, branchId);
-
-        // Name the two sides for step 2. A piece that was split contributes its
-        // blue half to the sources and its red half to the sinks; a piece holding
-        // only one colour is untouched and stands for itself.
-        const wasSplit = new Set(splitPieces.map((sp) => sp.old));
-        const sources = new Set<bigint>();
-        const sinks = new Set<bigint>();
-        for (const sp of splitPieces) {
-          sources.add(sp.blue);
-          sinks.add(sp.red);
-        }
-        for (const p of pieceSplitState.bluePoints.value) {
-          if (!wasSplit.has(p.pieceId)) sources.add(p.pieceId);
-        }
-        for (const p of pieceSplitState.redPoints.value) {
-          if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
-        }
-        // The segment stays whole but its pieces changed, so the piece->root
-        // mapping is stale.
         const newRoots = roots.filter((root) => root !== 0n);
-
-        steppedSplit = {
-          sources: [...sources],
-          sinks: [...sinks],
-          branchId,
-          // Step 1 keeps the segment whole, so it reports exactly one root; hold
-          // it so Debug inspects the post-split graph rather than resolving the
-          // now-superseded pieces the points still name.
-          rootId: newRoots.length === 1 ? newRoots[0] : undefined,
-        };
-
-        const focus = currentFocusRoot();
-        if (newRoots.length > 0 && focus !== undefined) {
-          // Split-mode 2D renders raw piece ids through segmentEquivalences, so
-          // the links must follow the edit. With pieces_only the segment stays
-          // whole, so the response carries one component holding the new root's
-          // complete piece list — authoritative where the local reconstruction
-          // was only as fresh as the last chunk fetch.
-          graphConnection.updateAfterSplit(focus, newRoots, components);
+        if (newRoots.length === 0) {
+          StatusMessage.showTemporaryMessage("No split found.", 3000);
+          return;
+        }
+        graphConnection.pushUndo(operationId, branchId);
+        if (oldRoot !== undefined) {
+          graphConnection.updateAfterSplit(oldRoot, newRoots, components);
           graphConnection.meshAddNewSegments(newRoots);
           const oldRootSet = new Uint64Set();
-          oldRootSet.add(focus);
+          oldRootSet.add(oldRoot);
           const newRootSet = new Uint64Set();
           newRootSet.add(newRoots);
           graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
+        } else {
+          const segmentsState = layer.displayState.segmentationGroupState.value;
+          for (const newRoot of newRoots) {
+            segmentsState.selectedSegments.add(newRoot);
+            segmentsState.visibleSegments.add(newRoot);
+          }
+          graphConnection.meshAddNewSegments(newRoots);
         }
         refreshDebugOverlay();
+        pieceSplitState.reset();
         StatusMessage.showTemporaryMessage(
-          `Step 1 done — ${splitPieces.length} piece(s) split, segment still whole. ` +
-            `Press Debug to inspect the edges, then "2. Cut".`,
-          8000,
+          `Separated into ${newRoots.length} root(s). Press Ctrl+Z to undo.`,
+          6000,
         );
-        render();
       } catch (e: unknown) {
         StatusMessage.showTemporaryMessage(
-          `Step 1 failed: ${e instanceof Error ? e.message : String(e)}`,
+          `Split failed: ${e instanceof Error ? e.message : String(e)}`,
           8000,
         );
       } finally {
@@ -8439,7 +8389,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
     };
 
-    // Step 2: the ordinary multicut, over the pieces step 1 left behind.
     // Advanced mode: run the split up to one stage and show what it produced.
     // Nothing is written, so this is safe to repeat and to step back through.
     const runStage = async (wave: number) => {
@@ -8557,69 +8506,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
     };
 
-    const runCut = async () => {
-      if (steppedSplit === undefined) {
-        StatusMessage.showTemporaryMessage('Run "1. Pieces" first', 5000);
-        return;
-      }
-      setBusy(true);
-      const { sources, sinks, branchId, rootId } = steppedSplit;
-      try {
-        const { roots, components, operationId } =
-          await graphConnection.graph.graphServer.splitByPieces(
-            sources,
-            sinks,
-            branchId,
-          );
-        const newRoots = roots.filter((root) => root !== 0n);
-        if (newRoots.length === 0) {
-          StatusMessage.showTemporaryMessage("No split found.", 3000);
-          return;
-        }
-        graphConnection.pushUndo(operationId, branchId);
-        const segmentsState = layer.displayState.segmentationGroupState.value;
-        for (const piece of [...sources, ...sinks]) {
-          segmentsState.selectedSegments.delete(piece);
-          segmentsState.visibleSegments.delete(piece);
-        }
-        // The post-pieces root is superseded by the two cut roots. rootId is
-        // the authoritative handle (currentFocusRoot maps the first point's
-        // piece, which the pieces step already retired).
-        const oldRoot = rootId ?? currentFocusRoot();
-        if (oldRoot !== undefined) {
-          // Reconcile from the server's authoritative components instead of
-          // re-fetching chunks and waiting out the lagging LUT.
-          graphConnection.updateAfterSplit(oldRoot, newRoots, components);
-          graphConnection.meshAddNewSegments(newRoots);
-          const oldRootSet = new Uint64Set();
-          oldRootSet.add(oldRoot);
-          const newRootSet = new Uint64Set();
-          newRootSet.add(newRoots);
-          graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
-        } else {
-          for (const newRoot of newRoots) {
-            segmentsState.selectedSegments.add(newRoot);
-            segmentsState.visibleSegments.add(newRoot);
-          }
-          graphConnection.meshAddNewSegments(newRoots);
-        }
-        refreshDebugOverlay();
-        steppedSplit = undefined;
-        pieceSplitState.reset();
-        StatusMessage.showTemporaryMessage(
-          `Step 2 done — separated into ${newRoots.length} root(s). Press Ctrl+Z to undo.`,
-          6000,
-        );
-      } catch (e: unknown) {
-        StatusMessage.showTemporaryMessage(
-          `Step 2 failed: ${e instanceof Error ? e.message : String(e)}`,
-          8000,
-        );
-      } finally {
-        setBusy(false);
-      }
-    };
-
     // --- Click placement ---
     activation.bindInputEventMap(PIECE_SPLIT_INPUT_EVENT_MAP);
     const placePoint = async () => {
@@ -8702,14 +8588,14 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       event.stopPropagation();
       pieceSplitState.swapGroup();
     });
-    // Enter runs whichever step is next: the multicut once step 1 has produced
-    // pieces to cut, the piece split otherwise.
+    // Enter applies whichever mode is showing: the stage the session stopped at
+    // in advanced mode, the whole split otherwise.
     activation.bindAction("apply", (event) => {
       event.stopPropagation();
-      if (steppedSplit !== undefined) {
-        void runCut();
+      if (pieceSplitState.advanced.value) {
+        void runApplyStage();
       } else {
-        void runSplitPieces();
+        void runFullSplit();
       }
     });
     activation.bindAction("undo", (event) => {

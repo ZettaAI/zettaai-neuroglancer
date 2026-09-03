@@ -1202,6 +1202,14 @@ export class SegmentationUserLayer extends Base {
     if (value == null) {
       return value;
     }
+    // An annotation layer attached to this segmentation layer returns its
+    // picked annotation's property value here, and an rgb property arrives as
+    // "#rrggbb". That is not a segment id: parsing it throws, and it throws
+    // from the selected-values update, so every mouse move over such an
+    // annotation would break. Only a base-10 string can be an id.
+    if (typeof value === "string" && !/^[0-9]+$/.test(value)) {
+      return value;
+    }
     return maybeAugmentSegmentId(this.displayState, value);
   }
 
