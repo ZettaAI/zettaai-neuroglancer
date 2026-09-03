@@ -4827,7 +4827,10 @@ async function withErrorMessageHTTP<T>(
   } catch (e) {
     if (e instanceof HttpError && e.response) {
       const { errorPrefix = "" } = options;
-      const msg = (await parseCalcadaError(e)) || "unknown error";
+      // Calcada answers {"code","error","message"} and leaves message empty on
+      // the general split, so parseCalcadaError — which reads only .message —
+      // reduces every one of its failures to "unknown error".
+      const msg = (await wrapCalcadaError(e)).message || "unknown error";
       if (!status) {
         status = new StatusMessage(true);
       }
