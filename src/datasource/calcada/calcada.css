@@ -227,6 +227,14 @@
   min-width: 0;
 }
 
+/* The "from" picker and the error each take a row of their own, leaving the
+   name input and Create button the row between them: the panel is too narrow
+   to read a branch label and a name field side by side. */
+.neuroglancer-calcada-branch-create-form > .neuroglancer-calcada-branch-select,
+.neuroglancer-calcada-branch-create-form > .branch-create-error {
+  flex-basis: 100%;
+}
+
 .neuroglancer-layer-control-container:has(
     .neuroglancer-calcada-branch-control
   ) {

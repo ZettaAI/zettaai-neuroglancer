@@ -11,6 +11,8 @@
 import { userEvent } from "@vitest/browser/context";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import "#src/datasource/calcada/calcada.css";
+
 import type {
   CalcadaBranch,
   CalcadaGraphSource,
@@ -126,6 +128,23 @@ describe("CalcadaBranchPicker in a narrow panel", () => {
     await userEvent.hover(long);
     await settle(OPEN_WAIT);
     expect(bubble()?.textContent).toContain(LONG_NAME);
+  });
+
+  it('stacks the new-branch name input under its "from" picker', async () => {
+    await userEvent.click(
+      target.querySelector<HTMLElement>(".neuroglancer-calcada-branch-new")!,
+    );
+    await settle(50);
+    const form = target.querySelector<HTMLElement>(
+      ".neuroglancer-calcada-branch-create-form",
+    )!;
+    const parent = form
+      .querySelector<HTMLElement>(".neuroglancer-calcada-branch-select")!
+      .getBoundingClientRect();
+    const name = form
+      .querySelector<HTMLInputElement>('input[name="branch_name"]')!
+      .getBoundingClientRect();
+    expect(name.top).toBeGreaterThanOrEqual(parent.bottom);
   });
 
   it("keeps the option's tooltip out of the pointer's way", async () => {
