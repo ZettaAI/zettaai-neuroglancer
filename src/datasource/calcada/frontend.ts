@@ -94,7 +94,6 @@ import {
 } from "#src/datasource/calcada/root_resolution.js";
 import {
   stageAction,
-  stageSummary,
   stoppableStages,
 } from "#src/datasource/calcada/split_steps.js";
 import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
@@ -5390,35 +5389,25 @@ class CalcadaGraphServerInterface {
   }
 
   /**
-   * Run the general split up to one stage and stop there.
+   * Ask what the split would mark, without marking it.
    *
-   * Nothing is written: the components come back as a preview, and the ids in
-   * them are provisional because the commit mints its own. Omitting sessionId
-   * starts a session, which is when the points are required.
+   * The first of the three steps a proofreader can drive by hand, and the only
+   * one that writes nothing. The carve recomputes these points rather than
+   * being handed them, so this is purely something to look at before deciding.
    */
-  async generalSplitStep(
-    stopAfter: number,
+  async generalSplitPoints(
+    points: {
+      color: "blue" | "red";
+      pieceId: bigint;
+      x: number;
+      y: number;
+      z: number;
+      origin: "2d" | "3d";
+    }[],
     branchId: number,
-    session:
-      | { sessionId: number }
-      | {
-          points: {
-            color: "blue" | "red";
-            pieceId: bigint;
-            x: number;
-            y: number;
-            z: number;
-            origin: "2d" | "3d";
-          }[];
-          useImage: boolean;
-        },
+    useImage: boolean,
   ): Promise<{
-    sessionId: number;
-    stage: number;
-    round: number;
-    components: bigint[][];
-    canContinue: boolean;
-    canStepBack: boolean;
+    conflicted: bigint[];
     artificialPoints: {
       color: "blue" | "red";
       pieceId: bigint;
@@ -5426,41 +5415,35 @@ class CalcadaGraphServerInterface {
     }[];
   }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
-    const body: Record<string, unknown> = { stop_after: stopAfter };
-    if ("sessionId" in session) {
-      body.session_id = session.sessionId;
-    } else {
-      body.points = session.points.map((p) => ({
-        color: p.color,
-        // piece_id is a tagged uint64 > 2^53; send as a string.
-        piece_id: p.pieceId.toString(),
-        x: p.x,
-        y: p.y,
-        z: p.z,
-        origin: p.origin,
-      }));
-      body.use_image = session.useImage;
-    }
     let response: Response;
     try {
       response = await fetchOkImpl(
-        appendCoordParams(`${baseUrl}/split/general/step?int64_as_str=1`, {
+        appendCoordParams(`${baseUrl}/split/general/points?int64_as_str=1`, {
           branchId,
         }),
-        { method: "POST", body: JSON.stringify(body) },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            points: points.map((p) => ({
+              color: p.color,
+              piece_id: p.pieceId.toString(),
+              x: p.x,
+              y: p.y,
+              z: p.z,
+              origin: p.origin,
+            })),
+            use_image: useImage,
+          }),
+        },
       );
     } catch (e) {
       throw await wrapCalcadaError(e);
     }
     const jsonResp = await response.json();
-    const comps: string[][] = jsonResp.components ?? [];
     return {
-      sessionId: Number(jsonResp.session_id ?? 0),
-      stage: Number(jsonResp.stage ?? 0),
-      round: Number(jsonResp.round ?? 0),
-      components: comps.map((c) => c.map((x) => parseUint64(x))),
-      canContinue: Boolean(jsonResp.can_continue),
-      canStepBack: Boolean(jsonResp.can_step_back),
+      conflicted: (jsonResp.conflicted ?? []).map((x: string) =>
+        parseUint64(x),
+      ),
       artificialPoints: (jsonResp.artificial_points ?? []).map(
         (p: {
           color: string;
@@ -5474,43 +5457,6 @@ class CalcadaGraphServerInterface {
           voxel: [p.x, p.y, p.z] as [number, number, number],
         }),
       ),
-    };
-  }
-
-  /**
-   * Commit the stage a stepped session stopped at. This is the write: the same
-   * lock and transaction the plain split takes.
-   */
-  async generalSplitApply(
-    sessionId: number,
-    branchId = 0,
-  ): Promise<{
-    operationId: number;
-    roots: bigint[];
-    components: bigint[][];
-  }> {
-    const { fetchOkImpl, baseUrl } = this.httpSource;
-    let response: Response;
-    try {
-      response = await fetchOkImpl(
-        appendCoordParams(
-          `${baseUrl}/split/general/step/apply?int64_as_str=1`,
-          {
-            branchId,
-          },
-        ),
-        { method: "POST", body: JSON.stringify({ session_id: sessionId }) },
-      );
-    } catch (e) {
-      throw await wrapCalcadaError(e);
-    }
-    const jsonResp = await response.json();
-    const rootIds: string[] = jsonResp.new_root_ids ?? [];
-    const comps: string[][] = jsonResp.components ?? [];
-    return {
-      operationId: Number(jsonResp.operation_id ?? 0),
-      roots: rootIds.map((x) => parseUint64(x)),
-      components: comps.map((c) => c.map((x) => parseUint64(x))),
     };
   }
 
@@ -7762,22 +7708,26 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     stageStatus.className = "piece-split-focus";
     body.appendChild(stageStatus);
 
-    let stepSession: { id: number; reached: number } | undefined;
+    // What step 2 wrote, which step 3 cuts. Client-side because each step is
+    // its own committed edit: there is no session on the server to hold it.
+    let carved:
+      | {
+          sources: bigint[];
+          sinks: bigint[];
+          branchId: number;
+          rootId?: bigint;
+        }
+      | undefined;
+    let stepStage = 0;
     const stageButtons = stoppableStages().map((stage) => {
       const button = makeIcon({
         text: `${stage.wave}. ${stage.label}`,
         title: stage.title,
-        onClick: () => void runStage(stage.wave),
+        onClick: () => runStageByWave(stage.wave),
       });
       stagesRow.appendChild(button);
       return { stage, button };
     });
-    const applyStageButton = makeIcon({
-      text: "Apply",
-      title: "Commit the stage shown above. This is the write.",
-      onClick: () => void runApplyStage(),
-    });
-    stagesRow.appendChild(applyStageButton);
 
     let busy = false;
     const setStepButtonsEnabled = (enabled: boolean) => {
@@ -7792,7 +7742,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       stagesRow.style.display = on ? "" : "none";
       stageStatus.style.display =
         on && stageStatus.textContent !== "" ? "" : "none";
-      const reached = stepSession?.reached ?? 0;
+      const reached = stepStage;
       for (const { stage, button } of stageButtons) {
         button.classList.toggle("disabled", busy);
         button.title =
@@ -7800,20 +7750,17 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             ? `${stage.title} (already run — shows the stored result)`
             : stage.title;
       }
-      applyStageButton.classList.toggle(
-        "disabled",
-        busy || stepSession === undefined,
-      );
     };
 
     // Editing the points describes a different split, so the session that was
     // stepping the old ones is no longer about anything: continuing it would
     // replay the points the session started with, not the ones on screen.
+    // Editing the points describes a different split, so what step 1 showed and
+    // what step 2 handed to step 3 no longer say anything true.
     const dropStepSession = () => {
-      if (stepSession === undefined) return;
-      stepSession = undefined;
-      // The placed points described the old session's graph, so they no longer
-      // say anything true about what will be cut.
+      if (stepStage === 0 && carved === undefined) return;
+      carved = undefined;
+      stepStage = 0;
       pieceSplitState.artificialPoints.value = [];
       stageStatus.textContent = "";
       renderStages();
@@ -8008,49 +7955,47 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
     };
 
-    // Advanced mode: run the split up to one stage and show what it produced.
-    // Nothing is written, so this is safe to repeat and to step back through.
-    const runStage = async (wave: number) => {
-      if (busy) return;
+    // Advanced mode drives the split by hand in three steps. The first only
+    // looks; the two after it are ordinary edits, each undoable on its own.
+    const toPayload = (p: PointEntry, color: "blue" | "red") => ({
+      color,
+      pieceId: p.pieceId,
+      x: p.voxel[0],
+      y: p.voxel[1],
+      z: p.voxel[2],
+      origin: p.origin,
+    });
+    const placedPoints = () => {
       const blue = pieceSplitState.bluePoints.value;
       const red = pieceSplitState.redPoints.value;
-      if (
-        stepSession === undefined &&
-        (blue.length === 0 || red.length === 0)
-      ) {
+      if (blue.length === 0 || red.length === 0) {
         StatusMessage.showTemporaryMessage(
           "Place at least one blue and one red point",
           5000,
         );
-        return;
+        return undefined;
       }
+      return [
+        ...blue.map((p) => toPayload(p, "blue")),
+        ...red.map((p) => toPayload(p, "red")),
+      ];
+    };
+
+    // Step 1: show the points the split would place, and the pieces it would
+    // carve because of them. Writes nothing.
+    const runPointsStep = async () => {
+      if (busy) return;
+      const points = placedPoints();
+      if (points === undefined) return;
       setBusy(true);
       const branchId = graphConnection.graph.branchId.value;
       try {
-        const toPayload = (p: PointEntry, color: "blue" | "red") => ({
-          color,
-          pieceId: p.pieceId,
-          x: p.voxel[0],
-          y: p.voxel[1],
-          z: p.voxel[2],
-          origin: p.origin,
-        });
-        const result = await graphConnection.graph.graphServer.generalSplitStep(
-          wave,
-          branchId,
-          stepSession !== undefined
-            ? { sessionId: stepSession.id }
-            : {
-                points: [
-                  ...blue.map((p) => toPayload(p, "blue")),
-                  ...red.map((p) => toPayload(p, "red")),
-                ],
-                useImage: pieceSplitState.useImage.value,
-              },
-        );
-        stepSession = { id: result.sessionId, reached: result.stage };
-        // The split's own points, drawn so a proofreader can see why a piece
-        // they never marked is going to be cut.
+        const { conflicted, artificialPoints } =
+          await graphConnection.graph.graphServer.generalSplitPoints(
+            points,
+            branchId,
+            pieceSplitState.useImage.value,
+          );
         const loadedSubsource = getGraphLoadedSubsource(layer)!;
         const annotationToNanometers = new Float64Array(
           loadedSubsource.loadedDataSource.transform.inputSpace.value.scales.map(
@@ -8059,53 +8004,99 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         );
         const graphResolution = graphConnection.graph.info.scales[0]
           .resolution as unknown as [number, number, number];
-        pieceSplitState.artificialPoints.value = result.artificialPoints.map(
-          (p) => ({
-            voxel: p.voxel,
-            layer: voxelToLayerPoint(
-              p.voxel,
-              annotationToNanometers,
-              graphResolution,
-            ),
-            pieceId: p.pieceId,
-            origin: "3d" as const,
-            artificialColor: p.color,
-          }),
-        );
-        const sizes = result.components.map((c) => c.length).join(" / ");
+        pieceSplitState.artificialPoints.value = artificialPoints.map((p) => ({
+          voxel: p.voxel,
+          layer: voxelToLayerPoint(
+            p.voxel,
+            annotationToNanometers,
+            graphResolution,
+          ),
+          pieceId: p.pieceId,
+          origin: "3d" as const,
+          artificialColor: p.color,
+        }));
         stageStatus.textContent =
-          `${stageSummary(result.stage, result.round)}: ` +
-          `${result.components.length} part(s), ${sizes} pieces. ` +
-          "Nothing written — press Apply to commit this stage.";
+          artificialPoints.length === 0
+            ? "No extra points needed — the cut can run on the pieces as they are."
+            : `${artificialPoints.length} point(s) added on ${conflicted.length} piece(s) that both sides run through. Nothing written yet.`;
+        stepStage = 1;
       } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // A session whose segment moved cannot be continued; saying so beats
-        // restarting silently, which would change the result with no reason
-        // the proofreader can see.
-        if (msg.includes("changed since this session started")) {
-          stepSession = undefined;
-          stageStatus.textContent =
-            "The segment changed under this session. Place the points again.";
-        } else {
-          stageStatus.textContent = `Stage failed: ${msg}`;
-        }
+        stageStatus.textContent = `Step 1 failed: ${e instanceof Error ? e.message : String(e)}`;
         StatusMessage.showTemporaryMessage(stageStatus.textContent, 8000);
       } finally {
         setBusy(false);
       }
     };
 
-    // Commit whichever stage the session stopped at. This is the write, and it
-    // takes the same lock and transaction the whole split takes.
-    const runApplyStage = async () => {
-      if (busy || stepSession === undefined) return;
+    // Step 2: carve every piece holding both colours. This writes: the
+    // sub-pieces and their edges are persisted and the segment stays whole, so
+    // Debug shows the graph the cut will run over.
+    const runCarveStep = async () => {
+      if (busy) return;
+      const points = placedPoints();
+      if (points === undefined) return;
       setBusy(true);
       const branchId = graphConnection.graph.branchId.value;
-      const oldRoot = currentFocusRoot();
+      const rootId = currentFocusRoot();
+      try {
+        const { roots, operationId, splitPieces } =
+          await graphConnection.graph.graphServer.generalSplit(
+            points,
+            branchId,
+            true,
+            pieceSplitState.useImage.value,
+          );
+        graphConnection.pushUndo(operationId, branchId);
+
+        // Name the two sides for step 3. A piece that was carved contributes
+        // its blue half to the sources and its red half to the sinks; a piece
+        // holding only one colour stands for itself.
+        const wasSplit = new Set(splitPieces.map((sp) => sp.old));
+        const sources = new Set<bigint>();
+        const sinks = new Set<bigint>();
+        for (const sp of splitPieces) {
+          sources.add(sp.blue);
+          sinks.add(sp.red);
+        }
+        for (const p of pieceSplitState.bluePoints.value) {
+          if (!wasSplit.has(p.pieceId)) sources.add(p.pieceId);
+        }
+        for (const p of pieceSplitState.redPoints.value) {
+          if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
+        }
+        carved = {
+          sources: [...sources],
+          sinks: [...sinks],
+          branchId,
+          rootId,
+        };
+        stepStage = 2;
+        const newRoots = roots.filter((root) => root !== 0n);
+        graphConnection.meshAddNewSegments(newRoots);
+        refreshDebugOverlay();
+        stageStatus.textContent = `Carved ${splitPieces.length} piece(s). Written — press 3 to cut, or Ctrl+Z to undo.`;
+      } catch (e: unknown) {
+        stageStatus.textContent = `Step 2 failed: ${e instanceof Error ? e.message : String(e)}`;
+        StatusMessage.showTemporaryMessage(stageStatus.textContent, 8000);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    // Step 3: the multicut over what step 2 wrote.
+    const runCutStep = async () => {
+      if (busy) return;
+      if (carved === undefined) {
+        StatusMessage.showTemporaryMessage("Run step 2 first", 5000);
+        return;
+      }
+      setBusy(true);
+      const { sources, sinks, branchId, rootId } = carved;
       try {
         const { roots, components, operationId } =
-          await graphConnection.graph.graphServer.generalSplitApply(
-            stepSession.id,
+          await graphConnection.graph.graphServer.splitByPieces(
+            sources,
+            sinks,
             branchId,
           );
         const newRoots = roots.filter((root) => root !== 0n);
@@ -8114,6 +8105,12 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        const segmentsState = layer.displayState.segmentationGroupState.value;
+        for (const piece of [...sources, ...sinks]) {
+          segmentsState.selectedSegments.delete(piece);
+          segmentsState.visibleSegments.delete(piece);
+        }
+        const oldRoot = rootId ?? currentFocusRoot();
         if (oldRoot !== undefined) {
           graphConnection.updateAfterSplit(oldRoot, newRoots, components);
           graphConnection.meshAddNewSegments(newRoots);
@@ -8123,7 +8120,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           newRootSet.add(newRoots);
           graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         } else {
-          const segmentsState = layer.displayState.segmentationGroupState.value;
           for (const newRoot of newRoots) {
             segmentsState.selectedSegments.add(newRoot);
             segmentsState.visibleSegments.add(newRoot);
@@ -8131,21 +8127,22 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           graphConnection.meshAddNewSegments(newRoots);
         }
         refreshDebugOverlay();
-        stepSession = undefined;
-        stageStatus.textContent = "";
+        carved = undefined;
+        stepStage = 0;
         pieceSplitState.reset();
-        StatusMessage.showTemporaryMessage(
-          `Committed — separated into ${newRoots.length} root(s). Press Ctrl+Z to undo.`,
-          6000,
-        );
+        stageStatus.textContent = `Separated into ${newRoots.length} root(s). Ctrl+Z undoes the cut, again undoes the carve.`;
       } catch (e: unknown) {
-        StatusMessage.showTemporaryMessage(
-          `Apply failed: ${e instanceof Error ? e.message : String(e)}`,
-          8000,
-        );
+        stageStatus.textContent = `Step 3 failed: ${e instanceof Error ? e.message : String(e)}`;
+        StatusMessage.showTemporaryMessage(stageStatus.textContent, 8000);
       } finally {
         setBusy(false);
       }
+    };
+
+    const runStageByWave = (wave: number) => {
+      if (wave === 1) return void runPointsStep();
+      if (wave === 2) return void runCarveStep();
+      return void runCutStep();
     };
 
     // --- Click placement ---
@@ -8235,7 +8232,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     activation.bindAction("apply", (event) => {
       event.stopPropagation();
       if (pieceSplitState.advanced.value) {
-        void runApplyStage();
+        runStageByWave(stepStage + 1 > 3 ? 3 : stepStage + 1);
       } else {
         void runFullSplit();
       }

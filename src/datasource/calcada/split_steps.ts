@@ -21,7 +21,7 @@ export const SPLIT_STAGES: SplitStage[] = [
     wave: 1,
     label: "Points",
     title:
-      "Marks the pieces both colours have to run through, placing points in them. Nothing is cut yet.",
+      "Shows the points the split would add, on the pieces both sides run through. Writes nothing.",
     repeats: false,
     stoppable: true,
   },
@@ -29,14 +29,14 @@ export const SPLIT_STAGES: SplitStage[] = [
     wave: 2,
     label: "Carve",
     title:
-      "Splits every piece holding points of both colours, the ones you placed and the ones step 1 added.",
+      "Carves every piece holding both colours and writes the result, leaving the segment whole. Undoable on its own.",
     repeats: false,
     stoppable: true,
   },
   {
     wave: 3,
     label: "Cut",
-    title: "The multicut over the carved graph.",
+    title: "The multicut over what step 2 wrote. Undoable on its own.",
     repeats: false,
     stoppable: true,
   },
