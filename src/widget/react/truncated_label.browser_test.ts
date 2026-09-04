@@ -151,8 +151,6 @@ describe("TruncatedLabel", () => {
     await hoverLabel();
     const content = bubble()!;
     expect(getComputedStyle(content).pointerEvents).toBe("none");
-    // What is under the bubble stays reachable: hit-testing its own centre
-    // must never come back with the bubble itself.
     const rect = content.getBoundingClientRect();
     const hit = document.elementFromPoint(
       rect.left + rect.width / 2,
