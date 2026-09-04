@@ -7606,6 +7606,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // on entry, so reopening the tool after deselecting starts clean, and while
     // open, so hiding the segment takes effect immediately.
     const dropPointsIfFocusGone = () => {
+      // A carve that has run supersedes the very pieces the points name, so the
+      // focus stops resolving. Dropping them then would throw away the split
+      // between step 2 and step 3, which is exactly when it is needed.
+      if (carved !== undefined) return;
       const focus = currentFocusRoot();
       if (focus === undefined) return;
       if (segmentationGroupState.visibleSegments.has(focus)) return;
@@ -8065,16 +8069,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
         }
         const newRoots = roots.filter((root) => root !== 0n);
-        carved = {
-          sources: [...sources],
-          sinks: [...sinks],
-          branchId,
-          // The carve keeps the segment whole, so it reports exactly one root.
-          // Hold it: the old one is superseded, and asking Debug about a root
-          // that no longer has pieces is a 404 rather than a graph.
-          rootId: newRoots.length === 1 ? newRoots[0] : undefined,
-        };
-        stepStage = 2;
         if (newRoots.length > 0 && focus !== undefined) {
           // The segment stays whole but its pieces changed, so the piece to
           // root mapping is stale. The response carries the new root's complete
@@ -8089,6 +8083,19 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         }
         refreshDebugOverlay();
+        // Set last: the notifications above supersede the pieces the points name,
+        // and the guards that watch for a segment going away run in between.
+        carved = {
+          sources: [...sources],
+          sinks: [...sinks],
+          branchId,
+          // The carve keeps the segment whole, so it reports exactly one root.
+          // Hold it: the old one is superseded, and asking Debug about a root
+          // that no longer has pieces is a 404 rather than a graph.
+          rootId: newRoots.length === 1 ? newRoots[0] : undefined,
+        };
+        stepStage = 2;
+        renderStages();
         stageStatus.textContent = `Carved ${splitPieces.length} piece(s). Written — press 3 to cut, or Ctrl+Z to undo.`;
       } catch (e: unknown) {
         stageStatus.textContent = `Step 2 failed: ${e instanceof Error ? e.message : String(e)}`;
