@@ -2257,8 +2257,11 @@ class CalcadaDebugSession extends RefCounted {
         window,
         "calcada-debug-toggle-piece",
         (event: ActionEvent<unknown>) => {
-          event.stopPropagation();
-          this.toggleUnderCursor();
+          // Only swallow the gesture when the mode actually acts on it. Debug
+          // sits alongside whatever else the proofreader is doing, and taking
+          // every double-click leaves them unable to select a segment the mode
+          // knows nothing about — with nothing on screen to say why.
+          if (this.toggleUnderCursor()) event.stopPropagation();
         },
       ),
     );
@@ -2273,11 +2276,15 @@ class CalcadaDebugSession extends RefCounted {
    * only once it is does the same gesture start acting on its individual
    * pieces. Removing a segment stays with the Seg. tab, so this gesture can
    * never take one away by surprise.
+   *
+   * Returns whether the mode acted. A piece it is not drawing is none of its
+   * business: hiding that mesh does nothing anybody can see, and swallowing
+   * the gesture to do it stops the segment being selected at all.
    */
-  private toggleUnderCursor() {
+  private toggleUnderCursor(): boolean {
     const selection = this.layer.displayState.segmentSelectionState;
     const piece = selection.baseValue;
-    if (piece === undefined || piece === null || piece === 0n) return;
+    if (piece === undefined || piece === null || piece === 0n) return false;
     const { visibleSegments } = this.segmentsState;
     const segment = selection.hasSelectedSegment
       ? selection.selectedSegment
@@ -2288,9 +2295,19 @@ class CalcadaDebugSession extends RefCounted {
       !visibleSegments.has(piece)
     ) {
       visibleSegments.add(segment);
-      return;
+      return true;
     }
+    if (!this.isDebuggedPiece(piece)) return false;
     this.connection.togglePieceMesh(piece);
+    return true;
+  }
+
+  /** Whether the overlay is drawing this piece, and so has a mesh to toggle. */
+  private isDebuggedPiece(piece: bigint): boolean {
+    for (const graph of this.graphCache.values()) {
+      if (graph.pieces.some((p) => p.id === piece)) return true;
+    }
+    return false;
   }
 
   private async enter() {
