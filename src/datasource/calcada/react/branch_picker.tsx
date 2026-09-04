@@ -191,14 +191,12 @@ export function CalcadaBranchPicker({
       : String(MAIN_BRANCH_ID);
 
   const toggleForm = () => {
-    setFormOpen((wasOpen) => {
-      if (!wasOpen) setParentChoice(undefined);
-      return !wasOpen;
-    });
+    if (!formOpen) setParentChoice(undefined);
+    setFormOpen(!formOpen);
   };
 
   const submitCreate = async () => {
-    if (graph === undefined) return;
+    if (graph === undefined || creating) return;
     const name = newBranchName.trim();
     if (name.length === 0) return;
     const originBranchId = graph.branchId.value;
@@ -249,6 +247,13 @@ export function CalcadaBranchPicker({
         );
       }
       if (newStatus === "active") {
+        // See onBranchChange: clear synchronously here too, to suppress
+        // "Could not fetch root: piece not found" spam from in-flight
+        // selectedSegments changes referencing pieces local to the
+        // previous branch.
+        segmentationGroupState.selectedSegments.clear();
+        segmentationGroupState.visibleSegments.clear();
+        segmentationGroupState.segmentEquivalences.clear();
         graph.branchId.value = newId;
       } else {
         watchBranchUntilActive(
