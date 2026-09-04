@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   branchOptions,
+  clearSegmentSelection,
   defaultParentForNewBranch,
   diffUrl,
   MAIN_BRANCH_ID,
@@ -158,14 +159,7 @@ export function CalcadaBranchPicker({
     const targetBranch = branches.find((branch) => branch.id === parsed);
     if (targetBranch !== undefined && targetBranch.status === "creating")
       return;
-    // Drop selected segments synchronously before switching — the
-    // branchId.changed listener also clears, but doing it here too
-    // suppresses the "Could not fetch root: piece not found" spam
-    // that would otherwise fire from any in-flight selectedSegments
-    // changes referencing pieces local to the previous branch.
-    segmentationGroupState.selectedSegments.clear();
-    segmentationGroupState.visibleSegments.clear();
-    segmentationGroupState.segmentEquivalences.clear();
+    clearSegmentSelection(segmentationGroupState);
     branchId.value = parsed;
   };
 
@@ -247,13 +241,7 @@ export function CalcadaBranchPicker({
         );
       }
       if (newStatus === "active") {
-        // See onBranchChange: clear synchronously here too, to suppress
-        // "Could not fetch root: piece not found" spam from in-flight
-        // selectedSegments changes referencing pieces local to the
-        // previous branch.
-        segmentationGroupState.selectedSegments.clear();
-        segmentationGroupState.visibleSegments.clear();
-        segmentationGroupState.segmentEquivalences.clear();
+        clearSegmentSelection(segmentationGroupState);
         graph.branchId.value = newId;
       } else {
         watchBranchUntilActive(

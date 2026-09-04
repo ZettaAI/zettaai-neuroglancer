@@ -12,6 +12,7 @@ import type {
   CalcadaBranch,
   CalcadaGraphSource,
 } from "#src/datasource/calcada/frontend.js";
+import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
 
@@ -86,6 +87,19 @@ export async function pollBranchCreate(
 
 export function defaultParentForNewBranch(graph: CalcadaGraphSource): number {
   return graph.branchId.value;
+}
+
+// Drop selected segments synchronously before switching branches — the
+// branchId.changed listener also clears, but doing it here too suppresses the
+// "Could not fetch root: piece not found" spam that would otherwise fire from
+// any in-flight selectedSegments changes referencing pieces local to the
+// previous branch.
+export function clearSegmentSelection(
+  segmentationGroupState: SegmentationUserLayerGroupState,
+) {
+  segmentationGroupState.selectedSegments.clear();
+  segmentationGroupState.visibleSegments.clear();
+  segmentationGroupState.segmentEquivalences.clear();
 }
 
 export function watchBranchUntilActive(
