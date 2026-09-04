@@ -280,6 +280,11 @@ function vec4FromVec3(vec: vec3, alpha = 0) {
 
 const RED_COLOR = vec3.fromValues(1, 0, 0);
 const BLUE_COLOR = vec3.fromValues(0, 0, 1);
+// Points the split placed itself. Near the proofreader's own colours so their
+// side is obvious, but clearly a different kind of mark: they are a consequence
+// of the graph, not a choice, and nothing offers a way to remove one.
+const ARTIFICIAL_RED_COLOR = vec3.fromValues(1, 0.55, 0.15);
+const ARTIFICIAL_BLUE_COLOR = vec3.fromValues(0.3, 0.8, 1);
 const GREEN_COLOR = vec3.fromValues(0, 1, 0);
 const RED_COLOR_SEGMENT = vec4FromVec3(RED_COLOR, 0.5);
 const BLUE_COLOR_SEGMENT = vec4FromVec3(BLUE_COLOR, 0.5);
@@ -1890,6 +1895,9 @@ interface PointEntry {
   // nearest in-piece voxel).
   pieceId: bigint;
   origin: "2d" | "3d";
+  // Set only on points the split placed itself, naming the side it put them on.
+  // Absent on a point the proofreader placed.
+  artificialColor?: "blue" | "red";
 }
 
 const PIECE_SPLIT_BLUE_KEY = "blue";
@@ -1918,6 +1926,10 @@ class PieceSplitState extends RefCounted implements Trackable {
   // only: it is a way of working, not part of the cut being described, and a
   // saved state that reopened in advanced mode would surprise.
   advanced = new WatchableValue<boolean>(false);
+  // Points the last step placed. Session only and never serialised: they are
+  // derived from the graph, so a saved state that restored them could restore
+  // points the graph no longer justifies.
+  artificialPoints = new WatchableValue<PointEntry[]>([]);
 
   constructor() {
     super();
@@ -1927,12 +1939,14 @@ class PieceSplitState extends RefCounted implements Trackable {
     this.registerDisposer(this.redPoints.changed.add(reemit));
     this.registerDisposer(this.useImage.changed.add(reemit));
     this.registerDisposer(this.advanced.changed.add(reemit));
+    this.registerDisposer(this.artificialPoints.changed.add(reemit));
   }
 
   reset() {
     this.blueGroup.value = true;
     this.bluePoints.value = [];
     this.redPoints.value = [];
+    this.artificialPoints.value = [];
   }
 
   swapGroup() {
@@ -3765,6 +3779,18 @@ void main() {
       "pieceSplitRed",
       RED_COLOR,
     );
+    const pieceSplitAutoBlueAnnotation = makeColoredAnnotationState(
+      layer,
+      loadedSubsource,
+      "pieceSplitAutoBlue",
+      ARTIFICIAL_BLUE_COLOR,
+    );
+    const pieceSplitAutoRedAnnotation = makeColoredAnnotationState(
+      layer,
+      loadedSubsource,
+      "pieceSplitAutoRed",
+      ARTIFICIAL_RED_COLOR,
+    );
     // Default marker rendering uses size=5px which is barely visible when the
     // viewer is zoomed in close to a slice — and the cross-section fade in
     // slice view further drops the alpha. Bump the size, force opaque interior,
@@ -3781,6 +3807,21 @@ void main() {
       PIECE_SPLIT_POINT_SHADER;
     pieceSplitRedAnnotation.displayState.shader.value =
       PIECE_SPLIT_POINT_SHADER;
+    // Smaller, with a dark border rather than a white one: the split's own
+    // marks read as a different kind of thing at a glance without having to be
+    // a colour nobody associates with a side.
+    const PIECE_SPLIT_AUTO_POINT_SHADER = `
+void main() {
+  setPointMarkerSize(13.0);
+  setPointMarkerBorderWidth(2.0);
+  setColor(vec4(defaultColor(), 1.0));
+  setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
+}
+`;
+    pieceSplitAutoBlueAnnotation.displayState.shader.value =
+      PIECE_SPLIT_AUTO_POINT_SHADER;
+    pieceSplitAutoRedAnnotation.displayState.shader.value =
+      PIECE_SPLIT_AUTO_POINT_SHADER;
     // The markers describe a cut in progress, so they are drawn only while the
     // Cut tool is open. The points themselves outlive the tool — reopening it
     // restores them — but leaving them on screen makes the viewer look like it
@@ -3822,6 +3863,22 @@ void main() {
         ),
       ),
     );
+    // The split's own points are drawn from the same list, split by the colour
+    // the server gave each one.
+    const syncArtificialAnnotations = () => {
+      const placed = pieceSplitState.artificialPoints.value;
+      syncPieceSplitAnnotations(
+        placed.filter((p) => p.artificialColor === "blue"),
+        pieceSplitAutoBlueAnnotation,
+      );
+      syncPieceSplitAnnotations(
+        placed.filter((p) => p.artificialColor === "red"),
+        pieceSplitAutoRedAnnotation,
+      );
+    };
+    this.registerDisposer(
+      pieceSplitState.artificialPoints.changed.add(syncArtificialAnnotations),
+    );
     const syncBothPieceSplitAnnotations = () => {
       syncPieceSplitAnnotations(
         pieceSplitState.bluePoints.value,
@@ -3831,6 +3888,7 @@ void main() {
         pieceSplitState.redPoints.value,
         pieceSplitRedAnnotation,
       );
+      syncArtificialAnnotations();
     };
     this.registerDisposer(
       pieceSplitState.active.changed.add(syncBothPieceSplitAnnotations),
@@ -5360,6 +5418,11 @@ class CalcadaGraphServerInterface {
     components: bigint[][];
     canContinue: boolean;
     canStepBack: boolean;
+    artificialPoints: {
+      color: "blue" | "red";
+      pieceId: bigint;
+      voxel: [number, number, number];
+    }[];
   }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     const body: Record<string, unknown> = { stop_after: stopAfter };
@@ -5397,6 +5460,19 @@ class CalcadaGraphServerInterface {
       components: comps.map((c) => c.map((x) => parseUint64(x))),
       canContinue: Boolean(jsonResp.can_continue),
       canStepBack: Boolean(jsonResp.can_step_back),
+      artificialPoints: (jsonResp.artificial_points ?? []).map(
+        (p: {
+          color: string;
+          piece_id: string;
+          x: number;
+          y: number;
+          z: number;
+        }) => ({
+          color: p.color === "red" ? ("red" as const) : ("blue" as const),
+          pieceId: parseUint64(p.piece_id),
+          voxel: [p.x, p.y, p.z] as [number, number, number],
+        }),
+      ),
     };
   }
 
@@ -7358,6 +7434,20 @@ async function wrapCalcadaError(e: unknown): Promise<Error> {
 // voxel coordinates using the graph's resolution. Both arrays are expected
 // to be in the conventional (x, y, z) order. The conversion truncates toward
 // zero — matching the integer-division semantics the merge handler documents.
+// voxelToLayerPoint is the inverse of layerPointToVoxel: the server answers in
+// voxels and the annotation layer draws in layer space.
+function voxelToLayerPoint(
+  voxel: VoxelPoint,
+  annotationToNanometers: Float64Array,
+  graphResolution: [number, number, number],
+): [number, number, number] {
+  return [
+    (voxel[0] * graphResolution[0]) / annotationToNanometers[0],
+    (voxel[1] * graphResolution[1]) / annotationToNanometers[1],
+    (voxel[2] * graphResolution[2]) / annotationToNanometers[2],
+  ];
+}
+
 function layerPointToVoxel(
   layerPoint: Float32Array,
   annotationToNanometers: Float64Array,
@@ -7721,6 +7811,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const dropStepSession = () => {
       if (stepSession === undefined) return;
       stepSession = undefined;
+      // The placed points described the old session's graph, so they no longer
+      // say anything true about what will be cut.
+      pieceSplitState.artificialPoints.value = [];
       stageStatus.textContent = "";
       renderStages();
     };
@@ -7955,6 +8048,29 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
               },
         );
         stepSession = { id: result.sessionId, reached: result.stage };
+        // The split's own points, drawn so a proofreader can see why a piece
+        // they never marked is going to be cut.
+        const loadedSubsource = getGraphLoadedSubsource(layer)!;
+        const annotationToNanometers = new Float64Array(
+          loadedSubsource.loadedDataSource.transform.inputSpace.value.scales.map(
+            (x: number) => x / 1e-9,
+          ),
+        );
+        const graphResolution = graphConnection.graph.info.scales[0]
+          .resolution as unknown as [number, number, number];
+        pieceSplitState.artificialPoints.value = result.artificialPoints.map(
+          (p) => ({
+            voxel: p.voxel,
+            layer: voxelToLayerPoint(
+              p.voxel,
+              annotationToNanometers,
+              graphResolution,
+            ),
+            pieceId: p.pieceId,
+            origin: "3d" as const,
+            artificialColor: p.color,
+          }),
+        );
         const sizes = result.components.map((c) => c.length).join(" / ");
         stageStatus.textContent =
           `${stageSummary(result.stage, result.round)}: ` +

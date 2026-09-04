@@ -7,57 +7,45 @@ import {
 } from "#src/datasource/calcada/split_steps.js";
 
 describe("SPLIT_STAGES", () => {
-  // Sergiy asked for four buttons; there are five stages and the fourth can
-  // fire several times. The model has to say so or the panel misleads.
-  it("names five stages and marks the repeating one", () => {
-    expect(SPLIT_STAGES).toHaveLength(5);
-    expect(SPLIT_STAGES.filter((s) => s.repeats).map((s) => s.wave)).toEqual([
-      4,
-    ]);
+  it("names the three waves, all of them stopping points", () => {
+    expect(SPLIT_STAGES).toHaveLength(3);
+    expect(stoppableStages()).toHaveLength(3);
+    expect(SPLIT_STAGES.map((s) => s.wave)).toEqual([1, 2, 3]);
   });
 
-  // The carve is not a stopping point: every run performs it, and the server
-  // refuses a stop_after below the first cut.
-  it("offers only the cut stages as stopping points", () => {
-    expect(stoppableStages().map((s) => s.wave)).toEqual([2, 3, 4, 5]);
-  });
-
-  it("numbers the stages the way the server does", () => {
-    expect(SPLIT_STAGES.map((s) => s.wave)).toEqual([1, 2, 3, 4, 5]);
+  // Each wave runs once now, so nothing reports a round and the panel never
+  // has to explain a button firing several times.
+  it("marks no wave as repeating", () => {
+    expect(SPLIT_STAGES.some((s) => s.repeats)).toBe(false);
   });
 });
 
 describe("stageAction", () => {
-  it("treats every stage as a step forward before anything has run", () => {
-    expect(stageAction(2, 0)).toBe("advance");
-    expect(stageAction(5, 0)).toBe("advance");
+  it("treats every wave as a step forward before anything has run", () => {
+    expect(stageAction(1, 0)).toBe("advance");
+    expect(stageAction(3, 0)).toBe("advance");
   });
 
-  it("calls a stage behind the one reached a rewind", () => {
-    expect(stageAction(2, 4)).toBe("rewind");
+  it("calls a wave behind the one reached a rewind", () => {
+    expect(stageAction(1, 3)).toBe("rewind");
   });
 
-  it("calls the stage reached the current one", () => {
-    expect(stageAction(3, 3)).toBe("current");
+  it("calls the wave reached the current one", () => {
+    expect(stageAction(2, 2)).toBe("current");
   });
 
-  it("calls a stage past the one reached a step forward", () => {
-    expect(stageAction(5, 3)).toBe("advance");
+  it("calls a wave past the one reached a step forward", () => {
+    expect(stageAction(3, 2)).toBe("advance");
   });
 });
 
 describe("stageSummary", () => {
-  // "Recover" firing three times otherwise looks like the panel is stuck.
-  it("reports the round for the stage that repeats", () => {
-    expect(stageSummary(4, 0)).toBe("Recover");
-    expect(stageSummary(4, 2)).toBe("Recover (round 3)");
+  it("names a wave without a round, since none repeats", () => {
+    expect(stageSummary(1, 0)).toBe("Points");
+    expect(stageSummary(3, 2)).toBe("Cut");
   });
 
-  it("leaves a stage that runs once without a round", () => {
-    expect(stageSummary(3, 2)).toBe("Pinned");
-  });
-
-  it("falls back to the number for a stage it does not know", () => {
+  it("falls back to the number for a wave it does not know", () => {
     expect(stageSummary(9, 0)).toBe("Stage 9");
   });
 });

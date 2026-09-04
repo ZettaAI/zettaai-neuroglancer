@@ -1,10 +1,8 @@
 /**
- * The stages of a general split, as the advanced-mode panel presents them.
+ * The waves of a general split, as the advanced-mode panel presents them.
  *
- * The server runs five, not the four a proofreader sees described, and the
- * fourth can fire several times on one request. Keeping that model here, free
- * of any neuroglancer state, is what lets it be tested directly and stops the
- * panel inventing its own numbering.
+ * Keeping the model here, free of any neuroglancer state, is what lets it be
+ * tested directly and stops the panel inventing its own numbering.
  */
 
 export interface SplitStage {
@@ -14,50 +12,31 @@ export interface SplitStage {
   title: string;
   /** Whether the server may run this stage more than once in one request. */
   repeats: boolean;
-  /**
-   * Whether a request can be told to stop after this stage. The voxel carve is
-   * not optional — every run performs it — so it is shown but never offered as
-   * a stopping point.
-   */
+  /** Whether a request can be told to stop after this wave. All of them can. */
   stoppable: boolean;
 }
 
 export const SPLIT_STAGES: SplitStage[] = [
   {
     wave: 1,
-    label: "Carve",
+    label: "Points",
     title:
-      "Splits the pieces the points landed on. Always runs; it is what the later stages work on.",
+      "Marks the pieces both colours have to run through, placing points in them. Nothing is cut yet.",
     repeats: false,
-    stoppable: false,
+    stoppable: true,
   },
   {
     wave: 2,
-    label: "Cut",
-    title: "The plain multicut, with nothing pinned.",
+    label: "Carve",
+    title:
+      "Splits every piece holding points of both colours, the ones you placed and the ones step 1 added.",
     repeats: false,
     stoppable: true,
   },
   {
     wave: 3,
-    label: "Pinned",
-    title:
-      "The multicut again, with pieces only one side needs forced onto that side.",
-    repeats: false,
-    stoppable: true,
-  },
-  {
-    wave: 4,
-    label: "Recover",
-    title:
-      "Carves the pieces both sides need, or the pieces standing between the points. Can run several times.",
-    repeats: true,
-    stoppable: true,
-  },
-  {
-    wave: 5,
-    label: "Final",
-    title: "The multicut after the recovery carve.",
+    label: "Cut",
+    title: "The multicut over the carved graph.",
     repeats: false,
     stoppable: true,
   },
