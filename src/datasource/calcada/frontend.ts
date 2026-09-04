@@ -280,11 +280,11 @@ function vec4FromVec3(vec: vec3, alpha = 0) {
 
 const RED_COLOR = vec3.fromValues(1, 0, 0);
 const BLUE_COLOR = vec3.fromValues(0, 0, 1);
-// Points the split placed itself. Near the proofreader's own colours so their
-// side is obvious, but clearly a different kind of mark: they are a consequence
-// of the graph, not a choice, and nothing offers a way to remove one.
-const ARTIFICIAL_RED_COLOR = vec3.fromValues(1, 0.55, 0.15);
-const ARTIFICIAL_BLUE_COLOR = vec3.fromValues(0.3, 0.8, 1);
+// Points the split placed itself. Still plainly the colour of their side — a
+// lighter blue and a lighter red — because the side is the thing a proofreader
+// reads off them; the dark border is what says the split placed it.
+const ARTIFICIAL_RED_COLOR = vec3.fromValues(1, 0.45, 0.5);
+const ARTIFICIAL_BLUE_COLOR = vec3.fromValues(0.45, 0.55, 1);
 const GREEN_COLOR = vec3.fromValues(0, 1, 0);
 const RED_COLOR_SEGMENT = vec4FromVec3(RED_COLOR, 0.5);
 const BLUE_COLOR_SEGMENT = vec4FromVec3(BLUE_COLOR, 0.5);
@@ -3807,13 +3807,14 @@ void main() {
       PIECE_SPLIT_POINT_SHADER;
     pieceSplitRedAnnotation.displayState.shader.value =
       PIECE_SPLIT_POINT_SHADER;
-    // Smaller, with a dark border rather than a white one: the split's own
-    // marks read as a different kind of thing at a glance without having to be
-    // a colour nobody associates with a side.
+    // Same size as the proofreader's own marks, told apart by a dark border
+    // instead. These sit at contacts *between* pieces, so they are deeper inside
+    // the mesh than a point somebody clicked on a surface; making them smaller
+    // as well would only make that worse.
     const PIECE_SPLIT_AUTO_POINT_SHADER = `
 void main() {
-  setPointMarkerSize(13.0);
-  setPointMarkerBorderWidth(2.0);
+  setPointMarkerSize(20.0);
+  setPointMarkerBorderWidth(4.0);
   setColor(vec4(defaultColor(), 1.0));
   setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
 }
