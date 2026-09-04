@@ -7605,6 +7605,18 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // would also stop a double-click from ever hiding it. Drop them instead —
     // on entry, so reopening the tool after deselecting starts clean, and while
     // open, so hiding the segment takes effect immediately.
+    // What step 2 wrote, which step 3 cuts. Client-side because each step is
+    // its own committed edit: there is no session on the server to hold it.
+    let carved:
+      | {
+          sources: bigint[];
+          sinks: bigint[];
+          branchId: number;
+          rootId?: bigint;
+        }
+      | undefined;
+    let stepStage = 0;
+
     const dropPointsIfFocusGone = () => {
       // A carve that has run supersedes the very pieces the points name, so the
       // focus stops resolving. Dropping them then would throw away the split
@@ -7712,17 +7724,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     stageStatus.className = "piece-split-focus";
     body.appendChild(stageStatus);
 
-    // What step 2 wrote, which step 3 cuts. Client-side because each step is
-    // its own committed edit: there is no session on the server to hold it.
-    let carved:
-      | {
-          sources: bigint[];
-          sinks: bigint[];
-          branchId: number;
-          rootId?: bigint;
-        }
-      | undefined;
-    let stepStage = 0;
     const stageButtons = stoppableStages().map((stage) => {
       const button = makeIcon({
         text: `${stage.wave}. ${stage.label}`,
