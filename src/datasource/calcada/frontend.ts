@@ -8151,8 +8151,14 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         }
         refreshDebugOverlay();
         carved = undefined;
-        stepStage = 0;
-        pieceSplitState.reset();
+        stepStage = 3;
+        // Advanced mode keeps the points on screen after the cut: they are the
+        // record of what was asked for, and the whole reason to step is to see
+        // what each stage did to them. Clear is one keystroke away.
+        if (!pieceSplitState.advanced.value) {
+          pieceSplitState.reset();
+        }
+        renderStages();
         stageStatus.textContent = `Separated into ${newRoots.length} root(s). Ctrl+Z undoes the cut, again undoes the carve.`;
       } catch (e: unknown) {
         stageStatus.textContent = `Step 3 failed: ${e instanceof Error ? e.message : String(e)}`;
