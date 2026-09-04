@@ -6072,6 +6072,7 @@ const timeControl = {
   label: "Time",
   title: TIMESTAMP_CONTROL_TITLE,
   toolJson: CALCADA_TIME_JSON_KEY,
+  noImplicitLabel: true,
   ...timeLayerControl(),
 };
 
