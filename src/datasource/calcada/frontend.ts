@@ -8037,9 +8037,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       if (points === undefined) return;
       setBusy(true);
       const branchId = graphConnection.graph.branchId.value;
-      const rootId = currentFocusRoot();
+      const focus = currentFocusRoot();
       try {
-        const { roots, operationId, splitPieces } =
+        const { roots, components, operationId, splitPieces } =
           await graphConnection.graph.graphServer.generalSplit(
             points,
             branchId,
@@ -8064,15 +8064,30 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         for (const p of pieceSplitState.redPoints.value) {
           if (!wasSplit.has(p.pieceId)) sinks.add(p.pieceId);
         }
+        const newRoots = roots.filter((root) => root !== 0n);
         carved = {
           sources: [...sources],
           sinks: [...sinks],
           branchId,
-          rootId,
+          // The carve keeps the segment whole, so it reports exactly one root.
+          // Hold it: the old one is superseded, and asking Debug about a root
+          // that no longer has pieces is a 404 rather than a graph.
+          rootId: newRoots.length === 1 ? newRoots[0] : undefined,
         };
         stepStage = 2;
-        const newRoots = roots.filter((root) => root !== 0n);
-        graphConnection.meshAddNewSegments(newRoots);
+        if (newRoots.length > 0 && focus !== undefined) {
+          // The segment stays whole but its pieces changed, so the piece to
+          // root mapping is stale. The response carries the new root's complete
+          // piece list, which is authoritative where the local reconstruction
+          // is only as fresh as the last chunk fetch.
+          graphConnection.updateAfterSplit(focus, newRoots, components);
+          graphConnection.meshAddNewSegments(newRoots);
+          const oldRootSet = new Uint64Set();
+          oldRootSet.add(focus);
+          const newRootSet = new Uint64Set();
+          newRootSet.add(newRoots);
+          graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
+        }
         refreshDebugOverlay();
         stageStatus.textContent = `Carved ${splitPieces.length} piece(s). Written — press 3 to cut, or Ctrl+Z to undo.`;
       } catch (e: unknown) {
