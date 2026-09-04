@@ -40,23 +40,28 @@ export function TruncatedLabel({
   const labelRef = useRef<HTMLSpanElement>(null);
   const [truncated, setTruncated] = useState(false);
 
+  const measure = () => {
+    const label = labelRef.current;
+    if (label === null) return;
+    setTruncated(label.scrollWidth - label.clientWidth > OVERFLOW_TOLERANCE_PX);
+  };
+
   // Layout effect, not a passive one: the measurement decides whether the
   // tooltip exists at all, so it has to land before the label is painted and
   // can be hovered.
   useLayoutEffect(() => {
     const label = labelRef.current;
     if (label === null) return;
-    const measure = () =>
-      setTruncated(
-        label.scrollWidth - label.clientWidth > OVERFLOW_TOLERANCE_PX,
-      );
-    measure();
     // The row can be resized by the panel, and an option in a closed dropdown
-    // has no width to measure until it is shown.
+    // has no width to measure until it is shown. This observer's lifecycle
+    // doesn't depend on the text — only re-measuring below does — so it is
+    // created once instead of on every text change.
     const observer = new ResizeObserver(measure);
     observer.observe(label);
     return () => observer.disconnect();
-  }, [text]);
+  }, []);
+
+  useLayoutEffect(measure, [text]);
 
   return (
     <Tooltip>
