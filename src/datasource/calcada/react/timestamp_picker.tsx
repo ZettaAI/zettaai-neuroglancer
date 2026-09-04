@@ -88,10 +88,15 @@ export function CalcadaTimestampPicker({
           )}
         >
           <CalendarIcon />
-          <span className="truncate">
+          <span
+            className={cn(
+              "truncate",
+              selected === undefined && "text-muted-foreground",
+            )}
+          >
             {selected === undefined
-              ? ""
-              : format(selected, "yyyy-MM-dd HH:mm:ss")}
+              ? "yyyy-MM-dd"
+              : format(selected, "yyyy-MM-dd")}
           </span>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-0" align="start">

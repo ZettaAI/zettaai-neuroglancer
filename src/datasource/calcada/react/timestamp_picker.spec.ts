@@ -85,9 +85,9 @@ function typeTime(value: string) {
 }
 
 describe("CalcadaTimestampPicker", () => {
-  it("shows no date while no timestamp is set", () => {
+  it("shows the date format placeholder while no timestamp is set", () => {
     mount();
-    expect(trigger().textContent).toBe("");
+    expect(trigger().textContent).toBe("yyyy-MM-dd");
     expect(timeField().value).toBe("");
     expect(clearButton().disabled).toBe(true);
   });
@@ -95,7 +95,7 @@ describe("CalcadaTimestampPicker", () => {
   it("summarizes the pending timestamp on the trigger", () => {
     intermediateTimestamp.value = WITHIN_RANGE;
     mount();
-    expect(trigger().textContent).toContain("2026-06-15 14:30:00");
+    expect(trigger().textContent).toContain("2026-06-15");
     expect(timeField().value).toBe("14:30:00");
   });
 
@@ -104,7 +104,7 @@ describe("CalcadaTimestampPicker", () => {
     act(() => {
       intermediateTimestamp.value = WITHIN_RANGE;
     });
-    expect(trigger().textContent).toContain("2026-06-15 14:30:00");
+    expect(trigger().textContent).toContain("2026-06-15");
   });
 
   it("applies a new time of day without moving the date", () => {
@@ -137,7 +137,7 @@ describe("CalcadaTimestampPicker", () => {
       clearButton().click();
     });
     expect(intermediateTimestamp.value).toBeUndefined();
-    expect(trigger().textContent).toBe("");
+    expect(trigger().textContent).toBe("yyyy-MM-dd");
   });
 
   it("opens a calendar limited to the selectable range", () => {
