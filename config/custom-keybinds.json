@@ -24,18 +24,8 @@
     "layer": "segmentation",
     "tool": "calcadaPieceSplit"
   },
-  "keyt": {
-    "layer": "segmentation",
-    "tool": {
-      "calcada": "calcadaZettaTrace"
-    }
-  },
-  "keyd": {
-    "layer": "segmentation",
-    "tool": {
-      "calcada": "calcadaDebug"
-    }
-  },
+  "keyt": "calcada-toggle-zetta-trace",
+  "keyd": "calcada-toggle-debug-mode",
   "keyx": false,
   "control+shift+keyx": "clear-segments",
   "bracketleft": "select-previous",
