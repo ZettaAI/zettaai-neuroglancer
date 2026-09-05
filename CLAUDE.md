@@ -51,6 +51,11 @@ npm run e2e / npm run perf  # Playwright; rebuilds the bundle + regenerates fixt
 - Relative imports (`./`, `../`) are banned in `src/` (ESLint-enforced). Use the
   `#src/...` aliases from package.json `imports`.
 - Type-only imports must use `import type` (enforced).
+- `@/...` also resolves to `src/` (`tsconfig.json` paths, `rspack.config.js`
+  `resolve.alias`, `vitest.workspace.ts`), but only because the shadcn CLI emits it.
+  Use it solely to reach the vendored shadcn tree (`@/components/ui/…`, `@/lib/utils`).
+  Everything else — including the hand-written components that import those — keeps
+  using `#src/...`. Two aliases is already one too many; do not widen `@/`.
 
 ## UI Architecture
 
@@ -111,6 +116,26 @@ to use a banned name.
 Code used by one domain stays in that domain, even if it "feels" generic. Promote only
 when a second consumer actually exists. Logic that belongs to the edit-session domain
 itself goes upstream into `@zettaai/edit-session`, not duplicated here.
+
+### Rule 7: The Only Exceptions
+
+Rules 1-4 hold everywhere except these two trees. Both are deliberate, scoped, and
+temporary-to-shrinking; neither is precedent for anything else.
+
+**Vendored shadcn output** — `src/components/ui/`, `src/lib/`, and `src/hooks/` if a
+later `shadcn add` creates it. The CLI hardcodes these paths in `components.json` and
+rewrites the files it owns on every `add`, so renaming them forks the components off
+their update path. Treat the tree as vendored: take CLI output as-is and keep
+hand-written code out of it. `src/lib/ui_scope.ts` is the one hand-written file there,
+and it exists beside `lib/utils.ts` rather than inside it precisely because the CLI
+overwrites `utils.ts`.
+
+**`react/` migration folders** — `src/widget/react/`, `src/datasource/calcada/react/`,
+`src/editing/ui/interop/react/`. Both frameworks must coexist while the UI moves off
+Preact, and the framework really is what distinguishes the two copies of a component.
+These folders end with the last Preact component: each React file then takes the
+domain name its Preact sibling held. `interop/react/` is the exception that stays —
+"bridge to React" is its actual responsibility.
 
 ## Code Quality Rules
 

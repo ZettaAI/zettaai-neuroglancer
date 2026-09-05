@@ -211,27 +211,8 @@
   min-width: 0;
 }
 
-/* Matches .neuroglancer-listbox-dropdown-trigger's look (same --nge-* tokens,
-   border-radius, padding) so the row reads as one control family instead of
-   a picker plus unstyled/ad-hoc buttons. */
 .neuroglancer-calcada-branch-new {
   align-self: flex-start;
-  background-color: var(--nge-overlay-bg-elev, #232323);
-  color: var(--nge-text, #e5e7eb);
-  border: 1px solid var(--nge-overlay-border, #3a3a3a);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font: inherit;
-  cursor: pointer;
-}
-
-.neuroglancer-calcada-branch-new:hover {
-  border-color: var(--nge-accent, #3b82f6);
-}
-
-.neuroglancer-calcada-branch-new:focus-visible {
-  outline: 2px solid var(--nge-accent, #3b82f6);
-  outline-offset: 1px;
 }
 
 .neuroglancer-calcada-branch-create-form {
@@ -246,46 +227,12 @@
   min-width: 0;
 }
 
-.neuroglancer-calcada-branch-create-form input[name="branch_name"] {
-  flex: 1 1 auto;
-  min-width: 0;
-  box-sizing: border-box;
-  background-color: var(--nge-overlay-bg-elev, #232323);
-  color: var(--nge-text, #e5e7eb);
-  border: 1px solid var(--nge-overlay-border, #3a3a3a);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font: inherit;
-}
-
-.neuroglancer-calcada-branch-create-form input[name="branch_name"]:focus {
-  outline: none;
-  border-color: var(--nge-accent, #3b82f6);
-}
-
-.neuroglancer-calcada-branch-create-form button[type="submit"] {
-  background-color: var(--nge-overlay-bg-elev, #232323);
-  color: var(--nge-text, #e5e7eb);
-  border: 1px solid var(--nge-overlay-border, #3a3a3a);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font: inherit;
-  cursor: pointer;
-}
-
-.neuroglancer-calcada-branch-create-form
-  button[type="submit"]:hover:not(:disabled) {
-  border-color: var(--nge-accent, #3b82f6);
-}
-
-.neuroglancer-calcada-branch-create-form button[type="submit"]:focus-visible {
-  outline: 2px solid var(--nge-accent, #3b82f6);
-  outline-offset: 1px;
-}
-
-.neuroglancer-calcada-branch-create-form button[type="submit"]:disabled {
-  cursor: default;
-  opacity: 0.5;
+/* The "from" picker and the error each take a row of their own, leaving the
+   name input and Create button the row between them: the panel is too narrow
+   to read a branch label and a name field side by side. */
+.neuroglancer-calcada-branch-create-form > .neuroglancer-calcada-branch-select,
+.neuroglancer-calcada-branch-create-form > .branch-create-error {
+  flex-basis: 100%;
 }
 
 .neuroglancer-layer-control-container:has(
@@ -296,23 +243,21 @@
 
 .neuroglancer-calcada-branch-control .calcada-open-diff {
   white-space: nowrap;
-  padding: 6px 10px;
-  border: 1px solid var(--nge-overlay-border, #3a3a3a);
-  border-radius: 4px;
-  background-color: var(--nge-overlay-bg-elev, #232323);
-  color: var(--nge-text, #e5e7eb);
-  text-decoration: none;
-  cursor: pointer;
-  font-size: inherit;
 }
 
-.neuroglancer-calcada-branch-control .calcada-open-diff:hover {
-  border-color: var(--nge-accent, #3b82f6);
+.neuroglancer-calcada-labeled-timestamp-select {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.neuroglancer-calcada-branch-control .calcada-open-diff:focus-visible {
-  outline: 2px solid var(--nge-accent, #3b82f6);
-  outline-offset: 1px;
+/* Calendar button / time field / clear button on one row, the calendar button
+   absorbing the spare width so the fixed-width time field never shrinks. */
+.neuroglancer-calcada-timestamp-picker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .piece-split-debug-pieces {

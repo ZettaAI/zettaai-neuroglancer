@@ -1,3 +1,4 @@
+/** @jsxImportSource react */
 /**
  * @license
  * Copyright 2026 Calcada AI / Zetta AI
@@ -12,11 +13,17 @@ import type {
   CalcadaGraphSource,
   CalcadaLabeledTimestamp,
 } from "#src/datasource/calcada/frontend.js";
-import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
+import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
-import { ListboxDropdown } from "#src/widget/listbox_dropdown.js";
+import { TruncatedLabel } from "#src/widget/react/truncated_label.js";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select";
 
 export const LABELED_TIMESTAMP_CONTROL_TITLE =
   "Labeled timestamps for the current branch. Selecting one switches the view to that point in time (read-only).";
@@ -43,9 +50,9 @@ function labelOptions(
 
 /**
  * The Calcada "Label" layer control: switches the view to a labeled
- * timestamp (read-only) or back to "— live —". Not filterable — label lists
- * are short compared to branch lists, so a search box would be pure
- * overhead.
+ * timestamp (read-only) or back to "— live —". A plain select rather than a
+ * searchable combobox — label lists are short compared to branch lists, so a
+ * search box would be pure overhead.
  */
 export function CalcadaLabeledTimestampPicker({
   graph,
@@ -63,23 +70,37 @@ export function CalcadaLabeledTimestampPicker({
   const match = labels.find((entry) => entry.timestampMs === currentTimestamp);
   const value = match ? String(match.timestampMs) : LIVE_VALUE;
 
-  const onChange = (key: string) => {
-    intermediateTimestamp.value =
-      key === LIVE_VALUE ? undefined : Number.parseInt(key, 10);
-  };
+  const items = options.map((option) => ({
+    value: option.key,
+    label: option.label,
+  }));
 
   return (
-    <span
-      class="neuroglancer-calcada-labeled-timestamp-select"
-      title={LABELED_TIMESTAMP_CONTROL_TITLE}
-    >
-      <ListboxDropdown
-        options={options}
+    <span className="neuroglancer-calcada-labeled-timestamp-select">
+      <Select
+        items={items}
         value={value}
-        onChange={onChange}
-        onOpen={() => graph?.triggerLabeledTimestampRefresh()}
-        ariaLabel="Label"
-      />
+        onValueChange={(key: string) => {
+          intermediateTimestamp.value =
+            key === LIVE_VALUE ? undefined : Number.parseInt(key, 10);
+        }}
+        onOpenChange={(open: boolean) => {
+          if (open) graph?.triggerLabeledTimestampRefresh();
+        }}
+      >
+        <SelectTrigger aria-label="Label" className="w-full min-w-0">
+          <TruncatedLabel
+            text={items.find((item) => item.value === value)?.label ?? ""}
+          />
+        </SelectTrigger>
+        <SelectContent>
+          {items.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              <TruncatedLabel text={item.label} />
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </span>
   );
 }

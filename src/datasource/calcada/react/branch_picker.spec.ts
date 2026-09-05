@@ -8,20 +8,23 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { h, render } from "preact";
-import { act } from "preact/test-utils";
+import { act, createElement } from "react";
+import type { Root } from "react-dom/client";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  branchOptions,
-  CalcadaBranchPicker,
-} from "#src/datasource/calcada/branch_picker.js";
 import type {
   CalcadaBranch,
   CalcadaGraphSource,
 } from "#src/datasource/calcada/frontend.js";
+import {
+  branchOptions,
+  CalcadaBranchPicker,
+} from "#src/datasource/calcada/react/branch_picker.js";
 import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import { TrackableValue, WatchableValue } from "#src/trackable_value.js";
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const BRANCHES: CalcadaBranch[] = [
   { id: 1, name: "feature", status: "active", parentId: 0 },
@@ -77,35 +80,36 @@ function makeHarness(initialBranchId = 0): Harness {
 }
 
 let container: HTMLDivElement;
+let root: Root;
 
 beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
+  root = createRoot(container);
 });
 
 afterEach(() => {
   act(() => {
-    render(null, container);
+    root.unmount();
   });
   container.remove();
 });
 
 function mount(harness: Harness) {
   act(() => {
-    render(
-      h(CalcadaBranchPicker, {
+    root.render(
+      createElement(CalcadaBranchPicker, {
         graph: harness.graph,
         branchId: harness.branchId,
         segmentationGroupState: harness.segmentationGroupState,
       }),
-      container,
     );
   });
 }
 
-function openPanel() {
-  const trigger = container.querySelector<HTMLButtonElement>(
-    ".neuroglancer-listbox-dropdown-trigger",
+function openPanel(scope: HTMLElement = container) {
+  const trigger = scope.querySelector<HTMLButtonElement>(
+    '[data-slot="combobox-trigger"]',
   )!;
   act(() => {
     trigger.click();
@@ -114,14 +118,25 @@ function openPanel() {
 
 function optionElements(): HTMLElement[] {
   return [
-    ...document.querySelectorAll<HTMLElement>(
-      ".neuroglancer-listbox-dropdown-option",
-    ),
+    ...document.querySelectorAll<HTMLElement>('[data-slot="combobox-item"]'),
   ];
 }
 
 function optionLabels(): string[] {
   return optionElements().map((el) => el.textContent ?? "");
+}
+
+// React's value tracker swallows plain `input.value = x`; use the prototype setter.
+const nativeInputValue = Object.getOwnPropertyDescriptor(
+  HTMLInputElement.prototype,
+  "value",
+)!.set!;
+
+function typeQuery(input: HTMLInputElement, value: string) {
+  act(() => {
+    nativeInputValue.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 
 describe("branchOptions", () => {
@@ -161,6 +176,22 @@ describe("branchOptions", () => {
     ];
     expect(branchOptions(orphan, 0)[1].label).toBe("orphan ← #42");
   });
+
+  it("stands in for a selected branch the list has not loaded yet", () => {
+    expect(branchOptions([], 50)).toEqual([
+      { key: "0", label: "main" },
+      { key: "50", label: "#50" },
+    ]);
+  });
+
+  it("drops the stand-in once the real branch arrives", () => {
+    expect(branchOptions(BRANCHES, 1).map((option) => option.label)).toEqual([
+      "main",
+      "feature",
+      "child ← feature",
+      "copying (creating…)",
+    ]);
+  });
 });
 
 describe("CalcadaBranchPicker", () => {
@@ -168,9 +199,22 @@ describe("CalcadaBranchPicker", () => {
     const harness = makeHarness(2);
     mount(harness);
     expect(
-      container.querySelector(".neuroglancer-listbox-dropdown-summary")
-        ?.textContent,
+      container.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("child ← feature");
+  });
+
+  it("names the restored branch before the branch list arrives", () => {
+    const harness = makeHarness(50);
+    harness.branches.value = [];
+    mount(harness);
+    const trigger = container.querySelector('[data-slot="combobox-trigger"]')!;
+    expect(trigger.textContent).toBe("#50");
+    act(() => {
+      harness.branches.value = [
+        { id: 50, name: "dendrite", status: "active", parentId: 0 },
+      ];
+    });
+    expect(trigger.textContent).toBe("dendrite");
   });
 
   it("refreshes the branch list when the panel opens", () => {
@@ -221,17 +265,25 @@ describe("CalcadaBranchPicker", () => {
     expect(optionLabels()).toContain("fresh");
   });
 
+  it("gives every option a single-line label that carries its full text", () => {
+    const harness = makeHarness();
+    mount(harness);
+    openPanel();
+    const labels = optionElements().map((option) =>
+      option.querySelector('[data-slot="tooltip-trigger"]'),
+    );
+    expect(labels.every((label) => label !== null)).toBe(true);
+    expect(labels.map((label) => label!.textContent)).toEqual(optionLabels());
+  });
+
   it("filters the options by substring", () => {
     const harness = makeHarness();
     mount(harness);
     openPanel();
     const search = document.querySelector<HTMLInputElement>(
-      ".neuroglancer-listbox-dropdown-search",
+      '[data-slot="combobox-content"] input',
     )!;
-    act(() => {
-      search.value = "CHI";
-      search.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    typeQuery(search, "CHI");
     expect(optionLabels()).toEqual(["child ← feature"]);
   });
 
@@ -261,7 +313,7 @@ describe("CalcadaBranchPicker", () => {
     });
     expect(form.style.display).toBe("");
     expect(
-      form.querySelector(".neuroglancer-listbox-dropdown-summary")?.textContent,
+      form.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("from: feature");
   });
 
@@ -276,13 +328,7 @@ describe("CalcadaBranchPicker", () => {
     const form = container.querySelector<HTMLElement>(
       ".neuroglancer-calcada-branch-create-form",
     )!;
-    act(() => {
-      form
-        .querySelector<HTMLButtonElement>(
-          ".neuroglancer-listbox-dropdown-trigger",
-        )!
-        .click();
-    });
+    openPanel(form);
     const childOption = optionElements().find(
       (el) => el.textContent === "from: child",
     )!;
@@ -290,7 +336,7 @@ describe("CalcadaBranchPicker", () => {
       childOption.click();
     });
     expect(
-      form.querySelector(".neuroglancer-listbox-dropdown-summary")?.textContent,
+      form.querySelector('[data-slot="combobox-trigger"]')?.textContent,
     ).toBe("from: child");
   });
 });

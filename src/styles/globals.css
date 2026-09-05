@@ -1,0 +1,162 @@
+/*
+ * Copyright 2026 Calcada AI / Zetta AI
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *
+ * Tailwind + shadcn, bridged onto neuroglancer's own chrome.
+ *
+ * Preflight is deliberately NOT imported: its global reset would restyle every
+ * native button, input, and select in neuroglancer's existing UI. The reset
+ * below is the part shadcn's components actually depend on, scoped to
+ * `.nge-ui` so it only reaches subtrees this bridge mounts.
+ *
+ * shadcn's theme variables are mapped to the `--nge-*` design tokens from
+ * `editing_theme.css`, so the components inherit the editing UI's dark palette
+ * instead of shadcn's default light one, and a token change still moves both.
+ */
+
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+/*
+ * `source(none)` turns off Tailwind's automatic source detection. Without it
+ * Tailwind scans (and rspack then watches) every non-gitignored file in the
+ * repo, so writing anything anywhere — editor scratch files, `.omc/` state,
+ * test screenshots — triggers a full rebuild and a live reload.
+ */
+@source "../**/*.{ts,tsx}";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  /* 3.5px steps: shadcn's default control height (h-8) then lands exactly on
+     --nge-control-h (28px) instead of towering over the native rows. */
+  --spacing: 0.21875rem;
+  --font-sans: var(--nge-font);
+  --font-mono: var(--nge-font-mono);
+  --text-xs: var(--nge-text-size-sm);
+  --text-xs--line-height: 1rem;
+  --text-sm: var(--nge-text-size);
+  --text-sm--line-height: 1.125rem;
+  --text-base: 13px;
+  --text-base--line-height: 1.25rem;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-tooltip: var(--tooltip);
+  --color-tooltip-foreground: var(--tooltip-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* One palette, not a light/dark pair: neuroglancer's chrome is dark-only, so
+   the `.dark` selector shadcn's components look for resolves to the same
+   tokens rather than to a second theme nobody can reach. */
+:root,
+.dark {
+  --radius: var(--nge-radius-md);
+  --background: var(--nge-overlay-bg-elev);
+  --foreground: var(--nge-text);
+  --card: var(--nge-overlay-bg);
+  --card-foreground: var(--nge-text);
+  --popover: var(--nge-overlay-bg);
+  --popover-foreground: var(--nge-text);
+  --primary: var(--nge-accent-strong);
+  --primary-foreground: var(--nge-accent-fg);
+  --secondary: var(--nge-control-bg);
+  --secondary-foreground: var(--nge-text);
+  --muted: var(--nge-control-bg-hover);
+  --muted-foreground: var(--nge-text-subtle);
+  --accent: var(--nge-accent-tint);
+  --accent-foreground: var(--nge-text);
+  --destructive: var(--nge-danger);
+  --destructive-foreground: var(--nge-accent-fg);
+  --tooltip: var(--nge-tooltip-bg);
+  --tooltip-foreground: var(--nge-tooltip-fg);
+  --border: var(--nge-border);
+  --input: var(--nge-border-strong);
+  --ring: var(--nge-accent);
+}
+
+@layer base {
+  .nge-ui {
+    font-family: var(--nge-font);
+    font-size: var(--nge-text-size);
+    line-height: 1.5;
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .nge-ui *,
+  .nge-ui ::before,
+  .nge-ui ::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid var(--border);
+    outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
+  }
+
+  .nge-ui :is(button, input, select, textarea) {
+    font: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    background-color: transparent;
+    border-radius: 0;
+  }
+
+  .nge-ui :is(input, textarea)::placeholder {
+    opacity: 1;
+    color: var(--muted-foreground);
+  }
+
+  .nge-ui :is(button, [role="button"]) {
+    cursor: pointer;
+  }
+
+  .nge-ui :is(button, [role="button"]):disabled {
+    cursor: default;
+  }
+
+  .nge-ui :is(img, svg, video, canvas) {
+    display: block;
+    vertical-align: middle;
+  }
+
+  .nge-ui :is(h1, h2, h3, h4, h5, h6) {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+
+  .nge-ui a {
+    color: inherit;
+    text-decoration: inherit;
+  }
+
+  .nge-ui :is(ol, ul, menu) {
+    list-style: none;
+  }
+}

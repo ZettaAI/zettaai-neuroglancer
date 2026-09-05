@@ -86,6 +86,12 @@ export default (env, args) => {
           type: "javascript/auto",
         },
         {
+          test: /\.css$/,
+          include: path.resolve(import.meta.dirname, "src", "styles"),
+          use: ["postcss-loader"],
+          type: "css",
+        },
+        {
           test: /\.wasm$/,
           generator: {
             filename: "[name].[contenthash][ext]",
@@ -107,6 +113,12 @@ export default (env, args) => {
           },
         },
       ],
+    },
+    resolve: {
+      alias: {
+        "@": path.resolve(import.meta.dirname, "src"),
+      },
+      extensions: [".ts", ".tsx", "..."],
     },
     devServer: {
       port: 3008,
@@ -163,8 +175,12 @@ export default (env, args) => {
     ],
     output: {
       path: path.resolve(import.meta.dirname, "dist", "client"),
-      filename: "[name].[chunkhash].js",
-      chunkFilename: "[name].[contenthash].js",
+      // Unhashed in development: the dev server only serves the newest build,
+      // so a name that changes on every rebuild lets a live reload race the
+      // next rebuild and 404 on the bundle its fresh index.html just asked for.
+      filename: mode === "production" ? "[name].[chunkhash].js" : "[name].js",
+      chunkFilename:
+        mode === "production" ? "[name].[contenthash].js" : "[name].js",
       asyncChunks: true,
       clean: true,
     },
@@ -215,7 +231,14 @@ export default (env, args) => {
       // NEUROGLANCER_GOOGLE_TAG_MANAGER: JSON.stringify('GTM-XXXXXX'),
     },
     watchOptions: {
-      ignored: /node_modules/,
+      ignored: [
+        "**/node_modules/**",
+        "**/.git/**",
+        "**/dist/**",
+        "**/.omc/**",
+        "**/__screenshots__/**",
+        "**/test-results/**",
+      ],
     },
   };
   return env.NEUROGLANCER_CLI
