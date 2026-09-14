@@ -87,3 +87,48 @@ export function mergeDebugGraphs(graphs: RootDebugGraph[]): DebugGraph {
     edges: [...edgeByPair.values()],
   };
 }
+
+/** An edge of the debug overlay, drawn between the anchors of its two pieces. */
+export interface DebugEdgeLine {
+  from: [number, number, number];
+  to: [number, number, number];
+  color: number;
+}
+
+/**
+ * The overlay's edge lines, each in the colour of the segment it belongs to,
+ * whatever its affinity. A line joins the two pieces' anchors and nothing else:
+ * edge rows also carry a contact position, but bulk merge stores it divided by
+ * the resolution, so on a merge-heavy graph most of them point far outside the
+ * volume. An edge with an end that has no anchor is only counted.
+ */
+export function debugEdgeLines(
+  graph: DebugGraph,
+  colorOfRoot: (root: bigint) => number,
+  fallbackColor: number,
+): { lines: DebugEdgeLine[]; undrawable: number } {
+  const centerById = new Map(
+    graph.pieces.map((piece) => [piece.id, piece.center] as const),
+  );
+  const rootByPiece = new Map<bigint, bigint>();
+  for (const piece of graph.pieces) {
+    if (piece.root !== undefined) rootByPiece.set(piece.id, piece.root);
+  }
+  const lines: DebugEdgeLine[] = [];
+  let undrawable = 0;
+  for (const edge of graph.edges) {
+    const from = centerById.get(edge.a);
+    const to = centerById.get(edge.b);
+    if (from === undefined || to === undefined) {
+      undrawable++;
+      continue;
+    }
+    const root = rootByPiece.get(edge.a) ?? rootByPiece.get(edge.b);
+    lines.push({
+      from,
+      to,
+      color: root === undefined ? fallbackColor : colorOfRoot(root),
+    });
+  }
+  return { lines, undrawable };
+}
