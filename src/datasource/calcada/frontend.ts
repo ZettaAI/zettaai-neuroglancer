@@ -7467,7 +7467,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       resetPieceSplitDisplay();
       displayState.hideSegmentZero.value = false;
 
-      const focus = currentFocusRoot();
+      // Points kept after a split are a record of it; previewing them would pin
+      // the display to the half the first point landed in.
+      const focus = pointsOutliveSplit ? undefined : currentFocusRoot();
       if (focus === undefined) {
         displayState.useTempSegmentStatedColors2d.value = false;
         return;
@@ -7912,6 +7914,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        // Before updateAfterSplit: the guard that drops points runs inside it,
+        // and the preview of the old segment has to come off first.
+        pointsOutliveSplit = true;
+        updatePieceSplitDisplay();
         if (oldRoot !== undefined) {
           graphConnection.updateAfterSplit(oldRoot, newRoots, components);
           graphConnection.meshAddNewSegments(newRoots);
@@ -7929,7 +7935,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           graphConnection.meshAddNewSegments(newRoots);
         }
         refreshDebugOverlay();
-        pointsOutliveSplit = true;
         renderStages();
         StatusMessage.showTemporaryMessage(
           `Separated into ${newRoots.length} root(s). The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
@@ -8094,6 +8099,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           newRootSet.add(newRoots);
           graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         }
+        updatePieceSplitDisplay();
         refreshDebugOverlay();
         stepStage = 2;
         renderStages();
@@ -8128,6 +8134,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        pointsOutliveSplit = true;
+        updatePieceSplitDisplay();
         const segmentsState = layer.displayState.segmentationGroupState.value;
         for (const piece of [...sources, ...sinks]) {
           segmentsState.selectedSegments.delete(piece);
@@ -8152,7 +8160,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         refreshDebugOverlay();
         carved = undefined;
         stepStage = 3;
-        pointsOutliveSplit = true;
         renderStages();
         stageStatus.textContent = `Separated into ${newRoots.length} root(s). Points stay up for comparison — step 4 clears them. Ctrl+Z undoes the cut, again undoes the carve.`;
       } catch (e: unknown) {
@@ -8231,6 +8238,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         mouseState.pickedRenderLayer instanceof PerspectiveViewRenderLayer
           ? "3d"
           : "2d";
+      // A new point asks for a new cut, so the kept points preview again.
+      pointsOutliveSplit = false;
       pieceSplitState.addPoint({
         voxel,
         layer: [point[0], point[1], point[2]],
