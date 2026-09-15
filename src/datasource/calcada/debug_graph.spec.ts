@@ -4,14 +4,27 @@ import type {
   DebugGraph,
   DebugPiece,
 } from "#src/datasource/calcada/debug_graph.js";
-import { mergeDebugGraphs } from "#src/datasource/calcada/debug_graph.js";
+import {
+  debugEdgeLines,
+  mergeDebugGraphs,
+} from "#src/datasource/calcada/debug_graph.js";
 
 function piece(id: bigint, external = false): DebugPiece {
   return { id, center: [0, 0, 0], anchor: "bbox", external };
 }
 
-function edge(a: bigint, b: bigint): DebugEdge {
-  return { a, b, affinity: 1, area: 1, status: "enabled" };
+function edge(a: bigint, b: bigint, affinity = 1): DebugEdge {
+  return { a, b, affinity, area: 1, status: "enabled" };
+}
+
+function anchoredPiece(id: bigint, x: number, root?: bigint): DebugPiece {
+  return {
+    id,
+    center: [x, 0, 0],
+    anchor: "rep",
+    external: root === undefined,
+    root,
+  };
 }
 
 describe("mergeDebugGraphs", () => {
@@ -75,5 +88,43 @@ describe("mergeDebugGraphs", () => {
     const merged: DebugGraph = mergeDebugGraphs([]);
     expect(merged.pieces).toHaveLength(0);
     expect(merged.edges).toHaveLength(0);
+  });
+});
+
+describe("debugEdgeLines", () => {
+  const SEGMENT_COLOR = 0x3366cc;
+  const FALLBACK_COLOR = 0xffffff;
+  const colorOfRoot = (root: bigint) => (root === 10n ? SEGMENT_COLOR : 0);
+
+  // A split writes a zero-affinity edge between its halves. It is an edge of
+  // the segment like any other, so the cut tool must draw it the way debug does.
+  it("draws a split's zero-affinity edge in its segment's colour", () => {
+    const graph: DebugGraph = {
+      pieces: [anchoredPiece(1n, 0, 10n), anchoredPiece(2n, 5, 10n)],
+      edges: [edge(1n, 2n, 0)],
+    };
+    expect(debugEdgeLines(graph, colorOfRoot, FALLBACK_COLOR).lines).toEqual([
+      { from: [0, 0, 0], to: [5, 0, 0], color: SEGMENT_COLOR },
+    ]);
+  });
+
+  it("draws an edge no debugged root owns in the fallback colour", () => {
+    const graph: DebugGraph = {
+      pieces: [anchoredPiece(1n, 0), anchoredPiece(2n, 5)],
+      edges: [edge(1n, 2n)],
+    };
+    expect(debugEdgeLines(graph, colorOfRoot, FALLBACK_COLOR).lines).toEqual([
+      { from: [0, 0, 0], to: [5, 0, 0], color: FALLBACK_COLOR },
+    ]);
+  });
+
+  it("counts an edge it cannot anchor instead of drawing it", () => {
+    const graph: DebugGraph = {
+      pieces: [anchoredPiece(1n, 0, 10n)],
+      edges: [edge(1n, 2n)],
+    };
+    const result = debugEdgeLines(graph, colorOfRoot, FALLBACK_COLOR);
+    expect(result.lines).toEqual([]);
+    expect(result.undrawable).toBe(1);
   });
 });
