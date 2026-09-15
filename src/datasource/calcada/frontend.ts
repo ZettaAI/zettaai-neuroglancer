@@ -73,7 +73,10 @@ import type {
   DebugGraph,
   RootDebugGraph,
 } from "#src/datasource/calcada/debug_graph.js";
-import { mergeDebugGraphs } from "#src/datasource/calcada/debug_graph.js";
+import {
+  debugEdgeLines,
+  mergeDebugGraphs,
+} from "#src/datasource/calcada/debug_graph.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
@@ -287,7 +290,6 @@ const BLUE_COLOR = vec3.fromValues(0, 0, 1);
 // reads off them; the lighter shade is what says the split placed it.
 const ARTIFICIAL_RED_COLOR = vec3.fromValues(1, 0.45, 0.5);
 const ARTIFICIAL_BLUE_COLOR = vec3.fromValues(0.45, 0.55, 1);
-const GREEN_COLOR = vec3.fromValues(0, 1, 0);
 const RED_COLOR_SEGMENT = vec4FromVec3(RED_COLOR, 0.5);
 const BLUE_COLOR_SEGMENT = vec4FromVec3(BLUE_COLOR, 0.5);
 const RED_COLOR_HIGHLIGHT = vec4FromVec3(RED_COLOR, 0.25);
@@ -300,8 +302,8 @@ const TRANSPARENT_COLOR_PACKED = BigInt(packColor(TRANSPARENT_COLOR));
 // out as "this piece will be cut" instead of looking deselected.
 const SPLIT_TARGET_COLOR = vec4FromVec3(vec3.fromValues(0, 1, 0), 0.6);
 const SPLIT_TARGET_COLOR_PACKED = BigInt(packColor(SPLIT_TARGET_COLOR));
-// Distinct per-piece colours for the debug overlay (green is reserved for
-// sibling edge lines, so it is intentionally excluded here).
+// Distinct per-piece colours for the debug overlay. Green is left out: the cut
+// tool tints its split target green.
 const DEBUG_PIECE_PALETTE: bigint[] = (
   [
     [1, 0.5, 0],
@@ -2390,26 +2392,9 @@ class CalcadaDebugSession extends RefCounted {
       owned++;
     }
 
-    const edgeLines: Line[] = [];
-    const siblingLines: Line[] = [];
-    let undrawable = 0;
-    let siblingEdgeCount = 0;
-    const lineBetween = (from: vec3, to: vec3, color: number): Line => ({
-      pointA: from,
-      pointB: to,
-      id: "",
-      type: AnnotationType.LINE,
-      properties: [color],
-    });
-
-    // Which segment an edge belongs to, and what that segment looked like
-    // before the mode recoloured its pieces. Reading the colour off the root
-    // rather than a piece is what makes it the pre-D colour: the temporary
-    // stated colours applied below are keyed by piece.
-    const rootByPiece = new Map<bigint, bigint>();
-    for (const piece of graph.pieces) {
-      if (piece.root !== undefined) rootByPiece.set(piece.id, piece.root);
-    }
+    // What a segment looked like before the mode recoloured its pieces. Reading
+    // the colour off the root rather than a piece is what makes it the pre-D
+    // colour: the temporary stated colours applied below are keyed by piece.
     const segmentColor = new Map<bigint, number>();
     const colorOfRoot = (root: bigint) => {
       let packed = segmentColor.get(root);
@@ -2424,38 +2409,22 @@ class CalcadaDebugSession extends RefCounted {
       return packed;
     };
 
-    // Telling zero-affinity edges apart is a cut-tool concern — it marks the
-    // sibling edges a split just wrote. In debug on its own it says nothing, so
-    // edges are coloured by the segment they belong to instead.
-    const cutting = this.connection.state.pieceSplitState.active.value;
-    const fallbackColor = packColor(WHITE_COLOR);
-    for (const edge of graph.edges) {
-      const centerA = centerById.get(edge.a);
-      const centerB = centerById.get(edge.b);
-      if (!centerA || !centerB) {
-        undrawable++;
-        continue;
-      }
-      const isSibling = edge.affinity === 0 && edge.status === "enabled";
-      const root = rootByPiece.get(edge.a) ?? rootByPiece.get(edge.b);
-      // An edge is a pair of piece ids: draw it between the two anchors and
-      // nothing else. Edge rows also carry a contact position, but bulk merge
-      // stores it divided by the resolution rather than multiplied, so on a
-      // merge-heavy graph most of them point far outside the volume.
-      const line = lineBetween(
-        vec3.fromValues(centerA[0], centerA[1], centerA[2]),
-        vec3.fromValues(centerB[0], centerB[1], centerB[2]),
-        root === undefined ? fallbackColor : colorOfRoot(root),
-      );
-      if (isSibling) siblingEdgeCount++;
-      if (cutting && isSibling) {
-        siblingLines.push(line);
-      } else {
-        edgeLines.push(line);
-      }
-    }
-
-    this.connection.setDebugEdges(edgeLines, siblingLines);
+    const { lines, undrawable } = debugEdgeLines(
+      graph,
+      colorOfRoot,
+      packColor(WHITE_COLOR),
+    );
+    this.connection.setDebugEdges(
+      lines.map(
+        ({ from, to, color }): Line => ({
+          pointA: vec3.fromValues(...from),
+          pointB: vec3.fromValues(...to),
+          id: "",
+          type: AnnotationType.LINE,
+          properties: [color],
+        }),
+      ),
+    );
     this.connection.setDebugPieces(roots[0], colors, centerById);
 
     // Piece view: 2D hover picks out a single piece and MeshLayer colours each
@@ -2492,8 +2461,7 @@ class CalcadaDebugSession extends RefCounted {
 
     this.setStatus(
       `${roots.length} segment(s), ${graph.pieces.length} pieces, ` +
-        `${graph.edges.length} edges \u2014 ${siblingEdgeCount} green ` +
-        "zero-affinity split edge(s)" +
+        `${graph.edges.length} edges` +
         (undrawable > 0 ? `, ${undrawable} not drawable` : "") +
         (bboxAnchored > 0
           ? `, ${bboxAnchored} on bbox centre (no rep point)`
@@ -3458,11 +3426,9 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public annotationLayerStates: AnnotationLayerState[] = [];
   public mergeAnnotationState: AnnotationLayerState;
   public findPathAnnotationState: AnnotationLayerState;
-  // Piece-split debug overlay: one line per edge among a root's pieces. Enabled
-  // edges render neutral; zero-affinity sibling edges (the connections a piece
-  // split creates to keep the segment whole) render green so they stand out.
+  // Debug overlay: one line per edge among a root's pieces, in its segment's
+  // colour.
   public debugEdgeAnnotationState!: AnnotationLayerState;
-  public debugSiblingAnnotationState!: AnnotationLayerState;
   public traceAnnotationState!: AnnotationLayerState;
   public traceSession!: ZettaTraceSession;
   public debugSession!: CalcadaDebugSession;
@@ -3644,12 +3610,6 @@ void main() {
       loadedSubsource,
       "calcadaTraceCandidate",
       YELLOW_COLOR,
-    );
-    this.debugSiblingAnnotationState = makeColoredAnnotationState(
-      layer,
-      loadedSubsource,
-      "calcadaDebugSiblings",
-      GREEN_COLOR,
     );
 
     {
@@ -4543,17 +4503,14 @@ void main() {
     }
   }
 
-  setDebugEdges(edgeLines: Line[], siblingLines: Line[]) {
+  setDebugEdges(edgeLines: Line[]) {
     this.clearDebugEdges();
     for (const line of edgeLines)
       this.debugEdgeAnnotationState.source.add(line);
-    for (const line of siblingLines)
-      this.debugSiblingAnnotationState.source.add(line);
   }
 
   clearDebugEdges() {
     (this.debugEdgeAnnotationState.source as AnnotationSource).clear();
-    (this.debugSiblingAnnotationState.source as AnnotationSource).clear();
   }
 
   async submitMulticut(annotationToNanometers: Float64Array): Promise<boolean> {
@@ -5957,7 +5914,7 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
         label: "Debug",
         title:
           "Debug overlay: colour every piece of the visible segments and draw " +
-          "a line per edge (green = zero-affinity split edges). Bind a key to " +
+          "a line per edge in its segment's colour. Bind a key to " +
           "it from this button to toggle it without the mouse.",
       }),
     );
@@ -7510,7 +7467,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       resetPieceSplitDisplay();
       displayState.hideSegmentZero.value = false;
 
-      const focus = currentFocusRoot();
+      // Points kept after a split are a record of it; previewing them would pin
+      // the display to the half the first point landed in.
+      const focus = pointsOutliveSplit ? undefined : currentFocusRoot();
       if (focus === undefined) {
         displayState.useTempSegmentStatedColors2d.value = false;
         return;
@@ -7955,6 +7914,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        // Before updateAfterSplit: the guard that drops points runs inside it,
+        // and the preview of the old segment has to come off first.
+        pointsOutliveSplit = true;
+        updatePieceSplitDisplay();
         if (oldRoot !== undefined) {
           graphConnection.updateAfterSplit(oldRoot, newRoots, components);
           graphConnection.meshAddNewSegments(newRoots);
@@ -7972,7 +7935,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           graphConnection.meshAddNewSegments(newRoots);
         }
         refreshDebugOverlay();
-        pointsOutliveSplit = true;
         renderStages();
         StatusMessage.showTemporaryMessage(
           `Separated into ${newRoots.length} root(s). The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
@@ -8137,6 +8099,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           newRootSet.add(newRoots);
           graphConnection.notifyGraphEdited(oldRootSet, newRootSet);
         }
+        updatePieceSplitDisplay();
         refreshDebugOverlay();
         stepStage = 2;
         renderStages();
@@ -8171,6 +8134,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        pointsOutliveSplit = true;
+        updatePieceSplitDisplay();
         const segmentsState = layer.displayState.segmentationGroupState.value;
         for (const piece of [...sources, ...sinks]) {
           segmentsState.selectedSegments.delete(piece);
@@ -8195,7 +8160,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         refreshDebugOverlay();
         carved = undefined;
         stepStage = 3;
-        pointsOutliveSplit = true;
         renderStages();
         stageStatus.textContent = `Separated into ${newRoots.length} root(s). Points stay up for comparison — step 4 clears them. Ctrl+Z undoes the cut, again undoes the carve.`;
       } catch (e: unknown) {
@@ -8274,6 +8238,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         mouseState.pickedRenderLayer instanceof PerspectiveViewRenderLayer
           ? "3d"
           : "2d";
+      // A new point asks for a new cut, so the kept points preview again.
+      pointsOutliveSplit = false;
       pieceSplitState.addPoint({
         voxel,
         layer: [point[0], point[1], point[2]],
