@@ -7867,6 +7867,11 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
     };
 
+    // What a proofreader actually waits through: the click to the segment
+    // coming apart on screen, server work and mesh refresh included.
+    const splitTookLabel = (startedAt: number) =>
+      `split took ${((Date.now() - startedAt) / 1000).toFixed(2)} sec`;
+
     // Step 1: cut every multi-colour piece and write the edges its halves inherit,
     // but leave everything in one segment. What the multicut will act on is then
     // in the graph and can be looked at with Debug before anything is separated.
@@ -7887,6 +7892,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         return;
       }
       setBusy(true);
+      const startedAt = Date.now();
       const branchId = graphConnection.graph.branchId.value;
       const oldRoot = currentFocusRoot();
       try {
@@ -7937,7 +7943,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         refreshDebugOverlay();
         renderStages();
         StatusMessage.showTemporaryMessage(
-          `Separated into ${newRoots.length} root(s). The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
+          `Separated into ${newRoots.length} root(s) — ${splitTookLabel(startedAt)}. The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
           6000,
         );
       } catch (e: unknown) {
@@ -8120,6 +8126,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         return;
       }
       setBusy(true);
+      const startedAt = Date.now();
       const { sources, sinks, branchId, rootId } = carved;
       try {
         const { roots, components, operationId } =
@@ -8161,7 +8168,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         carved = undefined;
         stepStage = 3;
         renderStages();
-        stageStatus.textContent = `Separated into ${newRoots.length} root(s). Points stay up for comparison — step 4 clears them. Ctrl+Z undoes the cut, again undoes the carve.`;
+        stageStatus.textContent = `Separated into ${newRoots.length} root(s) — ${splitTookLabel(startedAt)}. Points stay up for comparison — step 4 clears them. Ctrl+Z undoes the cut, again undoes the carve.`;
       } catch (e: unknown) {
         stageStatus.textContent = `Step 3 failed: ${e instanceof Error ? e.message : String(e)}`;
         StatusMessage.showTemporaryMessage(stageStatus.textContent, 8000);
