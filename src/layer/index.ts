@@ -2135,10 +2135,11 @@ export class TopLevelLayerListSpecification extends LayerListSpecification {
   /**
    * Extension point for the `EditSessionHost`. Assigned by the `Viewer`
    * constructor immediately after the host is constructed. Reached by
-   * per-layer UI (data-source widgets in `layer_data_sources_tab.ts`) that
-   * needs to consult `host.sessionLock.isLayerDataSourceLocked(...)` without
-   * taking a `Viewer` dependency. Untyped here to avoid an editing-module
-   * dependency cycle at the layer layer.
+   * per-layer UI that needs to consult `host.sessionLock` without taking a
+   * `Viewer` dependency: the data-source widgets in `layer_data_sources_tab.ts`
+   * and the controls that delete, rename or retype a layer (through
+   * `editing/adapters/session_layer_structure_lock.ts`). Untyped here to avoid
+   * an editing-module dependency cycle at the layer layer.
    */
   editSessionHost: unknown = undefined;
 

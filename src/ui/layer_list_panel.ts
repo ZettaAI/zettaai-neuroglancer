@@ -18,6 +18,7 @@ import "#src/ui/layer_list_panel.css";
 import svg_controls_alt from "ikonate/icons/controls-alt.svg?raw";
 import svg_eye_crossed from "ikonate/icons/eye-crossed.svg?raw";
 import svg_eye from "ikonate/icons/eye.svg?raw";
+import { bindSessionLayerDeleteIcon } from "#src/editing/adapters/session_layer_structure_lock.js";
 import type {
   LayerManager,
   ManagedUserLayer,
@@ -180,12 +181,14 @@ class LayerListItem extends RefCounted {
       this.registerDisposer(makeSelectedLayerSidePanelCheckboxIcon(layer))
         .element,
     );
-    const deleteButton = makeDeleteButton({
-      title: "Delete layer",
-      onClick: () => {
-        deleteLayer(this.layer);
-      },
-    });
+    const deleteButton = makeDeleteButton();
+    // A layer of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`).
+    this.registerDisposer(
+      bindSessionLayerDeleteIcon(deleteButton, layer, "Delete layer", () =>
+        deleteLayer(this.layer),
+      ),
+    );
     deleteButton.classList.add("neuroglancer-layer-list-panel-item-delete");
     element.appendChild(deleteButton);
     registerLayerDragHandlers(panel, element, layer, {

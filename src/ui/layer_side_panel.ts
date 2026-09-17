@@ -21,6 +21,12 @@
 import "#src/ui/layer_side_panel.css";
 
 import svg_cursor from "ikonate/icons/cursor.svg?raw";
+import {
+  bindSessionLayerDeleteIcon,
+  isSessionLayer,
+  observeSessionLayerLock,
+  SESSION_LAYER_LOCK_REASON,
+} from "#src/editing/adapters/session_layer_structure_lock.js";
 import type {
   ManagedUserLayer,
   SelectedLayerState,
@@ -74,7 +80,16 @@ export class LayerNameWidget extends RefCounted {
       event.stopPropagation();
       event.preventDefault();
     });
-    element.title = "Rename layer";
+    // The session finds its layers by name, so a layer of the active edit
+    // session cannot be renamed from here (see
+    // `session_layer_structure_lock.ts`). Read-only rather than disabled keeps
+    // the name selectable and leaves the input's pointer events alone.
+    this.registerDisposer(
+      observeSessionLayerLock(layer, (locked) => {
+        element.readOnly = locked;
+        element.title = locked ? SESSION_LAYER_LOCK_REASON : "Rename layer";
+      }),
+    );
     this.registerDisposer(layer.layerChanged.add(() => this.updateView()));
     element.addEventListener("change", () => this.updateModel());
     element.addEventListener("blur", () => this.updateModel());
@@ -86,6 +101,11 @@ export class LayerNameWidget extends RefCounted {
   }
 
   private updateModel() {
+    // Also covers a name typed before the session locked the input.
+    if (isSessionLayer(this.layer)) {
+      this.updateView();
+      return;
+    }
     changeLayerName(this.layer, this.element.value);
   }
 }
@@ -98,7 +118,6 @@ export class LayerTypeWidget extends RefCounted {
     const { element, measureElement } = this;
     element.classList.add("neuroglancer-layer-side-panel-type");
     measureElement.classList.add("neuroglancer-layer-side-panel-type-measure");
-    element.title = "Change layer type";
     document.body.appendChild(measureElement);
     for (const [layerType, layerConstructor] of layerTypes) {
       if (layerConstructor.type !== layerType) continue;
@@ -107,7 +126,21 @@ export class LayerTypeWidget extends RefCounted {
       option.value = layerType;
       element.appendChild(option);
     }
+    // Changing the type replaces the user layer the active edit session paints
+    // through (see `session_layer_structure_lock.ts`).
+    this.registerDisposer(
+      observeSessionLayerLock(layer.managedLayer, (locked) => {
+        element.disabled = locked;
+        element.title = locked
+          ? SESSION_LAYER_LOCK_REASON
+          : "Change layer type";
+      }),
+    );
     element.addEventListener("change", () => {
+      if (isSessionLayer(this.layer.managedLayer)) {
+        this.updateView();
+        return;
+      }
       const newType = element.value;
       const layerConstructor = layerTypes.get(newType)!;
       changeLayerType(this.layer.managedLayer, layerConstructor);
@@ -220,14 +253,18 @@ class LayerSidePanel extends SidePanel {
         element.dataset.neuroglancerLayerPanelPinned = pinned.toString();
       }, pinWatchable),
     );
-    titleBar.appendChild(
-      makeDeleteButton({
-        title: "Delete layer",
-        onClick: () => {
-          deleteLayer(this.layer.managedLayer);
-        },
-      }),
+    const deleteButton = makeDeleteButton();
+    // A layer of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`).
+    this.registerDisposer(
+      bindSessionLayerDeleteIcon(
+        deleteButton,
+        layer.managedLayer,
+        "Delete layer",
+        () => deleteLayer(this.layer.managedLayer),
+      ),
     );
+    titleBar.appendChild(deleteButton);
     this.tabView = new TabView(
       {
         makeTab: (id) => layer.tabs.options.get(id)!.getter(),

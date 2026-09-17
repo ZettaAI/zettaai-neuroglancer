@@ -20,7 +20,17 @@
 
 import "#src/ui/layer_data_sources_tab.css";
 import { LocalDataSource } from "#src/datasource/local.js";
-import type { UserLayer, UserLayerConstructor } from "#src/layer/index.js";
+import {
+  isSessionLayer,
+  observeSessionLayerLock,
+  SESSION_LAYER_LOCK_REASON,
+  showSessionLayerLockOnIcon,
+} from "#src/editing/adapters/session_layer_structure_lock.js";
+import type {
+  ManagedUserLayer,
+  UserLayer,
+  UserLayerConstructor,
+} from "#src/layer/index.js";
 import {
   changeLayerName,
   changeLayerType,
@@ -168,6 +178,34 @@ export class MessagesView extends RefCounted {
   }
 }
 
+/**
+ * Disable a subsource checkbox while its layer belongs to the active edit
+ * session: turning a session layer's subsources off, or back to the default
+ * set, can drop the render layer the session paints through (see
+ * `session_layer_structure_lock.ts`). The reason goes on the checkbox and on
+ * its whole label row; `unlockedLabelTitle` comes back when the lock lifts.
+ */
+function bindSubsourceCheckboxLock(
+  managedLayer: ManagedUserLayer,
+  checkbox: HTMLInputElement,
+  label: HTMLElement,
+  unlockedLabelTitle?: string,
+): () => void {
+  return observeSessionLayerLock(managedLayer, (locked) => {
+    checkbox.disabled = locked;
+    setTitle(checkbox, locked ? SESSION_LAYER_LOCK_REASON : undefined);
+    setTitle(label, locked ? SESSION_LAYER_LOCK_REASON : unlockedLabelTitle);
+  });
+}
+
+function setTitle(element: HTMLElement, title: string | undefined) {
+  if (title === undefined) {
+    element.removeAttribute("title");
+  } else {
+    element.title = title;
+  }
+}
+
 export class DataSourceSubsourceView extends RefCounted {
   element = document.createElement("div");
 
@@ -192,18 +230,31 @@ export class DataSourceSubsourceView extends RefCounted {
     this.registerDisposer(
       loadedSource.enabledSubsourcesChanged.add(updateActiveAttribute),
     );
+    const { managedLayer } = loadedSource.layer;
     const enabledCheckbox = this.registerDisposer(
       new TrackableBooleanCheckbox({
         get value() {
           return loadedSubsource.enabled;
         },
         set value(value: boolean) {
+          // Action-time check behind the disabled checkbox.
+          if (isSessionLayer(managedLayer)) {
+            enabledCheckbox.element.checked = loadedSubsource.enabled;
+            return;
+          }
           loadedSubsource.enabled = value;
           loadedSource.enableDefaultSubsources = false;
           loadedSource.enabledSubsourcesChanged.dispatch();
         },
         changed: loadedSource.enabledSubsourcesChanged,
       }),
+    );
+    this.registerDisposer(
+      bindSubsourceCheckboxLock(
+        managedLayer,
+        enabledCheckbox.element,
+        sourceInfoLine,
+      ),
     );
     sourceInfoLine.classList.add("neuroglancer-layer-data-sources-info-line");
     sourceInfoLine.appendChild(enabledCheckbox.element);
@@ -263,35 +314,49 @@ export class LoadedDataSourceView extends RefCounted {
   constructor(public source: Borrowed<LoadedLayerDataSource>) {
     super();
     const { element } = this;
+    const { managedLayer } = source.layer;
     const enableDefaultSubsourcesLabel = document.createElement("label");
     enableDefaultSubsourcesLabel.classList.add(
       "neuroglancer-layer-data-sources-source-default",
     );
-    enableDefaultSubsourcesLabel.appendChild(
-      this.registerDisposer(
-        new TrackableBooleanCheckbox({
-          changed: source.enabledSubsourcesChanged,
-          get value() {
-            return source.enableDefaultSubsources;
-          },
-          set value(value: boolean) {
-            if (source.enableDefaultSubsources === value) return;
-            source.enableDefaultSubsources = value;
-            if (value) {
-              for (const subsource of source.subsources) {
-                subsource.enabled = subsource.subsourceEntry.default;
-              }
+    const enableDefaultSubsourcesCheckbox = this.registerDisposer(
+      new TrackableBooleanCheckbox({
+        changed: source.enabledSubsourcesChanged,
+        get value() {
+          return source.enableDefaultSubsources;
+        },
+        set value(value: boolean) {
+          if (source.enableDefaultSubsources === value) return;
+          // Action-time check behind the disabled checkbox.
+          if (isSessionLayer(managedLayer)) {
+            enableDefaultSubsourcesCheckbox.element.checked =
+              source.enableDefaultSubsources;
+            return;
+          }
+          source.enableDefaultSubsources = value;
+          if (value) {
+            for (const subsource of source.subsources) {
+              subsource.enabled = subsource.subsourceEntry.default;
             }
-            source.enabledSubsourcesChanged.dispatch();
-          },
-        }),
-      ).element,
+          }
+          source.enabledSubsourcesChanged.dispatch();
+        },
+      }),
+    );
+    enableDefaultSubsourcesLabel.appendChild(
+      enableDefaultSubsourcesCheckbox.element,
     );
     enableDefaultSubsourcesLabel.appendChild(
       document.createTextNode("Enable default subsource set"),
     );
-    enableDefaultSubsourcesLabel.title =
-      "Enable the default set of subsources for this data source.";
+    this.registerDisposer(
+      bindSubsourceCheckboxLock(
+        managedLayer,
+        enableDefaultSubsourcesCheckbox.element,
+        enableDefaultSubsourcesLabel,
+        "Enable the default set of subsources for this data source.",
+      ),
+    );
     element.appendChild(enableDefaultSubsourcesLabel);
     for (const subsource of source.subsources) {
       element.appendChild(
@@ -339,7 +404,7 @@ export class DataSourceView extends RefCounted {
       // session lock", reject the change at the action gate even if the UI
       // gating somehow let it through. The input is snapped back to the
       // previous spec URL and a StatusMessage explains why.
-      if (isDataSourceLocked(userLayer)) {
+      if (isSessionLayer(userLayer.managedLayer)) {
         urlInput.value = existingSpec.url;
         urlInput.dirty.value = false;
         StatusMessage.showTemporaryMessage(
@@ -381,8 +446,7 @@ export class DataSourceView extends RefCounted {
 
     // Reactively reflect the data-source lock state on the URL input. When
     // a session locks this layer, the input is made read-only and shows a
-    // tooltip explaining why; the change re-applies on every session
-    // open/close.
+    // tooltip explaining why; the change re-applies whenever the lock flips.
     this.bindLockState(urlInput);
 
     const { element } = this;
@@ -431,74 +495,28 @@ export class DataSourceView extends RefCounted {
   }
 
   /**
-   * Wire `host.sessionLock.activeSession.changed` to keep the input's
-   * read-only state and tooltip in sync. No-op when no `EditSessionHost` is
-   * wired (test viewers / alternative embeddings).
+   * Keep the input's read-only state and tooltip in sync with the session
+   * layer lock (see `session_layer_structure_lock.ts`). Never locked when no
+   * `EditSessionHost` is wired (test viewers / alternative embeddings).
    */
   private bindLockState(urlInput: SourceUrlAutocomplete): void {
     const userLayer = this.source.layer;
-    const host = getEditSessionHost(userLayer);
-    if (host === undefined) return;
-    const apply = () => {
-      const locked = host.sessionLock.isLayerDataSourceLocked(
-        userLayer.managedLayer.name,
-      );
-      const { inputElement } = urlInput;
-      inputElement.contentEditable = locked ? "false" : "true";
-      if (locked) {
-        inputElement.title = SESSION_LOCK_TOOLTIP;
-        urlInput.element.classList.add("neuroglancer-layer-data-source-locked");
-      } else {
-        if (inputElement.title === SESSION_LOCK_TOOLTIP) {
+    this.registerDisposer(
+      observeSessionLayerLock(userLayer.managedLayer, (locked) => {
+        const { inputElement } = urlInput;
+        inputElement.contentEditable = locked ? "false" : "true";
+        urlInput.element.classList.toggle(
+          "neuroglancer-layer-data-source-locked",
+          locked,
+        );
+        if (locked) {
+          inputElement.title = SESSION_LAYER_LOCK_REASON;
+        } else if (inputElement.title === SESSION_LAYER_LOCK_REASON) {
           inputElement.removeAttribute("title");
         }
-        urlInput.element.classList.remove(
-          "neuroglancer-layer-data-source-locked",
-        );
-      }
-    };
-    apply();
-    this.registerDisposer(host.sessionLock.activeSession.changed.add(apply));
+      }),
+    );
   }
-}
-
-const SESSION_LOCK_TOOLTIP =
-  "Locked by active edit session. Discard or commit the session before changing data sources for this layer.";
-
-/**
- * Lazily look up the active `EditSessionHost` published by the viewer onto
- * `TopLevelLayerListSpecification.editSessionHost` in step 24. Returns
- * undefined when no host is wired (test viewers / alternative embeddings).
- *
- * The host type is duck-typed here to avoid pulling an `#src/editing/...`
- * dependency into the layer-data-sources UI; the assertion is sound because
- * the viewer is the only writer to this extension slot.
- */
-interface EditSessionHostLike {
-  readonly sessionLock: {
-    isLayerDataSourceLocked(layerId: string): boolean;
-    readonly activeSession: {
-      readonly changed: {
-        add(handler: () => void): () => void;
-      };
-    };
-  };
-}
-
-function getEditSessionHost(
-  userLayer: UserLayer,
-): EditSessionHostLike | undefined {
-  const root = userLayer.manager.root;
-  const host = (root as unknown as { editSessionHost?: unknown })
-    .editSessionHost;
-  if (host === undefined || host === null) return undefined;
-  return host as EditSessionHostLike;
-}
-
-function isDataSourceLocked(userLayer: UserLayer): boolean {
-  const host = getEditSessionHost(userLayer);
-  if (host === undefined) return false;
-  return host.sessionLock.isLayerDataSourceLocked(userLayer.managedLayer.name);
 }
 
 function changeLayerTypeToDetected(userLayer: UserLayer) {
@@ -535,7 +553,7 @@ export class LayerDataSourcesTab extends Tab {
     addDataSourceIcon.addEventListener("click", () => {
       // Defensive at-action gate (see `09-error-handling.md`). UI gating
       // below should normally make this branch unreachable.
-      if (isDataSourceLocked(this.layer)) {
+      if (isSessionLayer(this.layer.managedLayer)) {
         StatusMessage.showTemporaryMessage(
           "Cannot change data source: layer is locked by the active edit session.",
           4000,
@@ -553,40 +571,20 @@ export class LayerDataSourcesTab extends Tab {
       view.urlInput.inputElement.focus();
     });
     // Reflect the data-source lock state on the add button. Subscribed once
-    // here; flips on session open/close.
-    const host = getEditSessionHost(layer);
-    if (host !== undefined) {
-      const applyAddButtonLock = () => {
-        const locked = host.sessionLock.isLayerDataSourceLocked(
-          layer.managedLayer.name,
+    // here; flips whenever the lock does.
+    this.registerDisposer(
+      observeSessionLayerLock(layer.managedLayer, (locked) => {
+        showSessionLayerLockOnIcon(
+          addDataSourceIcon,
+          locked,
+          "Add additional data source",
         );
-        if (locked) {
-          (addDataSourceIcon as HTMLElement).setAttribute(
-            "aria-disabled",
-            "true",
-          );
-          (addDataSourceIcon as HTMLElement).title = SESSION_LOCK_TOOLTIP;
-          (addDataSourceIcon as HTMLElement).classList.add(
-            "neuroglancer-layer-data-source-locked",
-          );
-        } else {
-          (addDataSourceIcon as HTMLElement).removeAttribute("aria-disabled");
-          if (
-            (addDataSourceIcon as HTMLElement).title === SESSION_LOCK_TOOLTIP
-          ) {
-            (addDataSourceIcon as HTMLElement).title =
-              "Add additional data source";
-          }
-          (addDataSourceIcon as HTMLElement).classList.remove(
-            "neuroglancer-layer-data-source-locked",
-          );
-        }
-      };
-      applyAddButtonLock();
-      this.registerDisposer(
-        host.sessionLock.activeSession.changed.add(applyAddButtonLock),
-      );
-    }
+        addDataSourceIcon.classList.toggle(
+          "neuroglancer-layer-data-source-locked",
+          locked,
+        );
+      }),
+    );
     element.appendChild(this.dataSourcesContainer);
     if (layer instanceof NewUserLayer) {
       const { layerTypeDetection, layerTypeElement } = this;

@@ -17,6 +17,7 @@
 import "#src/noselect.css";
 import "#src/ui/layer_bar.css";
 import svg_plus from "ikonate/icons/plus.svg?raw";
+import { bindSessionLayerDeleteIcon } from "#src/editing/adapters/session_layer_structure_lock.js";
 import type { ManagedUserLayer } from "#src/layer/index.js";
 import { addNewLayer, deleteLayer, makeLayer } from "#src/layer/index.js";
 import { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
@@ -158,9 +159,18 @@ class LayerWidget extends RefCounted {
       event.stopPropagation();
     });
     const deleteElement = makeDeleteButton();
-    deleteElement.title = "Delete this layer";
+    // A layer of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`); the click is still swallowed so it
+    // does not toggle the layer's visibility.
+    this.registerDisposer(
+      bindSessionLayerDeleteIcon(
+        deleteElement,
+        layer,
+        "Delete this layer",
+        () => deleteLayer(this.layer),
+      ),
+    );
     deleteElement.addEventListener("click", (event: MouseEvent) => {
-      deleteLayer(this.layer);
       event.stopPropagation();
     });
     element.appendChild(layerNumberElement);
