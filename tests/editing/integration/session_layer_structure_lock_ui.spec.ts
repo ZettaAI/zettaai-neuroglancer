@@ -17,11 +17,14 @@
  * Covered here: the layer name input (layer side panel, layer list panel, tool
  * palette), the side panel's type select, the data-sources tab's subsource
  * checkboxes, the data-source URL input and add-source icon, and the
- * layer-group menu's "Remove layer group". The delete icons of the layer bar,
- * layer list panel and layer side panel live in classes that need a
+ * layer-group menu's "Remove layer group", including the prompt it shows
+ * before deleting layers (`window.confirm`, stubbed). The delete icons of the
+ * layer bar, layer list panel and layer side panel live in classes that need a
  * `LayerGroupViewer` or `SidePanelManager`; each is wired through
- * `bindSessionLayerDeleteIcon`, which
- * `tests/editing/unit/adapters/session_layer_structure_lock.spec.ts` covers.
+ * `bindLayerDeleteIcon`, which `src/ui/layer_deletion_confirmation.spec.ts`
+ * covers with the prompt and each icon's hint, and the lock behaviour of the
+ * `bindSessionLayerDeleteIcon` underneath it is covered in
+ * `tests/editing/unit/adapters/session_layer_structure_lock.spec.ts`.
  *
  * Written with `h` rather than JSX so it stays a `.spec.ts` (the workspace
  * globs `*.spec.ts` only).
@@ -29,6 +32,7 @@
 
 import { h, render } from "preact";
 import { act } from "preact/test-utils";
+import type { MockInstance } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -463,6 +467,16 @@ describe("layer-group menu Remove layer group", () => {
     }
   }
 
+  let confirm: MockInstance<(message?: string) => boolean>;
+
+  beforeEach(() => {
+    confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    confirm.mockRestore();
+  });
+
   /** Mount the menu for `group`; returns its Remove button. */
   function mountMenu(group: FakeGroup): HTMLButtonElement {
     const link = new TrackableEnum(
@@ -490,7 +504,7 @@ describe("layer-group menu Remove layer group", () => {
     )!;
   }
 
-  it("removes a group whose session layers are also shown elsewhere", () => {
+  it("removes a group whose session layers are also shown elsewhere without asking", () => {
     const group = fakeGroup();
     showIn(layer, group, fakeGroup());
     act(() => layers.openSession("segmentation"));
@@ -500,7 +514,52 @@ describe("layer-group menu Remove layer group", () => {
     expect(button.title).toBe("");
     act(() => button.click());
 
+    expect(confirm).not.toHaveBeenCalled();
     expect(group.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks before removing a group that shows the only copy of a layer, naming only that layer", () => {
+    const group = fakeGroup();
+    showIn(layer, group);
+    showIn(layers.addLayer("shared"), group, fakeGroup());
+    const button = mountMenu(group);
+
+    act(() => button.click());
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.lastCall![0]).toBe(
+      `Remove this layer group? This also deletes layer "segmentation", which no other layer group shows. This can't be undone.`,
+    );
+    expect(group.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the group when the prompt is declined", () => {
+    const group = fakeGroup();
+    showIn(layer, group);
+    const button = mountMenu(group);
+    confirm.mockReturnValue(false);
+
+    act(() => button.click());
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(group.clear).not.toHaveBeenCalled();
+  });
+
+  it("keeps the group when a session locks its only copy of a layer while the prompt is up", async () => {
+    const group = fakeGroup();
+    showIn(layer, group);
+    const button = mountMenu(group);
+    confirm.mockImplementation(() => {
+      layers.openSession("segmentation");
+      return true;
+    });
+
+    button.click();
+    await act(async () => {});
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(group.clear).not.toHaveBeenCalled();
+    expect(button.disabled).toBe(true);
   });
 
   it("is disabled with the reason while it shows the only copy of a session layer", () => {
@@ -546,6 +605,7 @@ describe("layer-group menu Remove layer group", () => {
     button.click();
     await act(async () => {});
 
+    expect(confirm).not.toHaveBeenCalled();
     expect(group.clear).not.toHaveBeenCalled();
     expect(button.disabled).toBe(true);
   });

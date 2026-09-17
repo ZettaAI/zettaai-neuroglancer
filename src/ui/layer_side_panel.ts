@@ -22,7 +22,6 @@ import "#src/ui/layer_side_panel.css";
 
 import svg_cursor from "ikonate/icons/cursor.svg?raw";
 import {
-  bindSessionLayerDeleteIcon,
   isSessionLayer,
   observeSessionLayerLock,
   SESSION_LAYER_LOCK_REASON,
@@ -35,7 +34,6 @@ import type {
 import {
   changeLayerName,
   changeLayerType,
-  deleteLayer,
   layerTypes,
 } from "#src/layer/index.js";
 import { ElementVisibilityFromTrackableBoolean } from "#src/trackable_boolean.js";
@@ -44,6 +42,10 @@ import {
   observeWatchable,
 } from "#src/trackable_value.js";
 import { popDragStatus, pushDragStatus } from "#src/ui/drag_and_drop.js";
+import {
+  bindLayerDeleteIcon,
+  LAYER_SIDE_PANEL_HIDE_INSTEAD,
+} from "#src/ui/layer_deletion_confirmation.js";
 import type { UserLayerSidePanelState } from "#src/ui/layer_side_panel_state.js";
 import { LAYER_SIDE_PANEL_DEFAULT_LOCATION } from "#src/ui/layer_side_panel_state.js";
 import type { DragSource, SidePanelManager } from "#src/ui/side_panel.js";
@@ -254,14 +256,16 @@ class LayerSidePanel extends SidePanel {
       }, pinWatchable),
     );
     const deleteButton = makeDeleteButton();
-    // A layer of the active edit session cannot be deleted from here (see
-    // `session_layer_structure_lock.ts`).
+    // Deleting asks first (see `layer_deletion_confirmation.ts`), and a layer
+    // of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`). This panel has no visibility
+    // toggle, so the prompt points to the layer bar and layer list panel.
     this.registerDisposer(
-      bindSessionLayerDeleteIcon(
+      bindLayerDeleteIcon(
         deleteButton,
         layer.managedLayer,
         "Delete layer",
-        () => deleteLayer(this.layer.managedLayer),
+        LAYER_SIDE_PANEL_HIDE_INSTEAD,
       ),
     );
     titleBar.appendChild(deleteButton);

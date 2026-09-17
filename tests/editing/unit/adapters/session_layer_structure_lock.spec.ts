@@ -15,7 +15,8 @@
  * publishes the host.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   bindSessionLayerDeleteIcon,
@@ -30,6 +31,7 @@ import type {
   ManagedUserLayer,
   TopLevelLayerListSpecification,
 } from "#src/layer/index.js";
+import { confirmLayerDeletion } from "#src/ui/layer_deletion_confirmation.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 import { FakeLayerRoot } from "#tests/editing/fakes/fake_layer_root.js";
@@ -182,9 +184,11 @@ describe("showSessionLayerLockOnIcon", () => {
 });
 
 describe("bindSessionLayerDeleteIcon", () => {
+  const HIDE_INSTEAD = "To hide it instead, click its eye icon.";
   let layers: FakeLayerRoot;
   let layer: ManagedUserLayer;
   let icon: HTMLElement;
+  let confirm: MockInstance<(message?: string) => boolean>;
   let onDelete: ReturnType<typeof vi.fn>;
   let dispose: () => void;
 
@@ -192,23 +196,64 @@ describe("bindSessionLayerDeleteIcon", () => {
     layers = new FakeLayerRoot();
     layer = layers.addLayer("writable");
     icon = document.createElement("div");
+    confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     onDelete = vi.fn();
-    dispose = bindSessionLayerDeleteIcon(icon, layer, "Delete layer", onDelete);
+    // Wired the way `bindLayerDeleteIcon` wires the layer UI's delete icons,
+    // with the delete itself mocked.
+    dispose = bindSessionLayerDeleteIcon(icon, layer, "Delete layer", {
+      confirm: () => confirmLayerDeletion(layer, HIDE_INSTEAD),
+      onDelete,
+    });
   });
 
-  it("deletes a layer that is not part of a session", () => {
+  afterEach(() => {
+    confirm.mockRestore();
+  });
+
+  it("asks, then deletes a layer that is not part of a session", () => {
     expect(icon.hasAttribute("aria-disabled")).toBe(false);
     expect(icon.title).toBe("Delete layer");
     icon.click();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.lastCall![0]).toBe(
+      `Delete layer "writable"? This can't be undone. ${HIDE_INSTEAD}`,
+    );
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the lock and ignores clicks while the layer is in the session", () => {
+  it("keeps the layer when the prompt is declined", () => {
+    confirm.mockReturnValue(false);
+    icon.click();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps the layer when a session locks it while the prompt is up", () => {
+    confirm.mockImplementation(() => {
+      layers.openSession("writable");
+      return true;
+    });
+    icon.click();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(icon.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("keeps the layer when a restore starts while the prompt is up", () => {
+    confirm.mockImplementation(() => {
+      layers.startRestore("writable");
+      return true;
+    });
+    icon.click();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("shows the lock and neither asks nor deletes while the layer is in the session", () => {
     layers.openSession("writable");
 
     expect(icon.getAttribute("aria-disabled")).toBe("true");
     expect(icon.title).toBe(SESSION_LAYER_LOCK_REASON);
     icon.click();
+    expect(confirm).not.toHaveBeenCalled();
     expect(onDelete).not.toHaveBeenCalled();
 
     layers.closeSession();
@@ -216,14 +261,16 @@ describe("bindSessionLayerDeleteIcon", () => {
     expect(icon.hasAttribute("aria-disabled")).toBe(false);
     expect(icon.title).toBe("Delete layer");
     icon.click();
+    expect(confirm).toHaveBeenCalledTimes(1);
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the lock and ignores clicks while the session is being restored", () => {
+  it("shows the lock and neither asks nor deletes while the session is being restored", () => {
     layers.startRestore("writable");
 
     expect(icon.getAttribute("aria-disabled")).toBe("true");
     icon.click();
+    expect(confirm).not.toHaveBeenCalled();
     expect(onDelete).not.toHaveBeenCalled();
 
     layers.endRestore();
@@ -232,9 +279,10 @@ describe("bindSessionLayerDeleteIcon", () => {
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
 
-  it("neither deletes nor tracks the lock once disposed", () => {
+  it("neither asks, deletes nor tracks the lock once disposed", () => {
     dispose();
     icon.click();
+    expect(confirm).not.toHaveBeenCalled();
     expect(onDelete).not.toHaveBeenCalled();
 
     layers.openSession("writable");
@@ -269,6 +317,14 @@ describe("layerGroupHoldsOnlyCopyOfSessionLayer", () => {
 
   it("is false once another group also shows the session layer", () => {
     showIn(layers.addLayer("writable"), group, otherGroup);
+    layers.openSession("writable");
+    expect(layerGroupHoldsOnlyCopyOfSessionLayer(group)).toBe(false);
+  });
+
+  it("is false for an archived session layer, which removal keeps", () => {
+    const writable = layers.addLayer("writable");
+    showIn(writable, group);
+    writable.archived = true;
     layers.openSession("writable");
     expect(layerGroupHoldsOnlyCopyOfSessionLayer(group)).toBe(false);
   });
