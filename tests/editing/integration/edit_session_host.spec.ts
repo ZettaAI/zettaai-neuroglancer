@@ -249,6 +249,59 @@ describe("EditSessionHost exit lock", () => {
   });
 });
 
+describe("EditSessionHost hasUnsavedEdits", () => {
+  let host: EditSessionHost;
+
+  beforeEach(() => {
+    host = new EditSessionHost(createFakeViewer());
+  });
+
+  afterEach(() => {
+    host.activeSession.value = undefined;
+    host.dispose();
+  });
+
+  /** Publish a fake session whose live strokes are dirty or not. */
+  function activateFakeSession(isDirty: boolean): void {
+    host.activeSession.value = {
+      dirty: { isDirty: () => isDirty },
+    } as unknown as EditSession;
+  }
+
+  it("is false with no session and nothing pending", () => {
+    expect(host.hasUnsavedEdits()).toBe(false);
+  });
+
+  it("is false for an open session with no unsaved strokes", () => {
+    activateFakeSession(false);
+    expect(host.hasUnsavedEdits()).toBe(false);
+  });
+
+  it("is true for unsaved strokes in the open session", () => {
+    // Nothing committed or awaiting confirmation: only the live strokes would
+    // be lost by a reload.
+    activateFakeSession(true);
+    expect(host.hasPendingCommittedChanges()).toBe(false);
+    expect(host.hasUnconfirmedSaves()).toBe(false);
+
+    expect(host.hasUnsavedEdits()).toBe(true);
+  });
+
+  it("is true for committed chunks still only in memory, with or without a session", () => {
+    vi.spyOn(host, "hasPendingCommittedChanges").mockReturnValue(true);
+    expect(host.hasUnsavedEdits()).toBe(true);
+    activateFakeSession(false);
+    expect(host.hasUnsavedEdits()).toBe(true);
+  });
+
+  it("is true for saves not yet confirmed durable, with or without a session", () => {
+    vi.spyOn(host, "hasUnconfirmedSaves").mockReturnValue(true);
+    expect(host.hasUnsavedEdits()).toBe(true);
+    activateFakeSession(false);
+    expect(host.hasUnsavedEdits()).toBe(true);
+  });
+});
+
 describe("EditSessionHost restore window", () => {
   let host: EditSessionHost;
   let layersChanged: NullarySignal;
