@@ -118,3 +118,39 @@ export function stageSummary(wave: number, round: number): string {
   if (stage.repeats && round > 0) return `${stage.label} (round ${round + 1})`;
   return stage.label;
 }
+
+/**
+ * What the panel looked like before a step ran its edit, kept so undoing that
+ * edit can put the panel back where the step found it.
+ *
+ * `carved` is the handoff step 3 consumes. This model never looks inside it; it
+ * only insists that undoing the cut hands the same object back, because Cut
+ * offered without it answers "Run step 2 first".
+ */
+export interface SplitStepUndo<CarvedState> {
+  /** The edit this step pushed onto the graph's undo stack. */
+  operationId: number;
+  stage: number;
+  carved: CarvedState | undefined;
+  pointsOutliveSplit: boolean;
+  status: string;
+}
+
+/**
+ * The state to restore now that `revertedOperationId` has been undone, or
+ * undefined when that undo reverted something else.
+ *
+ * The undo stack belongs to the whole graph — merges and the older multicut
+ * push onto it too — so a stepped session may only rewind when the edit that
+ * came back is one of its own. Steps are reverted newest first, so only the
+ * newest entry can match: an older one matching would claim a stage whose own
+ * edit is still in place.
+ */
+export function splitStepUndone<CarvedState>(
+  history: SplitStepUndo<CarvedState>[],
+  revertedOperationId: number,
+): SplitStepUndo<CarvedState> | undefined {
+  const newest = history.at(-1);
+  if (newest === undefined) return undefined;
+  return newest.operationId === revertedOperationId ? newest : undefined;
+}

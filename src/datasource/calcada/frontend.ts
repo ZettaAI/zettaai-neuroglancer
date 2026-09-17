@@ -77,6 +77,7 @@ import {
   debugEdgeLines,
   mergeDebugGraphs,
 } from "#src/datasource/calcada/debug_graph.js";
+import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
@@ -98,8 +99,10 @@ import {
   classifyCandidateEdit,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
+import type { SplitStepUndo } from "#src/datasource/calcada/split_steps.js";
 import {
   panelStages,
+  splitStepUndone,
   stageBlockedReason,
   stageEnabled,
 } from "#src/datasource/calcada/split_steps.js";
@@ -3422,6 +3425,12 @@ class ZettaTraceSession extends RefCounted {
   }
 }
 
+/** An edit on the undo stack: what to revert, and on which branch. */
+interface UndoableEdit {
+  operationId: number;
+  branchId: number;
+}
+
 class GraphConnection extends SegmentationGraphSourceConnection {
   public annotationLayerStates: AnnotationLayerState[] = [];
   public mergeAnnotationState: AnnotationLayerState;
@@ -4228,7 +4237,7 @@ void main() {
   // Undo stack of recent operations (calcada-only). Ctrl+Z pops the newest and
   // reverts it via the backend. Records general-split applies, merges, and
   // multicuts — each of those pushes its operation_id here.
-  private undoStack: { operationId: number; branchId: number }[] = [];
+  private undoStack: UndoableEdit[] = [];
 
   private static readonly MAX_UNDO_ENTRIES = 50;
 
@@ -4246,9 +4255,11 @@ void main() {
   }
 
   /**
-   * Revert the last edit. Returns whether anything actually reverted, so a
-   * caller keeping its own bookkeeping does not have to guess: an empty stack
-   * and a failed revert both leave the graph untouched.
+   * Revert the last edit. Returns the edit that was reverted, so a caller
+   * keeping its own bookkeeping does not have to guess — an empty stack and a
+   * failed revert both leave the graph untouched and answer undefined — and so
+   * a panel whose own steps are on this stack can tell whether the edit that
+   * came back was one of them.
    */
   // Serialised because every keybinding calls this fire-and-forget: two quick
   // presses would pop two entries and revert both at once, and a stepped
@@ -4257,15 +4268,18 @@ void main() {
   // two edits, one after the other.
   private readonly runUndoSerially = createSerialRunner();
 
-  async undo(): Promise<boolean> {
-    return this.runUndoSerially(() => this.undoOnce());
+  async undo(): Promise<UndoableEdit | undefined> {
+    // Clocked from before the queue: two quick presses mean the second really
+    // does wait out the first revert, and the label should own up to it.
+    const startedAt = Date.now();
+    return this.runUndoSerially(() => this.undoOnce(startedAt));
   }
 
-  private async undoOnce(): Promise<boolean> {
+  private async undoOnce(startedAt: number): Promise<UndoableEdit | undefined> {
     const entry = this.undoStack.pop();
     if (entry === undefined) {
       StatusMessage.showTemporaryMessage("Nothing to undo", 2500);
-      return false;
+      return undefined;
     }
     let restoredRoots: bigint[];
     let supersededRoots: bigint[];
@@ -4283,7 +4297,7 @@ void main() {
         `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
         8000,
       );
-      return false;
+      return undefined;
     }
     const segmentsState = this.layer.displayState.segmentationGroupState.value;
     // Drop the roots this undo retired (the reverted op's outputs), else their
@@ -4305,10 +4319,10 @@ void main() {
     this.meshRefreshSegments(restored);
     this.refreshChunkSources();
     StatusMessage.showTemporaryMessage(
-      `Undo applied — restored ${restoredRoots.length} root(s)`,
+      `Restored ${restoredRoots.length} root(s) — ${editTookLabel("undo", startedAt)}.`,
       5000,
     );
-    return true;
+    return entry;
   }
 
   setDebugPieces(
@@ -4725,10 +4739,11 @@ void main() {
               submission.source!.rootId,
               submission.sink.rootId,
             ];
+            const startedAt = Date.now();
             this.submitMerge(submission, 3)
               .then((mergedRoot) => {
                 segmentsToRemove.push(...segments);
-                submission.status = "done";
+                submission.status = editTookLabel("merge", startedAt);
                 submission.mergedRoot = mergedRoot;
                 merges.changed.dispatch();
                 completed += 1;
@@ -7507,7 +7522,12 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         zettaTraceState.active.value &&
         (focus === zettaTraceState.seedRoot.value ||
           focus === graphConnection.traceSession.current?.partnerRootId);
-      if (!traceOwnsFocus) {
+      // Hiding the focus is a deliberate look underneath it. Forcing it back on
+      // screen here is what used to make a double-click report "Hid segment"
+      // and change nothing.
+      const focusHidden = !segmentationGroupState.visibleSegments.has(focus);
+      const forceFocusVisible = !traceOwnsFocus && !focusHidden;
+      if (forceFocusVisible) {
         segmentationGroupState.useTemporaryVisibleSegments.value = true;
         segmentationGroupState.temporaryVisibleSegments.add(focus);
       }
@@ -7517,7 +7537,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       for (const piece of segmentationGroupState.segmentEquivalences.setElements(
         focus,
       )) {
-        if (!traceOwnsFocus) {
+        if (forceFocusVisible) {
           segmentationGroupState.temporaryVisibleSegments.add(piece);
         }
         const color = pieceColor.get(piece);
@@ -7563,27 +7583,31 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       displayState.baseSegmentHighlighting.value = priorBaseSegmentHighlighting;
       displayState.highlightColor.value = priorHighlightColor;
     });
-    // A cut belongs to the segment its points were placed on. Once that segment
-    // is hidden or deselected the points describe something the proofreader can
-    // no longer see, and the display override that forces its pieces on screen
-    // would also stop a double-click from ever hiding it. Drop them instead —
-    // on entry, so reopening the tool after deselecting starts clean, and while
-    // open, so hiding the segment takes effect immediately.
     // What step 2 wrote, which step 3 cuts. Client-side because each step is
     // its own committed edit: there is no session on the server to hold it.
-    let carved:
-      | {
-          sources: bigint[];
-          sinks: bigint[];
-          branchId: number;
-          rootId?: bigint;
-        }
-      | undefined;
+    interface CarvedSides {
+      sources: bigint[];
+      sinks: bigint[];
+      branchId: number;
+      rootId?: bigint;
+    }
+    let carved: CarvedSides | undefined;
     let stepStage = 0;
     // Set by a finished split, cleared by Clear: says the points on screen are
     // a record of a split that ran, not a request for one still to come.
     let pointsOutliveSplit = false;
+    // What each committed step replaced, so undoing its edit can put the panel
+    // back. stepStage only ever moves forward by itself, which left undoing a
+    // carve with Carve disabled and Cut enabled over pieces the undo destroyed.
+    const stepHistory: SplitStepUndo<CarvedSides>[] = [];
 
+    // A cut belongs to the segment its points were placed on. Deselecting that
+    // segment says the proofreader has moved on, so the points go with it — on
+    // entry, so reopening the tool after a deselect starts clean, and while
+    // open. Hiding is not that: it takes the segment off screen to see what is
+    // underneath, and the points on it still describe the cut being set up.
+    // updatePieceSplitDisplay leaves a hidden focus alone, so hiding takes
+    // effect while they stay.
     const dropPointsIfFocusGone = () => {
       // A carve that has run supersedes the very pieces the points name, so the
       // focus stops resolving. Dropping them then would throw away the split
@@ -7594,16 +7618,31 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       if (pointsOutliveSplit) return;
       const focus = currentFocusRoot();
       if (focus === undefined) return;
-      if (segmentationGroupState.visibleSegments.has(focus)) return;
+      if (segmentationGroupState.selectedSegments.has(focus)) return;
       pieceSplitState.reset();
     };
     dropPointsIfFocusGone();
     activation.registerDisposer(
-      segmentationGroupState.visibleSegments.changed.add(dropPointsIfFocusGone),
+      segmentationGroupState.selectedSegments.changed.add(
+        dropPointsIfFocusGone,
+      ),
     );
 
     activation.registerDisposer(
       pieceSplitState.changed.add(updatePieceSplitDisplay),
+    );
+    // Hiding or unhiding the focus decides whether the override may force it
+    // back on screen, and nothing else re-runs the display for that — which is
+    // how a double-click used to report "Hid segment" and change nothing. The
+    // focus check keeps the recompute to sessions that have points placed.
+    const updateDisplayForFocusVisibility = () => {
+      if (currentFocusRoot() === undefined) return;
+      updatePieceSplitDisplay();
+    };
+    activation.registerDisposer(
+      segmentationGroupState.visibleSegments.changed.add(
+        updateDisplayForFocusVisibility,
+      ),
     );
     updatePieceSplitDisplay();
 
@@ -7636,6 +7675,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       pointsOutliveSplit = false;
       carved = undefined;
       stepStage = 0;
+      stepHistory.length = 0;
       pieceSplitState.reset();
       stageStatus.textContent = "";
       renderStages();
@@ -7749,6 +7789,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // Editing the points describes a different split, so what step 1 showed and
     // what step 2 handed to step 3 no longer say anything true.
     const dropStepSession = () => {
+      // Editing the points abandons the stepped session, so nothing in it is
+      // worth rewinding to any more.
+      stepHistory.length = 0;
       if (stepStage === 0 && carved === undefined) return;
       carved = undefined;
       stepStage = 0;
@@ -7852,6 +7895,29 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     activation.registerDisposer(pieceSplitState.changed.add(render));
 
     // --- Actions ---
+    const rememberStep = (operationId: number) => {
+      stepHistory.push({
+        operationId,
+        stage: stepStage,
+        carved,
+        pointsOutliveSplit,
+        status: stageStatus.textContent ?? "",
+      });
+    };
+    // The steps commit as they go, so undoing one is the only way back — and the
+    // panel has to follow it, or it keeps offering the step after the one whose
+    // edit has just gone away.
+    const rewindStep = (revertedOperationId: number) => {
+      const undone = splitStepUndone(stepHistory, revertedOperationId);
+      if (undone === undefined) return;
+      stepHistory.pop();
+      stepStage = undone.stage;
+      carved = undone.carved;
+      pointsOutliveSplit = undone.pointsOutliveSplit;
+      stageStatus.textContent = undone.status;
+      updatePieceSplitDisplay();
+    };
+
     const runUndo = async () => {
       if (busy) return;
       if (!graphConnection.canUndo()) {
@@ -7860,17 +7926,13 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       }
       setBusy(true);
       try {
-        await graphConnection.undo();
+        const reverted = await graphConnection.undo();
+        if (reverted !== undefined) rewindStep(reverted.operationId);
         refreshDebugOverlay(); // the overlay's piece ids are now stale
       } finally {
         setBusy(false);
       }
     };
-
-    // What a proofreader actually waits through: the click to the segment
-    // coming apart on screen, server work and mesh refresh included.
-    const splitTookLabel = (startedAt: number) =>
-      `split took ${((Date.now() - startedAt) / 1000).toFixed(2)} sec`;
 
     // Step 1: cut every multi-colour piece and write the edges its halves inherit,
     // but leave everything in one segment. What the multicut will act on is then
@@ -7920,6 +7982,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        rememberStep(operationId);
         // Before updateAfterSplit: the guard that drops points runs inside it,
         // and the preview of the old segment has to come off first.
         pointsOutliveSplit = true;
@@ -7943,7 +8006,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         refreshDebugOverlay();
         renderStages();
         StatusMessage.showTemporaryMessage(
-          `Separated into ${newRoots.length} root(s) — ${splitTookLabel(startedAt)}. The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
+          `Separated into ${newRoots.length} root(s) — ${editTookLabel("split", startedAt)}. The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
           6000,
         );
       } catch (e: unknown) {
@@ -7989,6 +8052,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       const points = placedPoints();
       if (points === undefined) return;
       setBusy(true);
+      const startedAt = Date.now();
       const branchId = graphConnection.graph.branchId.value;
       try {
         const { conflicted, artificialPoints } =
@@ -8016,10 +8080,11 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           origin: "3d" as const,
           artificialColor: p.color,
         }));
+        const tookLabel = editTookLabel("points", startedAt);
         stageStatus.textContent =
           artificialPoints.length === 0
-            ? "No extra points needed — the cut can run on the pieces as they are."
-            : `${artificialPoints.length} point(s) added on ${conflicted.length} piece(s) that both sides run through. Nothing written yet.`;
+            ? `No extra points needed — ${tookLabel}. The cut can run on the pieces as they are.`
+            : `${artificialPoints.length} point(s) added on ${conflicted.length} piece(s) that both sides run through — ${tookLabel}. Nothing written yet.`;
         stepStage = 1;
       } catch (e: unknown) {
         stageStatus.textContent = `Step 1 failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -8037,6 +8102,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       const points = placedPoints();
       if (points === undefined) return;
       setBusy(true);
+      const startedAt = Date.now();
       const branchId = graphConnection.graph.branchId.value;
       const focus = currentFocusRoot();
       try {
@@ -8048,6 +8114,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             pieceSplitState.useImage.value,
           );
         graphConnection.pushUndo(operationId, branchId);
+        rememberStep(operationId);
 
         // Name the two sides for step 3. A piece that was carved contributes
         // its blue half to the sources and its red half to the sinks; a piece
@@ -8109,7 +8176,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         refreshDebugOverlay();
         stepStage = 2;
         renderStages();
-        stageStatus.textContent = `Carved ${splitPieces.length} piece(s). Written — press 3 to cut, or Ctrl+Z to undo.`;
+        stageStatus.textContent = `Carved ${splitPieces.length} piece(s) — ${editTookLabel("carve", startedAt)}. Written — press 3 to cut, or Ctrl+Z to undo.`;
       } catch (e: unknown) {
         stageStatus.textContent = `Step 2 failed: ${e instanceof Error ? e.message : String(e)}`;
         StatusMessage.showTemporaryMessage(stageStatus.textContent, 8000);
@@ -8141,6 +8208,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           return;
         }
         graphConnection.pushUndo(operationId, branchId);
+        rememberStep(operationId);
         pointsOutliveSplit = true;
         updatePieceSplitDisplay();
         const segmentsState = layer.displayState.segmentationGroupState.value;
@@ -8168,7 +8236,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         carved = undefined;
         stepStage = 3;
         renderStages();
-        stageStatus.textContent = `Separated into ${newRoots.length} root(s) — ${splitTookLabel(startedAt)}. Points stay up for comparison — step 4 clears them. Ctrl+Z undoes the cut, again undoes the carve.`;
+        stageStatus.textContent = `Separated into ${newRoots.length} root(s) — ${editTookLabel("cut", startedAt)}. Points stay up for comparison — step 4 clears them. Ctrl+Z undoes the cut, again undoes the carve.`;
       } catch (e: unknown) {
         stageStatus.textContent = `Step 3 failed: ${e instanceof Error ? e.message : String(e)}`;
         StatusMessage.showTemporaryMessage(stageStatus.textContent, 8000);
@@ -8211,7 +8279,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         );
         return;
       }
-      if (!value || !segmentationGroupState.visibleSegments.has(value)) {
+      if (!value || !segmentationGroupState.selectedSegments.has(value)) {
         StatusMessage.showTemporaryMessage(
           "Points can only be placed on selected segments",
           5000,

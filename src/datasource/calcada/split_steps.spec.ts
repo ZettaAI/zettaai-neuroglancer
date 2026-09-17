@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SPLIT_STAGES,
   panelStages,
+  splitStepUndone,
   stageBlockedReason,
   stageEnabled,
   stageSummary,
@@ -88,5 +89,57 @@ describe("stageSummary", () => {
 
   it("falls back to the number for a wave it does not know", () => {
     expect(stageSummary(9, 0)).toBe("Stage 9");
+  });
+});
+
+describe("splitStepUndone", () => {
+  // What the panel looked like before each step wrote anything: the carve began
+  // with step 1 behind it and nothing carved, the cut began with the carve's
+  // sources and sinks in hand.
+  const beforeCarve = {
+    operationId: 41,
+    stage: 1,
+    carved: undefined,
+    pointsOutliveSplit: false,
+    status: "2 point(s) added on 1 piece(s) that both sides run through.",
+  };
+  const beforeCut = {
+    operationId: 42,
+    stage: 2,
+    carved: { sources: [7n], sinks: [8n] },
+    pointsOutliveSplit: false,
+    status: "Carved 1 piece(s).",
+  };
+
+  // Undoing a carve used to leave the panel claiming it had run: Carve stayed
+  // disabled while Cut stayed enabled over the very pieces the undo destroyed.
+  it("puts the panel back to the stage a reverted step started from", () => {
+    const undone = splitStepUndone([beforeCarve], 41);
+    expect(undone?.stage).toBe(1);
+    expect(undone?.carved).toBeUndefined();
+    expect(stageEnabled(2, beforeCarve.stage, true)).toBe(true);
+    expect(stageEnabled(3, beforeCarve.stage, true)).toBe(false);
+  });
+
+  // Undoing the cut has to hand the carve's two sides back as well, or Cut is
+  // offered again only to answer "Run step 2 first".
+  it("restores the carve handoff when the cut is reverted", () => {
+    const undone = splitStepUndone([beforeCarve, beforeCut], 42);
+    expect(undone?.stage).toBe(2);
+    expect(undone?.carved).toEqual({ sources: [7n], sinks: [8n] });
+    expect(stageEnabled(3, beforeCut.stage, true)).toBe(true);
+  });
+
+  // The undo stack is shared with merges and the older multicut, so an undo
+  // that reverted one of those must leave the stepped session as it is.
+  it("ignores an undo that reverted another edit", () => {
+    expect(splitStepUndone([beforeCarve, beforeCut], 99)).toBeUndefined();
+    expect(splitStepUndone([], 41)).toBeUndefined();
+  });
+
+  // Steps are reverted newest first, so only the newest can match; an older
+  // entry matching would restore a stage whose own edit is still in place.
+  it("matches only the newest step", () => {
+    expect(splitStepUndone([beforeCarve, beforeCut], 41)).toBeUndefined();
   });
 });
