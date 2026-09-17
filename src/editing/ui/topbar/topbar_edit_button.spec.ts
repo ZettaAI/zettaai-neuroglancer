@@ -49,24 +49,31 @@ interface FakeHost {
   readonly exitLockReason: WatchableValue<string | undefined>;
   readonly requestSessionEntry: Signal<(key?: string) => void>;
   readonly discardActive: ReturnType<typeof vi.fn>;
-  hasPendingCommittedChanges(): boolean;
-  hasUnconfirmedSaves(): boolean;
+  hasUnsavedEdits(): boolean;
+}
+
+/** A session whose live strokes are dirty or not. */
+interface FakeSession {
+  readonly dirty: { isDirty(): boolean };
 }
 
 function createFakeHost(): FakeHost {
+  const activeSession = new WatchableValue<unknown>(undefined);
   return {
-    activeSession: new WatchableValue<unknown>(undefined),
+    activeSession,
     saveInProgress: new WatchableValue(false),
     exitLockReason: new WatchableValue<string | undefined>(undefined),
     requestSessionEntry: new Signal<(key?: string) => void>(),
     discardActive: vi.fn(async () => {}),
-    hasPendingCommittedChanges: () => false,
-    hasUnconfirmedSaves: () => false,
+    // Only live strokes: the committed and unconfirmed parts of the real
+    // predicate are covered in `edit_session_host.spec.ts`.
+    hasUnsavedEdits: () =>
+      (activeSession.value as FakeSession | undefined)?.dirty.isDirty() ===
+      true,
   };
 }
 
-/** A session whose live strokes are dirty or not, as the Exit handler reads. */
-function fakeSession(isDirty: boolean) {
+function fakeSession(isDirty: boolean): FakeSession {
   return { dirty: { isDirty: () => isDirty } };
 }
 

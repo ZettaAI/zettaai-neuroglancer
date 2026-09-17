@@ -116,19 +116,14 @@ export function TopbarEditButton({ host }: { host: EditSessionHost }) {
       return;
     }
     if (isExitBlockedNow()) return;
+    if (host.activeSession.value === undefined) return;
     // Read dirty state at click time, not render time — this component
     // doesn't subscribe to `session.dirty` events, so a render-time
     // snapshot would be stale once the user starts painting.
-    const session = host.activeSession.value;
-    if (session === undefined) return;
     // Confirm exit on live dirty edits, in-memory committed patches, OR saves
     // that were sent but not yet confirmed durable (TM-352) — leaving with
     // unconfirmed saves risks silent data loss.
-    const dirty =
-      session.dirty.isDirty() ||
-      host.hasPendingCommittedChanges() ||
-      host.hasUnconfirmedSaves();
-    if (dirty) {
+    if (host.hasUnsavedEdits()) {
       setConfirmExitOpen(true);
       return;
     }

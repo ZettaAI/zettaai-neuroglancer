@@ -50,6 +50,7 @@ import {
   makeZExtrapPanel,
 } from "#src/editing/ui/interop/tool_panel_mounts.js";
 import { EditingTopbar } from "#src/editing/ui/topbar/editing_topbar.js";
+import { installUnsavedEditsUnloadGuard } from "#src/editing/unsaved_edits_unload_guard.js";
 import {
   HelpPanelState,
   InputEventBindingHelpDialog,
@@ -997,31 +998,13 @@ export class Viewer extends RefCounted implements ViewerState {
       topRow.insertBefore(editingTopbarRightSpacer, anchor);
     }
 
-    {
-      // beforeunload guard: warn the user if they navigate away while
-      // there are in-memory committed patches that have not been saved
-      // to the backend. Modern browsers ignore the custom message and
-      // show their own generic prompt; setting `returnValue` is what
-      // actually triggers it.
-      const handleBeforeUnload = (ev: BeforeUnloadEvent) => {
-        // Warn on in-memory committed patches OR saves that were sent but not
-        // yet confirmed durable by read-back (TM-352) — the user must not lose
-        // unconfirmed work by leaving.
-        if (
-          !this.editSessionHost.hasPendingCommittedChanges() &&
-          !this.editSessionHost.hasUnconfirmedSaves()
-        ) {
-          return;
-        }
-        ev.preventDefault();
-        ev.returnValue =
-          "You have edits that are not confirmed saved. They may be lost if you leave.";
-      };
-      window.addEventListener("beforeunload", handleBeforeUnload);
-      this.registerDisposer(() =>
-        window.removeEventListener("beforeunload", handleBeforeUnload),
-      );
-    }
+    // beforeunload guard: warn the user if they navigate away while there are
+    // edits that are not confirmed saved to the backend: unsaved strokes in the
+    // open session, in-memory committed patches, OR saves that were sent but
+    // not yet confirmed durable by read-back (TM-352).
+    this.registerDisposer(
+      installUnsavedEditsUnloadGuard(window, this.editSessionHost),
+    );
 
     this.registerDisposer(
       new ElementVisibilityFromTrackableBoolean(

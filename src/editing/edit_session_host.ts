@@ -2174,11 +2174,26 @@ export class EditSessionHost extends RefCounted {
 
   /**
    * True iff there's at least one committed chunk pending in memory that
-   * the user has not yet saved to the backend. Used to drive the
-   * `beforeunload` warning.
+   * the user has not yet saved to the backend. Part of `hasUnsavedEdits()`.
    */
   hasPendingCommittedChanges(): boolean {
     return this.commitTarget.accepted.size > 0;
+  }
+
+  /**
+   * True while leaving would lose edits: strokes in the open session that are
+   * not saved yet, committed chunks still only in memory
+   * (`hasPendingCommittedChanges()`), or saves not yet confirmed durable
+   * (`hasUnconfirmedSaves()`, TM-352). Drives the `beforeunload` warning, so a
+   * reload or tab close does not silently drop paint, and the Exit-session
+   * confirmation.
+   */
+  hasUnsavedEdits(): boolean {
+    return (
+      this.activeSession.value?.dirty.isDirty() === true ||
+      this.hasPendingCommittedChanges() ||
+      this.hasUnconfirmedSaves()
+    );
   }
 
   // -- Per-layer accessors --------------------------------------------------
