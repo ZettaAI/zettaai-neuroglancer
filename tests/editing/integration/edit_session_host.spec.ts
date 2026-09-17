@@ -8,11 +8,13 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import type { EditSession } from "@zettaai/edit-session";
 import { Resolution, layerId } from "@zettaai/edit-session";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import { NgSessionLockAdapter } from "#src/editing/adapters/ng_session_lock.js";
 import {
+  DEFAULT_EXIT_LOCK_REASON,
   EditSessionHost,
   TrackableEditSessionIntent,
   type EditSessionIntent,
@@ -126,6 +128,123 @@ describe("EditSessionHost (no active session)", () => {
       host.ensureMaskReference(layerId("L1"), RES),
     ).resolves.toBeUndefined();
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe("EditSessionHost exit lock", () => {
+  let host: EditSessionHost;
+
+  beforeEach(() => {
+    const viewer = createFakeViewer();
+    // Session teardown walks the managed layers (to lift hover suppression);
+    // an empty list lets the real `discardActive` teardown run end to end.
+    Object.assign(viewer.layerManager, { managedLayers: [] });
+    host = new EditSessionHost(viewer);
+  });
+
+  afterEach(() => {
+    host.dispose();
+  });
+
+  /** Count `exitLockReason.changed` dispatches from here on. */
+  function countLockChanges(): () => number {
+    let dispatches = 0;
+    host.exitLockReason.changed.add(() => dispatches++);
+    return () => dispatches;
+  }
+
+  /**
+   * Publish a fake session the way `openSession` does. `EditSession.open` is
+   * out of reach in node (see `save_active_owned_region.spec.ts`); the teardown
+   * path only reads the dirty set and calls `discard()`.
+   */
+  function activateFakeSession(): EditSession {
+    const session = {
+      dirty: { getDirtyChunks: () => new Set<string>() },
+      discard: vi.fn(async () => {}),
+    } as unknown as EditSession;
+    host.activeSession.value = session;
+    return session;
+  }
+
+  it("is unlocked by default", () => {
+    expect(host.exitLockReason.value).toBeUndefined();
+  });
+
+  it("lockExit sets the reason and notifies once", () => {
+    const dispatches = countLockChanges();
+    host.lockExit("Complete the task to leave the edit session.");
+    expect(host.exitLockReason.value).toBe(
+      "Complete the task to leave the edit session.",
+    );
+    expect(dispatches()).toBe(1);
+  });
+
+  it("unlockExit clears the reason, notifies once, and is a no-op when unlocked", () => {
+    host.lockExit("Locked.");
+    const dispatches = countLockChanges();
+    host.unlockExit();
+    expect(host.exitLockReason.value).toBeUndefined();
+    expect(dispatches()).toBe(1);
+    host.unlockExit();
+    expect(dispatches()).toBe(1);
+  });
+
+  it("falls back to the default reason for a missing or blank reason", () => {
+    host.lockExit();
+    expect(host.exitLockReason.value).toBe(DEFAULT_EXIT_LOCK_REASON);
+    host.unlockExit();
+    host.lockExit("");
+    expect(host.exitLockReason.value).toBe(DEFAULT_EXIT_LOCK_REASON);
+    host.unlockExit();
+    host.lockExit("   ");
+    expect(host.exitLockReason.value).toBe(DEFAULT_EXIT_LOCK_REASON);
+  });
+
+  it("does not notify when locked again with the same reason", () => {
+    host.lockExit("Locked.");
+    const dispatches = countLockChanges();
+    host.lockExit("Locked.");
+    expect(dispatches()).toBe(0);
+    host.lockExit("Locked for another reason.");
+    expect(dispatches()).toBe(1);
+  });
+
+  it("stays out of the serialized viewer state", () => {
+    const intentJson = host.state.toJSON();
+    const preferencesJson = host.editPreferences.toJSON();
+    let stateChanges = 0;
+    host.state.changed.add(() => stateChanges++);
+    host.editPreferences.changed.add(() => stateChanges++);
+
+    host.lockExit("Locked.");
+
+    expect(host.state.toJSON()).toEqual(intentJson);
+    expect(host.editPreferences.toJSON()).toEqual(preferencesJson);
+    expect(stateChanges).toBe(0);
+  });
+
+  it("survives session teardown, so it still applies to a re-opened session", async () => {
+    host.lockExit("Locked.");
+    activateFakeSession();
+
+    await host.discardActive();
+
+    expect(host.activeSession.value).toBeUndefined();
+    expect(host.exitLockReason.value).toBe("Locked.");
+    activateFakeSession();
+    expect(host.exitLockReason.value).toBe("Locked.");
+    await host.discardActive();
+  });
+
+  it("does not gate discardActive, which still closes the session", async () => {
+    host.lockExit("Locked.");
+    const session = activateFakeSession();
+
+    await host.discardActive();
+
+    expect(session.discard).toHaveBeenCalledTimes(1);
+    expect(host.activeSession.value).toBeUndefined();
   });
 });
 

@@ -986,12 +986,12 @@ export class Viewer extends RefCounted implements ViewerState {
       const editingTopbarRightSpacer = document.createElement("div");
       editingTopbarRightSpacer.style.flex = "1 1 0";
       editingTopbarRightSpacer.style.minWidth = "0";
-      // The trailing controls (Save all / tools / Undo-Redo) are rendered
-      // as absolutely-positioned children of `.neuroglancer-editing-topbar`
-      // so they overlay this spacer without contributing to the topbar's
-      // flex width — which keeps the Edit / Exit button's X coordinate
-      // constant between idle and active states. `pointer-events: none`
-      // here so those overlaid controls remain clickable.
+      // The trailing controls (Save all / tools / Undo-Redo) render after the
+      // Edit / Exit button inside `.neuroglancer-editing-topbar`, whose flex
+      // width does not depend on its content, so they can overflow over this
+      // spacer without moving the Edit / Exit button's X coordinate.
+      // `pointer-events: none` here so those overflowing controls remain
+      // clickable.
       editingTopbarRightSpacer.style.pointerEvents = "none";
       const anchor = mousePositionWidget.element.nextSibling;
       topRow.insertBefore(topbarMount, anchor);
