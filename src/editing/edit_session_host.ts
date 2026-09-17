@@ -483,6 +483,14 @@ function dirtyFingerprint(session: EditSession): string {
  */
 const TARGET_BRUSH_DIAMETER_PX = 28;
 
+/**
+ * Why leaving the edit session is locked, shown on the disabled Exit-session
+ * button when the embedding host calls `EditSessionHost.lockExit()` without a
+ * reason of its own.
+ */
+export const DEFAULT_EXIT_LOCK_REASON =
+  "The app embedding this viewer has locked leaving the edit session.";
+
 // ---------------------------------------------------------------------------
 // EditSessionHost
 // ---------------------------------------------------------------------------
@@ -716,9 +724,10 @@ export class EditSessionHost extends RefCounted {
    * Reactive flag: whether a save started by `saveActive()` is currently in
    * flight. The topbar's Save button drives its loading state from this, and
    * the Exit-session button disables itself while it is `true` so a save can't
-   * be interrupted by leaving the session. Set `true` for the duration of
-   * `saveActive()` and reset in its `finally` (covers success, failure, and
-   * cancellation alike).
+   * be interrupted by leaving the session. It also disables while
+   * `exitLockReason` is set, and then shows the lock reason instead of the
+   * saving one. Set `true` for the duration of `saveActive()` and reset in its
+   * `finally` (covers success, failure, and cancellation alike).
    */
   readonly saveInProgress = new WatchableValue<boolean>(false);
 
@@ -824,6 +833,20 @@ export class EditSessionHost extends RefCounted {
   readonly backendAuthExpired = new WatchableValue<boolean>(
     isBackendAuthExpired(),
   );
+
+  /**
+   * Why the embedding host (the portal) has locked leaving the edit session
+   * through NG's own UI, or `undefined` while exit is unlocked — the default,
+   * so standalone NG behaves as it always has. While it is set, the topbar
+   * Exit-session button disables itself and shows this text as its tooltip.
+   * Written only through `lockExit()` / `unlockExit()`.
+   *
+   * Host-owned runtime state: NOT part of `state` / `editPreferences`, so it is
+   * never serialized into the ngState URL; NOT reset on session teardown, so it
+   * outlives a discard followed by a re-open; gone on page reload, so the
+   * embedding host re-applies it per document, like `configureBackend()`.
+   */
+  readonly exitLockReason = new WatchableValue<string | undefined>(undefined);
 
   /**
    * Shared HTTP client for the Zetta backend, used by tool compute backends.
@@ -1944,6 +1967,42 @@ export class EditSessionHost extends RefCounted {
    */
   configureBackend(endpoint: BackendEndpoint): void {
     registerBackendEndpoint(endpoint);
+  }
+
+  /**
+   * Lock leaving the edit session through NG's own UI, reachable via
+   * `window.viewer.editSessionHost`. The embedding host (the portal) calls this
+   * while a task must keep the tracer in the session; the topbar Exit-session
+   * button then stays disabled with `reason` as its tooltip. A blank or missing
+   * `reason` falls back to `DEFAULT_EXIT_LOCK_REASON`; a later call replaces
+   * the reason, and repeating the current one notifies nobody.
+   *
+   * Only NG's UI is gated: `discardActive()`, `commitActive()`, `saveActive()`
+   * and `saveCommitted()` stay callable, so the host can save and close the
+   * session itself. The lock is runtime state that outlives session teardown
+   * but not a page reload (see `exitLockReason`), so apply it per document and
+   * feature-detect it, since older builds lack it:
+   *
+   *   const host = window.viewer.editSessionHost;
+   *   if (typeof host.lockExit === "function") {
+   *     host.lockExit("Complete the task to leave the edit session.");
+   *   }
+   *   // ...later, when the task no longer needs the lock:
+   *   host.unlockExit();
+   */
+  lockExit(reason?: string): void {
+    this.exitLockReason.value =
+      typeof reason === "string" && reason.trim() !== ""
+        ? reason
+        : DEFAULT_EXIT_LOCK_REASON;
+  }
+
+  /**
+   * Undo `lockExit()`, re-enabling the topbar Exit-session button. No-op while
+   * exit is not locked.
+   */
+  unlockExit(): void {
+    this.exitLockReason.value = undefined;
   }
 
   /**

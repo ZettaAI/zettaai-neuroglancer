@@ -104,13 +104,14 @@ const TOOL_ENTRIES: readonly ToolEntry[] = [
 
 export function EditingTopbar({ host }: { host: EditSessionHost }) {
   const session = useWatchable(host.activeSession);
-  // The Edit / Exit button is the only flex child of the topbar — that
-  // keeps its X coordinate identical between idle and active states (the
-  // topbar's natural width never changes). Active-session controls are
-  // rendered into an absolutely-positioned trailing wrapper anchored to
-  // the right edge of the Edit button; viewer.ts centers the topbar
-  // between two flex:1 spacers so the cluster sits at the visual center
-  // of the neuroglancer top row.
+  // The topbar's first flex item is TopbarEditButton's tooltip wrapper, which
+  // sizes to the Edit / Exit button (96px min-width). The topbar itself is
+  // `flex: 1 1 0`, so its width does not depend on its content and the
+  // button's X coordinate is identical between idle and active states.
+  // Active-session controls follow as a plain flex sibling
+  // (`.neuroglancer-editing-topbar-trailing`) that may overflow over the right
+  // spacer; viewer.ts centers the topbar between two flex:1 spacers so the
+  // cluster sits at the visual center of the neuroglancer top row.
   return (
     <div class="neuroglancer-editing-topbar">
       <TopbarEditButton host={host} />
