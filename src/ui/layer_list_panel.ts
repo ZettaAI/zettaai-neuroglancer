@@ -18,14 +18,16 @@ import "#src/ui/layer_list_panel.css";
 import svg_controls_alt from "ikonate/icons/controls-alt.svg?raw";
 import svg_eye_crossed from "ikonate/icons/eye-crossed.svg?raw";
 import svg_eye from "ikonate/icons/eye.svg?raw";
-import { bindSessionLayerDeleteIcon } from "#src/editing/adapters/session_layer_structure_lock.js";
 import type {
   LayerManager,
   ManagedUserLayer,
   TopLevelLayerListSpecification,
 } from "#src/layer/index.js";
-import { deleteLayer } from "#src/layer/index.js";
 import { TrackableBooleanCheckbox } from "#src/trackable_boolean.js";
+import {
+  bindLayerDeleteIcon,
+  LAYER_LIST_PANEL_HIDE_INSTEAD,
+} from "#src/ui/layer_deletion_confirmation.js";
 import type { DropLayers } from "#src/ui/layer_drag_and_drop.js";
 import {
   registerLayerBarDragLeaveHandler,
@@ -182,11 +184,15 @@ class LayerListItem extends RefCounted {
         .element,
     );
     const deleteButton = makeDeleteButton();
-    // A layer of the active edit session cannot be deleted from here (see
+    // Deleting asks first (see `layer_deletion_confirmation.ts`), and a layer
+    // of the active edit session cannot be deleted from here (see
     // `session_layer_structure_lock.ts`).
     this.registerDisposer(
-      bindSessionLayerDeleteIcon(deleteButton, layer, "Delete layer", () =>
-        deleteLayer(this.layer),
+      bindLayerDeleteIcon(
+        deleteButton,
+        layer,
+        "Delete layer",
+        LAYER_LIST_PANEL_HIDE_INSTEAD,
       ),
     );
     deleteButton.classList.add("neuroglancer-layer-list-panel-item-delete");

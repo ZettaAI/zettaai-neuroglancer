@@ -46,13 +46,16 @@ export class FakeLayerRoot {
   } as unknown as TopLevelLayerListSpecification;
 
   /**
-   * A managed layer shown only by the root manager, exposing what the layer UI
-   * reads: its name, `layerChanged`, `manager.root` and `containers`.
+   * A visible, unarchived managed layer shown only by the root manager,
+   * exposing what the layer UI reads: its name, `visible`, `archived`,
+   * `layerChanged`, `manager.root` and `containers`.
    */
   addLayer(name: string): ManagedUserLayer {
     const layer = {
       name,
       layer: null,
+      visible: true,
+      archived: false,
       layerChanged: new NullarySignal(),
       manager: { root: this.root, rootLayers: this.rootLayers },
       containers: new Set<LayerManager>([this.rootLayers]),

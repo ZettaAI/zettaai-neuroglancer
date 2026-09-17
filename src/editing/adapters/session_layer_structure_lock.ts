@@ -26,7 +26,8 @@
  * The lock is a guard against accidental clicks in NG's own UI, not a model
  * rule: `deleteLayer`, `changeLayerName`, `changeLayerType`, `LayerManager` and
  * state restore (JSON state editor, URL hash, the portal's Reset View) stay
- * unguarded.
+ * unguarded. Deletes that the lock allows still ask first
+ * (`ui/layer_deletion_confirmation.ts`), in standalone NG too.
  *
  * Like `segment_selection_lock.ts`, the host is duck-typed off
  * `TopLevelLayerListSpecification.editSessionHost`, so upstream UI takes no
@@ -39,6 +40,7 @@ import type {
   ManagedUserLayer,
   TopLevelLayerListSpecification,
 } from "#src/layer/index.js";
+import { layersDeletedByRemovingLayerGroup } from "#src/layer/layer_group_removal.js";
 
 /**
  * The reasons say when the lock lifts, not what to do about it: in the
@@ -142,19 +144,32 @@ export function showSessionLayerLockOnIcon(
   }
 }
 
+/** What a click on an unlocked layer delete icon runs, in order. */
+export interface LayerDeleteIconActions {
+  /** Ask the user; `false` keeps the layer. */
+  confirm(): boolean;
+  onDelete(): void;
+}
+
 /**
  * Wire an upstream delete icon for `layer`: shown locked while the layer
- * belongs to the edit session, and a click runs `onDelete` only while it does
- * not. Returns the disposer.
+ * belongs to the edit session. A click on the unlocked icon asks
+ * `actions.confirm()` first, then runs `actions.onDelete()` if the user agreed
+ * and the layer is still unlocked when the prompt returns. A click on the
+ * locked icon runs neither. Returns the disposer.
  */
 export function bindSessionLayerDeleteIcon(
   icon: HTMLElement,
   layer: ManagedUserLayer,
   unlockedTitle: string,
-  onDelete: () => void,
+  actions: LayerDeleteIconActions,
 ): () => void {
   const onClick = () => {
-    if (!isSessionLayer(layer)) onDelete();
+    if (isSessionLayer(layer)) return;
+    if (!actions.confirm()) return;
+    // A session that locked the layer while the prompt was up wins.
+    if (isSessionLayer(layer)) return;
+    actions.onDelete();
   };
   icon.addEventListener("click", onClick);
   const stopObserving = observeSessionLayerLock(layer, (locked) =>
@@ -168,19 +183,13 @@ export function bindSessionLayerDeleteIcon(
 
 /**
  * Whether removing the layer group whose layers are `groupLayers` would delete
- * a session layer. A layer's `containers` are the root layer manager plus each
- * group that shows it, and the root drops a layer once no group shows it, so
- * a session layer that only this group shows is deleted with the group.
+ * a session layer: one that no other group shows and that is not archived
+ * (see `layersDeletedByRemovingLayerGroup`).
  */
 export function layerGroupHoldsOnlyCopyOfSessionLayer(
   groupLayers: LayerManager,
 ): boolean {
-  return groupLayers.managedLayers.some(
-    (layer) =>
-      isSessionLayer(layer) &&
-      [...layer.containers].every(
-        (container) =>
-          container === groupLayers || container === layer.manager.rootLayers,
-      ),
+  return layersDeletedByRemovingLayerGroup(groupLayers).some((layer) =>
+    isSessionLayer(layer),
   );
 }
