@@ -19,6 +19,7 @@ import {
   TrackableEditSessionIntent,
   type EditSessionIntent,
 } from "#src/editing/edit_session_host.js";
+import { NullarySignal } from "#src/util/signal.js";
 
 import { createFakeViewer } from "#tests/editing/fakes/fake_viewer.js";
 
@@ -245,6 +246,67 @@ describe("EditSessionHost exit lock", () => {
 
     expect(session.discard).toHaveBeenCalledTimes(1);
     expect(host.activeSession.value).toBeUndefined();
+  });
+});
+
+describe("EditSessionHost restore window", () => {
+  let host: EditSessionHost;
+  let layersChanged: NullarySignal;
+  let layers: Map<string, unknown>;
+
+  /** A layer whose only data source is still loading. */
+  function loadingLayer() {
+    return {
+      layer: {
+        dataSources: [{ loadState: undefined }],
+        dataSourcesChanged: new NullarySignal(),
+      },
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    layersChanged = new NullarySignal();
+    layers = new Map([
+      ["L1", loadingLayer()],
+      ["L2", loadingLayer()],
+    ]);
+    const viewer = createFakeViewer();
+    Object.assign(viewer.layerManager, {
+      layersChanged,
+      managedLayers: [],
+      getLayerByName: (name: string) => layers.get(name),
+    });
+    host = new EditSessionHost(viewer);
+  });
+
+  afterEach(() => {
+    host.dispose();
+    vi.useRealTimers();
+  });
+
+  it("locks the intent's layers while the restore waits for them, and unlocks them when it fails", async () => {
+    host.state.restoreState(sampleIntent());
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Still waiting for L1's data source: no session yet, but the intent's
+    // layers are already session layers for NG's UI.
+    expect(host.state.value.value).not.toBeNull();
+    expect(host.activeSession.value).toBeUndefined();
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(true);
+    expect(host.sessionLock.isSessionLayer(layerId("L2"))).toBe(true);
+    expect(host.sessionLock.isSessionLayer(layerId("outsider"))).toBe(false);
+
+    // Removed anyway (the lock only guards NG's UI): the wait times out and the
+    // restore fails, clearing the intent and the lock.
+    layers.delete("L1");
+    layersChanged.dispatch();
+    await vi.advanceTimersByTimeAsync(30000);
+
+    expect(host.state.value.value).toBeNull();
+    expect(host.sessionLock.restoringLayerIds.value).toBeUndefined();
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(false);
+    expect(host.sessionLock.isSessionLayer(layerId("L2"))).toBe(false);
   });
 });
 

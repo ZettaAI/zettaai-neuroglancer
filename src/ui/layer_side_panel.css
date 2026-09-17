@@ -36,6 +36,11 @@
   min-width: 0px;
 }
 
+/* Locked while the layer belongs to the active edit session. */
+.neuroglancer-layer-side-panel-name[readonly] {
+  cursor: default;
+}
+
 .neuroglancer-layer-side-panel-tab-view {
   flex: 1;
   display: flex;
@@ -70,6 +75,11 @@
   margin-right: 5px;
   border: 0px;
   outline: 0px;
+}
+
+.neuroglancer-layer-side-panel-type:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .neuroglancer-layer-side-panel-type option {

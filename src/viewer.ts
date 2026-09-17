@@ -624,10 +624,9 @@ export class Viewer extends RefCounted implements ViewerState {
     // `chunkManager`, and `display.gl` are all available.
     this.editSessionHost = this.registerDisposer(new EditSessionHost(this));
     // Publish the host through a dedicated `editSessionHost` extension
-    // point on `TopLevelLayerListSpecification` so per-layer UI
-    // (data-source widgets in `layer_data_sources_tab.ts`) can consult
-    // `host.sessionLock.isLayerDataSourceLocked(...)` without taking a
-    // direct Viewer dependency.
+    // point on `TopLevelLayerListSpecification` so per-layer UI (data-source
+    // widgets, and the controls that delete, rename or retype a layer) can
+    // consult `host.sessionLock` without taking a direct Viewer dependency.
     this.layerSpecification.editSessionHost = this.editSessionHost;
 
     this.alignmentLink = this.registerDisposer(new AlignmentLinkSession(this));

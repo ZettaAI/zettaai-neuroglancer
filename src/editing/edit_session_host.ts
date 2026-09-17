@@ -2380,9 +2380,18 @@ export class EditSessionHost extends RefCounted {
   async tryRestoreFromState(): Promise<void> {
     if (this.restoreInFlight !== undefined) return this.restoreInFlight;
     if (this.activeSession.value !== undefined) return;
-    if (this.state.value.value === null) return;
+    const intent = this.state.value.value;
+    if (intent === null) return;
+    // Lock the intent's layers in NG's UI while the restore waits for them
+    // (see `session_layer_structure_lock.ts`): deleting or renaming one now
+    // would fail the restore and clear the intent. Cleared when the attempt
+    // ends; on success the active session already holds the lock.
+    this.sessionLock.restoringLayerIds.value = new Set(
+      intent.layers.map((l) => l.layerId),
+    );
     const attempt = this.runRestoreAttempt().finally(() => {
       this.restoreInFlight = undefined;
+      this.sessionLock.restoringLayerIds.value = undefined;
     });
     this.restoreInFlight = attempt;
     return attempt;
