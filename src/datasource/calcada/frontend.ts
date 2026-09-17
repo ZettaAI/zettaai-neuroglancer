@@ -204,6 +204,7 @@ import type {
 import {
   makeCachedLazyDerivedWatchableValue,
   registerNested,
+  registerNestedSync,
   TrackableValue,
   WatchableSet,
   WatchableValue,
@@ -215,9 +216,10 @@ import {
   PlaceLineTool,
 } from "#src/ui/annotations.js";
 import { getDefaultAnnotationListBindings } from "#src/ui/default_input_event_bindings.js";
-import type { ToolActivation } from "#src/ui/tool.js";
+import type { Tool } from "#src/ui/tool.js";
 import {
   LayerTool,
+  ToolActivation,
   makeToolActivationStatusMessageWithHeader,
   makeToolButton,
   registerLegacyTool,
@@ -6278,6 +6280,68 @@ const getPoint = (
   return undefined;
 };
 
+function calcadaGraphUrl(layer: SegmentationUserLayer): string | undefined {
+  const connection = layer.graphConnection.value;
+  return connection instanceof GraphConnection
+    ? connection.graph.info.app?.segmentationUrl
+    : undefined;
+}
+
+/**
+ * The layer a calcada tool acts on: the first one that is not hidden among the
+ * layers over this table, or the tool's own layer when they are all hidden.
+ *
+ * A multi-branch setup is several layers over one segmentation, and hiding one
+ * and showing another is how a proofreader switches branch. A tool frozen to
+ * the layer it was activated on would go on editing the branch they just hid —
+ * and it could not read a click either, since a hidden layer draws nothing and
+ * therefore resolves no pick (LayerSelectedValues.update skips it outright).
+ */
+function activeCalcadaLayer(
+  layer: SegmentationUserLayer,
+  context: RefCounted,
+): WatchableValueInterface<SegmentationUserLayer> {
+  const layerManager = layer.manager.rootLayers;
+  const firstShown = () => {
+    // Read per call rather than once: the tool can be activated before this
+    // layer's datasource has finished loading, and a url captured then would
+    // stay undefined for the life of the activation.
+    const url = calcadaGraphUrl(layer);
+    if (url !== undefined) {
+      for (const managed of layerManager.managedLayers) {
+        const other = managed.layer;
+        if (!managed.visible || !(other instanceof SegmentationUserLayer)) {
+          continue;
+        }
+        if (calcadaGraphUrl(other) === url) return other;
+      }
+    }
+    return layer;
+  };
+  const target = new WatchableValue(firstShown());
+  context.registerDisposer(
+    layerManager.layersChanged.add(() => {
+      target.value = firstShown();
+    }),
+  );
+  return target;
+}
+
+/**
+ * One target layer's slice of a tool activation. Everything a tool binds
+ * through it is torn down when the tool moves to another layer, while the outer
+ * activation — and the key the proofreader is holding — lives on.
+ */
+class ScopedToolActivation<T extends Tool> extends ToolActivation<T> {
+  constructor(private outer: ToolActivation<T>) {
+    super(outer.tool, outer.inputEventMapBinder);
+  }
+
+  override cancel() {
+    this.outer.cancel();
+  }
+}
+
 // Legacy value kept verbatim: this is the persisted tool id in saved NG
 // states, and renaming it would break every state with a timestamp tool.
 const CALCADA_TIME_JSON_KEY = "grapheneTime";
@@ -7390,7 +7454,27 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
   }
 
   activate(activation: ToolActivation<this>) {
-    const { layer } = this;
+    // Rebuilt whenever the tool moves to another layer, so switching branch by
+    // hiding one layer and showing another does not need the tool restarted.
+    // The cut in progress belongs to the layer it was placed on, so it goes
+    // with the old layer rather than following to the new one.
+    activation.registerDisposer(
+      registerNestedSync(
+        (context, layer) => {
+          this.activateFor(
+            context.registerDisposer(new ScopedToolActivation(activation)),
+            layer,
+          );
+        },
+        activeCalcadaLayer(this.layer, activation),
+      ),
+    );
+  }
+
+  private activateFor(
+    activation: ToolActivation<this>,
+    layer: SegmentationUserLayer,
+  ) {
     const {
       graphConnection: { value: graphConnection },
     } = layer;
@@ -7412,7 +7496,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
-    header.textContent = "Cut tool";
+    header.textContent = `Cut tool — ${layer.managedLayer.name}`;
     body.classList.add("calcada-tool-status", "calcada-piece-split");
 
     // Dim the segmentation overlay (same mechanism as MulticutSegmentsTool) so
@@ -8274,8 +8358,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       const { value, baseValue } = layer.displayState.segmentSelectionState;
       if (baseValue === undefined || baseValue === null || baseValue === 0n) {
         StatusMessage.showTemporaryMessage(
-          "No piece is selected at the click position",
-          3000,
+          `No piece is selected at the click position in layer "${layer.managedLayer.name}"`,
+          4000,
         );
         return;
       }
