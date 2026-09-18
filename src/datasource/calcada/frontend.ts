@@ -1205,6 +1205,7 @@ class CalcadaDebugTab extends Tab {
   private readonly copyVisibleButton: HTMLElement;
   private readonly toggleAllButton: HTMLElement;
   private readonly hintElement = document.createElement("div");
+  private readonly modeElement = document.createElement("div");
   private readonly listElement = document.createElement("div");
   private query = "";
 
@@ -1212,6 +1213,9 @@ class CalcadaDebugTab extends Tab {
     super();
     const { element } = this;
     element.classList.add("calcada-debug-tab");
+
+    this.modeElement.className = "calcada-debug-tab-mode";
+    element.appendChild(this.modeElement);
 
     this.hintElement.className = "calcada-debug-tab-hint";
     element.appendChild(this.hintElement);
@@ -1277,6 +1281,11 @@ class CalcadaDebugTab extends Tab {
     this.registerDisposer(
       connection.debugPiecesChanged.add(() => this.render()),
     );
+    // The mode's counts change without the piece colours changing — a segment
+    // added to the comparison repaints the header long before its pieces land.
+    this.registerDisposer(
+      connection.debugSession.changed.add(() => this.render()),
+    );
     this.render();
   }
 
@@ -1310,16 +1319,26 @@ class CalcadaDebugTab extends Tab {
   }
 
   private render() {
+    const session = this.connection.debugSession;
     const colors = this.connection.debugPiecesColors;
     const hasPieces = colors !== undefined;
     this.queryElement.style.display = hasPieces ? "" : "none";
     this.listElement.style.display = hasPieces ? "" : "none";
     removeChildren(this.listElement);
 
+    // What the mode used to say in a banner over the viewer. It is here instead
+    // because one banner existed per calcada layer and they stacked until there
+    // was nothing left to work in, while this tab already belongs to one layer.
+    this.modeElement.textContent = session.active
+      ? `Debug mode \u00b7 ${session.status} \u00b7 D to exit`
+      : "";
+    this.modeElement.style.display = session.active ? "" : "none";
+
     if (colors === undefined) {
-      this.hintElement.textContent =
-        'Press "D" (or the Debug button in the Graph tab) and select a segment ' +
-        "to inspect its pieces here.";
+      this.hintElement.textContent = session.active
+        ? "Select segments to debug them."
+        : 'Press "D" (or the Debug button in the Graph tab) and select a segment ' +
+          "to inspect its pieces here.";
       this.statusMessage.textContent = "";
       this.toggleAllButton.style.display = "none";
       this.copyAllButton.style.display = "none";
@@ -2183,9 +2202,10 @@ class CalcadaDebugSession extends RefCounted {
   private priorHighlightColor: vec4 | undefined;
   private priorHideSegmentZero = false;
   private saved = false;
-  private modePanel: StatusMessage | undefined;
-  private modePanelStatus: HTMLElement | undefined;
-  private status = "Select a segment to debug it";
+  // Read by CalcadaDebugTab, which is where this is shown. Kept on the session
+  // rather than in the tab because a tab is built lazily and thrown away when
+  // the panel switches, while the mode's state outlives both.
+  private statusText = "Select a segment to debug it";
   // Selecting a segment fires once per id, and showing a segment made of many
   // pieces fires once per piece; refetching on each would be a burst of whole
   // -segment queries for one user action.
@@ -2200,7 +2220,10 @@ class CalcadaDebugSession extends RefCounted {
   // A refresh landing after the mode was switched off would repaint an overlay
   // nothing is going to clear.
   private fetchToken = 0;
-  private revealedTab = false;
+  // Which layer over this graph is on screen. Debug is a mode on the graph, but
+  // it is run by one layer.
+  private readonly shownLayer: WatchableValueInterface<SegmentationUserLayer>;
+  private engaged = false;
 
   constructor(
     private connection: GraphConnection,
@@ -2208,23 +2231,20 @@ class CalcadaDebugSession extends RefCounted {
     private state: CalcadaDebugState,
   ) {
     super();
-    this.registerDisposer(
-      state.active.changed.add(() => {
-        if (state.active.value) {
-          this.enterMode();
-        } else {
-          this.exit();
-        }
-      }),
-    );
+    this.shownLayer = activeCalcadaLayer(layer, this);
+    this.registerDisposer(this.shownLayer.changed.add(() => this.syncMode()));
+    this.registerDisposer(state.active.changed.add(() => this.syncMode()));
     this.registerDisposer(
       state.graphEdited.add(() => {
-        // An edit rewrites the very piece ids the cache holds.
+        // An edit rewrites the very piece ids the cache holds. Drop them
+        // whatever this layer is doing — a layer brought back on screen must
+        // not paint from a cache the edit invalidated — but only refetch when
+        // the layer is the one being looked at.
         this.graphCache.clear();
-        void this.enter();
+        if (this.engaged) void this.enter();
       }),
     );
-    if (state.active.value) this.enterMode();
+    this.syncMode();
     this.registerDisposer(() => this.exit());
   }
 
@@ -2256,7 +2276,10 @@ class CalcadaDebugSession extends RefCounted {
   // goes up immediately and the overlay follows whatever gets selected, so the
   // mode can be armed before picking a segment.
   private enterMode() {
-    this.showModePanel();
+    // Reveal on entering, not on the first successful paint: with nothing
+    // selected the paint returns early, and the mode would then be on with
+    // nothing anywhere on screen to say so.
+    this.selectLayerPanelTab("calcada-debug");
     const watcher = new RefCounted();
     watcher.registerDisposer(
       this.segmentsState.visibleSegments.changed.add(() => this.refetch()),
@@ -2279,7 +2302,6 @@ class CalcadaDebugSession extends RefCounted {
       ),
     );
     this.watchingSelection = watcher;
-    this.revealedTab = false;
     void this.enter();
   }
 
@@ -2350,13 +2372,15 @@ class CalcadaDebugSession extends RefCounted {
             ),
           ),
         );
-        if (token !== this.fetchToken || !this.state.active.value) return;
+        // engaged, not state.active: a fetch in flight when the layer goes off
+        // screen would otherwise land and paint an overlay nobody can see.
+        if (token !== this.fetchToken || !this.engaged) return;
         missing.forEach((id, i) => this.graphCache.set(id, fetched[i]));
       }
       const graphs = capped
         .map((id) => this.graphCache.get(id))
         .filter((graph): graph is RootDebugGraph => graph !== undefined);
-      if (token !== this.fetchToken || !this.state.active.value) return;
+      if (token !== this.fetchToken || !this.engaged) return;
       // Two selected ids can resolve to one segment -- a click that landed on a
       // piece, or two pieces of the same root -- so the roots are taken from
       // what the server resolved, not from what was asked for.
@@ -2454,14 +2478,6 @@ class CalcadaDebugSession extends RefCounted {
     }
     displayState.useTempSegmentStatedColors2d.value = true;
 
-    // Reveal the Debug tab once, when the mode first paints. A repaint fires on
-    // every selection change, and merge and cut are driven from the Graph tab —
-    // switching again would pull the proofreader off it mid-edit. exit() guards
-    // the same way, with onlyIfCurrent.
-    if (!this.revealedTab) {
-      this.revealedTab = true;
-      this.selectLayerPanelTab("calcada-debug");
-    }
     this.changed.dispatch();
 
     this.setStatus(
@@ -2493,67 +2509,48 @@ class CalcadaDebugSession extends RefCounted {
     this.watchingSelection?.dispose();
     this.watchingSelection = undefined;
     this.clearOverlay();
-    this.hideModePanel();
     this.selectLayerPanelTab("segments", "calcada-debug");
   }
 
+  // Both read by CalcadaDebugTab: the mode has no on-screen presence of its own
+  // any more, so the tab is where it says what it is doing.
+  get active() {
+    return this.engaged;
+  }
+
+  get status() {
+    return this.statusText;
+  }
+
   private setStatus(text: string) {
-    this.status = text;
-    if (this.modePanelStatus !== undefined) {
-      this.modePanelStatus.textContent = text;
-    }
+    this.statusText = text;
     this.changed.dispatch();
   }
 
   /**
-   * The mode's own section in the status list, built the way a tool activation
-   * builds one — same header and body as merge and cut, so the three read as one
-   * family. It cannot use makeToolActivationStatusMessage: the activation
-   * releases the tool slot immediately, and the section has to outlive it.
+   * Runs the mode on the layer that is on screen, and only there.
+   *
+   * A connection, a session and a window-level D listener exist per calcada
+   * layer, and subsource activation ignores visibility — so a graph opened as
+   * main plus two branches answers one D press with three sessions. All three
+   * painted a banner, each reporting its own layer's counts and none saying
+   * which layer it spoke for, and the status list stacked them until there was
+   * nothing left to work in. All three also fetched: whole-segment debug graphs
+   * for layers nobody was looking at, refetched on every edit anyone made.
+   *
+   * Engaging on the shown layer alone fixes both. A layer brought back on
+   * screen fetches then, which is the first moment its overlay can be seen.
    */
-  private showModePanel() {
-    if (this.modePanel !== undefined) return;
-    const message = new StatusMessage(false);
-    message.element.classList.add(
-      "neuroglancer-tool-status",
-      "calcada-debug-mode",
-    );
-
-    const content = document.createElement("div");
-    content.classList.add("neuroglancer-tool-status-content");
-    message.element.appendChild(content);
-
-    const headerContainer = document.createElement("div");
-    headerContainer.classList.add("neuroglancer-tool-status-header-container");
-    const header = document.createElement("div");
-    header.classList.add("neuroglancer-tool-status-header");
-    header.textContent = "Debug mode";
-    headerContainer.appendChild(header);
-    content.appendChild(headerContainer);
-
-    const body = document.createElement("div");
-    body.classList.add("neuroglancer-tool-status-body", "calcada-tool-status");
-    const status = document.createElement("span");
-    status.className = "calcada-debug-mode-status";
-    status.textContent = this.status;
-    body.appendChild(status);
-    content.appendChild(body);
-
-    const hint = document.createElement("div");
-    hint.textContent =
-      "Select segments to debug them \u00b7 double-click a piece to hide its " +
-      "mesh \u00b7 D to exit";
-    hint.classList.add("neuroglancer-tool-status-bindings");
-    message.element.appendChild(hint);
-
-    this.modePanel = message;
-    this.modePanelStatus = status;
-  }
-
-  private hideModePanel() {
-    this.modePanel?.dispose();
-    this.modePanel = undefined;
-    this.modePanelStatus = undefined;
+  private syncMode() {
+    const want =
+      this.state.active.value && this.shownLayer.value === this.layer;
+    if (want === this.engaged) return;
+    this.engaged = want;
+    if (want) {
+      this.enterMode();
+    } else {
+      this.exit();
+    }
   }
 
   // Shows a tab, optionally only when the panel is currently on another named

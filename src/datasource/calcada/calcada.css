@@ -342,6 +342,13 @@
   margin-bottom: 4px;
 }
 
+/* The mode's own line, where a banner over the viewer used to be. Set apart from
+   the hint below it so a glance at the tab says whether the mode is on. */
+.calcada-debug-tab-mode {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
 .calcada-debug-piece-list {
   display: flex;
   flex-direction: column;
@@ -373,12 +380,6 @@
    after a merge/cut activation creates theirs. Ordering it first keeps it in
    one place regardless — above whichever tool the proofreader picks up. */
 .calcada-zetta-trace-mode {
-  order: -1;
-}
-
-/* Same reasoning as the trace mode's section: it outlives any activation, so it
-   is ordered to a fixed place rather than wherever it happened to be created. */
-.calcada-debug-mode {
   order: -1;
 }
 
