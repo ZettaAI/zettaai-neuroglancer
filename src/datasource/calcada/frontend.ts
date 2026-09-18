@@ -8088,9 +8088,21 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           graphConnection.meshAddNewSegments(newRoots);
         }
         refreshDebugOverlay();
+        // Proofreaders cut one segment after another, and points that survive
+        // the split make the next one start with a trip to Clear: a point
+        // placed anywhere outside the old focus is refused, and the usual
+        // escape — deselecting the segment — is switched off while the points
+        // are outliving the split. Advanced mode keeps them, where dropping
+        // them is its own stage.
+        const kept = pieceSplitState.advanced.value;
+        if (!kept) clearPoints();
         renderStages();
         StatusMessage.showTemporaryMessage(
-          `Separated into ${newRoots.length} root(s) — ${editTookLabel("split", startedAt)}. The points stay up for comparison — Clear removes them. Ctrl+Z undoes the split.`,
+          `Separated into ${newRoots.length} root(s) — ${editTookLabel("split", startedAt)}. ${
+            kept
+              ? "The points stay up for comparison — Clear removes them."
+              : "Points cleared."
+          } Ctrl+Z undoes the split.`,
           6000,
         );
       } catch (e: unknown) {
