@@ -1335,8 +1335,10 @@ class CalcadaDebugTab extends Tab {
     this.modeElement.style.display = session.active ? "" : "none";
 
     if (colors === undefined) {
+      // Nothing here when the mode is on: the line above already says to select
+      // a segment, and saying it twice reads like two different instructions.
       this.hintElement.textContent = session.active
-        ? "Select segments to debug them."
+        ? ""
         : 'Press "D" (or the Debug button in the Graph tab) and select a segment ' +
           "to inspect its pieces here.";
       this.statusMessage.textContent = "";
@@ -2553,6 +2555,12 @@ class CalcadaDebugSession extends RefCounted {
     if (want === this.engaged) return;
     this.engaged = want;
     if (want) {
+      // Before entering, so the tab exists to be selected — and so the mode is
+      // visible from the moment it is switched on. The fetch that fills the tab
+      // can take seconds, and a segment has to be selected before there is
+      // anything to fetch at all; until then this is the only sign the mode is
+      // on. Leaving it hidden until pieces arrive is what made D look dead.
+      this.connection.debugTabHidden.value = false;
       this.enterMode();
     } else {
       this.exit();
@@ -4338,7 +4346,11 @@ void main() {
     this.debugPiecesRoot = rootId;
     this.debugPiecesColors = colors;
     this.debugPieceCenters = centers;
-    this.debugTabHidden.value = colors === undefined;
+    // Losing the pieces does not close the tab while the mode is still on:
+    // clearOverlay runs on every selection change, including the one that
+    // leaves nothing selected.
+    this.debugTabHidden.value =
+      colors === undefined && !this.debugSession?.active;
     if (colors === undefined) {
       const meshSource = this.getMeshSource();
       if (
