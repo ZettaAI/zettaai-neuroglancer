@@ -7089,11 +7089,38 @@ const MERGE_SEGMENTS_INPUT_EVENT_MAP = EventActionMap.fromObject({
 });
 
 class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
+  /**
+   * Follows the calcada layer that is on screen, the way the cut tool does.
+   *
+   * The merge line is an annotation tool, and the viewer routes a click to
+   * `selectedLayer.tool` (viewer.ts, the "annotate" action). Installing it on
+   * the layer the tool happened to be activated from meant that a proofreader
+   * who switched branch — by hiding one layer over the graph and showing
+   * another — got "The selected layer does not have an active annotation tool"
+   * on every click, with the tool visibly active.
+   */
   activate(activation: ToolActivation<this>) {
+    activation.registerDisposer(
+      registerNestedSync(
+        (context, layer) => {
+          this.activateFor(
+            context.registerDisposer(new ScopedToolActivation(activation)),
+            layer,
+          );
+        },
+        activeCalcadaLayer(this.layer, activation),
+      ),
+    );
+  }
+
+  private activateFor(
+    activation: ToolActivation<this>,
+    layer: SegmentationUserLayer,
+  ) {
     const {
       graphConnection: { value: graphConnection },
       tool,
-    } = this.layer;
+    } = layer;
     if (!graphConnection || !(graphConnection instanceof GraphConnection)) {
       activation.cancel();
       return;
@@ -7108,7 +7135,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
     }
     const { merges, autoSubmit } = mergeState;
     const lineTool = new MergeSegmentsPlaceLineTool(
-      this.layer,
+      layer,
       mergeAnnotationState,
     );
     tool.value = lineTool;
@@ -7169,7 +7196,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
     body.appendChild(points);
 
     const segmentWidgetFactory = SegmentWidgetFactory.make(
-      this.layer.displayState,
+      layer.displayState,
       /*includeUnmapped=*/ true,
     );
     const makeWidget = (id: Uint64MapEntry) => {
@@ -7181,7 +7208,7 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
     const createPointElement = (id: bigint) => {
       const containerEl = document.createElement("div");
       containerEl.classList.add("calcada-merge-segments-point");
-      const widget = makeWidget(augmentSegmentId(this.layer.displayState, id));
+      const widget = makeWidget(augmentSegmentId(layer.displayState, id));
       containerEl.appendChild(widget);
       return containerEl;
     };
