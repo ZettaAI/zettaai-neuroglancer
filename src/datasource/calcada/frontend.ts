@@ -4705,6 +4705,7 @@ void main() {
 
   async bulkMerge(submissions: MergeSubmission[]) {
     const { merges } = this.state.mergeState;
+    const startedAt = Date.now();
     const bulkMergeHelper = (
       submissions: MergeSubmission[],
     ): Promise<bigint[]> => {
@@ -4824,6 +4825,18 @@ void main() {
       }
     }
     merges.changed.dispatch();
+
+    // Each submission does record its own duration, but the row carrying it is
+    // deleted in the same tick it succeeds, so nobody ever saw it. Report the
+    // whole call instead — the span every other edit reports: the click through
+    // to the segments changing on screen, mesh refresh included.
+    const merged = submissions.filter((x) => x.mergedRoot !== undefined).length;
+    if (merged > 0) {
+      StatusMessage.showTemporaryMessage(
+        `Merged ${merged} pair(s) — ${editTookLabel("merge", startedAt)}.`,
+        4000,
+      );
+    }
   }
 
   async submitFindPath(
