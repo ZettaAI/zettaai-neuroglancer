@@ -10,11 +10,13 @@ compute → commit → GPU → save). Conventions (tiers, naming, vocabulary) ar
 unit/          *.spec.ts  — fast, isolated (Vitest). Compute matrices
                (painting_compute, painting_compute_matrix, patch_readback),
                adapters/, overlay/, local_patch_store, locked_writable_matrix,
-               harness-helper tests (build_ng_state, gcs_route).
-integration/   *.spec.ts  — EditSessionHost wiring (edit_session, edit_session_host).
+               unsaved_edits_unload_guard, harness-helper tests
+               (build_ng_state, gcs_route).
+integration/   *.spec.ts  — EditSessionHost wiring (edit_session, edit_session_host),
+               upstream layer UI under the session-layer structure lock.
 e2e/           *.e2e.ts   — Playwright correctness on the built app.
 perf/          *.perf.ts  — Playwright paint benchmark.
-fakes/         FakeViewer / FakeLayerManager / FakeLogger.
+fakes/         FakeViewer / FakeLayerManager / FakeLogger / FakeLayerRoot.
 harness/       drivers (no *.spec): e2e_setup, build_ng_state, gcs_route,
                fake_gcs_fixtures, serve_dist.
 ```

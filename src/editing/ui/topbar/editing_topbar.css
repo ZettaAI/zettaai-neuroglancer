@@ -13,10 +13,11 @@
  */
 
 .neuroglancer-editing-topbar {
-  /* The topbar's flex width is just the Edit / Exit button so its
-     position never changes between idle and active states. The trailing
-     controls live in a position:absolute wrapper that overflows to the
-     right (over the flex:1 spacer viewer.ts adds after the topbar). */
+  /* The topbar is flex: 1 1 0, so its width never depends on content and the
+     Edit / Exit button (its first item, inside the tooltip wrapper) keeps its
+     position between idle and active states. The trailing controls follow as
+     a plain flex sibling and may overflow to the right (over the flex:1
+     spacer viewer.ts adds after the topbar). */
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -282,6 +283,26 @@
 }
 
 /* Edit / Exit-session button (center anchor) ----------------------------- */
+
+/* Tooltip carrier for the Edit / Exit button. It sizes to the button and takes
+   its place as the topbar's first flex item, so the button's X coordinate is
+   unchanged. While the button is disabled (a save in flight, or exit locked by
+   the embedding host) the button drops out of hit-testing, so hover reaches
+   this wrapper and its `data-tooltip` reason still shows. */
+.neuroglancer-editing-topbar-edit-button-wrap {
+  display: inline-flex;
+}
+
+.neuroglancer-editing-topbar-edit-button-wrap:has(
+    > .neuroglancer-editing-topbar-edit-button:disabled
+  ) {
+  cursor: not-allowed;
+}
+
+.neuroglancer-editing-topbar-edit-button-wrap
+  > .neuroglancer-editing-topbar-edit-button:disabled {
+  pointer-events: none;
+}
 
 .neuroglancer-editing-topbar-edit-button {
   display: inline-flex;

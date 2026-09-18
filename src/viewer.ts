@@ -50,6 +50,7 @@ import {
   makeZExtrapPanel,
 } from "#src/editing/ui/interop/tool_panel_mounts.js";
 import { EditingTopbar } from "#src/editing/ui/topbar/editing_topbar.js";
+import { installUnsavedEditsUnloadGuard } from "#src/editing/unsaved_edits_unload_guard.js";
 import {
   HelpPanelState,
   InputEventBindingHelpDialog,
@@ -624,10 +625,9 @@ export class Viewer extends RefCounted implements ViewerState {
     // `chunkManager`, and `display.gl` are all available.
     this.editSessionHost = this.registerDisposer(new EditSessionHost(this));
     // Publish the host through a dedicated `editSessionHost` extension
-    // point on `TopLevelLayerListSpecification` so per-layer UI
-    // (data-source widgets in `layer_data_sources_tab.ts`) can consult
-    // `host.sessionLock.isLayerDataSourceLocked(...)` without taking a
-    // direct Viewer dependency.
+    // point on `TopLevelLayerListSpecification` so per-layer UI (data-source
+    // widgets, and the controls that delete, rename or retype a layer) can
+    // consult `host.sessionLock` without taking a direct Viewer dependency.
     this.layerSpecification.editSessionHost = this.editSessionHost;
 
     this.alignmentLink = this.registerDisposer(new AlignmentLinkSession(this));
@@ -986,43 +986,25 @@ export class Viewer extends RefCounted implements ViewerState {
       const editingTopbarRightSpacer = document.createElement("div");
       editingTopbarRightSpacer.style.flex = "1 1 0";
       editingTopbarRightSpacer.style.minWidth = "0";
-      // The trailing controls (Save all / tools / Undo-Redo) are rendered
-      // as absolutely-positioned children of `.neuroglancer-editing-topbar`
-      // so they overlay this spacer without contributing to the topbar's
-      // flex width — which keeps the Edit / Exit button's X coordinate
-      // constant between idle and active states. `pointer-events: none`
-      // here so those overlaid controls remain clickable.
+      // The trailing controls (Save all / tools / Undo-Redo) render after the
+      // Edit / Exit button inside `.neuroglancer-editing-topbar`, whose flex
+      // width does not depend on its content, so they can overflow over this
+      // spacer without moving the Edit / Exit button's X coordinate.
+      // `pointer-events: none` here so those overflowing controls remain
+      // clickable.
       editingTopbarRightSpacer.style.pointerEvents = "none";
       const anchor = mousePositionWidget.element.nextSibling;
       topRow.insertBefore(topbarMount, anchor);
       topRow.insertBefore(editingTopbarRightSpacer, anchor);
     }
 
-    {
-      // beforeunload guard: warn the user if they navigate away while
-      // there are in-memory committed patches that have not been saved
-      // to the backend. Modern browsers ignore the custom message and
-      // show their own generic prompt; setting `returnValue` is what
-      // actually triggers it.
-      const handleBeforeUnload = (ev: BeforeUnloadEvent) => {
-        // Warn on in-memory committed patches OR saves that were sent but not
-        // yet confirmed durable by read-back (TM-352) — the user must not lose
-        // unconfirmed work by leaving.
-        if (
-          !this.editSessionHost.hasPendingCommittedChanges() &&
-          !this.editSessionHost.hasUnconfirmedSaves()
-        ) {
-          return;
-        }
-        ev.preventDefault();
-        ev.returnValue =
-          "You have edits that are not confirmed saved. They may be lost if you leave.";
-      };
-      window.addEventListener("beforeunload", handleBeforeUnload);
-      this.registerDisposer(() =>
-        window.removeEventListener("beforeunload", handleBeforeUnload),
-      );
-    }
+    // beforeunload guard: warn the user if they navigate away while there are
+    // edits that are not confirmed saved to the backend: unsaved strokes in the
+    // open session, in-memory committed patches, OR saves that were sent but
+    // not yet confirmed durable by read-back (TM-352).
+    this.registerDisposer(
+      installUnsavedEditsUnloadGuard(window, this.editSessionHost),
+    );
 
     this.registerDisposer(
       new ElementVisibilityFromTrackableBoolean(

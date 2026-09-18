@@ -56,16 +56,16 @@ describe("EditSessionHost — integration (state surface)", () => {
     expect(host.state.value.value).toBeNull();
   });
 
-  it("setActiveSession + clearActiveSession on the lock toggle isLayerDataSourceLocked", () => {
+  it("setActiveSession + clearActiveSession on the lock toggle isSessionLayer", () => {
     const layers = new Set([layerId("L1"), layerId("L2")]);
     host.sessionLock.setActiveSession({
       sessionId: sessionId("dummy"),
       sessionLayerIds: layers,
     });
-    expect(host.sessionLock.isLayerDataSourceLocked(layerId("L1"))).toBe(true);
-    expect(host.sessionLock.isLayerDataSourceLocked(layerId("L3"))).toBe(false);
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(true);
+    expect(host.sessionLock.isSessionLayer(layerId("L3"))).toBe(false);
     host.sessionLock.clearActiveSession();
-    expect(host.sessionLock.isLayerDataSourceLocked(layerId("L1"))).toBe(false);
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(false);
   });
 
   it("state.restoreState with an unresolvable intent auto-clears via failRestore", async () => {
