@@ -53,6 +53,17 @@
   background-color: yellow;
 }
 
+/* An icon button whose action is currently unavailable (e.g. deleting a layer
+   of the active edit session); its title says why. */
+.neuroglancer-icon[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.neuroglancer-icon[aria-disabled="true"]:hover {
+  background-color: transparent;
+}
+
 .neuroglancer-icon.neuroglancer-info-icon:hover {
   background-color: inherit;
 }

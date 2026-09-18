@@ -18,12 +18,16 @@ import "#src/noselect.css";
 import "#src/ui/layer_bar.css";
 import svg_plus from "ikonate/icons/plus.svg?raw";
 import type { ManagedUserLayer } from "#src/layer/index.js";
-import { addNewLayer, deleteLayer, makeLayer } from "#src/layer/index.js";
+import { addNewLayer, makeLayer } from "#src/layer/index.js";
 import { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
 import type { LayerGroupViewer } from "#src/layer_group_viewer.js";
 import { NavigationLinkType } from "#src/navigation_state.js";
 import { StatusMessage } from "#src/status.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
+import {
+  bindLayerDeleteIcon,
+  LAYER_BAR_HIDE_INSTEAD,
+} from "#src/ui/layer_deletion_confirmation.js";
 import type { DropLayers } from "#src/ui/layer_drag_and_drop.js";
 import {
   registerLayerBarDragLeaveHandler,
@@ -158,9 +162,19 @@ class LayerWidget extends RefCounted {
       event.stopPropagation();
     });
     const deleteElement = makeDeleteButton();
-    deleteElement.title = "Delete this layer";
+    // Deleting asks first (see `layer_deletion_confirmation.ts`), and a layer
+    // of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`); the click is still swallowed so it
+    // does not toggle the layer's visibility.
+    this.registerDisposer(
+      bindLayerDeleteIcon(
+        deleteElement,
+        layer,
+        "Delete this layer",
+        LAYER_BAR_HIDE_INSTEAD,
+      ),
+    );
     deleteElement.addEventListener("click", (event: MouseEvent) => {
-      deleteLayer(this.layer);
       event.stopPropagation();
     });
     element.appendChild(layerNumberElement);
