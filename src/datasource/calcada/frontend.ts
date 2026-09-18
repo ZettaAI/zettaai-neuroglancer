@@ -2198,6 +2198,7 @@ const EMPTY_RETRY_DELAYS_MS = [300, 700, 1500];
  * tool activation would be torn down the moment the proofreader picked up merge
  * or cut, taking the overlay with it.
  */
+
 class CalcadaDebugSession extends RefCounted {
   readonly changed = new NullarySignal();
   private priorBaseSegmentHighlighting = false;
@@ -7560,13 +7561,13 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     // Dim the segmentation overlay (same mechanism as MulticutSegmentsTool) so
     // the bright point annotations stand out. The focus piece's root keeps
     // its outline visible via TRANSPARENT_COLOR_PACKED; every other segment
-    // gets MULTICUT_OFF_COLOR. Save and restore the prior display state on
-    // tool deactivation so the segmentation returns to its normal rendering.
+    // gets MULTICUT_OFF_COLOR.
     const { displayState } = layer;
-    const priorHideSegmentZero = displayState.hideSegmentZero.value;
-    const priorBaseSegmentHighlighting =
-      displayState.baseSegmentHighlighting.value;
-    const priorHighlightColor = displayState.highlightColor.value;
+    // Captured when the tool first overrides it rather than on activation.
+    // Debug mode owns the display state while it is on, so a snapshot taken
+    // under it restores the piece view once BOTH are closed — and debug then
+    // saves that as its own prior, so entering and leaving it again keeps it.
+    let priorHideSegmentZero: boolean | undefined;
     // The tool renders the segment the way the rest of the app does: as one
     // segment. Breaking it into its pieces — hover highlighting a single piece in
     // 2D, and tinting each mesh fragment separately in 3D — is a debugging view,
@@ -7622,6 +7623,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const updatePieceSplitDisplay = () => {
       if (graphConnection.state.calcadaDebugState.active.value) return;
       resetPieceSplitDisplay();
+      if (priorHideSegmentZero === undefined) {
+        priorHideSegmentZero = displayState.hideSegmentZero.value;
+      }
       displayState.hideSegmentZero.value = false;
 
       // Points kept after a split are a record of it; previewing them would pin
@@ -7721,9 +7725,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     };
     activation.registerDisposer(() => {
       resetPieceSplitDisplay();
-      displayState.hideSegmentZero.value = priorHideSegmentZero;
-      displayState.baseSegmentHighlighting.value = priorBaseSegmentHighlighting;
-      displayState.highlightColor.value = priorHighlightColor;
+      if (priorHideSegmentZero !== undefined) {
+        displayState.hideSegmentZero.value = priorHideSegmentZero;
+      }
     });
     // What step 2 wrote, which step 3 cuts. Client-side because each step is
     // its own committed edit: there is no session on the server to hold it.
