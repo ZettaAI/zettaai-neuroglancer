@@ -23,8 +23,11 @@ import type {
   ManagedUserLayer,
   TopLevelLayerListSpecification,
 } from "#src/layer/index.js";
-import { deleteLayer } from "#src/layer/index.js";
 import { TrackableBooleanCheckbox } from "#src/trackable_boolean.js";
+import {
+  bindLayerDeleteIcon,
+  LAYER_LIST_PANEL_HIDE_INSTEAD,
+} from "#src/ui/layer_deletion_confirmation.js";
 import type { DropLayers } from "#src/ui/layer_drag_and_drop.js";
 import {
   registerLayerBarDragLeaveHandler,
@@ -180,12 +183,18 @@ class LayerListItem extends RefCounted {
       this.registerDisposer(makeSelectedLayerSidePanelCheckboxIcon(layer))
         .element,
     );
-    const deleteButton = makeDeleteButton({
-      title: "Delete layer",
-      onClick: () => {
-        deleteLayer(this.layer);
-      },
-    });
+    const deleteButton = makeDeleteButton();
+    // Deleting asks first (see `layer_deletion_confirmation.ts`), and a layer
+    // of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`).
+    this.registerDisposer(
+      bindLayerDeleteIcon(
+        deleteButton,
+        layer,
+        "Delete layer",
+        LAYER_LIST_PANEL_HIDE_INSTEAD,
+      ),
+    );
     deleteButton.classList.add("neuroglancer-layer-list-panel-item-delete");
     element.appendChild(deleteButton);
     registerLayerDragHandlers(panel, element, layer, {

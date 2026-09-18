@@ -17,7 +17,7 @@
  *
  *   1. `NgSessionLockAdapter` — opening a session data-source-locks EVERY
  *      session layer (writable AND locked; `edit_session_host.ts:985`), so
- *      `isLayerDataSourceLocked` is set membership regardless of writability.
+ *      `isSessionLayer` is set membership regardless of writability.
  *   2. `SaveTracker` — initial per-layer status derivation: writable ⇒ pending,
  *      locked ⇒ skipped("read-only; not saved"); and the save flow only marks /
  *      reports writable layers (incl. the TM-352 unconfirmed-save path).
@@ -107,15 +107,15 @@ describe("locked/writable — NgSessionLockAdapter data-source locking", () => {
 
       // Writable AND locked session layers are data-source-locked.
       for (const l of layers) {
-        expect(adapter.isLayerDataSourceLocked(layerId(l.id))).toBe(true);
+        expect(adapter.isSessionLayer(layerId(l.id))).toBe(true);
       }
       // A layer outside the session is never locked.
-      expect(adapter.isLayerDataSourceLocked(layerId("OUTSIDER"))).toBe(false);
+      expect(adapter.isSessionLayer(layerId("OUTSIDER"))).toBe(false);
 
       // Clearing the session releases every layer.
       adapter.clearActiveSession();
       for (const l of layers) {
-        expect(adapter.isLayerDataSourceLocked(layerId(l.id))).toBe(false);
+        expect(adapter.isSessionLayer(layerId(l.id))).toBe(false);
       }
     });
   }

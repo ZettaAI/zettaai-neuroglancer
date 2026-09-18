@@ -483,6 +483,14 @@ function dirtyFingerprint(session: EditSession): string {
  */
 const TARGET_BRUSH_DIAMETER_PX = 28;
 
+/**
+ * Why leaving the edit session is locked, shown on the disabled Exit-session
+ * button when the embedding host calls `EditSessionHost.lockExit()` without a
+ * reason of its own.
+ */
+export const DEFAULT_EXIT_LOCK_REASON =
+  "The app embedding this viewer has locked leaving the edit session.";
+
 // ---------------------------------------------------------------------------
 // EditSessionHost
 // ---------------------------------------------------------------------------
@@ -716,9 +724,10 @@ export class EditSessionHost extends RefCounted {
    * Reactive flag: whether a save started by `saveActive()` is currently in
    * flight. The topbar's Save button drives its loading state from this, and
    * the Exit-session button disables itself while it is `true` so a save can't
-   * be interrupted by leaving the session. Set `true` for the duration of
-   * `saveActive()` and reset in its `finally` (covers success, failure, and
-   * cancellation alike).
+   * be interrupted by leaving the session. It also disables while
+   * `exitLockReason` is set, and then shows the lock reason instead of the
+   * saving one. Set `true` for the duration of `saveActive()` and reset in its
+   * `finally` (covers success, failure, and cancellation alike).
    */
   readonly saveInProgress = new WatchableValue<boolean>(false);
 
@@ -824,6 +833,20 @@ export class EditSessionHost extends RefCounted {
   readonly backendAuthExpired = new WatchableValue<boolean>(
     isBackendAuthExpired(),
   );
+
+  /**
+   * Why the embedding host (the portal) has locked leaving the edit session
+   * through NG's own UI, or `undefined` while exit is unlocked — the default,
+   * so standalone NG behaves as it always has. While it is set, the topbar
+   * Exit-session button disables itself and shows this text as its tooltip.
+   * Written only through `lockExit()` / `unlockExit()`.
+   *
+   * Host-owned runtime state: NOT part of `state` / `editPreferences`, so it is
+   * never serialized into the ngState URL; NOT reset on session teardown, so it
+   * outlives a discard followed by a re-open; gone on page reload, so the
+   * embedding host re-applies it per document, like `configureBackend()`.
+   */
+  readonly exitLockReason = new WatchableValue<string | undefined>(undefined);
 
   /**
    * Shared HTTP client for the Zetta backend, used by tool compute backends.
@@ -1947,6 +1970,42 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
+   * Lock leaving the edit session through NG's own UI, reachable via
+   * `window.viewer.editSessionHost`. The embedding host (the portal) calls this
+   * while a task must keep the tracer in the session; the topbar Exit-session
+   * button then stays disabled with `reason` as its tooltip. A blank or missing
+   * `reason` falls back to `DEFAULT_EXIT_LOCK_REASON`; a later call replaces
+   * the reason, and repeating the current one notifies nobody.
+   *
+   * Only NG's UI is gated: `discardActive()`, `commitActive()`, `saveActive()`
+   * and `saveCommitted()` stay callable, so the host can save and close the
+   * session itself. The lock is runtime state that outlives session teardown
+   * but not a page reload (see `exitLockReason`), so apply it per document and
+   * feature-detect it, since older builds lack it:
+   *
+   *   const host = window.viewer.editSessionHost;
+   *   if (typeof host.lockExit === "function") {
+   *     host.lockExit("Complete the task to leave the edit session.");
+   *   }
+   *   // ...later, when the task no longer needs the lock:
+   *   host.unlockExit();
+   */
+  lockExit(reason?: string): void {
+    this.exitLockReason.value =
+      typeof reason === "string" && reason.trim() !== ""
+        ? reason
+        : DEFAULT_EXIT_LOCK_REASON;
+  }
+
+  /**
+   * Undo `lockExit()`, re-enabling the topbar Exit-session button. No-op while
+   * exit is not locked.
+   */
+  unlockExit(): void {
+    this.exitLockReason.value = undefined;
+  }
+
+  /**
    * Dev-only logout for the build-time Google-login backend (TM-349). Clears
    * NG's cached id_token, best-effort revokes the grant at Google, and forces
    * the account chooser on the next login. Reachable from the console as
@@ -2115,11 +2174,26 @@ export class EditSessionHost extends RefCounted {
 
   /**
    * True iff there's at least one committed chunk pending in memory that
-   * the user has not yet saved to the backend. Used to drive the
-   * `beforeunload` warning.
+   * the user has not yet saved to the backend. Part of `hasUnsavedEdits()`.
    */
   hasPendingCommittedChanges(): boolean {
     return this.commitTarget.accepted.size > 0;
+  }
+
+  /**
+   * True while leaving would lose edits: strokes in the open session that are
+   * not saved yet, committed chunks still only in memory
+   * (`hasPendingCommittedChanges()`), or saves not yet confirmed durable
+   * (`hasUnconfirmedSaves()`, TM-352). Drives the `beforeunload` warning, so a
+   * reload or tab close does not silently drop paint, and the Exit-session
+   * confirmation.
+   */
+  hasUnsavedEdits(): boolean {
+    return (
+      this.activeSession.value?.dirty.isDirty() === true ||
+      this.hasPendingCommittedChanges() ||
+      this.hasUnconfirmedSaves()
+    );
   }
 
   // -- Per-layer accessors --------------------------------------------------
@@ -2321,9 +2395,18 @@ export class EditSessionHost extends RefCounted {
   async tryRestoreFromState(): Promise<void> {
     if (this.restoreInFlight !== undefined) return this.restoreInFlight;
     if (this.activeSession.value !== undefined) return;
-    if (this.state.value.value === null) return;
+    const intent = this.state.value.value;
+    if (intent === null) return;
+    // Lock the intent's layers in NG's UI while the restore waits for them
+    // (see `session_layer_structure_lock.ts`): deleting or renaming one now
+    // would fail the restore and clear the intent. Cleared when the attempt
+    // ends; on success the active session already holds the lock.
+    this.sessionLock.restoringLayerIds.value = new Set(
+      intent.layers.map((l) => l.layerId),
+    );
     const attempt = this.runRestoreAttempt().finally(() => {
       this.restoreInFlight = undefined;
+      this.sessionLock.restoringLayerIds.value = undefined;
     });
     this.restoreInFlight = attempt;
     return attempt;
