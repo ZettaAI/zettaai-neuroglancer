@@ -2542,8 +2542,14 @@ class CalcadaDebugSession extends RefCounted {
    * screen fetches then, which is the first moment its overlay can be seen.
    */
   private syncMode() {
+    // The visibility term is not redundant: activeCalcadaLayer falls back to the
+    // layer it was asked about when no layer over the graph is on screen, so
+    // with every layer hidden each session would name itself and all of them
+    // would engage at once — the exact per-layer duplication this avoids.
     const want =
-      this.state.active.value && this.shownLayer.value === this.layer;
+      this.state.active.value &&
+      this.shownLayer.value === this.layer &&
+      this.layer.managedLayer.visible;
     if (want === this.engaged) return;
     this.engaged = want;
     if (want) {
@@ -7132,7 +7138,10 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
       tool,
     } = layer;
     if (!graphConnection || !(graphConnection instanceof GraphConnection)) {
-      activation.cancel();
+      // Return rather than cancel: this activation is scoped to one layer and
+      // its cancel() reaches the outer one, which would drop the tool entirely
+      // instead of waiting for a layer whose datasource is still loading. The
+      // cut tool handles the same case the same way.
       return;
     }
     const {
