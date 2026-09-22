@@ -3422,6 +3422,13 @@ class ZettaTraceSession extends RefCounted {
         resolvedSeedRoot,
         newPartnerRoot,
       );
+      if (outcome === "superseded") {
+        // A cut replaced one of the two pieces. Which half now holds the
+        // candidate is the server's answer, not a guess worth making here, so
+        // the candidate is dropped and the reload below brings back the one it
+        // re-bound.
+        this.setStatus("segment was cut — reloading candidates");
+      }
       if (outcome === "rerooted") {
         this.current = { ...this.current, partnerRootId: newPartnerRoot };
         reconcile(resolvedSeedRoot, newPartnerRoot);

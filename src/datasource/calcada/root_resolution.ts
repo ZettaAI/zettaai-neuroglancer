@@ -21,13 +21,24 @@ export function isStaleRoot(
   return oldRoots.has(candidateRoot);
 }
 
-export type CandidateEditOutcome = "absorbed" | "rerooted" | "unaffected";
+export type CandidateEditOutcome =
+  | "absorbed"
+  | "rerooted"
+  | "unaffected"
+  | "superseded";
 
+/**
+ * A piece belongs to no root once a cut has replaced it with two halves, and the
+ * server answers that with a zero. Taking the zero for a root put the candidate
+ * on a segment that does not exist; the candidate has to come from the server
+ * again instead, because the server is what decided which half now holds it.
+ */
 export function classifyCandidateEdit(
   seedRootChanged: boolean,
   newSeedRoot: bigint,
   newPartnerRoot: bigint,
 ): CandidateEditOutcome {
+  if (newPartnerRoot === 0n || newSeedRoot === 0n) return "superseded";
   if (newPartnerRoot === newSeedRoot) return "absorbed";
   if (seedRootChanged) return "unaffected";
   return "rerooted";

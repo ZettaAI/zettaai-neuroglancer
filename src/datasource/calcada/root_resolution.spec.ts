@@ -23,4 +23,13 @@ describe("classifyCandidateEdit", () => {
   it("classifies as unaffected when the seed itself was re-rooted", () => {
     expect(classifyCandidateEdit(true, 10n, 20n)).toBe("unaffected");
   });
+  it("classifies as superseded when the partner's piece was cut in two", () => {
+    expect(classifyCandidateEdit(false, 10n, 0n)).toBe("superseded");
+  });
+  it("classifies as superseded when the seed's own piece was cut in two", () => {
+    expect(classifyCandidateEdit(false, 0n, 20n)).toBe("superseded");
+  });
+  it("does not read two cut pieces as one absorbed candidate", () => {
+    expect(classifyCandidateEdit(false, 0n, 0n)).toBe("superseded");
+  });
 });
