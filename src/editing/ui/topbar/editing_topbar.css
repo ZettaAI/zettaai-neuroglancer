@@ -105,7 +105,8 @@
   color: var(--nge-text);
 }
 
-.neuroglancer-editing-topbar-tool.active {
+.neuroglancer-editing-topbar-tool.active,
+.neuroglancer-editing-topbar-icon-button.active {
   /* Accent-tinted background + inset accent ring + accent icon color. Matches
      the active-state accent used by the Edit/Exit button and the panels. */
   background: var(--nge-accent-tint);

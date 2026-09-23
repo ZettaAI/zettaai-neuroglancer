@@ -56,6 +56,7 @@ import {
   clearDefaultSaveBackend,
 } from "#src/editing/adapters/save_backend.js";
 import { EditSessionHost } from "#src/editing/edit_session_host.js";
+import { SaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
 import type { OwnedChunkWrite } from "#src/editing/region/owned_chunk_write.js";
 import { captureSessionRegions } from "#src/editing/region/session_region_snapshot.js";
 
@@ -105,6 +106,16 @@ function chunkBytes(): Uint8Array {
   );
 }
 
+/**
+ * What a fresh read of the remote returns, in the shape `readFreshDecoded`
+ * resolves to. `mutate` stands in for another annotator having written.
+ */
+function remoteBytes(mutate?: (bytes: Uint8Array) => void) {
+  const bytes = chunkBytes();
+  mutate?.(bytes);
+  return { byteLength: bytes.byteLength, asView: () => bytes };
+}
+
 class RecordingBackend implements SaveBackend {
   readonly written: OwnedChunkWrite[] = [];
   async saveLayer(
@@ -132,6 +143,9 @@ function fakeSession(saveTarget: NgSaveTarget, bounds = REGION): EditSession {
       { layerId: LAYER, resolution: RES, chunkId: "0,0,0" },
     ],
     ensureContentRef: () => contentRef,
+    // The stale-baseline scan falls back to the session's opening baseline
+    // when no chunk has been saved yet this session.
+    baselineRefOf: () => contentRef,
   };
   // `saveActive` fingerprints the dirty set across its planning window and
   // refuses if it moved; `bump()` lets a test simulate paint landing there.
@@ -194,6 +208,10 @@ describe("EditSessionHost.saveActive region clip", () => {
       recordSavedBaseline: () => {},
       getSavedBytes: () => undefined,
       confirmChunkPersisted: vi.fn(async () => true),
+      // The stale-baseline scan fresh-reads every chunk before the write. The
+      // default answers with the bytes the save is about to send, i.e. nobody
+      // moved the region; tests about conflicts override this.
+      readFreshDecoded: vi.fn(async () => remoteBytes()),
     };
     // A REAL NgSaveTarget, but built with fakes: the one the host constructs
     // captures the viewer's metadata source, which would need a live
@@ -262,6 +280,131 @@ describe("EditSessionHost.saveActive region clip", () => {
       "edit overlay changed while the save was being prepared",
     );
     expect(backend.written).toHaveLength(0);
+  });
+
+  /**
+   * The stale-baseline gate, over the same clip. The owned box is x in [0,2),
+   * so x=1 is ours and x=3 belongs to the neighbouring task that shares this
+   * boundary chunk — the distinction the whole scan rests on.
+   */
+  describe("stale-baseline gate", () => {
+    function remoteWrites(voxel: number): void {
+      (host as any).chunkSource.readFreshDecoded = vi.fn(async () =>
+        remoteBytes((bytes) => {
+          bytes[voxel] = 200;
+        }),
+      );
+    }
+
+    it("refuses, and writes nothing, when the remote moved inside our box", async () => {
+      activate();
+      remoteWrites(1); // x=1 — ours
+
+      await expect(host.saveActive()).rejects.toThrow(SaveConflictError);
+      expect(backend.written).toHaveLength(0);
+    });
+
+    it("saves normally when a neighbour wrote outside our box", async () => {
+      activate();
+      remoteWrites(3); // x=3 — the neighbour's half of the same chunk
+
+      const result = await host.saveActive();
+      expect(result.overall).toBe("all-succeeded");
+      expect(backend.written).toHaveLength(1);
+    });
+
+    it("writes anyway once the user has chosen to overwrite", async () => {
+      activate();
+      remoteWrites(1);
+
+      const result = await host.saveActive(undefined, undefined, "overwrite");
+      expect(result.overall).toBe("all-succeeded");
+      expect(backend.written).toHaveLength(1);
+    });
+
+    it("skips the scan entirely when overwriting", async () => {
+      activate();
+      remoteWrites(1);
+
+      await host.saveActive(undefined, undefined, "overwrite");
+      expect(
+        (host as any).chunkSource.readFreshDecoded as ReturnType<typeof vi.fn>,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("refuses when no retained baseline can prove the region untouched", async () => {
+      // Neither a saved copy nor an opening baseline: unprovable, not clean.
+      const session = activate();
+      (session as any).overlay.baselineRefOf = () => undefined;
+      remoteWrites(1);
+
+      await expect(host.saveActive()).rejects.toThrow(SaveConflictError);
+      expect(backend.written).toHaveLength(0);
+    });
+
+    /**
+     * The scan is real network I/O, and it sits inside the window
+     * `owned_chunk_write.ts` requires to stay microtask-only: the host has
+     * already snapshotted the chunks it will verify, and the library has not
+     * yet collected the ones it will write. Paint landing in between makes
+     * those two sets differ — the library writes chunks this save never
+     * scanned for conflicts and never verifies.
+     */
+    it("refuses when paint lands while the conflict scan is running", async () => {
+      const session = activate();
+      (host as any).chunkSource.readFreshDecoded = vi.fn(async () => {
+        (session as any).dirty.bump(); // a paint tile commits mid-scan
+        return remoteBytes();
+      });
+
+      await expect(host.saveActive()).rejects.toThrow(
+        "changed while the save was being checked for conflicts",
+      );
+      expect(backend.written).toHaveLength(0);
+    });
+
+    /**
+     * `saveActive` records a chunk's saved bytes as soon as the write is acked,
+     * BEFORE read-back proves the backend holds them. If that verification
+     * never confirms, those bytes are only an attempt — and the merge kernel
+     * reads the baseline as ground truth for "did I change this voxel", so
+     * trusting them would hand every voxel of that attempt to the remote and
+     * silently revert the user's own paint.
+     */
+    it("treats an unconfirmed save's bytes as unprovable, not as a baseline", async () => {
+      activate();
+      const attempted = chunkBytes();
+      (host as any).chunkSource.getSavedBytes = () => ({
+        byteLength: attempted.byteLength,
+        asView: () => attempted,
+      });
+      (host as any).unconfirmedChunks.set("L1|8x8x40|0,0,0", {});
+      // Remote reads back pristine — the acked write never actually landed.
+      (host as any).chunkSource.readFreshDecoded = vi.fn(async () =>
+        remoteBytes((bytes) => bytes.fill(0)),
+      );
+
+      const error = await host.saveActive().catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(SaveConflictError);
+      // Unprovable, NOT diverged: a diverged chunk would offer Merge, and the
+      // merge is exactly what would eat the paint.
+      expect(error.scan.uncomparable).toHaveLength(1);
+      expect(error.scan.uncomparable[0].reason).toBe("no-retained-baseline");
+      expect(error.scan.diverged).toHaveLength(0);
+      expect(backend.written).toHaveLength(0);
+    });
+
+    it("carries what diverged on the error, for the dialog to list", async () => {
+      activate();
+      remoteWrites(1);
+
+      const error = await host.saveActive().catch((thrown) => thrown);
+      expect(error).toBeInstanceOf(SaveConflictError);
+      expect(error.scan.diverged).toHaveLength(1);
+      expect(error.scan.diverged[0].write.chunkId).toBe("0,0,0");
+      expect(error.scan.uncomparable).toHaveLength(0);
+    });
   });
 
   it("fails the save when the session region cannot be captured", async () => {
