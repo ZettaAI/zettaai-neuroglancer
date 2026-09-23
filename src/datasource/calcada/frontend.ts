@@ -97,6 +97,7 @@ import {
 } from "#src/datasource/calcada/role_colors.js";
 import {
   classifyCandidateEdit,
+  componentsWithCarvedParents,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
 import type { SplitStepUndo } from "#src/datasource/calcada/split_steps.js";
@@ -3422,6 +3423,13 @@ class ZettaTraceSession extends RefCounted {
         resolvedSeedRoot,
         newPartnerRoot,
       );
+      if (outcome === "superseded") {
+        // A cut replaced one of the two pieces. Which half now holds the
+        // candidate is the server's answer, not a guess worth making here, so
+        // the candidate is dropped and the reload below brings back the one it
+        // re-bound.
+        this.setStatus("segment was cut — reloading candidates");
+      }
       if (outcome === "rerooted") {
         this.current = { ...this.current, partnerRootId: newPartnerRoot };
         reconcile(resolvedSeedRoot, newPartnerRoot);
@@ -4218,6 +4226,10 @@ void main() {
     oldRoot: bigint,
     newRoots: bigint[],
     components: bigint[][],
+    // True when the split carved a piece whose halves went to different roots.
+    // Such a parent names two segments at once, so no group can hold it and the
+    // voxels that still carry its id have to be read again.
+    relabelledVoxels = false,
   ) {
     const segmentsState = this.layer.displayState.segmentationGroupState.value;
     // Drop the old root entirely — its equivalence class no longer
@@ -4243,9 +4255,33 @@ void main() {
     // ClickHouse materialised view that backs the LUT — when the MV
     // hasn't propagated the new piece→root mapping yet, the refreshed
     // chunks restore the OLD mapping and the new roots stop rendering
-    // until the user manually reloads. The pieces themselves haven't
-    // moved in storage, so the cached chunk pixel data is still valid;
-    // the in-memory equivalences here are what drive the shader.
+    // until the user manually reloads. Where a multicut only re-rooted
+    // pieces they have not moved in storage, so the cached chunk pixel
+    // data is still valid and the equivalences here drive the shader.
+    //
+    // Voxels a carve relabelled are the exception: the ids those chunks
+    // carry no longer exist in storage, so the pixels have to come again.
+    if (relabelledVoxels) this.refetchChunkPixels();
+  }
+
+  /**
+   * Re-read the segmentation pixels while keeping the equivalences.
+   *
+   * The ids in a chunk decoded before a carve name pieces the graph has since
+   * retired, and nothing resolves them: the slice view stops painting those
+   * voxels, hover stops highlighting, and a click has only the bare piece id to
+   * select. Fresh pixels carry the halves instead, which the equivalences set
+   * alongside this call already cover — and those equivalences are exactly what
+   * a full source refresh would throw away, handing the shader back to a
+   * materialized view that lags the write this is reacting to.
+   */
+  refetchChunkPixels() {
+    this.chunkSource.generation += 1;
+    for (const renderLayer of this.layer.renderLayers) {
+      if (renderLayer instanceof SliceViewRenderLayer) {
+        (renderLayer.transform.changed as unknown as NullarySignal).dispatch();
+      }
+    }
   }
 
   // Undo stack of recent operations (calcada-only). Ctrl+Z pops the newest and
@@ -8112,7 +8148,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           z: p.voxel[2],
           origin: p.origin,
         });
-        const { roots, components, operationId } =
+        const { roots, components, operationId, splitPieces } =
           await graphConnection.graph.graphServer.generalSplit(
             [
               ...blue.map((p) => toPayload(p, "blue")),
@@ -8133,8 +8169,14 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         // and the preview of the old segment has to come off first.
         pointsOutliveSplit = true;
         updatePieceSplitDisplay();
+        const carved = componentsWithCarvedParents(components, splitPieces);
         if (oldRoot !== undefined) {
-          graphConnection.updateAfterSplit(oldRoot, newRoots, components);
+          graphConnection.updateAfterSplit(
+            oldRoot,
+            newRoots,
+            carved.components,
+            carved.ambiguous.length > 0,
+          );
           graphConnection.meshAddNewSegments(newRoots);
           const oldRootSet = new Uint64Set();
           oldRootSet.add(oldRoot);
@@ -8305,24 +8347,23 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           rootId: newRoots.length === 1 ? newRoots[0] : undefined,
         };
         if (newRoots.length > 0 && focus !== undefined) {
-          // A carve rewrites voxels: every parent it split is superseded and its
-          // id replaced in storage by the two halves. The chunks already decoded
-          // in the browser still carry the parent id, and it belongs to no group
-          // in the response — which is why the segment vanished from the 2D view
-          // while the meshes, rebuilt from the response, stayed. Carrying the
-          // superseded parents into the group keeps those cached chunks
-          // resolving until they are re-fetched. Safe precisely here: a carve
-          // leaves the segment whole, so both halves of every parent are in the
-          // one root, and so is the parent.
-          const carveComponents =
-            newRoots.length === 1
-              ? [[...(components[0] ?? []), ...splitPieces.map((sp) => sp.old)]]
-              : components;
+          // This step keeps the segment whole, so both halves of every parent
+          // land in the one root and the parent goes in with them — which is
+          // what keeps the chunks still carrying its id resolving.
+          const withParents = componentsWithCarvedParents(
+            components,
+            splitPieces,
+          );
           // The segment stays whole but its pieces changed, so the piece to
           // root mapping is stale. The response carries the new root's complete
           // piece list, which is authoritative where the local reconstruction
           // is only as fresh as the last chunk fetch.
-          graphConnection.updateAfterSplit(focus, newRoots, carveComponents);
+          graphConnection.updateAfterSplit(
+            focus,
+            newRoots,
+            withParents.components,
+            withParents.ambiguous.length > 0,
+          );
           graphConnection.meshAddNewSegments(newRoots);
           const oldRootSet = new Uint64Set();
           oldRootSet.add(focus);
