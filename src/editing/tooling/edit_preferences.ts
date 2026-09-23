@@ -56,26 +56,41 @@ export interface EditPreferences {
    */
   readonly tooling?: ToolingPersistState;
   /**
-   * What a save does when it finds the region changed under it.
+   * Whether a save that finds the region changed under it reconciles itself
+   * instead of stopping to ask. Absent means {@link DEFAULT_AUTOMERGE}.
    *
-   * `"warn"` stops and asks; `"combine"` folds the other side's voxels in and
-   * saves the result. Absent means `"warn"` — the answer that cannot lose
-   * work without someone choosing to.
+   * On, a refused save folds the other side's voxels into every chunk it can
+   * and RELOADS every chunk where both sides changed the same voxels —
+   * dropping our edits there — then saves the result and reports what it did.
+   * Off, every conflict raises the dialog and nothing moves until the user
+   * answers.
    *
    * A preference rather than session state because it is a way of working,
    * not a property of one region: a tracer who wants merges wants them
-   * tomorrow too. Note the consequence of living in client-authored
-   * `ngState` — a session can set its own value, so this must never be the
-   * thing that decides whether an overwrite is ALLOWED, only whether the user
-   * is asked first. The refusal itself stays server-of-record in the scan.
+   * tomorrow too.
+   *
+   * WHY THIS IS SAFE TO DEFAULT ON, given it lives in client-authored
+   * `ngState` and so a session can set its own value: automerge resolves
+   * every collision in the REMOTE's favour. The most a hostile or stale
+   * state can cost is the local user's own unsaved paint — which is one undo
+   * away, because the reconcile goes through the write protocol as a single
+   * edit. It cannot authorize clobbering anyone else's work. That asymmetry
+   * is the whole argument, and it is why this must never become the thing
+   * that decides whether an OVERWRITE is allowed, only whether the user is
+   * asked first. The refusal itself stays server-of-record in the scan.
    */
-  readonly conflictStrategy?: ConflictStrategy;
+  readonly automerge?: boolean;
 }
 
-/** How a save answers a stale baseline without asking. */
-export type ConflictStrategy = "warn" | "combine";
-
-export const DEFAULT_CONFLICT_STRATEGY: ConflictStrategy = "warn";
+/**
+ * Conflicts reconcile themselves unless the user opts out.
+ *
+ * Note what this inverts: the tolerant parser below drops a malformed value,
+ * so a malformed value now degrades to "merge without asking" rather than to
+ * "ask me". What keeps that honest is not the parser — it is that a reconcile
+ * is one undo step and always announces what it discarded.
+ */
+export const DEFAULT_AUTOMERGE = true;
 
 /**
  * Trackable wrapping the `editPreferences` block on `ngState`. The value is
@@ -147,13 +162,13 @@ function parseResolutions(
  * nothing usable.
  */
 /**
- * Parse the conflict strategy. An unrecognised value is dropped rather than
- * kept or thrown on, so a future strategy name written by a newer build
- * degrades to "ask me" instead of breaking the block or silently enabling
- * something this build would misread.
+ * Parse the automerge opt-out. A non-boolean is dropped rather than coerced,
+ * so one malformed field cannot discard the user's unrelated preferences —
+ * and, more importantly, so a truthy-but-not-`true` value written by another
+ * build cannot be read here as consent.
  */
-function parseConflictStrategy(x: unknown): ConflictStrategy | undefined {
-  return x === "warn" || x === "combine" ? x : undefined;
+function parseAutomerge(x: unknown): boolean | undefined {
+  return typeof x === "boolean" ? x : undefined;
 }
 
 export function parseEditPreferences(x: unknown): EditPreferences | null {
@@ -162,24 +177,28 @@ export function parseEditPreferences(x: unknown): EditPreferences | null {
   const obj = x as Record<string, unknown>;
   const resolutions = parseResolutions(obj.resolutions);
   const tooling = parseTooling(obj.tooling);
-  const conflictStrategy = parseConflictStrategy(obj.conflictStrategy);
+  const automerge = parseAutomerge(obj.automerge);
   if (
     resolutions === undefined &&
     tooling === undefined &&
-    conflictStrategy === undefined
+    automerge === undefined
   ) {
     return null;
   }
   return {
     ...(resolutions !== undefined ? { resolutions } : {}),
     ...(tooling !== undefined ? { tooling } : {}),
-    ...(conflictStrategy !== undefined ? { conflictStrategy } : {}),
+    ...(automerge !== undefined ? { automerge } : {}),
   };
 }
 
-/** The effective strategy for a session, defaulting when unset or malformed. */
-export function conflictStrategyOf(
-  preferences: EditPreferences | null,
-): ConflictStrategy {
-  return preferences?.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
+/**
+ * Whether this session reconciles conflicts without asking.
+ *
+ * Because the default is on and nothing writes the field until the user opts
+ * out, the only value that ever reaches the URL is `false` — which is exactly
+ * the one that has to survive a reload.
+ */
+export function automergeEnabled(preferences: EditPreferences | null): boolean {
+  return preferences?.automerge ?? DEFAULT_AUTOMERGE;
 }

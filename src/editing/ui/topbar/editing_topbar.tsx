@@ -15,6 +15,7 @@ import type { EditSession } from "@zettaai/edit-session";
 import type { LucideIcon } from "lucide-preact";
 import {
   Eraser,
+  GitMerge,
   Layers,
   Loader2,
   LocateFixed,
@@ -44,6 +45,7 @@ import {
   effectiveEditKeybinds,
   type EditKeybindName,
 } from "#src/editing/session_hotkey_binder.js";
+import { automergeEnabled } from "#src/editing/tooling/edit_preferences.js";
 import { ConfirmDialog } from "#src/editing/ui/confirm_dialog.js";
 import { useSignal } from "#src/editing/ui/interop/use_signal.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
@@ -143,18 +145,41 @@ function describeSaveConflict(conflict: SaveConflictError | undefined): string {
   const sentences: string[] = [];
   if (diverged.length > 0) {
     sentences.push(
-      `${areaCount(diverged.length)} you painted changed after you loaded them.`,
+      `${areaCount(diverged.length)} you painted changed after you loaded ` +
+        "the region.",
     );
   }
   if (uncomparable.length > 0) {
     sentences.push(`${areaCount(uncomparable.length)} couldn't be checked.`);
   }
   sentences.push(
-    "Overwriting replaces that work permanently — these layers keep no " +
-      "history, so it can't be undone.",
+    "Merge keeps both sides, except where you both changed the same voxels — " +
+      "those areas are reloaded and your edits in them are dropped.",
   );
-  sentences.push("Keep editing to leave both versions in place for now.");
+  sentences.push(
+    "Reload takes their version of every area listed. Overwrite replaces " +
+      "their work permanently — these layers keep no history, so it can't be " +
+      "undone.",
+  );
+  sentences.push("Press Esc to leave everything as it is.");
   return sentences.join(" ");
+}
+
+/**
+ * What a save that reconciled itself cost the user, said plainly.
+ *
+ * Shown after the save, not before: this is the one outcome where work was
+ * destroyed without anyone choosing it, so it names the amount, points at the
+ * data, and names the way back.
+ */
+function describeConflictReload(count: number): string {
+  const those = count === 1 ? "that area was" : "those areas were";
+  return (
+    `Your edits in ${areaCount(count)} were discarded: you and someone else ` +
+    `changed the same voxels there, so ${those} reloaded from storage. ` +
+    "Everything else was saved. Please review your data — one undo puts your " +
+    "version back."
+  );
 }
 
 function ActiveTopbarControls({
@@ -203,7 +228,11 @@ function ActiveTopbarControls({
   const snapshot = session.getHistory();
   const hasDirty = session.dirty.isDirty();
   const saveAvailable = useWatchable(host.saveBackendAvailable);
-  const isSaving = saveTracker.state.kind === "saving";
+  // Reconciling counts as saving for the button: it is network work the
+  // save is waiting on, and showing idle there invites a second click.
+  const isSaving =
+    saveTracker.state.kind === "saving" ||
+    saveTracker.state.kind === "reconciling";
   // Granular save+verify progress (TM-352). Drives the save-progress messages,
   // and keeps the Save button CLICKABLE while there are unconfirmed saves so the
   // user can re-save (its label/badge are intentionally left unchanged — we
@@ -216,9 +245,38 @@ function ActiveTopbarControls({
   const confirmOverwrite = useCallback(() => {
     void saveTracker.overwriteConflict(host, session);
   }, [saveTracker, host, session]);
+  // Set when a settled save reconciled by discarding local edits. Held in
+  // state rather than read from the tracker at render time because it has to
+  // survive until the user acknowledges it, not until the next re-render.
+  const [reloadNotice, setReloadNotice] = useState<string | undefined>(
+    undefined,
+  );
+  // Everything a settled save still owes the user. Both toasts are failures;
+  // a discard is not a failure, so it gets a dialog it has to be dismissed.
+  const reportSaveOutcome = useCallback(() => {
+    const failure = saveTracker.lastFailureMessage();
+    if (failure !== undefined) {
+      StatusMessage.showTemporaryMessage(failure, 10000);
+    }
+    const reloaded = saveTracker.reloadedChunkCount();
+    if (reloaded > 0) setReloadNotice(describeConflictReload(reloaded));
+  }, [saveTracker]);
   const confirmMerge = useCallback(() => {
-    void saveTracker.mergeConflict(host, session);
-  }, [saveTracker, host, session]);
+    void (async () => {
+      await saveTracker.mergeConflict(host, session);
+      reportSaveOutcome();
+    })();
+  }, [saveTracker, host, session, reportSaveOutcome]);
+  const confirmReload = useCallback(() => {
+    void (async () => {
+      await saveTracker.reloadConflict(host, session);
+      reportSaveOutcome();
+    })();
+  }, [saveTracker, host, session, reportSaveOutcome]);
+  const automerge = automergeEnabled(useWatchable(host.editPreferences.value));
+  const toggleAutomerge = useCallback(() => {
+    host.setAutomerge(!automerge);
+  }, [host, automerge]);
   // A merge needs all three inputs; a chunk the scan could not prove has no
   // baseline to merge from, so offering it would promise something we cannot
   // deliver for part of the save.
@@ -359,13 +417,12 @@ function ActiveTopbarControls({
       await saveTracker.startSave(host, session);
       // Surface a failed/unconfirmed save as a prominent toast — the per-layer
       // status is otherwise only visible in the panel, so without this the user
-      // gets no clear signal that their changes did not reach the server.
-      const failure = saveTracker.lastFailureMessage();
-      if (failure !== undefined) {
-        StatusMessage.showTemporaryMessage(failure, 10000);
-      }
+      // gets no clear signal that their changes did not reach the server. With
+      // automerge on this also covers the reconcile, because `startSave` runs
+      // it and the follow-up save before it resolves.
+      reportSaveOutcome();
     })();
-  }, [saveTracker, host, session]);
+  }, [saveTracker, host, session, reportSaveOutcome]);
 
   const teleportToRegion = useCallback(() => {
     if (!host.teleportToActiveRegionCenter()) {
@@ -474,6 +531,27 @@ function ActiveTopbarControls({
               {pendingCount}
             </span>
           )}
+        </button>
+        {/*
+          Sits with Save because it changes what Save DOES, and it is the only
+          way a tracer can reach the setting — it otherwise lives in the URL.
+        */}
+        <button
+          type="button"
+          class={
+            "neuroglancer-editing-topbar-icon-button" +
+            (automerge ? " active" : "")
+          }
+          aria-label="Combine conflicting edits automatically"
+          aria-pressed={automerge}
+          data-tooltip={
+            automerge
+              ? "Conflicts are combined automatically when you save"
+              : "Conflicts stop the save and ask you what to do"
+          }
+          onClick={toggleAutomerge}
+        >
+          <GitMerge size={TOOL_ICON_SIZE} aria-hidden="true" />
         </button>
       </div>
 
@@ -596,6 +674,10 @@ function ActiveTopbarControls({
         Raised when a save was refused because the region moved under this
         session. Destructive-tinted, and the safe action is the default: with
         no object versioning on painting layers, overwriting cannot be undone.
+
+        Three real answers fill the button row, so the way out is Esc and the
+        backdrop rather than a fourth button — `onCancel` still changes
+        nothing, and focus lands on the primary rather than on Reload.
       */}
       <ConfirmDialog
         open={pendingConflict !== undefined}
@@ -603,25 +685,50 @@ function ActiveTopbarControls({
         message={describeSaveConflict(pendingConflict)}
         {...(canMergeConflict
           ? {
-              // Merging keeps both sides, so it is the primary and is not
-              // tinted destructive; overwriting is the one that destroys work.
-              confirmLabel: "Merge both",
+              // Merging keeps both sides wherever it can, so it is the primary
+              // and is not tinted destructive; overwriting is the one that
+              // destroys someone else's work outright.
+              confirmLabel: "Merge",
               onConfirm: confirmMerge,
-              secondaryAction: {
-                label: "Overwrite theirs",
-                destructive: true,
-                onClick: confirmOverwrite,
-              },
+              secondaryActions: [
+                { label: "Reload", onClick: confirmReload },
+                {
+                  label: "Overwrite",
+                  destructive: true,
+                  onClick: confirmOverwrite,
+                },
+              ],
             }
           : {
-              // Nothing to merge from — an unprovable chunk has no baseline,
-              // so the only answers left are overwrite or walk away.
-              confirmLabel: "Overwrite theirs",
-              destructive: true,
-              onConfirm: confirmOverwrite,
+              // Nothing to merge from — an unprovable chunk has no baseline.
+              // Reload still works, because it needs only their bytes, so it
+              // becomes the primary: the safe answer stays the default one.
+              confirmLabel: "Reload",
+              onConfirm: confirmReload,
+              secondaryActions: [
+                {
+                  label: "Overwrite",
+                  destructive: true,
+                  onClick: confirmOverwrite,
+                },
+              ],
             })}
-        cancelLabel="Keep editing"
+        hideCancelButton
         onCancel={() => saveTracker.dismissConflict()}
+      />
+      {/*
+        A save that reconciled itself discarded some of the user's paint
+        without asking. That cannot be a toast: it is the one outcome where
+        work was destroyed by a default, so it has to be acknowledged.
+      */}
+      <ConfirmDialog
+        open={reloadNotice !== undefined}
+        title="Some of your edits were discarded"
+        message={reloadNotice ?? ""}
+        confirmLabel="OK"
+        hideCancelButton
+        onConfirm={() => setReloadNotice(undefined)}
+        onCancel={() => setReloadNotice(undefined)}
       />
     </>
   );
