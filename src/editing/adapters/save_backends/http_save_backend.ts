@@ -81,11 +81,33 @@ const CONFLICT_DETAIL = "conditional_write_conflict";
 /**
  * Replays of one chunk after a lost CAS race. The backend already retries each
  * chunk internally before ever answering 409, so reaching the client means it
- * lost repeatedly on the same object. Task cutouts do not overlap in voxels
- * (measured across a real project: 0 overlapping task pairs, 78 pairs sharing a
- * boundary chunk), so the writers are racing over DISJOINT voxels and a replay
- * converges — hence a short, aggressive backoff rather than one tuned for
- * genuine contention.
+ * lost repeatedly on the same object.
+ *
+ * This used to be justified by task cutouts never overlapping in voxels
+ * (measured across a real project: 0 overlapping task pairs, 78 pairs sharing
+ * a boundary chunk), which made every racing writer disjoint and every replay
+ * convergent. That premise no longer holds: overlapping painting tasks are now
+ * a supported case, so two writers CAN be racing over the same voxels and a
+ * replay can land our absolute payload on top of theirs.
+ *
+ * What makes the replay safe instead is read-back verification. Every save
+ * ends in `EditSessionHost.verifySavedChunks`, which re-reads each chunk and
+ * compares `ownedRegionHash` over the OWNED SUB-BOX against the bytes it sent.
+ * The two cases separate exactly there:
+ *
+ *   - Neighbour wrote their half of a shared boundary chunk. Our sub-box still
+ *     matches, verification passes, and the replay was the harmless
+ *     convergence the old comment described.
+ *   - Someone overwrote voxels we own. The hash does not match, the chunk
+ *     stays unconfirmed, and the save is reported as not-durable with the
+ *     paint retained rather than as a clean success.
+ *
+ * So the backoff stays short and aggressive — it is resolving a race, not
+ * adjudicating a conflict, and the adjudication happens afterwards with better
+ * information than a 409 carries. The wide window (session open to save) is
+ * closed earlier and separately, by the stale-baseline scan in
+ * `src/editing/reconcile/`; this only ever sees the milliseconds between that
+ * scan and the CAS.
  */
 const CONFLICT_BACKOFF_MS: readonly number[] = [50, 150, 400];
 
