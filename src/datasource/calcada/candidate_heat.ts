@@ -111,6 +111,11 @@ export function overviewColors(
   minFraction: number,
 ): Map<bigint, bigint> {
   const colors = new Map<bigint, bigint>();
+  // A graph with no semantics at all would otherwise answer "unknown" for every
+  // piece and flatten the whole map to one colour — the class filter silently
+  // taking the heat map with it. Nothing was asked of these pieces, so the
+  // filter simply does not apply and the scores stay visible.
+  if (!pieces.some((piece) => piece.hasInfo)) wanted = "any";
   for (const piece of pieces) {
     const verdict = semanticVerdict(piece, wanted, minFraction);
     colors.set(

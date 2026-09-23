@@ -125,3 +125,36 @@ describe("describePartner", () => {
     expect(describePartner(partner({}, true))).toContain("no semantics");
   });
 });
+
+describe("overviewColors without semantics", () => {
+  it("keeps showing scores instead of flattening to one colour", () => {
+    const colors = overviewColors(
+      [
+        piece({ pieceId: 1n, bestScore: 0.9, hasInfo: false }),
+        piece({ pieceId: 2n, bestScore: 0.1, hasInfo: false }),
+      ],
+      "axon",
+      0.8,
+    );
+    expect(colors.get(1n)).toBe(heatColor(0.9));
+    expect(colors.get(2n)).toBe(heatColor(0.1));
+  });
+
+  it("still applies the filter once any piece has semantics", () => {
+    const colors = overviewColors(
+      [
+        piece({
+          pieceId: 1n,
+          bestScore: 0.9,
+          hasInfo: true,
+          classes: { ...noClasses, dendrite: 100 },
+        }),
+        piece({ pieceId: 2n, bestScore: 0.9, hasInfo: false }),
+      ],
+      "axon",
+      0.8,
+    );
+    expect(colors.get(1n)).toBe(SEMANTIC_FAIL_COLOR);
+    expect(colors.get(2n)).toBe(SEMANTIC_UNKNOWN_COLOR);
+  });
+});

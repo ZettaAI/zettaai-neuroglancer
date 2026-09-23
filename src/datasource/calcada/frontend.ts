@@ -3644,8 +3644,14 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       state.active.changed.add(() => {
         if (state.active.value) {
-          // One colour map, so the two overlays cannot share the screen.
+          // Three things want the piece-view display state, and only one can
+          // have it. A running trace is the loudest of them: it reduces the
+          // view to a seed and a candidate, and reasserts its role colours
+          // whenever anything else writes the shared colour map, so an overview
+          // drawn underneath it is painted and immediately painted over.
           connection.state.calcadaDebugState.active.value = false;
+          connection.state.zettaTraceState.aiming.value = false;
+          connection.state.zettaTraceState.active.value = false;
           this.refresh();
         } else {
           ++this.fetchToken;
@@ -3658,6 +3664,15 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       connection.state.calcadaDebugState.active.changed.add(() => {
         if (connection.state.calcadaDebugState.active.value) {
+          state.active.value = false;
+        }
+      }),
+    );
+    // Starting a trace is choosing to look at one candidate, which is the
+    // opposite of surveying a whole segment for where to start.
+    this.registerDisposer(
+      connection.state.zettaTraceState.active.changed.add(() => {
+        if (connection.state.zettaTraceState.active.value) {
           state.active.value = false;
         }
       }),
