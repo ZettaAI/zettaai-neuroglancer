@@ -67,10 +67,7 @@ describe("componentsWithCarvedParents", () => {
   // One split routinely carves several pieces, and the two cases mix freely.
   it("decides each carved piece on its own", () => {
     const { components, ambiguous } = componentsWithCarvedParents(
-      [
-        [11n, 12n, 21n],
-        [22n],
-      ],
+      [[11n, 12n, 21n], [22n]],
       [
         { old: 1n, blue: 11n, red: 12n },
         { old: 2n, blue: 21n, red: 22n },
