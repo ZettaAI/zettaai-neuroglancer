@@ -9,6 +9,8 @@ import {
   SEMANTIC_UNKNOWN_COLOR,
   heatColor,
   overviewColors,
+  partnerColors,
+  totalCandidates,
   semanticVerdict,
 } from "#src/datasource/calcada/candidate_heat.js";
 
@@ -27,6 +29,9 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
   return {
     pieceId: 1n,
     bestScore: 0,
+    bestPartnerPiece: 0n,
+    bestPartnerRoot: 0n,
+    candidateCount: 0,
     voxelCount: 100,
     classes: noClasses,
     hasInfo: false,
@@ -34,7 +39,8 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
   };
 }
 
-const red = (color: bigint) => Number(color / 65536n);
+// Packed as (a<<24)|(b<<16)|(g<<8)|r, so red is the low byte.
+const red = (color: bigint) => Number(color & 0xffn);
 
 describe("heatColor", () => {
   it("cools toward red and warms toward green", () => {
@@ -123,5 +129,77 @@ describe("describePartner", () => {
     expect(describePartner(partner({}, false))).toContain("no semantics");
     // A row that exists but sums to zero is just as uninformative.
     expect(describePartner(partner({}, true))).toContain("no semantics");
+  });
+});
+
+describe("overviewColors without semantics", () => {
+  it("keeps showing scores instead of flattening to one colour", () => {
+    const colors = overviewColors(
+      [
+        piece({ pieceId: 1n, bestScore: 0.9, hasInfo: false }),
+        piece({ pieceId: 2n, bestScore: 0.1, hasInfo: false }),
+      ],
+      "axon",
+      0.8,
+    );
+    expect(colors.get(1n)).toBe(heatColor(0.9));
+    expect(colors.get(2n)).toBe(heatColor(0.1));
+  });
+
+  it("still applies the filter once any piece has semantics", () => {
+    const colors = overviewColors(
+      [
+        piece({
+          pieceId: 1n,
+          bestScore: 0.9,
+          hasInfo: true,
+          classes: { ...noClasses, dendrite: 100 },
+        }),
+        piece({ pieceId: 2n, bestScore: 0.9, hasInfo: false }),
+      ],
+      "axon",
+      0.8,
+    );
+    expect(colors.get(1n)).toBe(SEMANTIC_FAIL_COLOR);
+    expect(colors.get(2n)).toBe(SEMANTIC_UNKNOWN_COLOR);
+  });
+});
+
+describe("partnerColors", () => {
+  it("colours the candidate's own piece by how good the proposal is", () => {
+    const colors = partnerColors(
+      [
+        piece({
+          pieceId: 1n,
+          bestScore: 0.9,
+          bestPartnerPiece: 77n,
+          candidateCount: 3,
+        }),
+      ],
+      "any",
+      0.8,
+    );
+    expect(colors.get(77n)).toBe(heatColor(0.9));
+    expect(colors.has(1n)).toBe(false);
+  });
+
+  it("leaves out pieces that offer nothing", () => {
+    const colors = partnerColors(
+      [piece({ pieceId: 1n, bestPartnerPiece: 0n, candidateCount: 0 })],
+      "any",
+      0.8,
+    );
+    expect(colors.size).toBe(0);
+  });
+});
+
+describe("totalCandidates", () => {
+  it("sums what each piece still offers", () => {
+    expect(
+      totalCandidates([
+        piece({ candidateCount: 3 }),
+        piece({ candidateCount: 4 }),
+      ]),
+    ).toBe(7);
   });
 });

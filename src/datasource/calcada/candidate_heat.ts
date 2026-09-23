@@ -20,6 +20,9 @@
  * as its most promising.
  */
 
+import { packColor } from "#src/util/color.js";
+import { vec4 } from "#src/util/geom.js";
+
 export type SemanticClass =
   | "any"
   | "perikaryon"
@@ -45,6 +48,11 @@ export interface PieceClasses {
 export interface PieceOverview {
   pieceId: bigint;
   bestScore: number;
+  /** The piece its best candidate would merge in; 0 when it offers none. */
+  bestPartnerPiece: bigint;
+  /** The segment holding that piece — what actually has a mesh to load. */
+  bestPartnerRoot: bigint;
+  candidateCount: number;
   voxelCount: number;
   classes: PieceClasses;
   hasInfo: boolean;
@@ -58,27 +66,22 @@ export interface PieceOverview {
  */
 export type SemanticVerdict = "pass" | "fail" | "unknown";
 
-const PACKED_COLOR_BASE = 256;
-
-function packColor(red: number, green: number, blue: number): bigint {
-  const channel = (value: number) =>
-    BigInt(Math.max(0, Math.min(255, Math.round(value))));
-  return (
-    channel(red) * BigInt(PACKED_COLOR_BASE) * BigInt(PACKED_COLOR_BASE) +
-    channel(green) * BigInt(PACKED_COLOR_BASE) +
-    channel(blue)
-  );
+// The shared packer, not a local one: the mesh reads these as (a<<24)|(b<<16)|
+// (g<<8)|r, and a hand-rolled version that packs red into the high byte instead
+// renders the whole scale as its own mirror image.
+function packed(red: number, green: number, blue: number): bigint {
+  return BigInt(packColor(vec4.fromValues(red, green, blue, 1)));
 }
 
 /** Red at zero through amber to green at one. */
 export function heatColor(bestScore: number): bigint {
   const t = Math.max(0, Math.min(1, bestScore));
-  return packColor(255 * (1 - t) + 40 * t, 60 * (1 - t) + 220 * t, 60);
+  return packed(1 - t * 0.84, 0.24 + t * 0.62, 0.24);
 }
 
 /** Outside the scale on purpose: a filtered-out piece is not a cold piece. */
-export const SEMANTIC_FAIL_COLOR = packColor(70, 70, 80);
-export const SEMANTIC_UNKNOWN_COLOR = packColor(110, 100, 130);
+export const SEMANTIC_FAIL_COLOR = packed(0.27, 0.27, 0.31);
+export const SEMANTIC_UNKNOWN_COLOR = packed(0.43, 0.39, 0.51);
 
 export function classTotal(classes: PieceClasses): number {
   return (
@@ -105,12 +108,42 @@ export function semanticVerdict(
   return piece.classes[wanted] / total >= minFraction ? "pass" : "fail";
 }
 
+/**
+ * The pieces the candidates would merge in, coloured by how good the proposal
+ * is. These live in other segments and are therefore invisible until something
+ * asks for them, which is the whole point of showing them: "where are the
+ * candidates" is a question about the neighbours, not about this segment.
+ */
+export function partnerColors(
+  pieces: readonly PieceOverview[],
+  wanted: SemanticClass,
+  minFraction: number,
+): Map<bigint, bigint> {
+  const colors = new Map<bigint, bigint>();
+  const filtered = pieces.some((piece) => piece.hasInfo) ? wanted : "any";
+  for (const piece of pieces) {
+    if (piece.bestPartnerPiece === 0n || piece.candidateCount === 0) continue;
+    if (semanticVerdict(piece, filtered, minFraction) === "fail") continue;
+    colors.set(piece.bestPartnerPiece, heatColor(piece.bestScore));
+  }
+  return colors;
+}
+
+export function totalCandidates(pieces: readonly PieceOverview[]): number {
+  return pieces.reduce((sum, piece) => sum + piece.candidateCount, 0);
+}
+
 export function overviewColors(
   pieces: readonly PieceOverview[],
   wanted: SemanticClass,
   minFraction: number,
 ): Map<bigint, bigint> {
   const colors = new Map<bigint, bigint>();
+  // A graph with no semantics at all would otherwise answer "unknown" for every
+  // piece and flatten the whole map to one colour — the class filter silently
+  // taking the heat map with it. Nothing was asked of these pieces, so the
+  // filter simply does not apply and the scores stay visible.
+  if (!pieces.some((piece) => piece.hasInfo)) wanted = "any";
   for (const piece of pieces) {
     const verdict = semanticVerdict(piece, wanted, minFraction);
     colors.set(
@@ -162,4 +195,13 @@ export function describePartner(piece: {
     `${size} · ${dominant.name} ${Math.round(dominant.fraction * 100)}%` +
     (dominant.name === "axon" ? "" : ` · axon ${axonPct}%`)
   );
+}
+
+/** The segments the candidates live in, which is what has to be loaded. */
+export function partnerRoots(pieces: readonly PieceOverview[]): bigint[] {
+  const roots = new Set<bigint>();
+  for (const piece of pieces) {
+    if (piece.bestPartnerRoot !== 0n) roots.add(piece.bestPartnerRoot);
+  }
+  return [...roots];
 }

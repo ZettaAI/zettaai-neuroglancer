@@ -70,6 +70,9 @@ import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePartner,
   overviewColors,
+  partnerColors,
+  partnerRoots,
+  totalCandidates,
 } from "#src/datasource/calcada/candidate_heat.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
@@ -3039,7 +3042,18 @@ class ZettaTraceSession extends RefCounted {
     if (seedRoot === undefined) return;
     this.dimmed.clear();
     const entry = nextEntry(this.pool, this.decided);
-    this.current = entry?.candidate;
+    // Never trust the root a queued candidate was fetched with. Roots are
+    // replaced by every merge and every split, while the piece survives both,
+    // so the root is resolved from the piece at the moment of showing it.
+    // Without this a split leaves the queue pointing at a segment that no
+    // longer exists, and the view only recovers on a reload.
+    this.current =
+      entry === undefined
+        ? undefined
+        : {
+            ...entry.candidate,
+            partnerRootId: this.rootOfPiece(entry.candidate),
+          };
     this.currentDepth = entry?.depth ?? 0;
     this.remaining = remainingCount(this.pool, this.decided);
     if (this.current === undefined) {
@@ -3405,6 +3419,14 @@ class ZettaTraceSession extends RefCounted {
    * "not in my segment" would quietly delete the far half of the queue, which
    * is exactly the part a depth-first walk is heading towards.
    */
+  /** The candidate partner's current root, or the one it was fetched with. */
+  private rootOfPiece(candidate: EdgeCandidate): bigint {
+    const root = this.segmentsState.segmentEquivalences.get(
+      candidate.partnerPieceId,
+    );
+    return root === candidate.partnerPieceId ? candidate.partnerRootId : root;
+  }
+
   private prunedPool(): PoolEntry[] {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return [];
@@ -3619,12 +3641,6 @@ class CandidateOverviewSession extends RefCounted {
   readonly changed = new NullarySignal();
   status = "";
   private fetchToken = 0;
-  // Selecting a segment fires once per id and showing one fires once per piece.
-  // Refetching on each would be a burst of whole-segment queries for a single
-  // user action.
-  private readonly refresh = this.registerCancellable(
-    debounce(() => void this.reload(), 150),
-  );
   private pieces: PieceOverview[] = [];
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
@@ -3644,9 +3660,15 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       state.active.changed.add(() => {
         if (state.active.value) {
-          // One colour map, so the two overlays cannot share the screen.
+          // Three things want the piece-view display state, and only one can
+          // have it. A running trace is the loudest of them: it reduces the
+          // view to a seed and a candidate, and reasserts its role colours
+          // whenever anything else writes the shared colour map, so an overview
+          // drawn underneath it is painted and immediately painted over.
           connection.state.calcadaDebugState.active.value = false;
-          this.refresh();
+          connection.state.zettaTraceState.aiming.value = false;
+          connection.state.zettaTraceState.active.value = false;
+          this.setStatus("Set the filters, then Apply");
         } else {
           ++this.fetchToken;
           this.pieces = [];
@@ -3662,7 +3684,16 @@ class CandidateOverviewSession extends RefCounted {
         }
       }),
     );
-    this.registerDisposer(state.minScore.changed.add(() => this.refresh()));
+    // Starting a trace is choosing to look at one candidate, which is the
+    // opposite of surveying a whole segment for where to start.
+    this.registerDisposer(
+      connection.state.zettaTraceState.active.changed.add(() => {
+        if (connection.state.zettaTraceState.active.value) {
+          state.active.value = false;
+        }
+      }),
+    );
+
     // The class filters change nothing the server was asked for, so they
     // repaint from what is already here rather than going back out.
     this.registerDisposer(
@@ -3671,15 +3702,19 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       state.minClassFraction.changed.add(() => this.repaint()),
     );
-    this.registerDisposer(
-      this.segmentsState.visibleSegments.changed.add(() => {
-        if (state.active.value) this.refresh();
-      }),
-    );
   }
 
   private get segmentsState() {
     return this.layer.displayState.segmentationGroupState.value;
+  }
+
+  /**
+   * Fetch and paint. Deliberately not automatic: a segment can name hundreds of
+   * candidate segments, and pulling every one of their meshes because a number
+   * changed is a long wait for a view nobody asked for yet.
+   */
+  apply() {
+    void this.reload();
   }
 
   private setStatus(text: string) {
@@ -3729,7 +3764,10 @@ class CandidateOverviewSession extends RefCounted {
     if (token !== this.fetchToken) return;
     this.pieces = fetched.flat();
     const withInfo = this.pieces.filter((piece) => piece.hasInfo).length;
-    this.setStatus(`${this.pieces.length} pieces · ${withInfo} with semantics`);
+    this.setStatus(
+      `${totalCandidates(this.pieces).toLocaleString()} candidates · ` +
+        `${this.pieces.length} pieces · ${withInfo} with semantics`,
+    );
     this.repaint();
   }
 
@@ -3769,6 +3807,31 @@ class CandidateOverviewSession extends RefCounted {
     for (const [piece, color] of colors) {
       segmentsState.temporaryVisibleSegments.add(piece);
       displayState.tempSegmentStatedColors2d.value.set(piece, color);
+    }
+    // The candidates themselves belong to other segments, so nothing puts them
+    // on screen unless this does. They carry the score of the proposal that
+    // named them, which is what makes a promising neighbour findable at a
+    // glance.
+    const partners = partnerColors(
+      this.pieces,
+      this.state.semanticClass.value,
+      this.state.minClassFraction.value,
+    );
+    for (const [piece, color] of partners) {
+      segmentsState.temporaryVisibleSegments.add(piece);
+      displayState.tempSegmentStatedColors2d.value.set(piece, color);
+    }
+    // The candidates' own segments are brought on screen the way a proofreader
+    // would bring them: added to the visible set, so they load as segments
+    // rather than as loose geometry. A piece has no mesh of its own — it is a
+    // fragment of its segment's — so naming the piece alone asks the mesh
+    // source for something it cannot serve.
+    const roots = partnerRoots(this.pieces);
+    if (roots.length !== 0) {
+      for (const root of roots) {
+        segmentsState.temporaryVisibleSegments.add(root);
+      }
+      this.connection.meshAddNewSegments(roots);
     }
     displayState.useTempSegmentStatedColors2d.value = true;
     this.painted = true;
@@ -5702,6 +5765,9 @@ class CalcadaGraphServerInterface {
       (piece: any): PieceOverview => ({
         pieceId: parseUint64(piece.piece_id),
         bestScore: Number(piece.best_score),
+        bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
+        bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
+        candidateCount: Number(piece.candidate_count ?? 0),
         voxelCount: Number(piece.voxel_count),
         classes: {
           perikaryon: Number(piece.classes?.perikaryon ?? 0),

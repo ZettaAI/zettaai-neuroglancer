@@ -49,6 +49,7 @@ export interface TracePanelConnection {
   readonly overviewSession: {
     readonly changed: NullarySignal;
     readonly status: string;
+    apply(): void;
   };
   readonly traceSession: {
     readonly changed: NullarySignal;
@@ -362,6 +363,16 @@ export function CalcadaTracePanel({
                 />
               </label>
             )}
+
+            <div className="calcada-trace-panel-buttons">
+              <Button
+                size="xs"
+                title="Load and colour the candidates matching these filters"
+                onClick={() => connection.overviewSession.apply()}
+              >
+                Apply
+              </Button>
+            </div>
 
             <div className="calcada-trace-panel-status">
               {connection.overviewSession.status}
