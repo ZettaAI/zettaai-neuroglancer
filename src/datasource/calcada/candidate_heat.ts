@@ -20,6 +20,9 @@
  * as its most promising.
  */
 
+import { packColor } from "#src/util/color.js";
+import { vec4 } from "#src/util/geom.js";
+
 export type SemanticClass =
   | "any"
   | "perikaryon"
@@ -58,27 +61,22 @@ export interface PieceOverview {
  */
 export type SemanticVerdict = "pass" | "fail" | "unknown";
 
-const PACKED_COLOR_BASE = 256;
-
-function packColor(red: number, green: number, blue: number): bigint {
-  const channel = (value: number) =>
-    BigInt(Math.max(0, Math.min(255, Math.round(value))));
-  return (
-    channel(red) * BigInt(PACKED_COLOR_BASE) * BigInt(PACKED_COLOR_BASE) +
-    channel(green) * BigInt(PACKED_COLOR_BASE) +
-    channel(blue)
-  );
+// The shared packer, not a local one: the mesh reads these as (a<<24)|(b<<16)|
+// (g<<8)|r, and a hand-rolled version that packs red into the high byte instead
+// renders the whole scale as its own mirror image.
+function packed(red: number, green: number, blue: number): bigint {
+  return BigInt(packColor(vec4.fromValues(red, green, blue, 1)));
 }
 
 /** Red at zero through amber to green at one. */
 export function heatColor(bestScore: number): bigint {
   const t = Math.max(0, Math.min(1, bestScore));
-  return packColor(255 * (1 - t) + 40 * t, 60 * (1 - t) + 220 * t, 60);
+  return packed(1 - t * 0.84, 0.24 + t * 0.62, 0.24);
 }
 
 /** Outside the scale on purpose: a filtered-out piece is not a cold piece. */
-export const SEMANTIC_FAIL_COLOR = packColor(70, 70, 80);
-export const SEMANTIC_UNKNOWN_COLOR = packColor(110, 100, 130);
+export const SEMANTIC_FAIL_COLOR = packed(0.27, 0.27, 0.31);
+export const SEMANTIC_UNKNOWN_COLOR = packed(0.43, 0.39, 0.51);
 
 export function classTotal(classes: PieceClasses): number {
   return (

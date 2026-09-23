@@ -34,7 +34,8 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
   };
 }
 
-const red = (color: bigint) => Number(color / 65536n);
+// Packed as (a<<24)|(b<<16)|(g<<8)|r, so red is the low byte.
+const red = (color: bigint) => Number(color & 0xffn);
 
 describe("heatColor", () => {
   it("cools toward red and warms toward green", () => {
