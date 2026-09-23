@@ -50,6 +50,8 @@ export interface PieceOverview {
   bestScore: number;
   /** The piece its best candidate would merge in; 0 when it offers none. */
   bestPartnerPiece: bigint;
+  /** The segment holding that piece — what actually has a mesh to load. */
+  bestPartnerRoot: bigint;
   candidateCount: number;
   voxelCount: number;
   classes: PieceClasses;
@@ -193,4 +195,13 @@ export function describePartner(piece: {
     `${size} · ${dominant.name} ${Math.round(dominant.fraction * 100)}%` +
     (dominant.name === "axon" ? "" : ` · axon ${axonPct}%`)
   );
+}
+
+/** The segments the candidates live in, which is what has to be loaded. */
+export function partnerRoots(pieces: readonly PieceOverview[]): bigint[] {
+  const roots = new Set<bigint>();
+  for (const piece of pieces) {
+    if (piece.bestPartnerRoot !== 0n) roots.add(piece.bestPartnerRoot);
+  }
+  return [...roots];
 }

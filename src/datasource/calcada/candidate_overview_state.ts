@@ -52,8 +52,12 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
   readonly changed = new NullarySignal();
 
   active = new WatchableValue<boolean>(false);
-  /** Candidates below this score do not warm a piece at all. */
-  minScore = new WatchableValue<number>(0);
+  /**
+   * Candidates below this score do not warm a piece at all. Starts high on
+   * purpose: a whole segment's worth of candidate segments is hundreds of
+   * meshes, and almost none of them are what anyone came to look at.
+   */
+  minScore = new WatchableValue<number>(0.8);
   semanticClass = new WatchableValue<SemanticClass>("any");
   minClassFraction = new WatchableValue<number>(OVERVIEW_MIN_FRACTION_DEFAULT);
 

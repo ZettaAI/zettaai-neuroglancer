@@ -30,6 +30,7 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
     pieceId: 1n,
     bestScore: 0,
     bestPartnerPiece: 0n,
+    bestPartnerRoot: 0n,
     candidateCount: 0,
     voxelCount: 100,
     classes: noClasses,

@@ -71,6 +71,7 @@ import {
   describePartner,
   overviewColors,
   partnerColors,
+  partnerRoots,
   totalCandidates,
 } from "#src/datasource/calcada/candidate_heat.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
@@ -3621,12 +3622,6 @@ class CandidateOverviewSession extends RefCounted {
   readonly changed = new NullarySignal();
   status = "";
   private fetchToken = 0;
-  // Selecting a segment fires once per id and showing one fires once per piece.
-  // Refetching on each would be a burst of whole-segment queries for a single
-  // user action.
-  private readonly refresh = this.registerCancellable(
-    debounce(() => void this.reload(), 150),
-  );
   private pieces: PieceOverview[] = [];
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
@@ -3654,7 +3649,7 @@ class CandidateOverviewSession extends RefCounted {
           connection.state.calcadaDebugState.active.value = false;
           connection.state.zettaTraceState.aiming.value = false;
           connection.state.zettaTraceState.active.value = false;
-          this.refresh();
+          this.setStatus("Set the filters, then Apply");
         } else {
           ++this.fetchToken;
           this.pieces = [];
@@ -3679,7 +3674,7 @@ class CandidateOverviewSession extends RefCounted {
         }
       }),
     );
-    this.registerDisposer(state.minScore.changed.add(() => this.refresh()));
+
     // The class filters change nothing the server was asked for, so they
     // repaint from what is already here rather than going back out.
     this.registerDisposer(
@@ -3688,15 +3683,20 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       state.minClassFraction.changed.add(() => this.repaint()),
     );
-    this.registerDisposer(
-      this.segmentsState.visibleSegments.changed.add(() => {
-        if (state.active.value) this.refresh();
-      }),
-    );
+
   }
 
   private get segmentsState() {
     return this.layer.displayState.segmentationGroupState.value;
+  }
+
+  /**
+   * Fetch and paint. Deliberately not automatic: a segment can name hundreds of
+   * candidate segments, and pulling every one of their meshes because a number
+   * changed is a long wait for a view nobody asked for yet.
+   */
+  apply() {
+    void this.reload();
   }
 
   private setStatus(text: string) {
@@ -3803,12 +3803,17 @@ class CandidateOverviewSession extends RefCounted {
       segmentsState.temporaryVisibleSegments.add(piece);
       displayState.tempSegmentStatedColors2d.value.set(piece, color);
     }
-    // Asking for a piece to be visible is not asking for its mesh. The
-    // segment's own pieces already have theirs — they are fragments of a mesh
-    // that is on screen — but a candidate belongs to a segment the viewer has
-    // never fetched, so nothing would arrive to colour.
-    if (partners.size !== 0) {
-      this.connection.meshAddNewSegments([...partners.keys()]);
+    // The candidates' own segments are brought on screen the way a proofreader
+    // would bring them: added to the visible set, so they load as segments
+    // rather than as loose geometry. A piece has no mesh of its own — it is a
+    // fragment of its segment's — so naming the piece alone asks the mesh
+    // source for something it cannot serve.
+    const roots = partnerRoots(this.pieces);
+    if (roots.length !== 0) {
+      for (const root of roots) {
+        segmentsState.temporaryVisibleSegments.add(root);
+      }
+      this.connection.meshAddNewSegments(roots);
     }
     displayState.useTempSegmentStatedColors2d.value = true;
     this.painted = true;
@@ -5743,6 +5748,7 @@ class CalcadaGraphServerInterface {
         pieceId: parseUint64(piece.piece_id),
         bestScore: Number(piece.best_score),
         bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
+        bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
         candidateCount: Number(piece.candidate_count ?? 0),
         voxelCount: Number(piece.voxel_count),
         classes: {
