@@ -18,7 +18,12 @@
  *   only I changed it        -> mine
  *   only they changed it     -> theirs
  *   both, to the same value  -> that value
- *   both, to different values-> unresolved; mine is kept and the voxel counted
+ *   both, to different values-> a COLLISION; counted, not resolved here
+ *
+ * The kernel leaves mine in place for a collision, but that is a detail of
+ * how it counts rather than the system's answer: a chunk with any collision
+ * is handed to `reloadedOwnedRegion`, which gives its whole owned box back to
+ * the remote. So treat `unresolved` as detection, not as a decision.
  *
  * WHY NOT "COMBINE NON-ZEROS". The obvious union — take whichever side is
  * non-zero — cannot represent an ERASE. Erasing is painting zero, so a union
@@ -50,11 +55,14 @@ export interface ThreeWayMerge {
   /** Voxels the remote changed and we did not — their work, taken in. */
   readonly acceptedFromRemote: number;
   /**
-   * Voxels both sides changed, to different values. Mine is kept, and the
-   * count is reported so the merge is never silently lossy: PRODUCT.md's
-   * "never lose the user's input" cuts both ways, and the only honest
-   * automatic answer here is to keep the local edit and say how often it
-   * happened.
+   * Voxels both sides changed, to different values.
+   *
+   * Non-zero means this chunk cannot be merged: the caller discards `merged`
+   * and reloads the owned box from the remote instead (see
+   * `owned_region_reload.ts`). The count survives as the finer measure behind
+   * that decision — it is what lets the save report how much of the user's
+   * work the reload cost, which PRODUCT.md's "never lose the user's input"
+   * demands we say out loud when we cannot honour it.
    */
   readonly unresolved: number;
 }

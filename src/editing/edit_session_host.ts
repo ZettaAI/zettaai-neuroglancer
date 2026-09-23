@@ -118,6 +118,10 @@ import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 import "#src/editing/benchmarks/edit_paint_bench.js";
 import { PointerEventBridge } from "#src/editing/pointer_event_bridge.js";
 import { QuickRegionCapture } from "#src/editing/quick_region_capture.js";
+import {
+  mustReloadFromRemote,
+  reloadedOwnedRegion,
+} from "#src/editing/reconcile/owned_region_reload.js";
 import type { SaveConflictPolicy } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
   refusesSave,
@@ -426,16 +430,37 @@ export interface ActiveRegion {
   readonly hi: readonly [number, number, number];
 }
 
-/** What {@link EditSessionHost.mergeConflicts} folded in. */
+/** What {@link EditSessionHost.mergeConflicts} did, chunk by chunk. */
 export interface MergeConflictsOutcome {
+  /** Chunks combined: every local edit in them survived. */
   readonly mergedChunks: number;
-  /** Voxels taken from the remote — another annotator's work, kept. */
+  /**
+   * Chunks given back to the remote because both sides changed the same
+   * voxels. The local edits in them were DROPPED. Non-zero is what makes
+   * "some of your changes were discarded" true, so it is what the save has to
+   * tell the user about afterwards.
+   */
+  readonly reloadedChunks: number;
+  /** Voxels taken from the remote across merged chunks — their work, kept. */
   readonly acceptedFromRemote: number;
   /**
-   * Voxels both sides changed differently. The local edit was kept; the count
-   * exists so the merge can say so rather than resolving them silently.
+   * Voxels both sides changed differently, across reloaded chunks. The finer
+   * measure behind {@link reloadedChunks}: how small a collision was enough
+   * to cost a whole chunk's work.
    */
   readonly unresolved: number;
+}
+
+/** What {@link EditSessionHost.reloadConflictedChunks} replaced. */
+export interface ReloadConflictedOutcome {
+  /** Chunks whose local edits were dropped for the remote's bytes. */
+  readonly reloadedChunks: number;
+  /**
+   * Chunks the remote could not be read for. Their local edits are untouched,
+   * so they are still dirty and still unproven — the save that follows has to
+   * scan rather than assume.
+   */
+  readonly unreadableChunks: number;
 }
 
 /** The owned box as a chunk-local subregion, for `commitWrites`. */
@@ -1934,12 +1959,15 @@ export class EditSessionHost extends RefCounted {
    * undone by the act of saving again. Going through the write protocol also
    * buys undo for free: a merge the user dislikes is Ctrl+Z.
    *
-   * Advancing the retained baseline to the remote we merged against is the
-   * other half. Without it the next save would re-scan the same chunks
-   * against the SAME stale baseline, find them diverged again, and refuse —
-   * merging would leave the save permanently blocked. Recording the merged-
-   * against bytes is exactly the store's meaning: what this session last
-   * observed as remote truth.
+   * A chunk both sides changed in the same place cannot be combined at all.
+   * Those are RELOADED instead: the owned box goes back to what storage
+   * holds and the local edits in it are dropped. That is the one case here
+   * that destroys the user's work, which is why the outcome counts it
+   * separately and the caller is expected to say so.
+   *
+   * Nothing durable is advanced to unblock the save that follows — see the
+   * comment in the apply loop for why that was tried and reverted. The save
+   * instead carries a policy scoped to itself alone.
    *
    * Chunks the scan could not compare are skipped: with no baseline there is
    * no third input, so there is nothing to merge them from.
@@ -1964,14 +1992,36 @@ export class EditSessionHost extends RefCounted {
       readonly baseline: ReadonlyChunkVoxelBuffer;
     }[] = [];
     for (const { write } of scan.diverged) {
-      if (signal?.aborted === true) break;
+      if (signal?.aborted === true) {
+        throw new Error("the merge was cancelled before anything was changed");
+      }
       const remote = await readers.readRemote(write, signal);
       const baseline = await readers.readRetainedBaseline(write, signal);
-      if (remote === undefined || baseline === undefined) continue;
+      // ALL OR NOTHING, and this must stay a throw rather than a skip. The
+      // save that follows a reconcile carries `"just-merged"` and skips the
+      // scan, on the promise that the payload now incorporates the remote.
+      // Silently dropping a chunk here breaks exactly that promise: it would
+      // still hold this session's pre-merge bytes, and the unscanned save
+      // would post them over the colleague's newer ones with no dialog and no
+      // way back. Every chunk in `scan.diverged` was readable and had a
+      // baseline moments ago, so failing here is a fresh transient fault —
+      // worth a retry, never worth a silent overwrite. Thrown before the edit
+      // is opened, so nothing has been touched.
+      if (remote === undefined || baseline === undefined) {
+        throw new Error(
+          `couldn't re-read ${write.layerId} chunk ${write.chunkId} to merge ` +
+            "it, so nothing was combined",
+        );
+      }
       prepared.push({ write, remote, baseline });
     }
     if (prepared.length === 0) {
-      return { mergedChunks: 0, acceptedFromRemote: 0, unresolved: 0 };
+      return {
+        mergedChunks: 0,
+        reloadedChunks: 0,
+        acceptedFromRemote: 0,
+        unresolved: 0,
+      };
     }
 
     // From here the only await is `beginWrite`, which materializes a chunk the
@@ -1983,6 +2033,7 @@ export class EditSessionHost extends RefCounted {
     let acceptedFromRemote = 0;
     let unresolved = 0;
     let mergedChunks = 0;
+    let reloadedChunks = 0;
     try {
       for (const { write, remote, baseline } of prepared) {
         const slot = await edit.beginWrite({
@@ -1996,7 +2047,17 @@ export class EditSessionHost extends RefCounted {
           remote.asView(),
           write.owned,
         );
-        asWritableBytes(slot.data).set(merge.merged);
+        // Any colliding voxel costs the whole owned box: it goes back to the
+        // remote and the local edits in it are dropped. The merged buffer is
+        // discarded in that case — one chunk-sized allocation wasted on a
+        // path that has just done network reads, and the merge is precisely
+        // what detected the collision.
+        const reload = mustReloadFromRemote(merge);
+        asWritableBytes(slot.data).set(
+          reload
+            ? reloadedOwnedRegion(slot.data, remote.asView(), write.owned)
+            : merge.merged,
+        );
         edit.commitWrites(slot, ownedSubregion(write.owned));
 
         // NOTHING DURABLE IS ADVANCED HERE. An earlier version recorded
@@ -2013,16 +2074,99 @@ export class EditSessionHost extends RefCounted {
         // policy, which is scoped to that one save. Every later save scans
         // from the original baseline, so an undone merge simply raises the
         // conflict again.
-        acceptedFromRemote += merge.acceptedFromRemote;
-        unresolved += merge.unresolved;
-        mergedChunks++;
+        if (reload) {
+          reloadedChunks++;
+          unresolved += merge.unresolved;
+        } else {
+          mergedChunks++;
+          acceptedFromRemote += merge.acceptedFromRemote;
+        }
       }
     } catch (error) {
       await edit.discard();
       throw error;
     }
     edit.record();
-    return { mergedChunks, acceptedFromRemote, unresolved };
+    return { mergedChunks, reloadedChunks, acceptedFromRemote, unresolved };
+  }
+
+  /**
+   * Give every chunk a scan flagged back to the remote, dropping the local
+   * edits in their owned boxes, as ONE undo step.
+   *
+   * This is the dialog's Reload, and the same operation the automatic path
+   * applies to a chunk it cannot combine. It differs from a merge in what it
+   * needs: only the remote's bytes, never a baseline. That is why it covers
+   * chunks the scan could NOT compare as well as the ones it found diverged —
+   * an unprovable chunk has no third input to merge from, but it can still be
+   * given back wholesale. Before this existed, a refusal made entirely of
+   * unprovable chunks left the user a choice between overwriting a colleague's
+   * work and never saving.
+   *
+   * A chunk whose remote cannot be read is left exactly as it was and counted,
+   * rather than failing the whole reload: one unreachable chunk is one chunk
+   * not reloaded, and the save that follows still scans, so it is caught
+   * rather than written blind.
+   *
+   * Nothing durable is advanced, for the same reason the merge advances
+   * nothing: this is an undo entry, so the next save must still scan from the
+   * baseline this session actually observed.
+   */
+  async reloadConflictedChunks(
+    scan: StaleBaselineScan,
+    signal?: AbortSignal,
+  ): Promise<ReloadConflictedOutcome> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to reload into");
+    }
+    const readers = this.staleBaselineReaders(session);
+
+    // Every read happens BEFORE the edit is opened: the session allows one
+    // live `Edit`, so holding one across per-chunk reads would make any brush
+    // stroke during the reload throw `ConcurrentEditError`.
+    const prepared: {
+      readonly write: OwnedChunkWrite;
+      readonly remote: ReadonlyChunkVoxelBuffer;
+    }[] = [];
+    let unreadableChunks = 0;
+    for (const { write } of [...scan.diverged, ...scan.uncomparable]) {
+      if (signal?.aborted === true) break;
+      const remote = await readers.readRemote(write, signal);
+      if (remote === undefined) {
+        unreadableChunks++;
+        continue;
+      }
+      prepared.push({ write, remote });
+    }
+    if (prepared.length === 0) {
+      return { reloadedChunks: 0, unreadableChunks };
+    }
+
+    const edit = session.beginEdit({
+      description: "Reload from storage",
+      tag: "reconcile.reload",
+    });
+    let reloadedChunks = 0;
+    try {
+      for (const { write, remote } of prepared) {
+        const slot = await edit.beginWrite({
+          layerId: write.layerId,
+          resolution: write.resolution,
+          chunkId: write.chunkId,
+        });
+        asWritableBytes(slot.data).set(
+          reloadedOwnedRegion(slot.data, remote.asView(), write.owned),
+        );
+        edit.commitWrites(slot, ownedSubregion(write.owned));
+        reloadedChunks++;
+      }
+    } catch (error) {
+      await edit.discard();
+      throw error;
+    }
+    edit.record();
+    return { reloadedChunks, unreadableChunks };
   }
 
   /**
@@ -3802,6 +3946,19 @@ export class EditSessionHost extends RefCounted {
     }
     const prev = this.editPreferences.value.value ?? {};
     this.editPreferences.value.value = { ...prev, resolutions };
+  }
+
+  /**
+   * Turn automatic conflict reconciling on or off, persisting it into the
+   * cross-session `editPreferences` block so it rides along in a shared link.
+   *
+   * Public because the topbar toggle is the only way a tracer can reach it —
+   * unlike `tooling`, there is no live state object behind this to mirror, so
+   * it is written on the spot rather than through the debounced persist.
+   */
+  setAutomerge(enabled: boolean): void {
+    const prev = this.editPreferences.value.value ?? {};
+    this.editPreferences.value.value = { ...prev, automerge: enabled };
   }
 
   private handleOpenFailure(err: unknown): void {
