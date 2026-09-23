@@ -30,6 +30,17 @@ export interface ConfirmDialogProps {
   cancelLabel?: string;
   /** Tints the confirm button as a destructive action. */
   destructive?: boolean;
+  /**
+   * Optional third action, rendered between Cancel and the primary — for the
+   * case where a decision has two real answers plus a way out, and the safe
+   * one should stay the primary. Omitted, the dialog is an ordinary
+   * confirm/cancel pair.
+   */
+  secondaryAction?: {
+    readonly label: string;
+    readonly destructive?: boolean;
+    readonly onClick: () => void;
+  };
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -54,6 +65,7 @@ function ConfirmDialogBody({
   confirmLabel,
   cancelLabel = "Cancel",
   destructive = false,
+  secondaryAction,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -64,6 +76,14 @@ function ConfirmDialogBody({
     "neuroglancer-confirm-dialog-btn",
     "neuroglancer-confirm-dialog-btn-primary",
     destructive ? "neuroglancer-confirm-dialog-btn-destructive" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const secondaryClass = [
+    "neuroglancer-confirm-dialog-btn",
+    secondaryAction?.destructive === true
+      ? "neuroglancer-confirm-dialog-btn-destructive"
+      : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -94,6 +114,15 @@ function ConfirmDialogBody({
           >
             {cancelLabel}
           </button>
+          {secondaryAction !== undefined && (
+            <button
+              type="button"
+              class={secondaryClass}
+              onClick={secondaryAction.onClick}
+            >
+              {secondaryAction.label}
+            </button>
+          )}
           <button type="button" class={confirmClass} onClick={onConfirm}>
             {confirmLabel}
           </button>

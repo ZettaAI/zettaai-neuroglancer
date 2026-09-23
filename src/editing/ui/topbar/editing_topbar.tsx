@@ -39,10 +39,12 @@ import {
   formatKeyIdentifier,
   keyboardEventToIdentifier,
 } from "#src/editing/keybind_event.js";
+import type { SaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
   effectiveEditKeybinds,
   type EditKeybindName,
 } from "#src/editing/session_hotkey_binder.js";
+import { ConfirmDialog } from "#src/editing/ui/confirm_dialog.js";
 import { useSignal } from "#src/editing/ui/interop/use_signal.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { SaveTracker } from "#src/editing/ui/session_controls/save_tracker.js";
@@ -123,6 +125,38 @@ export function EditingTopbar({ host }: { host: EditSessionHost }) {
   );
 }
 
+/** "1 area" / "4 areas" — the annotator-facing unit for a conflicting chunk. */
+function areaCount(count: number): string {
+  return count === 1 ? "1 area" : `${count} areas`;
+}
+
+/**
+ * The refused save, in the annotator's terms.
+ *
+ * Counts areas rather than listing chunk ids on purpose: "0,1,3" names nothing
+ * a tracer can act on, and the decision does not turn on WHICH chunks moved —
+ * only on how much moved and what overwriting costs.
+ */
+function describeSaveConflict(conflict: SaveConflictError | undefined): string {
+  if (conflict === undefined) return "";
+  const { diverged, uncomparable } = conflict.scan;
+  const sentences: string[] = [];
+  if (diverged.length > 0) {
+    sentences.push(
+      `${areaCount(diverged.length)} you painted changed after you loaded them.`,
+    );
+  }
+  if (uncomparable.length > 0) {
+    sentences.push(`${areaCount(uncomparable.length)} couldn't be checked.`);
+  }
+  sentences.push(
+    "Overwriting replaces that work permanently — these layers keep no " +
+      "history, so it can't be undone.",
+  );
+  sentences.push("Keep editing to leave both versions in place for now.");
+  return sentences.join(" ");
+}
+
 function ActiveTopbarControls({
   host,
   session,
@@ -176,6 +210,22 @@ function ActiveTopbarControls({
   // don't repurpose a user-important control to display verification state).
   const saveProgress = useWatchable(host.saveProgress);
   const hasUnconfirmed = host.hasUnconfirmedSaves();
+  // Set only while a refused save waits on a decision; `useSignal` above
+  // re-renders when the tracker records or clears it.
+  const pendingConflict = saveTracker.pendingConflict();
+  const confirmOverwrite = useCallback(() => {
+    void saveTracker.overwriteConflict(host, session);
+  }, [saveTracker, host, session]);
+  const confirmMerge = useCallback(() => {
+    void saveTracker.mergeConflict(host, session);
+  }, [saveTracker, host, session]);
+  // A merge needs all three inputs; a chunk the scan could not prove has no
+  // baseline to merge from, so offering it would promise something we cannot
+  // deliver for part of the save.
+  const canMergeConflict =
+    pendingConflict !== undefined &&
+    pendingConflict.scan.uncomparable.length === 0 &&
+    pendingConflict.scan.diverged.length > 0;
 
   // Distinct layers with saved-but-unconfirmed chunks. Read inline (cheap) so
   // it stays in sync with `hasUnconfirmed`; the component already re-renders on
@@ -541,6 +591,38 @@ function ActiveTopbarControls({
         "N chunks unavailable" warning lingers.
       */}
       <ChunkLoadProgress host={host} />
+
+      {/*
+        Raised when a save was refused because the region moved under this
+        session. Destructive-tinted, and the safe action is the default: with
+        no object versioning on painting layers, overwriting cannot be undone.
+      */}
+      <ConfirmDialog
+        open={pendingConflict !== undefined}
+        title="Someone else edited this region"
+        message={describeSaveConflict(pendingConflict)}
+        {...(canMergeConflict
+          ? {
+              // Merging keeps both sides, so it is the primary and is not
+              // tinted destructive; overwriting is the one that destroys work.
+              confirmLabel: "Merge both",
+              onConfirm: confirmMerge,
+              secondaryAction: {
+                label: "Overwrite theirs",
+                destructive: true,
+                onClick: confirmOverwrite,
+              },
+            }
+          : {
+              // Nothing to merge from — an unprovable chunk has no baseline,
+              // so the only answers left are overwrite or walk away.
+              confirmLabel: "Overwrite theirs",
+              destructive: true,
+              onConfirm: confirmOverwrite,
+            })}
+        cancelLabel="Keep editing"
+        onCancel={() => saveTracker.dismissConflict()}
+      />
     </>
   );
 }

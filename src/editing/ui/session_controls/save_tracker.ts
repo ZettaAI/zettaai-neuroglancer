@@ -15,7 +15,16 @@ import type {
   SaveResult,
 } from "@zettaai/edit-session";
 
-import type { EditSessionHost } from "#src/editing/edit_session_host.js";
+import type {
+  EditSessionHost,
+  MergeConflictsOutcome,
+} from "#src/editing/edit_session_host.js";
+import type {
+  SaveConflictError,
+  SaveConflictPolicy,
+} from "#src/editing/reconcile/save_conflict_refusal.js";
+import { isSaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
+import { conflictStrategyOf } from "#src/editing/tooling/edit_preferences.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 export type SaveAllState =
@@ -38,6 +47,7 @@ export class SaveTracker {
   private layerStatuses_: Map<string, PerLayerSaveStatus>;
   private saveStartedAt_ = 0;
   private autoClearTimer_: ReturnType<typeof setTimeout> | undefined;
+  private conflict_: SaveConflictError | undefined;
 
   constructor(host: EditSessionHost, session: EditSession) {
     this.layerStatuses_ = initializeLayerStatuses(host, session);
@@ -83,7 +93,131 @@ export class SaveTracker {
     return body;
   }
 
-  async startSave(host: EditSessionHost, session: EditSession): Promise<void> {
+  /**
+   * The conflict the last save stopped on, or `undefined`. Set only when a
+   * save was refused because the remote moved; cleared by answering it.
+   */
+  pendingConflict(): SaveConflictError | undefined {
+    return this.conflict_;
+  }
+
+  /**
+   * Leave the conflict unanswered: keep the paint, save nothing.
+   *
+   * The safe default, and the action Escape and the backdrop resolve to. The
+   * region stays dirty, so the user can keep editing and try again — by which
+   * point a merge (or a colleague finishing) may make the conflict moot.
+   */
+  dismissConflict(): void {
+    if (this.conflict_ === undefined) return;
+    this.conflict_ = undefined;
+    this.changed.dispatch();
+  }
+
+  /**
+   * Answer the conflict by writing anyway, replacing whatever landed after
+   * this session read the region.
+   *
+   * Irreversible: painting layers carry no object versioning, so the bytes
+   * this replaces cannot be recovered. Only ever reached from an explicit
+   * confirmation.
+   */
+  async overwriteConflict(
+    host: EditSessionHost,
+    session: EditSession,
+  ): Promise<void> {
+    if (this.conflict_ === undefined) return;
+    // Take the recoverable copy BEFORE the irreversible write, and let a
+    // failure to take it stop the write. The user agreed to overwrite with a
+    // safety net; proceeding without one silently would be answering a
+    // question they were not asked. The conflict stays pending so the dialog
+    // is still there to try again or back out.
+    try {
+      await host.snapshotDraft("before-overwrite");
+    } catch (error) {
+      this.applyGlobalFailure(
+        "Couldn't save a local copy of your work first, so nothing was " +
+          "overwritten. " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      this.changed.dispatch();
+      return;
+    }
+    this.conflict_ = undefined;
+    await this.startSave(host, session, "overwrite");
+  }
+
+  /**
+   * Answer the conflict by folding the remote's changes into the overlay,
+   * then saving the combined result.
+   *
+   * The save that follows carries `"just-merged"` and skips the scan, because
+   * the payload it sends already incorporates the remote the merge folded in —
+   * a scan would only re-report the divergence that merge resolved.
+   *
+   * Nothing durable is advanced to make that true, which is the point: undoing
+   * the merge leaves no residue, so the NEXT save scans from the original
+   * baseline and refuses exactly as it did before. The narrow window between
+   * the merge and this save is covered by the read-back verification every
+   * save ends in.
+   */
+  async mergeConflict(
+    host: EditSessionHost,
+    session: EditSession,
+  ): Promise<MergeConflictsOutcome | undefined> {
+    const conflict = this.conflict_;
+    if (conflict === undefined) return undefined;
+    let outcome: MergeConflictsOutcome;
+    try {
+      outcome = await host.mergeConflicts(conflict.scan);
+    } catch (error) {
+      // The conflict is cleared only once the merge has actually happened.
+      // Clearing first would close the dialog on a merge that then threw,
+      // leaving the user with dirty paint, no conflict shown, and a Save
+      // button that just raises the same conflict again with no explanation.
+      this.applyGlobalFailure(
+        "Couldn't combine the other changes, so nothing was saved. " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      this.changed.dispatch();
+      return undefined;
+    }
+    this.conflict_ = undefined;
+    this.changed.dispatch();
+    // Scoped to this one save: the payload already incorporates the remote, so
+    // a scan would only re-report the divergence the merge just resolved. Any
+    // LATER save scans normally — which is what makes undoing a merge safe.
+    await this.startSave(host, session, "just-merged");
+    return outcome;
+  }
+
+  /**
+   * Whether this conflict should be combined without asking.
+   *
+   * Only when the user configured `"combine"` AND every conflicting chunk can
+   * actually be merged. A chunk the scan could not prove has no baseline, so
+   * there is no third input to merge from — auto-combining "as much as
+   * possible" and writing the rest would quietly overwrite exactly the chunks
+   * we were least sure about. Those fall back to asking.
+   */
+  private shouldCombineAutomatically(
+    host: EditSessionHost,
+    conflict: SaveConflictError,
+  ): boolean {
+    if (conflictStrategyOf(host.editPreferences.value.value) !== "combine") {
+      return false;
+    }
+    return (
+      conflict.scan.uncomparable.length === 0 &&
+      conflict.scan.diverged.length > 0
+    );
+  }
+
+  async startSave(
+    host: EditSessionHost,
+    session: EditSession,
+    conflictPolicy: SaveConflictPolicy = "refuse",
+  ): Promise<void> {
     if (this.state_.kind === "saving") return;
     if (!session.dirty.isDirty()) return;
 
@@ -96,9 +230,29 @@ export class SaveTracker {
     let result: SaveResult | undefined;
     let thrownError: unknown;
     try {
-      result = await host.saveActive(undefined, controller.signal);
+      result = await host.saveActive(
+        undefined,
+        controller.signal,
+        conflictPolicy,
+      );
     } catch (err) {
       thrownError = err;
+    }
+
+    if (isSaveConflictError(thrownError)) {
+      // Not a failure: nothing was attempted and nothing was lost. The save
+      // stops and waits on a decision, so the state goes back to idle rather
+      // than painting the layers red — the paint is still dirty and still
+      // saveable once the user answers.
+      this.conflict_ = thrownError;
+      this.state_ = { kind: "idle" };
+      // Per-layer statuses are left as `startSave` set them (pending): the
+      // refused save touched nothing, so there is no per-layer outcome to show.
+      this.changed.dispatch();
+      if (this.shouldCombineAutomatically(host, thrownError)) {
+        await this.mergeConflict(host, session);
+      }
+      return;
     }
 
     if (thrownError !== undefined) {
