@@ -55,7 +55,27 @@ export interface EditPreferences {
    * open → close → open flow keeps the user's tool parameters.
    */
   readonly tooling?: ToolingPersistState;
+  /**
+   * What a save does when it finds the region changed under it.
+   *
+   * `"warn"` stops and asks; `"combine"` folds the other side's voxels in and
+   * saves the result. Absent means `"warn"` — the answer that cannot lose
+   * work without someone choosing to.
+   *
+   * A preference rather than session state because it is a way of working,
+   * not a property of one region: a tracer who wants merges wants them
+   * tomorrow too. Note the consequence of living in client-authored
+   * `ngState` — a session can set its own value, so this must never be the
+   * thing that decides whether an overwrite is ALLOWED, only whether the user
+   * is asked first. The refusal itself stays server-of-record in the scan.
+   */
+  readonly conflictStrategy?: ConflictStrategy;
 }
+
+/** How a save answers a stale baseline without asking. */
+export type ConflictStrategy = "warn" | "combine";
+
+export const DEFAULT_CONFLICT_STRATEGY: ConflictStrategy = "warn";
 
 /**
  * Trackable wrapping the `editPreferences` block on `ngState`. The value is
@@ -126,15 +146,40 @@ function parseResolutions(
  * dropped rather than discarding the whole thing. Returns `null` when there is
  * nothing usable.
  */
+/**
+ * Parse the conflict strategy. An unrecognised value is dropped rather than
+ * kept or thrown on, so a future strategy name written by a newer build
+ * degrades to "ask me" instead of breaking the block or silently enabling
+ * something this build would misread.
+ */
+function parseConflictStrategy(x: unknown): ConflictStrategy | undefined {
+  return x === "warn" || x === "combine" ? x : undefined;
+}
+
 export function parseEditPreferences(x: unknown): EditPreferences | null {
   if (x === null || x === undefined) return null;
   if (typeof x !== "object") throw new Error("not-an-object");
   const obj = x as Record<string, unknown>;
   const resolutions = parseResolutions(obj.resolutions);
   const tooling = parseTooling(obj.tooling);
-  if (resolutions === undefined && tooling === undefined) return null;
+  const conflictStrategy = parseConflictStrategy(obj.conflictStrategy);
+  if (
+    resolutions === undefined &&
+    tooling === undefined &&
+    conflictStrategy === undefined
+  ) {
+    return null;
+  }
   return {
     ...(resolutions !== undefined ? { resolutions } : {}),
     ...(tooling !== undefined ? { tooling } : {}),
+    ...(conflictStrategy !== undefined ? { conflictStrategy } : {}),
   };
+}
+
+/** The effective strategy for a session, defaulting when unset or malformed. */
+export function conflictStrategyOf(
+  preferences: EditPreferences | null,
+): ConflictStrategy {
+  return preferences?.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
 }

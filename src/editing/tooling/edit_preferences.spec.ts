@@ -14,6 +14,7 @@ import { describe, it, expect } from "vitest";
 
 import type { PaintingSharedState } from "#src/editing/tool_runtimes/painting_tools.js";
 import {
+  conflictStrategyOf,
   parseEditPreferences,
   validateRememberedResolutions,
 } from "#src/editing/tooling/edit_preferences.js";
@@ -79,6 +80,47 @@ describe("edit_preferences", () => {
       },
     });
     expect(parsed?.resolutions).toEqual({ target: [RES_HI] });
+  });
+
+  describe("conflictStrategy", () => {
+    it("round-trips through JSON like the URL hash would", () => {
+      expect(
+        parseEditPreferences(roundTrip({ conflictStrategy: "combine" })),
+      ).toEqual({ conflictStrategy: "combine" });
+    });
+
+    it("survives on its own, with no other preferences set", () => {
+      expect(parseEditPreferences({ conflictStrategy: "warn" })).toEqual({
+        conflictStrategy: "warn",
+      });
+    });
+
+    /**
+     * A newer build may write a strategy this one does not implement. Keeping
+     * it would let an unknown string reach code that only handles two cases;
+     * throwing would discard the user's unrelated preferences with it.
+     */
+    it("drops an unrecognised strategy rather than keeping or throwing", () => {
+      expect(parseEditPreferences({ conflictStrategy: "yolo" })).toBeNull();
+      expect(
+        parseEditPreferences({
+          conflictStrategy: "yolo",
+          resolutions: { target: [RES_HI] },
+        }),
+      ).toEqual({ resolutions: { target: [RES_HI] } });
+    });
+
+    it("drops a non-string strategy", () => {
+      expect(parseEditPreferences({ conflictStrategy: 3 })).toBeNull();
+    });
+
+    it("defaults to warning when unset", () => {
+      expect(conflictStrategyOf(null)).toBe("warn");
+      expect(conflictStrategyOf({})).toBe("warn");
+      expect(conflictStrategyOf({ conflictStrategy: "combine" })).toBe(
+        "combine",
+      );
+    });
   });
 
   describe("validateRememberedResolutions", () => {

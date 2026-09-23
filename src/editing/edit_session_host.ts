@@ -22,12 +22,15 @@
 
 import type {
   BoundingBoxVoxels,
+  ChunkSubregion,
+  ChunkVoxelBuffer,
   CommitResult,
   EditSessionAdapters,
   EditSessionConfig,
   LayerId,
   LayerMetadata,
   LayerSelection,
+  ReadonlyChunkVoxelBuffer,
   Resolution as ResolutionType,
   SaveResult,
   SavePayload,
@@ -97,6 +100,9 @@ import {
   FillCursorProgress,
   type FillProgressState,
 } from "#src/editing/cursor/fill_cursor_progress.js";
+import type { DraftReason, EditDraft } from "#src/editing/draft/edit_draft.js";
+import { draftIdForRegion } from "#src/editing/draft/edit_draft.js";
+import { EditDraftStore } from "#src/editing/draft/edit_draft_store.js";
 import { IdleEditHotkeyBinder } from "#src/editing/idle_edit_hotkey_binder.js";
 import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // PatchMirror is created by step 9 of Phase 1; this file's runtime import
@@ -112,12 +118,26 @@ import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 import "#src/editing/benchmarks/edit_paint_bench.js";
 import { PointerEventBridge } from "#src/editing/pointer_event_bridge.js";
 import { QuickRegionCapture } from "#src/editing/quick_region_capture.js";
+import type { SaveConflictPolicy } from "#src/editing/reconcile/save_conflict_refusal.js";
+import {
+  refusesSave,
+  SaveConflictError,
+} from "#src/editing/reconcile/save_conflict_refusal.js";
+import type {
+  RemoteBaselineReaders,
+  StaleBaselineScan,
+} from "#src/editing/reconcile/stale_baseline_scan.js";
+import { scanForStaleBaselines } from "#src/editing/reconcile/stale_baseline_scan.js";
+import { mergeOwnedRegion } from "#src/editing/reconcile/three_way_merge.js";
 import {
   checkLayerCompat,
   regionResolution,
   regionVoxelSizeNm,
 } from "#src/editing/region/edit_target_compat.js";
-import type { OwnedChunkWrite } from "#src/editing/region/owned_chunk_write.js";
+import type {
+  ChunkOwnedGeometry,
+  OwnedChunkWrite,
+} from "#src/editing/region/owned_chunk_write.js";
 import { planOwnedWrite } from "#src/editing/region/owned_chunk_write.js";
 import { voxelCenterInBox } from "#src/editing/region/region_geometry.js";
 import { EditRegionPerspectiveOverlay } from "#src/editing/region/region_perspective_overlay.js";
@@ -406,6 +426,34 @@ export interface ActiveRegion {
   readonly hi: readonly [number, number, number];
 }
 
+/** What {@link EditSessionHost.mergeConflicts} folded in. */
+export interface MergeConflictsOutcome {
+  readonly mergedChunks: number;
+  /** Voxels taken from the remote — another annotator's work, kept. */
+  readonly acceptedFromRemote: number;
+  /**
+   * Voxels both sides changed differently. The local edit was kept; the count
+   * exists so the merge can say so rather than resolving them silently.
+   */
+  readonly unresolved: number;
+}
+
+/** The owned box as a chunk-local subregion, for `commitWrites`. */
+function ownedSubregion(owned: ChunkOwnedGeometry): ChunkSubregion {
+  const origin = [0, 1, 2].map(
+    (axis) => owned.ownedBox.start[axis] - owned.chunkBox.start[axis],
+  ) as [number, number, number];
+  const size = [0, 1, 2].map(
+    (axis) => owned.ownedBox.end[axis] - owned.ownedBox.start[axis],
+  ) as [number, number, number];
+  return { origin, size };
+}
+
+/** A writable byte view over a chunk slot's buffer, whatever its voxel type. */
+function asWritableBytes(buffer: ChunkVoxelBuffer): Uint8Array {
+  return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+}
+
 /**
  * Progress of the save+verify pipeline (TM-352). See
  * {@link EditSessionHost.saveProgress}.
@@ -624,6 +672,13 @@ export class EditSessionHost extends RefCounted {
 
   // -- Save cancellation ----------------------------------------------------
   private saveAbortController: AbortController | undefined;
+
+  /**
+   * Opened on first use, not at construction: most sessions never take a
+   * draft, and opening IndexedDB throws in contexts (private windows, denied
+   * storage) where the rest of the editor works fine.
+   */
+  private draftStore: EditDraftStore | undefined;
 
   /**
    * The active session's edit region as plain numbers, captured at open.
@@ -1621,6 +1676,7 @@ export class EditSessionHost extends RefCounted {
   async saveActive(
     layerIds?: readonly LayerId[],
     signal?: AbortSignal,
+    conflictPolicy: SaveConflictPolicy = "refuse",
   ): Promise<SaveResult> {
     const session = this.activeSession.value;
     if (session === undefined) {
@@ -1668,6 +1724,36 @@ export class EditSessionHost extends RefCounted {
             "refusing to verify a save against a different set of chunks",
         );
       }
+      // 2a. Refuse to clobber work that landed after this session read the
+      //     region. Runs on the same `snapshot` the write and the verifier
+      //     use, so the owned sub-box compared is the one written — and before
+      //     `session.save()`, because a refused save must leave the overlay,
+      //     dirty flags and undo history untouched.
+      //
+      //     This is REAL NETWORK I/O inside the window property 2 of
+      //     `owned_chunk_write.ts` requires to stay microtask-only, which is
+      //     why the fingerprint is re-checked below rather than only above.
+      //     The check above cannot cover this: it ran before the scan existed.
+      if (conflictPolicy === "refuse") {
+        const scan = await scanForStaleBaselines(
+          snapshot,
+          this.staleBaselineReaders(session),
+          controller.signal,
+        );
+        if (refusesSave(scan)) throw new SaveConflictError(scan);
+        // The scan takes one fresh read per dirty chunk, so the user has had
+        // seconds in which to keep painting. Anything that landed in that time
+        // is in the overlay but NOT in `snapshot`: the library would collect it
+        // and write it, while this save verifies a different set and never
+        // scanned the new chunks for conflicts at all. Refuse instead — the
+        // paint stays dirty and the next save covers all of it.
+        if (dirtyFingerprint(session) !== dirtyBefore) {
+          throw new Error(
+            "the edit overlay changed while the save was being checked for " +
+              "conflicts: refusing to write chunks that were never checked",
+          );
+        }
+      }
       const regions = this.requireSessionRegions();
       const result = await this.saveTarget.withSessionRegions(regions, () =>
         session.save(layerIds, controller.signal),
@@ -1710,6 +1796,300 @@ export class EditSessionHost extends RefCounted {
         }
       }
     }
+  }
+
+  /**
+   * The id under which this session's unsaved paint is filed.
+   *
+   * Derived from the work, not the session, so a tab that reopens the same
+   * region after a crash computes the same id. Note the bbox is expressed in
+   * the session's chosen resolution, so opening the same physical region at a
+   * different resolution is a different draft — which is the wanted answer,
+   * since the chunks would not line up anyway.
+   */
+  private draftIdForSession(session: EditSession): string {
+    const scopes = session.config.layers.flatMap((layer) =>
+      layer.selectedResolutions.map((resolution) => ({
+        layerId: String(layer.layerId),
+        resolution: String(resolution),
+      })),
+    );
+    const bbox = session.config.region.bbox;
+    return draftIdForRegion(
+      scopes,
+      [bbox[0], bbox[1], bbox[2]],
+      [bbox[3], bbox[4], bbox[5]],
+    );
+  }
+
+  private async drafts(): Promise<EditDraftStore> {
+    this.draftStore ??= await EditDraftStore.open();
+    return this.draftStore;
+  }
+
+  /**
+   * Write this session's unsaved paint somewhere it survives the tab.
+   *
+   * Rejects rather than resolving quietly when storage is unavailable: the
+   * caller is about to do something irreversible on the strength of this, so
+   * "the net is not there" has to reach it.
+   */
+  async snapshotDraft(reason: DraftReason): Promise<EditDraft> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to snapshot");
+    }
+    const dirty = await collectDirtyChunks(session.overlay);
+    const draft: EditDraft = {
+      draftId: this.draftIdForSession(session),
+      savedAt: Date.now(),
+      reason,
+      scopes: session.config.layers.flatMap((layer) =>
+        layer.selectedResolutions.map(
+          (resolution) => `${String(layer.layerId)}|${String(resolution)}`,
+        ),
+      ),
+      chunks: dirty.map((chunk) => ({
+        layerId: String(chunk.layerId),
+        resolution: String(chunk.resolution),
+        voxelSizeNm: Resolution.toVoxelSize(chunk.resolution),
+        chunkId: String(chunk.chunkId),
+        // Copied: the overlay buffer keeps being painted into after this.
+        bytes: new Uint8Array(asWritableBytes(chunk.bytes.asView())),
+      })),
+    };
+    await (await this.drafts()).put(draft);
+    return draft;
+  }
+
+  /** The draft filed for the region this session is editing, if any. */
+  async findDraftForActiveSession(): Promise<EditDraft | undefined> {
+    const session = this.activeSession.value;
+    if (session === undefined) return undefined;
+    return (await this.drafts()).get(this.draftIdForSession(session));
+  }
+
+  /** Discard the draft for this session's region. */
+  async discardDraftForActiveSession(): Promise<void> {
+    const session = this.activeSession.value;
+    if (session === undefined) return;
+    await (await this.drafts()).delete(this.draftIdForSession(session));
+  }
+
+  /**
+   * Paint a draft's chunks back into the active session, as one undo step.
+   *
+   * Goes through the write protocol for the same reason the merge does: bytes
+   * that reach only the backend leave the overlay disagreeing with storage.
+   * Restoring is deliberately a whole-chunk overwrite of the drafted chunks —
+   * the draft IS the state the user wants back, not a delta to reconcile.
+   */
+  async restoreDraft(draft: EditDraft): Promise<number> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to restore into");
+    }
+    const edit = session.beginEdit({
+      description: "Restore unsaved paint",
+      tag: "draft.restore",
+    });
+    let restored = 0;
+    try {
+      for (const chunk of draft.chunks) {
+        const layer = toLayerId(chunk.layerId);
+        const resolution = Resolution.from(chunk.voxelSizeNm);
+        const metadata = await this.layerMetadataSource.resolve(layer);
+        const scale = scaleFor(metadata, resolution);
+        if (scale === undefined) continue;
+        const slot = await edit.beginWrite({
+          layerId: layer,
+          resolution,
+          chunkId: chunk.chunkId,
+        });
+        asWritableBytes(slot.data).set(chunk.bytes);
+        edit.commitWrites(slot, {
+          origin: [0, 0, 0],
+          size: scale.chunkDataSize,
+        });
+        restored++;
+      }
+    } catch (error) {
+      await edit.discard();
+      throw error;
+    }
+    if (restored === 0) await edit.discard();
+    else edit.record();
+    return restored;
+  }
+
+  /**
+   * Fold the remote's changes into the overlay for every chunk a scan found
+   * diverged, as ONE undo step.
+   *
+   * Applied through `session.beginEdit()` rather than written straight to the
+   * backend, and that is the whole design. The library re-baselines a layer it
+   * is told succeeded from the OVERLAY's bytes, so merged bytes that reached
+   * only the backend would leave the overlay holding the un-merged version,
+   * the next save would push it back over the merge, and the merge would be
+   * undone by the act of saving again. Going through the write protocol also
+   * buys undo for free: a merge the user dislikes is Ctrl+Z.
+   *
+   * Advancing the retained baseline to the remote we merged against is the
+   * other half. Without it the next save would re-scan the same chunks
+   * against the SAME stale baseline, find them diverged again, and refuse —
+   * merging would leave the save permanently blocked. Recording the merged-
+   * against bytes is exactly the store's meaning: what this session last
+   * observed as remote truth.
+   *
+   * Chunks the scan could not compare are skipped: with no baseline there is
+   * no third input, so there is nothing to merge them from.
+   */
+  async mergeConflicts(
+    scan: StaleBaselineScan,
+    signal?: AbortSignal,
+  ): Promise<MergeConflictsOutcome> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to merge into");
+    }
+    const readers = this.staleBaselineReaders(session);
+
+    // Every network read happens BEFORE the edit is opened. The session allows
+    // exactly one live `Edit` at a time, so holding one across per-chunk reads
+    // would make any brush stroke during the merge throw `ConcurrentEditError`
+    // — the tool's `beginEdit` would be refused for as long as the reads take.
+    const prepared: {
+      readonly write: OwnedChunkWrite;
+      readonly remote: ReadonlyChunkVoxelBuffer;
+      readonly baseline: ReadonlyChunkVoxelBuffer;
+    }[] = [];
+    for (const { write } of scan.diverged) {
+      if (signal?.aborted === true) break;
+      const remote = await readers.readRemote(write, signal);
+      const baseline = await readers.readRetainedBaseline(write, signal);
+      if (remote === undefined || baseline === undefined) continue;
+      prepared.push({ write, remote, baseline });
+    }
+    if (prepared.length === 0) {
+      return { mergedChunks: 0, acceptedFromRemote: 0, unresolved: 0 };
+    }
+
+    // From here the only await is `beginWrite`, which materializes a chunk the
+    // session already pinned and dirtied — an overlay hit, not a fetch.
+    const edit = session.beginEdit({
+      description: "Merge concurrent edits",
+      tag: "reconcile.merge",
+    });
+    let acceptedFromRemote = 0;
+    let unresolved = 0;
+    let mergedChunks = 0;
+    try {
+      for (const { write, remote, baseline } of prepared) {
+        const slot = await edit.beginWrite({
+          layerId: write.layerId,
+          resolution: write.resolution,
+          chunkId: write.chunkId,
+        });
+        const merge = mergeOwnedRegion(
+          baseline.asView(),
+          slot.data,
+          remote.asView(),
+          write.owned,
+        );
+        asWritableBytes(slot.data).set(merge.merged);
+        edit.commitWrites(slot, ownedSubregion(write.owned));
+
+        // NOTHING DURABLE IS ADVANCED HERE. An earlier version recorded
+        // `remote` as the retained baseline, reasoning that the overlay now
+        // agreed with it. That is true only while the merge stands — and the
+        // merge is an undo entry, so it need not. Undo rolled the overlay back
+        // to the pre-merge bytes while the baseline kept claiming we had
+        // reconciled, and the next scan then compared remote against itself,
+        // said "unchanged", and let the save POST our stale bytes over the
+        // colleague's work with no dialog: the exact silent overwrite this
+        // feature exists to prevent, reachable by pressing Ctrl+Z.
+        //
+        // The save that follows a merge instead carries the `"just-merged"`
+        // policy, which is scoped to that one save. Every later save scans
+        // from the original baseline, so an undone merge simply raises the
+        // conflict again.
+        acceptedFromRemote += merge.acceptedFromRemote;
+        unresolved += merge.unresolved;
+        mergedChunks++;
+      }
+    } catch (error) {
+      await edit.discard();
+      throw error;
+    }
+    edit.record();
+    return { mergedChunks, acceptedFromRemote, unresolved };
+  }
+
+  /**
+   * The two reads the stale-baseline scan compares.
+   *
+   * `readRetainedBaseline` prefers the client's saved copy over the session's
+   * opening baseline, and the order matters: after a mid-session save, what
+   * this session last observed as remote truth is what it last wrote, not what
+   * it opened with. Comparing against the opening baseline instead would report
+   * our own earlier save as somebody else's change, on every chunk, from the
+   * second save onwards.
+   *
+   * Returning `undefined` when neither is retained is deliberate — the scan
+   * records that as unprovable rather than assuming the region is untouched.
+   */
+  private staleBaselineReaders(session: EditSession): RemoteBaselineReaders {
+    return {
+      readRemote: (write, signal) =>
+        this.chunkSource.readFreshDecoded(
+          write.layerId,
+          write.resolution,
+          write.chunkCoord,
+          signal,
+        ),
+      readRetainedBaseline: async (write) => {
+        const chunkKey = `${write.layerId}|${write.resolution}|${write.chunkId}`;
+        // An UNCONFIRMED save's bytes were only attempted. `saveActive` records
+        // them the moment the write is acked — before read-back proves the
+        // backend actually holds them — so for a chunk still in this map they
+        // are not "what we last observed remotely" at all.
+        //
+        // The merge kernel decides `mineChanged` as `mine != baseline`, so a
+        // baseline of attempted bytes makes every voxel of that attempt look
+        // untouched by us and hands it to the remote. A chunk re-dirtied after
+        // an unconfirmed save would lose ALL of that save's paint back to the
+        // pristine value, reported as zero unresolved conflicts — and with the
+        // follow-up `"just-merged"` save skipping the scan, persisted.
+        //
+        // We genuinely do not know what the backend holds for these, which is
+        // what `uncomparable` means. It withholds Merge and routes the user to
+        // Overwrite (with a draft) or Keep editing, both of which keep the
+        // paint.
+        if (this.unconfirmedChunks.has(chunkKey)) return undefined;
+        const saved = this.chunkSource.getSavedBytes(
+          write.layerId,
+          write.resolution,
+          write.chunkId,
+        );
+        if (saved !== undefined) return saved;
+        // Saved AND verified earlier this session, but the bounded byte cache
+        // dropped it. The session-open baseline is NOT what we last observed
+        // remotely — our own earlier save superseded it — so comparing against
+        // it would report our own work as somebody else's change, and a merge
+        // from it would treat voxels we have since erased as "untouched by us"
+        // and take the remote's older label back. Report unprovable instead.
+        if (this.verifiedSavedChunks.has(chunkKey)) {
+          return undefined;
+        }
+        return session.overlay
+          .baselineRefOf({
+            layerId: write.layerId,
+            resolution: write.resolution,
+            chunkId: write.chunkId,
+          })
+          ?.retain();
+      },
+    };
   }
 
   /**
