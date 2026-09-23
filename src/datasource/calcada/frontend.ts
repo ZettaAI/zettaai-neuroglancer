@@ -3042,7 +3042,15 @@ class ZettaTraceSession extends RefCounted {
     if (seedRoot === undefined) return;
     this.dimmed.clear();
     const entry = nextEntry(this.pool, this.decided);
-    this.current = entry?.candidate;
+    // Never trust the root a queued candidate was fetched with. Roots are
+    // replaced by every merge and every split, while the piece survives both,
+    // so the root is resolved from the piece at the moment of showing it.
+    // Without this a split leaves the queue pointing at a segment that no
+    // longer exists, and the view only recovers on a reload.
+    this.current =
+      entry === undefined
+        ? undefined
+        : { ...entry.candidate, partnerRootId: this.rootOfPiece(entry.candidate) };
     this.currentDepth = entry?.depth ?? 0;
     this.remaining = remainingCount(this.pool, this.decided);
     if (this.current === undefined) {
@@ -3408,6 +3416,14 @@ class ZettaTraceSession extends RefCounted {
    * "not in my segment" would quietly delete the far half of the queue, which
    * is exactly the part a depth-first walk is heading towards.
    */
+  /** The candidate partner's current root, or the one it was fetched with. */
+  private rootOfPiece(candidate: EdgeCandidate): bigint {
+    const root = this.segmentsState.segmentEquivalences.get(
+      candidate.partnerPieceId,
+    );
+    return root === candidate.partnerPieceId ? candidate.partnerRootId : root;
+  }
+
   private prunedPool(): PoolEntry[] {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return [];
