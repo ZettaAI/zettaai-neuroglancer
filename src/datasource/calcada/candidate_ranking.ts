@@ -3,9 +3,12 @@
  *
  * The server does the real work: it ranks by score, drops candidates whose
  * partner already sits in the seed segment, drops those already accepted or
- * rejected, and keeps only the best interface per partner segment. The client
- * only suppresses verdicts issued in this session, before their refetch lands.
+ * rejected, and keeps only the best interface per partner segment. What order
+ * a proofreader is shown them in is the client's, and lives in
+ * `candidate_traversal.ts`.
  */
+import type { PieceClasses } from "#src/datasource/calcada/candidate_heat.js";
+
 export interface EdgeCandidate {
   lineId: bigint;
   score: number;
@@ -16,27 +19,8 @@ export interface EdgeCandidate {
   pointB: Float32Array;
   nInterfaces: number;
   modelDecision: string;
-}
-
-export function dropDecided(
-  candidates: EdgeCandidate[],
-  decided: Set<bigint>,
-): EdgeCandidate[] {
-  return candidates.filter((c) => !decided.has(c.lineId));
-}
-
-/**
- * The best remaining candidate. Picks by score rather than trusting the
- * server's order, so a locally rejected top candidate cannot leave the list
- * mis-ranked.
- */
-export function nextCandidate(
-  candidates: EdgeCandidate[],
-  decided: Set<bigint>,
-): EdgeCandidate | undefined {
-  let best: EdgeCandidate | undefined;
-  for (const c of dropDecided(candidates, decided)) {
-    if (best === undefined || c.score > best.score) best = c;
-  }
-  return best;
+  /** The piece this candidate would merge in. */
+  partnerVoxels: number;
+  partnerClasses: PieceClasses;
+  partnerHasInfo: boolean;
 }
