@@ -3794,13 +3794,21 @@ class CandidateOverviewSession extends RefCounted {
     // on screen unless this does. They carry the score of the proposal that
     // named them, which is what makes a promising neighbour findable at a
     // glance.
-    for (const [piece, color] of partnerColors(
+    const partners = partnerColors(
       this.pieces,
       this.state.semanticClass.value,
       this.state.minClassFraction.value,
-    )) {
+    );
+    for (const [piece, color] of partners) {
       segmentsState.temporaryVisibleSegments.add(piece);
       displayState.tempSegmentStatedColors2d.value.set(piece, color);
+    }
+    // Asking for a piece to be visible is not asking for its mesh. The
+    // segment's own pieces already have theirs — they are fragments of a mesh
+    // that is on screen — but a candidate belongs to a segment the viewer has
+    // never fetched, so nothing would arrive to colour.
+    if (partners.size !== 0) {
+      this.connection.meshAddNewSegments([...partners.keys()]);
     }
     displayState.useTempSegmentStatedColors2d.value = true;
     this.painted = true;
