@@ -65,10 +65,21 @@ import {
 } from "#src/datasource/calcada/base.js";
 import { BRANCH_PICKER_TITLE } from "#src/datasource/calcada/branch_picker_logic.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import {} from "#src/datasource/calcada/candidate_ranking.js";
+import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
-  dropDecided,
-  nextCandidate,
-} from "#src/datasource/calcada/candidate_ranking.js";
+  describePartner,
+  overviewColors,
+} from "#src/datasource/calcada/candidate_heat.js";
+import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
+import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
+import {
+  nextEntry,
+  prependChildren,
+  prunePool,
+  remainingCount,
+  seedPool,
+} from "#src/datasource/calcada/candidate_traversal.js";
 import type {
   DebugGraph,
   RootDebugGraph,
@@ -107,6 +118,17 @@ import {
   stageBlockedReason,
   stageEnabled,
 } from "#src/datasource/calcada/split_steps.js";
+import {
+  stepTraceSphereRadiusNm,
+  traceSphereSemiAxes,
+  pointInsideSphere,
+} from "#src/datasource/calcada/trace_cursor/trace_sphere_geometry.js";
+import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_perspective_overlay.js";
+import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
+import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
+import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
+import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
+import { CalcadaTraceTab } from "#src/datasource/calcada/trace_tab.js";
 import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
 import type {
   DataSource,
@@ -144,6 +166,7 @@ import { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
 import { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
 import { MeshSource } from "#src/mesh/frontend.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
+import { PerspectivePanel } from "#src/perspective_view/panel.js";
 import { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import type {
   ChunkTransformParameters,
@@ -267,7 +290,7 @@ import { KeyboardEventBinder } from "#src/util/keyboard_bindings.js";
 import { MouseEventBinder } from "#src/util/mouse_bindings.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
-import { NullarySignal, Signal } from "#src/util/signal.js";
+import { NullarySignal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
 import { makeDeleteButton } from "#src/widget/delete_button.js";
@@ -1125,6 +1148,8 @@ const PRECISION_MODE_JSON_KEY = "precision";
 const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const ZETTA_TRACE_JSON_KEY = "zettaTrace";
 const CALCADA_DEBUG_JSON_KEY = "debug";
+const CALCADA_TRACE_TAB_ID = "calcada-trace";
+const CALCADA_OVERVIEW_JSON_KEY = "candidateOverview";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 
 // Debugging more than a handful of segments at once is N whole-segment queries,
@@ -1443,6 +1468,7 @@ class CalcadaState extends RefCounted implements Trackable {
   public pieceSplitState = new PieceSplitState();
   public zettaTraceState = new ZettaTraceState();
   public calcadaDebugState = new CalcadaDebugState();
+  public overviewState = new CalcadaOverviewState();
   public branchId = new TrackableValue<number>(0, (x) =>
     typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : 0,
   );
@@ -1471,6 +1497,9 @@ class CalcadaState extends RefCounted implements Trackable {
     );
     this.registerDisposer(
       this.calcadaDebugState.changed.add(() => this.changed.dispatch()),
+    );
+    this.registerDisposer(
+      this.overviewState.changed.add(() => this.changed.dispatch()),
     );
     this.registerDisposer(
       this.zettaTraceState.changed.add(() => {
@@ -1510,6 +1539,7 @@ class CalcadaState extends RefCounted implements Trackable {
       [PIECE_SPLIT_JSON_KEY]: this.pieceSplitState.toJSON(),
       [ZETTA_TRACE_JSON_KEY]: this.zettaTraceState.toJSON(),
       [CALCADA_DEBUG_JSON_KEY]: this.calcadaDebugState.toJSON(),
+      [CALCADA_OVERVIEW_JSON_KEY]: this.overviewState.toJSON(),
       [CALCADA_BRANCH_JSON_KEY]: this.branchId.toJSON(),
     };
   }
@@ -1529,6 +1559,9 @@ class CalcadaState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, CALCADA_DEBUG_JSON_KEY, (value) => {
       this.calcadaDebugState.restoreState(value);
+    });
+    verifyOptionalObjectProperty(x, CALCADA_OVERVIEW_JSON_KEY, (value) => {
+      this.overviewState.restoreState(value);
     });
     verifyOptionalObjectProperty(x, ZETTA_TRACE_JSON_KEY, (value) => {
       this.zettaTraceState.restoreState(value);
@@ -2035,91 +2068,6 @@ class PieceSplitState extends RefCounted implements Trackable {
   }
 }
 
-const TRACE_ACTIVE_KEY = "active";
-const TRACE_SEED_KEY = "seedRoot";
-const TRACE_MIN_PIECE_VOXELS_KEY = "minPieceVoxels";
-const TRACE_REJECTED_BY_KEY = "rejectedBy";
-// Server-side alias for the authenticated user.
-const TRACE_CURRENT_USER = "me";
-
-/**
- * Zetta Trace is a mode, not a tool: a proofreader stays in it while switching
- * to merge or cut and back, so its state cannot live in a tool activation,
- * which neuroglancer tears down the moment another tool takes the single
- * active-tool slot.
- *
- * Only the durable knobs live here, and they are what a shared link restores.
- * The candidate list is deliberately not among them — it is refetched, because
- * a list saved minutes ago describes a graph that has since been edited.
- */
-class ZettaTraceState extends RefCounted implements Trackable {
-  changed = new NullarySignal();
-
-  active = new WatchableValue<boolean>(false);
-  seedRoot = new WatchableValue<bigint | undefined>(undefined);
-  // Candidates whose partner piece is smaller than this are debris the model
-  // still scores highly. Zero offers everything.
-  minPieceVoxels = new WatchableValue<number>(0);
-  // Whose rejections to honour. Empty means anyone's. The literal "me" is
-  // resolved by the server, which knows who the request is from — the browser
-  // never learns its own user id.
-  rejectedBy = new WatchableValue<string[]>([]);
-
-  // Fires when a merge or a split has rewritten roots. The seed and the
-  // candidate are identified by piece from here on: their root ids have just
-  // changed, so anything holding a root id is stale.
-  graphEdited = new Signal<
-    (oldRoots: Uint64Set, newRoots: Uint64Set) => void
-  >();
-
-  constructor() {
-    super();
-    const reemit = () => this.changed.dispatch();
-    this.registerDisposer(this.active.changed.add(reemit));
-    this.registerDisposer(this.seedRoot.changed.add(reemit));
-    this.registerDisposer(this.minPieceVoxels.changed.add(reemit));
-    this.registerDisposer(this.rejectedBy.changed.add(reemit));
-  }
-
-  reset() {
-    this.active.value = false;
-    this.seedRoot.value = undefined;
-  }
-
-  // The seed is re-resolved from its piece rather than remapped from the old
-  // root set: a cut splits one root into several, so the set alone cannot say
-  // which side the seed ended up on.
-  replaceSegments(oldValues: Uint64Set, newValues: Uint64Set) {
-    if (this.active.value) this.graphEdited.dispatch(oldValues, newValues);
-  }
-
-  toJSON() {
-    return {
-      [TRACE_ACTIVE_KEY]: this.active.value ? true : undefined,
-      [TRACE_SEED_KEY]: this.seedRoot.value?.toString(),
-      [TRACE_MIN_PIECE_VOXELS_KEY]: this.minPieceVoxels.value || undefined,
-      [TRACE_REJECTED_BY_KEY]: this.rejectedBy.value.length
-        ? this.rejectedBy.value
-        : undefined,
-    };
-  }
-
-  restoreState(x: any) {
-    verifyOptionalObjectProperty(x, TRACE_ACTIVE_KEY, (value) => {
-      this.active.value = verifyBoolean(value);
-    });
-    verifyOptionalObjectProperty(x, TRACE_SEED_KEY, (value) => {
-      this.seedRoot.value = BigInt(verifyString(value));
-    });
-    verifyOptionalObjectProperty(x, TRACE_MIN_PIECE_VOXELS_KEY, (value) => {
-      this.minPieceVoxels.value = verifyInt(value);
-    });
-    verifyOptionalObjectProperty(x, TRACE_REJECTED_BY_KEY, (value) => {
-      this.rejectedBy.value = parseArray(value, verifyString);
-    });
-  }
-}
-
 const VOXEL_KEY = "voxel";
 const LAYER_KEY = "layer";
 
@@ -2176,11 +2124,28 @@ const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   // handler and this one both — two reverts from a single press.
   "at:control+keyz": { action: "trace-undo" },
   "at:meta+keyz": { action: "trace-undo" },
-  // Seeding is deliberate and plain click is not: a proofreader checking
-  // whether a candidate is right needs to select neighbouring segments to look
-  // at, and that must not move the trace.
-  "at:shift+mousedown0": { action: "set-trace-seed" },
   "at:escape": { action: "exit-trace" },
+});
+
+// Held only while the sights are up. The placing click is bound HERE and
+// nowhere else on purpose: during a trace a click has to stay an ordinary
+// click, because a proofreader checking a candidate selects neighbouring
+// segments to look at, and that must not move the trace.
+//
+// The size keys are the brush's own (config/custom-keybinds.json,
+// editSession.sizeIncrease / sizeDecrease), deliberately rather than a second
+// vocabulary for the same gesture. They cannot collide: these live only for the
+// length of the aim, and "at:" outranks the panel bindings.
+const CALCADA_TRACE_AIM_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:equal": { action: "trace-radius-increase" },
+  "at:shift+equal": { action: "trace-radius-increase" },
+  "at:numpadadd": { action: "trace-radius-increase" },
+  "at:minus": { action: "trace-radius-decrease" },
+  "at:numpadsubtract": { action: "trace-radius-decrease" },
+  // Ctrl, not a plain click: in the 3D panel a bare drag orbits the camera, and
+  // aiming is exactly when you want to keep turning the view to find the spot.
+  "at:control+mousedown0": { action: "trace-place-sphere" },
+  "at:escape": { action: "trace-cancel-aim" },
 });
 
 // A merge is not instantly visible to a read that lands on another replica, so
@@ -2600,14 +2565,17 @@ class CalcadaDebugSession extends RefCounted {
 class ZettaTraceSession extends RefCounted {
   // The panel reads these; it re-renders on `changed`.
   readonly changed = new NullarySignal();
-  status = "Shift+click a segment to seed the trace";
+  status = "Press T, then Ctrl+click a mesh to seed the trace";
   current: EdgeCandidate | undefined;
   remaining = 0;
 
   // The seed's own piece. Root ids die on every merge and cut; this does not,
   // so it is what the trace re-resolves itself from afterwards.
   private seedPieceId: bigint | undefined;
-  private candidates: EdgeCandidate[] = [];
+  // Ordered depth-first: accepting a candidate puts the segment it merged at
+  // the head, so its own candidates come before anything the seed offered.
+  private pool: PoolEntry[] = [];
+  private currentDepth = 0;
   // Candidates accepted this session, newest last, so an undo can offer the top
   // one again.
   private acceptedLines: bigint[] = [];
@@ -2628,8 +2596,7 @@ class ZettaTraceSession extends RefCounted {
   // panel re-renders the current one.
   private prefetchedPartner: bigint | undefined;
   private bindings: RefCounted | undefined;
-  private modePanel: StatusMessage | undefined;
-  private modePanelStatus: HTMLElement | undefined;
+  private aimBindings: RefCounted | undefined;
   // Role segments the proofreader toggled "off": they stay visible but faint
   // rather than disappearing, so the comparison never loses a side.
   private readonly dimmed = new Set<bigint>();
@@ -2656,6 +2623,20 @@ class ZettaTraceSession extends RefCounted {
       }),
     );
     this.registerDisposer(
+      state.aiming.changed.add(() => {
+        if (state.aiming.value) {
+          this.bindAiming();
+        } else {
+          this.aimBindings?.dispose();
+          this.aimBindings = undefined;
+        }
+      }),
+    );
+    this.registerDisposer(() => {
+      this.aimBindings?.dispose();
+      this.aimBindings = undefined;
+    });
+    this.registerDisposer(
       state.graphEdited.add((oldRoots, newRoots) =>
         this.onGraphEdited(oldRoots, newRoots),
       ),
@@ -2668,7 +2649,6 @@ class ZettaTraceSession extends RefCounted {
     );
     this.registerDisposer(state.rejectedBy.changed.add(refetchOnFilterChange));
     if (state.active.value) this.enter();
-    this.registerDisposer(() => this.hideModePanel());
   }
 
   private get segmentsState() {
@@ -2685,60 +2665,75 @@ class ZettaTraceSession extends RefCounted {
 
   private setStatus(text: string) {
     this.status = text;
-    if (this.modePanelStatus !== undefined) {
-      this.modePanelStatus.textContent = text;
-    }
     this.changed.dispatch();
   }
 
   /**
-   * The mode's own section in the status list, built the way a tool activation
-   * builds one (makeToolActivationStatusMessage) — same header, body and
-   * key-binding row as merge and cut, so the three read as one family. The mode
-   * cannot use that helper directly: its activation releases the tool slot
-   * immediately, and the section has to outlive it.
+   * Keys and the click that live only while the sights are up. Structured like
+   * `enter()` — the same two binders, because the panel-focus gap that made the
+   * arrows go dead applies to the size keys too.
    */
-  private showModePanel() {
-    if (this.modePanel !== undefined) return;
-    const message = new StatusMessage(false);
-    message.element.classList.add(
-      "neuroglancer-tool-status",
-      "calcada-zetta-trace-mode",
+  private bindAiming() {
+    if (this.aimBindings !== undefined) return;
+    this.revealTraceTab();
+    const bindings = new RefCounted();
+    this.aimBindings = bindings;
+    this.layer.toolBinder.globalBinder.inputEventMapBinder(
+      CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
+      bindings,
     );
-
-    const content = document.createElement("div");
-    content.classList.add("neuroglancer-tool-status-content");
-    message.element.appendChild(content);
-
-    const headerContainer = document.createElement("div");
-    headerContainer.classList.add("neuroglancer-tool-status-header-container");
-    const header = document.createElement("div");
-    header.classList.add("neuroglancer-tool-status-header");
-    header.textContent = "Zetta trace";
-    headerContainer.appendChild(header);
-    content.appendChild(headerContainer);
-
-    const body = document.createElement("div");
-    body.classList.add("neuroglancer-tool-status-body", "calcada-tool-status");
-    const status = document.createElement("span");
-    status.className = "calcada-zetta-trace-status";
-    status.textContent = this.status;
-    body.appendChild(status);
-    content.appendChild(body);
-
-    const bindingHelp = document.createElement("div");
-    bindingHelp.textContent = ZETTA_TRACE_INPUT_EVENT_MAP.describe();
-    bindingHelp.classList.add("neuroglancer-tool-status-bindings");
-    message.element.appendChild(bindingHelp);
-
-    this.modePanel = message;
-    this.modePanelStatus = status;
+    const documentKeys = bindings.registerDisposer(
+      new KeyboardEventBinder(document, CALCADA_TRACE_AIM_INPUT_EVENT_MAP),
+    );
+    documentKeys.shouldIgnore = (event: KeyboardEvent) =>
+      (event.target as HTMLElement | null)?.closest?.(
+        ".neuroglancer-rendered-data-panel",
+      ) != null;
+    const bind = (action: string, handler: () => void) => {
+      bindings.registerDisposer(
+        registerActionListener(
+          window,
+          action,
+          (event: ActionEvent<unknown>) => {
+            event.stopPropagation();
+            handler();
+          },
+        ),
+      );
+    };
+    const resize = (direction: 1 | -1) => {
+      this.state.sphereRadiusNm.value = stepTraceSphereRadiusNm(
+        this.state.sphereRadiusNm.value,
+        direction,
+      );
+    };
+    bind("trace-radius-increase", () => resize(1));
+    bind("trace-radius-decrease", () => resize(-1));
+    bind("trace-place-sphere", () => this.placeSphere());
+    // Cancels the aim, not the trace: a live session has to survive a stray T
+    // in the middle of a review, because exit() restores the segment snapshot
+    // and drops the seed.
+    bind("trace-cancel-aim", () => this.state.cancelInnermost());
   }
 
-  private hideModePanel() {
-    this.modePanel?.dispose();
-    this.modePanel = undefined;
-    this.modePanelStatus = undefined;
+  /**
+   * Pin the sphere where the cursor is and seed from what is under it.
+   *
+   * Order matters: `active` goes on before the seed, because `setSeed` fetches
+   * candidates and that fetch has to see the centre already placed.
+   */
+  private placeSphere() {
+    const position =
+      this.layer.manager.root.layerSelectedValues.mouseState.unsnappedPosition;
+    if (position === undefined || position.length < 3) return;
+    this.state.sphereCenter.value = Float32Array.of(
+      position[0],
+      position[1],
+      position[2],
+    );
+    this.state.aiming.value = false;
+    if (!this.state.active.value) this.state.active.value = true;
+    this.seedFromMouse();
   }
 
   enter() {
@@ -2790,10 +2785,7 @@ class ZettaTraceSession extends RefCounted {
     bind("accept-candidate", () => void this.accept());
     bind("skip-candidate", () => this.skip());
     bind("trace-undo", () => void this.undoLast());
-    bind("exit-trace", () => {
-      this.state.active.value = false;
-    });
-    bind("set-trace-seed", () => this.seedFromMouse());
+    bind("exit-trace", () => this.state.cancelInnermost());
 
     // Toggling a role segment off would drop half the comparison. Put it back
     // and record it as dimmed instead, so it renders faint rather than gone.
@@ -2844,22 +2836,22 @@ class ZettaTraceSession extends RefCounted {
       ),
     );
 
-    this.showModePanel();
-    this.revealSegmentsTab();
+    this.revealTraceTab();
     if (this.state.seedRoot.value !== undefined) {
       void this.loadCandidates();
     } else {
-      this.setStatus("Shift+click a segment to seed the trace");
+      this.setStatus("Press T, then Ctrl+click a mesh to seed the trace");
     }
   }
 
-  // The trace panel lives in the segments tab, so entering the mode from a
-  // keybinding or a restored link would otherwise leave the proofreader looking
-  // at a tab that says nothing about the trace they just started.
-  private revealSegmentsTab() {
+  // Raising the sights or starting a trace from a keybinding would otherwise
+  // leave the proofreader looking at a tab that says nothing about what just
+  // happened. Only ever called on the way IN: leaving is not a reason to drag
+  // the panel away from wherever they have since moved it.
+  private revealTraceTab() {
     for (const panel of this.layer.panels.panels) {
-      if (panel.tabs.includes("segments")) {
-        panel.selectedTab.value = "segments";
+      if (panel.tabs.includes(CALCADA_TRACE_TAB_ID)) {
+        panel.selectedTab.value = CALCADA_TRACE_TAB_ID;
       }
     }
   }
@@ -2869,9 +2861,8 @@ class ZettaTraceSession extends RefCounted {
     const candidateRoot = this.current?.partnerRootId;
     this.bindings.dispose();
     this.bindings = undefined;
-    this.hideModePanel();
     this.clearAnnotation();
-    this.candidates = [];
+    this.pool = [];
     this.current = undefined;
     this.decided.clear();
     this.acceptedLines.length = 0;
@@ -2881,8 +2872,10 @@ class ZettaTraceSession extends RefCounted {
 
     // The seed does not outlive the mode: leaving means done with that segment.
     // Keeping it made re-entry snap the view back to the old candidate and wipe
-    // whatever the proofreader had just selected to trace next.
+    // whatever the proofreader had just selected to trace next. The placed
+    // sphere goes with it; the radius stays, being a setting rather than state.
     this.state.seedRoot.value = undefined;
+    this.state.sphereCenter.value = undefined;
 
     this.dimmed.clear();
     this.clearRoleColors();
@@ -2932,10 +2925,8 @@ class ZettaTraceSession extends RefCounted {
       segmentSelectionState: { value, baseValue },
     } = this.layer.displayState;
     if (!value || !baseValue) return;
-    if (value === this.state.seedRoot.value) {
-      StatusMessage.showTemporaryMessage("Already the seed", 3000);
-      return;
-    }
+    // No "already the seed" shortcut: the sphere has just moved, so the same
+    // segment is a different question and its candidates must be refetched.
     this.setSeed(value, baseValue);
   }
 
@@ -2943,7 +2934,7 @@ class ZettaTraceSession extends RefCounted {
     this.state.seedRoot.value = rootId;
     this.seedPieceId = pieceId;
     this.current = undefined;
-    this.candidates = [];
+    this.pool = [];
     this.dimmed.clear();
     this.clearAnnotation();
     this.showOnly(rootId);
@@ -3047,16 +3038,24 @@ class ZettaTraceSession extends RefCounted {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     this.dimmed.clear();
-    this.current = nextCandidate(this.candidates, this.decided);
-    this.remaining = dropDecided(this.candidates, this.decided).length;
+    const entry = nextEntry(this.pool, this.decided);
+    this.current = entry?.candidate;
+    this.currentDepth = entry?.depth ?? 0;
+    this.remaining = remainingCount(this.pool, this.decided);
     if (this.current === undefined) {
       this.showOnly(seedRoot);
-      this.setStatus("No candidates left for this segment");
+      this.setStatus(
+        "No candidates left — widen the sphere with + or press T to place a new one",
+      );
       return;
     }
     const candidate = this.current;
     this.showOnly(seedRoot, candidate.partnerRootId);
 
+    const contactIsAPoint =
+      candidate.pointA[0] === candidate.pointB[0] &&
+      candidate.pointA[1] === candidate.pointB[1] &&
+      candidate.pointA[2] === candidate.pointB[2];
     const line: Line = {
       id: "",
       type: AnnotationType.LINE,
@@ -3084,7 +3083,19 @@ class ZettaTraceSession extends RefCounted {
       properties: [],
     };
     const { source } = this.connection.traceAnnotationState;
-    this.annotationIds.push(source.add(line, true).id);
+    // The two ends of a contact are the same voxel whenever the ingest gave the
+    // candidate no spread, which is every candidate in the current wave. A line
+    // between them draws nothing at all, so mark the contact instead.
+    const annotation: Annotation = contactIsAPoint
+      ? {
+          id: "",
+          type: AnnotationType.POINT,
+          point: line.pointA as Float32Array,
+          relatedSegments: line.relatedSegments,
+          properties: [],
+        }
+      : line;
+    this.annotationIds.push(source.add(annotation, true).id);
 
     const midpoint = vec3.create();
     vec3.add(midpoint, line.pointA as vec3, line.pointB as vec3);
@@ -3094,12 +3105,36 @@ class ZettaTraceSession extends RefCounted {
     // match the coordinate space rank, so on a higher-rank space this simply
     // does not move rather than moving somewhere wrong.
     this.layer.manager.root.globalPosition.value = Float32Array.from(midpoint);
+    this.frameCandidate(candidate);
 
     this.setStatus(
       `score ${candidate.score.toFixed(2)} · ${candidate.nInterfaces} interface(s)` +
-        ` · partner ${candidate.partnerRootId} · ${this.remaining} left`,
+        ` · ${describePartner(candidate)}` +
+        ` · depth ${this.currentDepth} · ${this.remaining} left`,
     );
     this.prefetchNext(candidate);
+  }
+
+  /**
+   * Zoom the 3D view onto the candidate that just came up.
+   *
+   * Recentring alone leaves the pair a few pixels wide at a zoom that fits a
+   * whole neuron, which is not a view anyone can judge a merge from. Only the
+   * 3D panel is touched: the slice panels are where a proofreader sets a
+   * working scale and keeps it, and yanking that around every verdict would
+   * cost more than it gives.
+   */
+  private frameCandidate(candidate: EdgeCandidate) {
+    for (const panel of this.layer.manager.root.display.panels) {
+      if (!(panel instanceof PerspectivePanel)) continue;
+      const { navigationState } = panel;
+      navigationState.zoomFactor.value = framingZoom(
+        candidate.pointA,
+        candidate.pointB,
+        navigationState.displayDimensionRenderInfo.value,
+      );
+      return;
+    }
   }
 
   /**
@@ -3117,9 +3152,9 @@ class ZettaTraceSession extends RefCounted {
     // The reject branch: the mesh of whichever candidate comes next.
     const decidedAfterThis = new Set(this.decided);
     decidedAfterThis.add(current.lineId);
-    const next = nextCandidate(this.candidates, decidedAfterThis);
+    const next = nextEntry(this.pool, decidedAfterThis);
     if (next !== undefined) {
-      this.connection.meshPrefetchSegments([next.partnerRootId]);
+      this.connection.meshPrefetchSegments([next.candidate.partnerRootId]);
     }
 
     // The accept branch cannot be prefetched by url: the merged root does not
@@ -3133,7 +3168,6 @@ class ZettaTraceSession extends RefCounted {
     this.prefetchedPartner = current.partnerRootId;
     void this.graphServer
       .fetchCandidates(current.partnerRootId, {
-        batch: DEFAULT_CANDIDATE_BATCH,
         limit: CANDIDATE_FETCH_LIMIT,
         minPieceVoxels: this.state.minPieceVoxels.value,
         rejectedBy: this.state.rejectedBy.value,
@@ -3144,13 +3178,47 @@ class ZettaTraceSession extends RefCounted {
   }
 
   private fetchOnce(seedRoot: bigint) {
+    const sphere = this.sphereQuery();
+    if (
+      this.state.scope.value === "sphere" &&
+      this.state.sphereCenter.value !== undefined &&
+      sphere === undefined
+    ) {
+      // The centre is placed but could not be turned into a query, which means
+      // the coordinate space is unusable. Fetching anyway would quietly answer
+      // over the whole segment.
+      StatusMessage.showTemporaryMessage(
+        "Cannot apply the sphere: the layer's coordinate space is unusable.",
+        8000,
+      );
+    }
     return this.graphServer.fetchCandidates(seedRoot, {
-      batch: DEFAULT_CANDIDATE_BATCH,
-      limit: CANDIDATE_FETCH_LIMIT,
+      limit: sphere === undefined ? CANDIDATE_FETCH_LIMIT : SPHERE_FETCH_LIMIT,
       minPieceVoxels: this.state.minPieceVoxels.value,
       rejectedBy: this.state.rejectedBy.value,
       branchId: this.branchId,
+      ...sphere,
     });
+  }
+
+  /**
+   * The placed sphere as the server takes it. The semi-axes come from the same
+   * conversion that builds the sphere's model matrix, so what is drawn and what
+   * is selected cannot drift apart.
+   */
+  private sphereQuery() {
+    if (this.state.scope.value === "segment") return undefined;
+    const center = this.state.sphereCenter.value;
+    if (center === undefined) return undefined;
+    const semiAxes = traceSphereSemiAxes(
+      this.state.sphereRadiusNm.value,
+      this.layer.manager.root.coordinateSpace.value,
+    );
+    if (semiAxes === undefined) return undefined;
+    return {
+      center: [center[0], center[1], center[2]] as const,
+      radius: [semiAxes[0], semiAxes[1], semiAxes[2]] as const,
+    };
   }
 
   private async loadCandidates(retryWhenEmpty = false) {
@@ -3182,8 +3250,34 @@ class ZettaTraceSession extends RefCounted {
       }
     }
 
-    this.candidates = fetched;
+    this.pool = seedPool(fetched);
+    this.warnIfSphereWasIgnored(fetched);
     this.showCurrent();
+  }
+
+  /**
+   * Say so when a sphere was asked for and the answer plainly does not respect
+   * it. Without this the failure is invisible: an older server ignores the two
+   * unknown parameters and answers over the whole segment, which looks exactly
+   * like a sphere that did not work.
+   *
+   * Every single candidate has to be outside before this fires. One outside is
+   * not evidence — a candidate whose contact points coincide has both ends
+   * replaced by its pieces' representative points, which sit wherever the
+   * pieces do, not at the contact the filter matched.
+   */
+  private warnIfSphereWasIgnored(fetched: EdgeCandidate[]) {
+    const sphere = this.sphereQuery();
+    if (sphere === undefined || fetched.length === 0) return;
+    const anyInside = fetched.some((candidate) =>
+      pointInsideSphere(candidate.pointA, sphere.center, sphere.radius),
+    );
+    if (anyInside) return;
+    StatusMessage.showTemporaryMessage(
+      "The server returned no candidate inside the sphere — it may not support " +
+        "the radius filter yet.",
+      8000,
+    );
   }
 
   reject() {
@@ -3220,9 +3314,14 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     const accepted = this.current;
+    const acceptedDepth = this.currentDepth;
     this.setBusy(true);
     this.clearAnnotation();
     this.setStatus("Merging…");
+
+    // Started before the merge on purpose: the partner root stops existing the
+    // moment it is absorbed, so afterwards there is no id left to ask about.
+    const children = this.fetchChildren(accepted.partnerRootId);
 
     let merged: bigint;
     try {
@@ -3266,10 +3365,63 @@ class ZettaTraceSession extends RefCounted {
         );
       });
 
-    // The merge we just issued must be visible, or the enlarged segment reads
-    // back as having run out of candidates.
-    await this.loadCandidates(true);
+    this.pool = prependChildren(
+      this.prunedPool(),
+      await children,
+      acceptedDepth,
+      this.decided,
+    );
+    this.showCurrent();
     this.setBusy(false);
+  }
+
+  /**
+   * The candidates of a segment about to be merged in — the next level down.
+   *
+   * No sphere: the sphere seeds the trace and nothing more. Once a direction is
+   * taken, following it is the whole point, and the branch may well leave the
+   * region it started in.
+   */
+  private async fetchChildren(partnerRoot: bigint): Promise<EdgeCandidate[]> {
+    try {
+      return await this.graphServer.fetchCandidates(partnerRoot, {
+        limit: CANDIDATE_FETCH_LIMIT,
+        minPieceVoxels: this.state.minPieceVoxels.value,
+        rejectedBy: this.state.rejectedBy.value,
+        branchId: this.branchId,
+      });
+    } catch {
+      // A branch that cannot be read is a branch with no children, not a failed
+      // merge: the merge has already happened by the time this is awaited.
+      return [];
+    }
+  }
+
+  /**
+   * Drop what the graph has answered for us, on positive evidence only.
+   *
+   * Equivalences arrive with the chunks that are loaded, so a piece far from
+   * the camera commonly resolves to nothing at all. Treating that silence as
+   * "not in my segment" would quietly delete the far half of the queue, which
+   * is exactly the part a depth-first walk is heading towards.
+   */
+  private prunedPool(): PoolEntry[] {
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return [];
+    const { segmentEquivalences } = this.segmentsState;
+    const rootOf = (piece: bigint) => {
+      const root = segmentEquivalences.get(piece);
+      return root === piece ? undefined : root;
+    };
+    return prunePool(this.pool, (candidate) => {
+      // The partner is already inside: that merge has happened, by our hand or
+      // someone else's, and the question is gone with it.
+      if (rootOf(candidate.partnerPieceId) === seedRoot) return false;
+      // Our own side left the segment: a split cut it away, and its candidates
+      // went with it.
+      const selfRoot = rootOf(candidate.selfPieceId);
+      return selfRoot === undefined || selfRoot === seedRoot;
+    });
   }
 
   private setBusy(value: boolean) {
@@ -3443,7 +3595,204 @@ class ZettaTraceSession extends RefCounted {
     this.current = undefined;
     this.clearAnnotation();
     reconcile(resolvedSeedRoot);
-    await this.loadCandidates(true);
+    this.pool = this.prunedPool();
+    if (remainingCount(this.pool, this.decided) === 0) {
+      // The edit answered or cut away everything queued, so there is no walk
+      // left to preserve and the seed is the only thing still worth asking.
+      await this.loadCandidates(true);
+      return;
+    }
+    this.showCurrent();
+  }
+}
+
+/**
+ * Drives the candidate overview: scoring every piece of what is on screen by
+ * the best merge candidate it still offers, and painting it on a red-to-green
+ * scale so the eye finds the work without reading a list.
+ *
+ * Lives on the connection for the same reason the debug overlay does — looking
+ * at where the work is only pays off if you can then pick up a tool and go
+ * there, and a tool activation would tear this down at that exact moment.
+ */
+class CandidateOverviewSession extends RefCounted {
+  readonly changed = new NullarySignal();
+  status = "";
+  private fetchToken = 0;
+  // Selecting a segment fires once per id and showing one fires once per piece.
+  // Refetching on each would be a burst of whole-segment queries for a single
+  // user action.
+  private readonly refresh = this.registerCancellable(
+    debounce(() => void this.reload(), 150),
+  );
+  private pieces: PieceOverview[] = [];
+  // The colour map is shared with the debug overlay, so clearing it on the way
+  // out would wipe whatever took our place. Only what we painted is ours to
+  // erase; relying on which listener happens to run first would work today and
+  // break the first time one is added.
+  private painted = false;
+  private priorBaseSegmentHighlighting = false;
+  private priorHideSegmentZero = false;
+  private priorDisplayStateSaved = false;
+
+  constructor(
+    private connection: GraphConnection,
+    private layer: SegmentationUserLayer,
+    private state: CalcadaOverviewState,
+  ) {
+    super();
+    this.registerDisposer(
+      state.active.changed.add(() => {
+        if (state.active.value) {
+          // One colour map, so the two overlays cannot share the screen.
+          connection.state.calcadaDebugState.active.value = false;
+          this.refresh();
+        } else {
+          ++this.fetchToken;
+          this.pieces = [];
+          this.clearColors();
+          this.setStatus("");
+        }
+      }),
+    );
+    this.registerDisposer(
+      connection.state.calcadaDebugState.active.changed.add(() => {
+        if (connection.state.calcadaDebugState.active.value) {
+          state.active.value = false;
+        }
+      }),
+    );
+    this.registerDisposer(state.minScore.changed.add(() => this.refresh()));
+    // The class filters change nothing the server was asked for, so they
+    // repaint from what is already here rather than going back out.
+    this.registerDisposer(
+      state.semanticClass.changed.add(() => this.repaint()),
+    );
+    this.registerDisposer(
+      state.minClassFraction.changed.add(() => this.repaint()),
+    );
+    this.registerDisposer(
+      this.segmentsState.visibleSegments.changed.add(() => {
+        if (state.active.value) this.refresh();
+      }),
+    );
+  }
+
+  private get segmentsState() {
+    return this.layer.displayState.segmentationGroupState.value;
+  }
+
+  private setStatus(text: string) {
+    this.status = text;
+    this.changed.dispatch();
+  }
+
+  private async reload() {
+    if (!this.state.active.value) return;
+    const roots = [...this.segmentsState.visibleSegments];
+    if (roots.length === 0) {
+      this.pieces = [];
+      this.clearColors();
+      this.setStatus("Show a segment to see where its candidates are");
+      return;
+    }
+    if (roots.length > DEBUG_MAX_ROOTS) {
+      this.setStatus(
+        `Showing ${DEBUG_MAX_ROOTS} of ${roots.length} segments — each one is a whole-segment query`,
+      );
+    }
+    const token = ++this.fetchToken;
+    const wanted = roots.slice(0, DEBUG_MAX_ROOTS);
+    // Scoring a whole segment takes seconds. Without saying so the checkbox
+    // looks like it did nothing at all.
+    this.setStatus(
+      wanted.length === 1
+        ? "Scoring the segment…"
+        : `Scoring ${wanted.length} segments…`,
+    );
+    let fetched: PieceOverview[][];
+    try {
+      fetched = await Promise.all(
+        wanted.map((root) =>
+          this.connection.graph.graphServer.fetchCandidateOverview(root, {
+            minScore: this.state.minScore.value,
+            branchId: this.connection.graph.branchId.value,
+          }),
+        ),
+      );
+    } catch (e) {
+      if (token === this.fetchToken) {
+        this.setStatus(`Failed to score the segment: ${e}`);
+      }
+      return;
+    }
+    if (token !== this.fetchToken) return;
+    this.pieces = fetched.flat();
+    const withInfo = this.pieces.filter((piece) => piece.hasInfo).length;
+    this.setStatus(`${this.pieces.length} pieces · ${withInfo} with semantics`);
+    this.repaint();
+  }
+
+  private repaint() {
+    if (!this.state.active.value || this.pieces.length === 0) return;
+    const colors = overviewColors(
+      this.pieces,
+      this.state.semanticClass.value,
+      this.state.minClassFraction.value,
+    );
+    this.connection.setOverviewPieceColors(colors);
+
+    // Handing over the colour map is not enough to see anything: the map alone
+    // is read by the Debug tab's list, while the viewer paints whole segments
+    // until it is told to render their pieces separately. This is the same
+    // display switch the debug overlay makes, and like it, everything here is
+    // display-only and put back on the way out.
+    const { displayState } = this.layer;
+    const { segmentsState } = this;
+    if (!this.priorDisplayStateSaved) {
+      this.priorBaseSegmentHighlighting =
+        displayState.baseSegmentHighlighting.value;
+      this.priorHideSegmentZero = displayState.hideSegmentZero.value;
+      this.priorDisplayStateSaved = true;
+    }
+    displayState.baseSegmentHighlighting.value = true;
+    displayState.hideSegmentZero.value = false;
+
+    resetTemporaryVisibleSegmentsState(segmentsState);
+    displayState.tempSegmentStatedColors2d.value.clear();
+    displayState.tempSegmentDefaultColor2d.value = undefined;
+    segmentsState.useTemporaryVisibleSegments.value = true;
+    segmentsState.useTemporarySegmentEquivalences.value = true;
+    for (const root of segmentsState.visibleSegments) {
+      segmentsState.temporaryVisibleSegments.add(root);
+    }
+    for (const [piece, color] of colors) {
+      segmentsState.temporaryVisibleSegments.add(piece);
+      displayState.tempSegmentStatedColors2d.value.set(piece, color);
+    }
+    displayState.useTempSegmentStatedColors2d.value = true;
+    this.painted = true;
+  }
+
+  private clearColors() {
+    if (!this.painted) return;
+    this.painted = false;
+    this.connection.setOverviewPieceColors(undefined);
+
+    const { displayState } = this;
+    displayState.useTempSegmentStatedColors2d.value = false;
+    displayState.tempSegmentStatedColors2d.value.clear();
+    resetTemporaryVisibleSegmentsState(this.segmentsState);
+    if (this.priorDisplayStateSaved) {
+      displayState.baseSegmentHighlighting.value =
+        this.priorBaseSegmentHighlighting;
+      displayState.hideSegmentZero.value = this.priorHideSegmentZero;
+      this.priorDisplayStateSaved = false;
+    }
+  }
+
+  private get displayState() {
+    return this.layer.displayState;
   }
 }
 
@@ -3462,6 +3811,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public debugEdgeAnnotationState!: AnnotationLayerState;
   public traceAnnotationState!: AnnotationLayerState;
   public traceSession!: ZettaTraceSession;
+  public overviewSession!: CandidateOverviewSession;
   public debugSession!: CalcadaDebugSession;
 
   // Debug piece view shared between the piece-split tool (which enters/leaves
@@ -3488,6 +3838,13 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       getter: () => new CalcadaDebugTab(this),
       hidden: this.debugTabHidden,
     });
+    // Never hidden: the trace is started from this tab, so one that only
+    // appeared with the mode on would have nowhere to start it from.
+    layer.tabs.add(CALCADA_TRACE_TAB_ID, {
+      label: "Trace",
+      order: -21,
+      getter: () => new CalcadaTraceTab(this),
+    });
     // The side panel snapshots the layer's tab list before this
     // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
     // and it only registers hidden-listeners for tabs it knew at init — so
@@ -3500,6 +3857,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     // the visibility listener.
     this.registerDisposer(() => {
       layer.tabs.remove("calcada-debug");
+      layer.tabs.remove(CALCADA_TRACE_TAB_ID);
       layer.panels.updateTabs();
     });
     this.registerDisposer(
@@ -3919,8 +4277,26 @@ void main() {
     this.traceSession = this.registerDisposer(
       new ZettaTraceSession(this, layer, state.zettaTraceState),
     );
+    const sphereState = this.registerDisposer(
+      new TraceSphereState(
+        state.zettaTraceState,
+        layer.manager.root.layerSelectedValues.mouseState,
+        layer.displayState.segmentSelectionState,
+        layer.manager.root.coordinateSpace,
+      ),
+    );
+    const { gl } = layer.manager.root.display;
+    this.registerDisposer(
+      layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphereState)),
+    );
+    this.registerDisposer(
+      layer.addRenderLayer(new TraceSpherePerspectiveOverlay(gl, sphereState)),
+    );
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
+    );
+    this.overviewSession = this.registerDisposer(
+      new CandidateOverviewSession(this, layer, state.overviewState),
     );
 
     // Debug is a mode, not a tool: it is meant to sit alongside whatever the
@@ -3941,8 +4317,8 @@ void main() {
     // started before the timestamp moved would otherwise be impossible to end.
     this.registerDisposer(
       registerActionListener(window, CALCADA_TRACE_TOGGLE_ACTION, () => {
-        const { active } = state.zettaTraceState;
-        if (!active.value) {
+        const { aiming } = state.zettaTraceState;
+        if (!aiming.value) {
           const { timestamp } = layer.displayState.segmentationGroupState.value;
           if (timestamp.value !== undefined) {
             StatusMessage.showTemporaryMessage(
@@ -3951,7 +4327,7 @@ void main() {
             return;
           }
         }
-        active.value = !active.value;
+        aiming.value = !aiming.value;
       }),
     );
   }
@@ -4373,6 +4749,29 @@ void main() {
       5000,
     );
     return entry;
+  }
+
+  /**
+   * Paint pieces without claiming the Debug tab.
+   *
+   * Shares `debugPiecesColors` with setDebugPieces, which is what makes the
+   * debug overlay and the candidate overview mutually exclusive: there is one
+   * colour map, so the last mode to write it is the one on screen. That is a
+   * property of the design rather than a rule someone has to remember.
+   */
+  setOverviewPieceColors(colors: Map<bigint, bigint> | undefined) {
+    this.debugPiecesColors = colors;
+    if (colors === undefined) {
+      const meshSource = this.getMeshSource();
+      if (
+        meshSource instanceof MeshSource &&
+        meshSource.hiddenFragmentSegments.size !== 0
+      ) {
+        meshSource.hiddenFragmentSegments.clear();
+        this.redrawRenderLayers();
+      }
+    }
+    this.debugPiecesChanged.dispatch();
   }
 
   setDebugPieces(
@@ -5199,7 +5598,10 @@ class CalcadaGraphServerInterface {
   async fetchCandidates(
     rootId: bigint,
     opts: {
-      batch: string;
+      // Naming the ingest wave is optional: the server resolves it when a
+      // graph has only one, and refuses — naming the choices — when it does
+      // not, which is the only case where picking silently would be wrong.
+      batch?: string;
       limit?: number;
       minScore?: number;
       minPieceVoxels?: number;
@@ -5208,15 +5610,15 @@ class CalcadaGraphServerInterface {
       // Speculative callers pass "low" so they cannot preempt the fetch the
       // proofreader is actually waiting on.
       priority?: "high" | "low";
+      // Centre in global coordinates with per-axis semi-axes in the same units.
+      // Both or neither: the server rejects half a sphere.
+      center?: readonly [number, number, number];
+      radius?: readonly [number, number, number];
     },
   ): Promise<EdgeCandidate[]> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
-    // batch is required by the server: with several contact waves in the same
-    // tables, silently serving the wrong one is worse than failing.
-    const params = new URLSearchParams({
-      int64_as_str: "1",
-      batch: opts.batch,
-    });
+    const params = new URLSearchParams({ int64_as_str: "1" });
+    if (opts.batch) params.set("batch", opts.batch);
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
     if (opts.minScore !== undefined) {
       params.set("min_score", String(opts.minScore));
@@ -5231,6 +5633,10 @@ class CalcadaGraphServerInterface {
       params.set("rejected_by", opts.rejectedBy.join(","));
     }
     if (opts.branchId) params.set("branch_id", String(opts.branchId));
+    if (opts.center !== undefined && opts.radius !== undefined) {
+      params.set("center", opts.center.join(","));
+      params.set("radius", opts.radius.join(","));
+    }
     const response = await fetchOkImpl(
       `${baseUrl}/segment/${rootId}/candidates?${params.toString()}`,
       { priority: opts.priority ?? "high" },
@@ -5247,6 +5653,67 @@ class CalcadaGraphServerInterface {
         pointB: Float32Array.from(c.point_b),
         nInterfaces: Number(c.n_interfaces),
         modelDecision: String(c.model_decision),
+        partnerVoxels: Number(c.partner_voxels ?? 0),
+        partnerClasses: {
+          perikaryon: Number(c.partner_classes?.perikaryon ?? 0),
+          dendrite: Number(c.partner_classes?.dendrite ?? 0),
+          axon: Number(c.partner_classes?.axon ?? 0),
+          glia: Number(c.partner_classes?.glia ?? 0),
+          vasculature: Number(c.partner_classes?.vasculature ?? 0),
+          nucleus: Number(c.partner_classes?.nucleus ?? 0),
+          ecs: Number(c.partner_classes?.ecs ?? 0),
+          other: Number(c.partner_classes?.other ?? 0),
+        },
+        partnerHasInfo: c.partner_has_info === true,
+      }),
+    );
+  }
+
+  async fetchCandidateOverview(
+    rootId: bigint,
+    opts: {
+      // Naming the ingest wave is optional: the server resolves it when a
+      // graph has only one, and refuses — naming the choices — when it does
+      // not, which is the only case where picking silently would be wrong.
+      batch?: string;
+      minScore?: number;
+      minPieceVoxels?: number;
+      rejectedBy?: string[];
+      branchId?: number;
+    },
+  ): Promise<PieceOverview[]> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams({ int64_as_str: "1" });
+    if (opts.batch) params.set("batch", opts.batch);
+    if (opts.minScore) params.set("min_score", String(opts.minScore));
+    if (opts.minPieceVoxels) {
+      params.set("min_piece_voxels", String(opts.minPieceVoxels));
+    }
+    if (opts.rejectedBy?.length) {
+      params.set("rejected_by", opts.rejectedBy.join(","));
+    }
+    if (opts.branchId) params.set("branch_id", String(opts.branchId));
+    const response = await fetchOkImpl(
+      `${baseUrl}/segment/${rootId}/candidate_overview?${params.toString()}`,
+      { priority: "low" },
+    );
+    const jsonResp = await response.json();
+    return (jsonResp.pieces ?? []).map(
+      (piece: any): PieceOverview => ({
+        pieceId: parseUint64(piece.piece_id),
+        bestScore: Number(piece.best_score),
+        voxelCount: Number(piece.voxel_count),
+        classes: {
+          perikaryon: Number(piece.classes?.perikaryon ?? 0),
+          dendrite: Number(piece.classes?.dendrite ?? 0),
+          axon: Number(piece.classes?.axon ?? 0),
+          glia: Number(piece.classes?.glia ?? 0),
+          vasculature: Number(piece.classes?.vasculature ?? 0),
+          nucleus: Number(piece.classes?.nucleus ?? 0),
+          ecs: Number(piece.classes?.ecs ?? 0),
+          other: Number(piece.classes?.other ?? 0),
+        },
+        hasInfo: piece.has_info === true,
       }),
     );
   }
@@ -5907,29 +6374,6 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
       return point.map((val, i) => val / annotationToNanometers[i]);
     });
     return centroidsTransformed;
-  }
-
-  // Zetta Trace sits with the segment list rather than with the editing tools:
-  // it is a mode that decides which segments are on screen, and a proofreader
-  // driving it is reading the list, not reaching for multicut.
-  segmentsTabContents(
-    layer: SegmentationUserLayer,
-    context: DependentViewContext,
-  ) {
-    const parent = document.createElement("div");
-    parent.style.display = "contents";
-    const toolbox = document.createElement("div");
-    toolbox.className = "neuroglancer-segmentation-toolbox";
-    toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
-        toolJson: CALCADA_ZETTA_TRACE_TOOL_ID,
-        label: "Zetta Trace",
-        title: "Trace a segment through AI merge candidates",
-      }),
-    );
-    parent.appendChild(toolbox);
-    parent.appendChild(makeZettaTracePanel(layer, context));
-    return parent;
   }
 
   tabContents(
@@ -6859,189 +7303,6 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
  * up a candidate must still see which candidate they are on, and still be able
  * to answer it.
  */
-function makeZettaTracePanel(
-  layer: SegmentationUserLayer,
-  context: DependentViewContext,
-) {
-  const panel = document.createElement("div");
-  panel.className = "calcada-zetta-trace";
-
-  const header = document.createElement("div");
-  header.className = "calcada-zetta-trace-header";
-  const badge = document.createElement("span");
-  badge.className = "calcada-zetta-trace-badge";
-  badge.textContent = "Trace mode";
-  header.appendChild(badge);
-  panel.appendChild(header);
-
-  const status = document.createElement("div");
-  status.className = "calcada-zetta-trace-status";
-  panel.appendChild(status);
-
-  const sizeRow = document.createElement("label");
-  sizeRow.className = "calcada-zetta-trace-size";
-  sizeRow.textContent = "Min candidate size";
-  const sizeInput = document.createElement("input");
-  sizeInput.type = "number";
-  sizeInput.min = "0";
-  sizeInput.step = "100";
-  sizeInput.title =
-    "Skip candidates whose piece is smaller than this many voxels";
-  sizeRow.appendChild(sizeInput);
-  panel.appendChild(sizeRow);
-
-  // Proofreaders disagree, so whose rejections count is a setting rather than a
-  // rule. "me" is sent verbatim — the server resolves it, because the browser
-  // has an opaque token and no idea who it belongs to.
-  const rejectedRow = document.createElement("label");
-  rejectedRow.className = "calcada-zetta-trace-size";
-  rejectedRow.textContent = "Skip rejected by";
-  const rejectedSelect = document.createElement("select");
-  for (const [value, label] of [
-    ["anyone", "anyone"],
-    ["me", "only me"],
-    ["custom", "me and…"],
-  ]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    rejectedSelect.appendChild(option);
-  }
-  rejectedRow.appendChild(rejectedSelect);
-  panel.appendChild(rejectedRow);
-
-  const rejectedUsers = document.createElement("input");
-  rejectedUsers.type = "text";
-  rejectedUsers.placeholder = "tommy@zetta.ai, …";
-  rejectedUsers.title =
-    "Comma-separated users whose rejections to skip as well";
-  rejectedUsers.className = "calcada-zetta-trace-users";
-  panel.appendChild(rejectedUsers);
-
-  const buttons = document.createElement("div");
-  buttons.className = "calcada-zetta-trace-buttons";
-  panel.appendChild(buttons);
-
-  const session = () => {
-    const { value: connection } = layer.graphConnection;
-    return connection instanceof GraphConnection ? connection : undefined;
-  };
-
-  const exitIcon = makeIcon({
-    text: "Exit",
-    title: "Leave trace mode (Esc)",
-    onClick: () => {
-      const traceState = session()?.state.zettaTraceState;
-      if (traceState !== undefined) traceState.active.value = false;
-    },
-  });
-  header.appendChild(exitIcon);
-
-  const rejectIcon = makeIcon({
-    text: "Reject",
-    title: "Reject this candidate (left arrow)",
-    onClick: () => session()?.traceSession.reject(),
-  });
-  const skipIcon = makeIcon({
-    text: "Skip",
-    title: "Skip for now, this session only (down arrow)",
-    onClick: () => session()?.traceSession.skip(),
-  });
-  const acceptIcon = makeIcon({
-    text: "Accept",
-    title: "Accept and merge (right arrow)",
-    onClick: () => void session()?.traceSession.accept(),
-  });
-  const undoIcon = makeIcon({
-    text: "Undo",
-    title: "Take back the last edit (⌘/ctrl+Z)",
-    onClick: () => void session()?.traceSession.undoLast(),
-  });
-  buttons.appendChild(rejectIcon);
-  buttons.appendChild(skipIcon);
-  buttons.appendChild(acceptIcon);
-  buttons.appendChild(undoIcon);
-
-  const render = () => {
-    const connection = session();
-    const traceState = connection?.state.zettaTraceState;
-    const active = traceState?.active.value === true;
-    panel.style.display = active ? "" : "none";
-    if (!active || connection === undefined) return;
-    status.textContent = connection.traceSession.status;
-    if (document.activeElement !== sizeInput) {
-      sizeInput.value = String(traceState!.minPieceVoxels.value);
-    }
-    const rejected = traceState!.rejectedBy.value;
-    const extra = rejected.filter((user) => user !== TRACE_CURRENT_USER);
-    if (document.activeElement !== rejectedSelect) {
-      rejectedSelect.value =
-        rejected.length === 0 ? "anyone" : extra.length > 0 ? "custom" : "me";
-    }
-    rejectedUsers.style.display =
-      rejectedSelect.value === "custom" ? "" : "none";
-    if (document.activeElement !== rejectedUsers) {
-      rejectedUsers.value = extra.join(", ");
-    }
-    const busy = connection.traceSession.isBusy;
-    const noCandidate = connection.traceSession.current === undefined;
-    for (const icon of [rejectIcon, skipIcon, acceptIcon]) {
-      icon.classList.toggle("disabled", busy || noCandidate);
-    }
-    // Undo stays live with no candidate on screen: running out of candidates is
-    // exactly when someone notices the last merge was wrong.
-    undoIcon.classList.toggle("disabled", busy || !connection.canUndo());
-  };
-
-  const applyRejectedBy = () => {
-    const traceState = session()?.state.zettaTraceState;
-    if (traceState === undefined) return;
-    const mode = rejectedSelect.value;
-    if (mode === "anyone") {
-      traceState.rejectedBy.value = [];
-      return;
-    }
-    const extra =
-      mode === "custom"
-        ? rejectedUsers.value
-            .split(",")
-            .map((user) => user.trim())
-            .filter((user) => user.length > 0)
-        : [];
-    traceState.rejectedBy.value = [TRACE_CURRENT_USER, ...extra];
-  };
-  rejectedSelect.addEventListener("change", applyRejectedBy);
-  rejectedUsers.addEventListener("change", applyRejectedBy);
-
-  sizeInput.addEventListener("change", () => {
-    const traceState = session()?.state.zettaTraceState;
-    if (traceState === undefined) return;
-    const parsed = Number.parseInt(sizeInput.value, 10);
-    traceState.minPieceVoxels.value =
-      Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  });
-
-  // The connection is rebuilt when the data source reloads, so the listeners
-  // are re-attached rather than bound once at construction.
-  const attachTo = new Map<GraphConnection, () => void>();
-  const syncListeners = () => {
-    const connection = session();
-    if (connection !== undefined && !attachTo.has(connection)) {
-      const dispose = [
-        connection.traceSession.changed.add(render),
-        connection.state.zettaTraceState.changed.add(render),
-      ];
-      attachTo.set(connection, () => dispose.forEach((fn) => fn()));
-      context.registerDisposer(() => attachTo.get(connection)?.());
-    }
-    render();
-  };
-  context.registerDisposer(layer.graphConnection.changed.add(syncListeners));
-  syncListeners();
-
-  return panel;
-}
-
 const maybeGetSelection = (
   source: { layer: SegmentationUserLayer; mouseState: MouseSelectionState },
   visibleSegments: Uint64Set,
@@ -8587,8 +8848,10 @@ registerTool(SegmentationUserLayer, CALCADA_FIND_PATH_TOOL_ID, (layer) => {
 // the ingest job was run with — it identifies the experiment as well as the
 // wave, since two experiments both have a wave_2. When several coexist this has
 // to come from the datasource parameters instead of a constant.
-const DEFAULT_CANDIDATE_BATCH = "exp3_taper2_w2";
 const CANDIDATE_FETCH_LIMIT = 50;
+// A sphere holds few candidates, so trimming them to 50 buys nothing; 500 is
+// the server's own maxCandidateLimit.
+const SPHERE_FETCH_LIMIT = 500;
 
 /**
  * Turns Zetta Trace on and off.
@@ -8643,7 +8906,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
       return;
     }
     const { zettaTraceState } = graphConnection.state;
-    zettaTraceState.active.value = !zettaTraceState.active.value;
+    zettaTraceState.aiming.value = !zettaTraceState.aiming.value;
     // The mode owns its own keys and panel from here, so the activation has
     // nothing left to hold: releasing it lets the next tool take the slot
     // without ending the trace.

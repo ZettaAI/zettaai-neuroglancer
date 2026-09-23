@@ -365,33 +365,30 @@
   visibility: hidden;
 }
 
-/* Lives in the Graph tab rather than a tool-activation bubble, so it stacks:
-   the tab scrolls and has room. The status ellipsises instead of wrapping so a
-   long score/partner line cannot push the buttons around. */
-.calcada-zetta-trace {
+/* The Trace tab. Its controls are shadcn components inside the UI scope, so all
+   this holds is the stacking; colours and spacing come from the tokens. */
+.calcada-trace-tab {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 2px;
-  font: 12px sans-serif;
+  overflow-y: auto;
 }
 
-/* The mode outlives its activation, so its section can be created before or
-   after a merge/cut activation creates theirs. Ordering it first keeps it in
-   one place regardless — above whichever tool the proofreader picks up. */
-.calcada-zetta-trace-mode {
-  order: -1;
+.calcada-trace-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
 }
 
-.calcada-zetta-trace-header {
+.calcada-trace-panel-header {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
 /* Reads as a mode banner, not a label: the proofreader has to be able to tell
-   at a glance that arrow keys are answering candidates rather than panning. */
-.calcada-zetta-trace-badge {
+   at a glance whether arrow keys are answering candidates or panning. */
+.calcada-trace-panel-badge {
   flex: 1 1 auto;
   padding: 2px 6px;
   border-radius: 3px;
@@ -403,50 +400,87 @@
   font-size: 11px;
 }
 
-.calcada-zetta-trace-size {
+/* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
+   the width to show a whole hint. */
+.calcada-trace-panel-status {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.calcada-trace-panel-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  font-size: 12px;
 }
 
-.calcada-zetta-trace-size input {
-  width: 6em;
-  background: #222;
-  color: inherit;
-  border: 1px solid #444;
-}
-
-.calcada-zetta-trace-size select,
-.calcada-zetta-trace-users {
-  background: #222;
-  color: inherit;
-  border: 1px solid #444;
-}
-
-.calcada-zetta-trace-users {
-  width: 100%;
-}
-
-.calcada-zetta-trace-buttons {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.calcada-zetta-trace-status {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.calcada-zetta-trace .neuroglancer-icon {
+.calcada-trace-panel-row input,
+.calcada-trace-panel-row button {
+  width: 10em;
   flex: 0 0 auto;
 }
 
-.calcada-zetta-trace .neuroglancer-icon.disabled {
-  opacity: 0.4;
-  pointer-events: none;
+/* The keys the trace owns. Lives here rather than in a status bubble at the
+   bottom of the viewer: the tab is always open, so the bubble only repeated
+   what is already on screen. */
+.calcada-trace-panel-keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.calcada-trace-panel-keys dt {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.calcada-trace-panel-keys dd {
+  margin: 0;
+}
+
+.calcada-trace-panel-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.calcada-trace-panel-overview legend {
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* Without a legend "red or green" is a guess. The bar is the scale itself, so
+   it cannot drift from the colours the pieces are painted with. */
+.calcada-trace-panel-legend {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "scale scale" "low high";
+  gap: 2px;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.calcada-trace-panel-legend-scale {
+  grid-area: scale;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, rgb(255 60 60), rgb(40 220 60));
+}
+
+.calcada-trace-panel-legend span:nth-child(3) {
+  text-align: right;
+}
+
+.calcada-trace-panel-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
