@@ -3683,7 +3683,6 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       state.minClassFraction.changed.add(() => this.repaint()),
     );
-
   }
 
   private get segmentsState() {
