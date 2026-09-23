@@ -3050,7 +3050,10 @@ class ZettaTraceSession extends RefCounted {
     this.current =
       entry === undefined
         ? undefined
-        : { ...entry.candidate, partnerRootId: this.rootOfPiece(entry.candidate) };
+        : {
+            ...entry.candidate,
+            partnerRootId: this.rootOfPiece(entry.candidate),
+          };
     this.currentDepth = entry?.depth ?? 0;
     this.remaining = remainingCount(this.pool, this.decided);
     if (this.current === undefined) {
