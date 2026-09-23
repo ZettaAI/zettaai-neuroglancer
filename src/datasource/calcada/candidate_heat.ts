@@ -48,6 +48,9 @@ export interface PieceClasses {
 export interface PieceOverview {
   pieceId: bigint;
   bestScore: number;
+  /** The piece its best candidate would merge in; 0 when it offers none. */
+  bestPartnerPiece: bigint;
+  candidateCount: number;
   voxelCount: number;
   classes: PieceClasses;
   hasInfo: boolean;
@@ -101,6 +104,31 @@ export function semanticVerdict(
   // A row that exists but sums to zero says as little as no row at all.
   if (!piece.hasInfo || total === 0) return "unknown";
   return piece.classes[wanted] / total >= minFraction ? "pass" : "fail";
+}
+
+/**
+ * The pieces the candidates would merge in, coloured by how good the proposal
+ * is. These live in other segments and are therefore invisible until something
+ * asks for them, which is the whole point of showing them: "where are the
+ * candidates" is a question about the neighbours, not about this segment.
+ */
+export function partnerColors(
+  pieces: readonly PieceOverview[],
+  wanted: SemanticClass,
+  minFraction: number,
+): Map<bigint, bigint> {
+  const colors = new Map<bigint, bigint>();
+  const filtered = pieces.some((piece) => piece.hasInfo) ? wanted : "any";
+  for (const piece of pieces) {
+    if (piece.bestPartnerPiece === 0n || piece.candidateCount === 0) continue;
+    if (semanticVerdict(piece, filtered, minFraction) === "fail") continue;
+    colors.set(piece.bestPartnerPiece, heatColor(piece.bestScore));
+  }
+  return colors;
+}
+
+export function totalCandidates(pieces: readonly PieceOverview[]): number {
+  return pieces.reduce((sum, piece) => sum + piece.candidateCount, 0);
 }
 
 export function overviewColors(

@@ -70,6 +70,8 @@ import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePartner,
   overviewColors,
+  partnerColors,
+  totalCandidates,
 } from "#src/datasource/calcada/candidate_heat.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
@@ -3744,7 +3746,10 @@ class CandidateOverviewSession extends RefCounted {
     if (token !== this.fetchToken) return;
     this.pieces = fetched.flat();
     const withInfo = this.pieces.filter((piece) => piece.hasInfo).length;
-    this.setStatus(`${this.pieces.length} pieces · ${withInfo} with semantics`);
+    this.setStatus(
+      `${totalCandidates(this.pieces).toLocaleString()} candidates · ` +
+        `${this.pieces.length} pieces · ${withInfo} with semantics`,
+    );
     this.repaint();
   }
 
@@ -3782,6 +3787,18 @@ class CandidateOverviewSession extends RefCounted {
       segmentsState.temporaryVisibleSegments.add(root);
     }
     for (const [piece, color] of colors) {
+      segmentsState.temporaryVisibleSegments.add(piece);
+      displayState.tempSegmentStatedColors2d.value.set(piece, color);
+    }
+    // The candidates themselves belong to other segments, so nothing puts them
+    // on screen unless this does. They carry the score of the proposal that
+    // named them, which is what makes a promising neighbour findable at a
+    // glance.
+    for (const [piece, color] of partnerColors(
+      this.pieces,
+      this.state.semanticClass.value,
+      this.state.minClassFraction.value,
+    )) {
       segmentsState.temporaryVisibleSegments.add(piece);
       displayState.tempSegmentStatedColors2d.value.set(piece, color);
     }
@@ -5717,6 +5734,8 @@ class CalcadaGraphServerInterface {
       (piece: any): PieceOverview => ({
         pieceId: parseUint64(piece.piece_id),
         bestScore: Number(piece.best_score),
+        bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
+        candidateCount: Number(piece.candidate_count ?? 0),
         voxelCount: Number(piece.voxel_count),
         classes: {
           perikaryon: Number(piece.classes?.perikaryon ?? 0),
