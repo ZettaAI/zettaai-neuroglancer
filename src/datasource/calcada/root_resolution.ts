@@ -43,3 +43,47 @@ export function classifyCandidateEdit(
   if (seedRootChanged) return "unaffected";
   return "rerooted";
 }
+
+/** One piece a carve replaced, with the two halves that took it. */
+export interface CarvedPiece {
+  old: bigint;
+  blue: bigint;
+  red: bigint;
+}
+
+/**
+ * Place each carved parent in the root that took it, where a single root did.
+ *
+ * A carve rewrites voxels: the parent's id is gone from storage, replaced by its
+ * two halves. Chunks already decoded in the browser still carry the parent, and
+ * the split response lists it nowhere, so those voxels resolve to no segment —
+ * the slice view stops painting them, hover stops highlighting, and a click has
+ * only the bare piece id to select.
+ *
+ * Carrying the parent into a root's group fixes that wherever both halves landed
+ * in the same root, which is every carve that leaves the segment whole. Where the
+ * halves landed in different roots the parent names two segments at once, and
+ * putting it in either would give half its voxels the wrong one — those are
+ * returned as `ambiguous`, and only re-reading the voxels can resolve them.
+ */
+export function componentsWithCarvedParents(
+  components: bigint[][],
+  carved: readonly CarvedPiece[],
+): { components: bigint[][]; ambiguous: bigint[] } {
+  const componentOf = new Map<bigint, number>();
+  components.forEach((pieces, index) => {
+    for (const piece of pieces) componentOf.set(piece, index);
+  });
+  const out = components.map((pieces) => [...pieces]);
+  const ambiguous: bigint[] = [];
+  for (const piece of carved) {
+    const blue = componentOf.get(piece.blue);
+    const red = componentOf.get(piece.red);
+    if (blue !== undefined && blue === red) {
+      out[blue].push(piece.old);
+    } else {
+      ambiguous.push(piece.old);
+    }
+  }
+  return { components: out, ambiguous };
+}

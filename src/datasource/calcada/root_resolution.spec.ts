@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyCandidateEdit,
+  componentsWithCarvedParents,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
 
@@ -31,5 +32,70 @@ describe("classifyCandidateEdit", () => {
   });
   it("does not read two cut pieces as one absorbed candidate", () => {
     expect(classifyCandidateEdit(false, 0n, 0n)).toBe("superseded");
+  });
+});
+
+describe("componentsWithCarvedParents", () => {
+  // A carve that leaves the segment whole puts both halves in the one root, so
+  // the parent names that root and nothing else.
+  it("carries the parent into the root that took both of its halves", () => {
+    const { components, ambiguous } = componentsWithCarvedParents(
+      [[1n, 11n, 12n, 3n]],
+      [{ old: 2n, blue: 11n, red: 12n }],
+    );
+    expect(components).toEqual([[1n, 11n, 12n, 3n, 2n]]);
+    expect(ambiguous).toEqual([]);
+  });
+
+  // Half the parent's voxels belong to each root, so naming either would paint
+  // the other half wrong. Re-reading the voxels is the only way out.
+  it("reports a parent whose halves went to different roots instead of guessing", () => {
+    const { components, ambiguous } = componentsWithCarvedParents(
+      [
+        [1n, 11n],
+        [12n, 3n],
+      ],
+      [{ old: 2n, blue: 11n, red: 12n }],
+    );
+    expect(components).toEqual([
+      [1n, 11n],
+      [12n, 3n],
+    ]);
+    expect(ambiguous).toEqual([2n]);
+  });
+
+  // One split routinely carves several pieces, and the two cases mix freely.
+  it("decides each carved piece on its own", () => {
+    const { components, ambiguous } = componentsWithCarvedParents(
+      [
+        [11n, 12n, 21n],
+        [22n],
+      ],
+      [
+        { old: 1n, blue: 11n, red: 12n },
+        { old: 2n, blue: 21n, red: 22n },
+      ],
+    );
+    expect(components).toEqual([[11n, 12n, 21n, 1n], [22n]]);
+    expect(ambiguous).toEqual([2n]);
+  });
+
+  // A half the response never mentions cannot place its parent.
+  it("treats an unplaceable half as ambiguous", () => {
+    const { ambiguous } = componentsWithCarvedParents(
+      [[11n]],
+      [{ old: 1n, blue: 11n, red: 99n }],
+    );
+    expect(ambiguous).toEqual([1n]);
+  });
+
+  // A split with no carved pieces is the multicut case: nothing to place.
+  it("leaves the components alone when nothing was carved", () => {
+    const { components, ambiguous } = componentsWithCarvedParents(
+      [[1n], [2n]],
+      [],
+    );
+    expect(components).toEqual([[1n], [2n]]);
+    expect(ambiguous).toEqual([]);
   });
 });
