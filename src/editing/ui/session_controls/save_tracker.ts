@@ -257,6 +257,10 @@ export class SaveTracker {
     // LATER save scans normally — which is what makes undoing a merge safe.
     await this.startSave(host, session, "just-merged");
     this.recordDiscard(outcome.reloadedChunks);
+    // TODO(TM-xxx): Clear the undo history when we discard chunks, so the
+    // user cannot accidentally undo the reload decision and reapply work that
+    // was discarded due to a collision. Currently no public API in
+    // @zettaai/edit-session — needs a clear() method on EditSession.
     return outcome;
   }
 
@@ -333,6 +337,10 @@ export class SaveTracker {
     this.changed.dispatch();
     await this.startSave(host, session, "refuse");
     this.recordDiscard(reloaded);
+    // TODO(TM-xxx): Clear the undo history when we reload chunks from the
+    // remote, so the user cannot accidentally undo the reload decision and
+    // reapply work that was discarded due to a conflict. Currently no public
+    // API in @zettaai/edit-session — needs a clear() method on EditSession.
   }
 
   /**
