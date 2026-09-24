@@ -358,7 +358,7 @@ describe("EditSessionHost.saveActive region clip", () => {
       });
 
       await expect(host.saveActive()).rejects.toThrow(
-        "changed while the save was being checked for conflicts",
+        "changed while the save was being prepared or checked",
       );
       expect(backend.written).toHaveLength(0);
     });

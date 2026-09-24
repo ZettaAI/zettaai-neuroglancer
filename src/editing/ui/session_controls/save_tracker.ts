@@ -218,6 +218,14 @@ export class SaveTracker {
     conflict: SaveConflictError,
   ): Promise<MergeConflictsOutcome | undefined> {
     let outcome: MergeConflictsOutcome;
+    // Cancel any stale timer from a prior save: if we are here, that save's
+    // done-success state has been subsumed by this new conflict and reconcile,
+    // and we must not let the timer fire during the reconcile and stomp the
+    // reconciling state back to idle.
+    if (this.autoClearTimer_ !== undefined) {
+      clearTimeout(this.autoClearTimer_);
+      this.autoClearTimer_ = undefined;
+    }
     // Claimed before the first await, so there is no window in which a second
     // Save can start from the pre-reconcile overlay.
     this.state_ = { kind: "reconciling" };
@@ -253,14 +261,11 @@ export class SaveTracker {
   }
 
   /**
-   * Publish what reconciling cost, but only once the save it paid for has
-   * actually landed.
+   * Publish what reconciling cost, once the save that paid for it has settled.
    *
-   * Assigned after the save, not before, because `startSave` resets the count.
-   * Gated on the save having SUCCEEDED because the message says "everything
-   * else was saved" — after a failed save, or one that never ran because
-   * another was in flight, that sentence is false and the discard is not the
-   * headline: the failure is, and it has its own report.
+   * Recorded when the save succeeded, or when it's unconfirmed (couldn't verify
+   * — but the write did land). NOT recorded when the save failed outright,
+   * because a failure has its own message and the discard is not the headline.
    *
    * Added rather than assigned because a follow-up save can itself refuse and
    * reconcile again; two rounds of discarded work are two rounds, and the user
@@ -268,9 +273,20 @@ export class SaveTracker {
    */
   private recordDiscard(chunks: number): void {
     if (chunks === 0) return;
-    if (this.state_.kind !== "done-success") return;
-    this.reloadedChunks_ += chunks;
-    this.changed.dispatch();
+    if (this.state_.kind === "done-success") {
+      this.reloadedChunks_ += chunks;
+      this.changed.dispatch();
+      return;
+    }
+    // done-partial can be either a failed save or an unconfirmed save. Only
+    // record the discard if it's unconfirmed (the message mentions "confirmed").
+    if (this.state_.kind === "done-partial") {
+      const message = this.lastFailureMessage();
+      if (message !== undefined && message.includes("confirmed")) {
+        this.reloadedChunks_ += chunks;
+        this.changed.dispatch();
+      }
+    }
   }
 
   /**
@@ -421,10 +437,16 @@ export class SaveTracker {
     // done — surface a persistent failure (kept until a successful re-save)
     // instead of a green "saved", so the user knows their data is unconfirmed.
     if (host.hasUnconfirmedSaves()) {
-      this.applyGlobalFailure(
+      let message =
         "Your changes were sent but couldn't be confirmed as saved. " +
-          "They're kept here and not lost.",
-      );
+        "They're kept here and not lost.";
+      if (this.reloadedChunks_ > 0) {
+        message =
+          `Your edits in ${this.reloadedChunks_ === 1 ? "1 area were" : `${this.reloadedChunks_} areas were`} ` +
+          "discarded and reloaded, but the rest were sent. They couldn't be " +
+          "confirmed as saved — please review your data once verification completes.";
+      }
+      this.applyGlobalFailure(message);
     } else {
       this.applySaveResult(result);
     }

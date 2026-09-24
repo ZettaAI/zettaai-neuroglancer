@@ -1766,18 +1766,19 @@ export class EditSessionHost extends RefCounted {
           controller.signal,
         );
         if (refusesSave(scan)) throw new SaveConflictError(scan);
-        // The scan takes one fresh read per dirty chunk, so the user has had
-        // seconds in which to keep painting. Anything that landed in that time
-        // is in the overlay but NOT in `snapshot`: the library would collect it
-        // and write it, while this save verifies a different set and never
-        // scanned the new chunks for conflicts at all. Refuse instead — the
-        // paint stays dirty and the next save covers all of it.
-        if (dirtyFingerprint(session) !== dirtyBefore) {
-          throw new Error(
-            "the edit overlay changed while the save was being checked for " +
-              "conflicts: refusing to write chunks that were never checked",
-          );
-        }
+      }
+      // The scan (or any other network I/O) takes seconds, so the user has had
+      // time in which to keep painting. Anything that landed in that time is in
+      // the overlay but NOT in `snapshot`: the library would collect it and
+      // write it, while this save verifies a different set. Refuse instead — the
+      // paint stays dirty and the next save covers all of it. This guard applies
+      // to all save policies, not just "refuse", because even a "just-merged"
+      // save skips the conflict scan and cannot see newly-painted chunks.
+      if (dirtyFingerprint(session) !== dirtyBefore) {
+        throw new Error(
+          "the edit overlay changed while the save was being prepared or " +
+            "checked: refusing to write chunks that were never checked",
+        );
       }
       const regions = this.requireSessionRegions();
       const result = await this.saveTarget.withSessionRegions(regions, () =>

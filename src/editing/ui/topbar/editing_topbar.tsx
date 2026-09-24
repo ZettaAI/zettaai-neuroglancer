@@ -152,10 +152,12 @@ function describeSaveConflict(conflict: SaveConflictError | undefined): string {
   if (uncomparable.length > 0) {
     sentences.push(`${areaCount(uncomparable.length)} couldn't be checked.`);
   }
-  sentences.push(
-    "Merge keeps both sides, except where you both changed the same voxels — " +
-      "those areas are reloaded and your edits in them are dropped.",
-  );
+  if (diverged.length > 0 && uncomparable.length === 0) {
+    sentences.push(
+      "Merge keeps both sides, except where you both changed the same voxels — " +
+        "those areas are reloaded and your edits in them are dropped.",
+    );
+  }
   sentences.push(
     "Reload takes their version of every area listed. Overwrite replaces " +
       "their work permanently — these layers keep no history, so it can't be " +
@@ -175,10 +177,9 @@ function describeSaveConflict(conflict: SaveConflictError | undefined): string {
 function describeConflictReload(count: number): string {
   const those = count === 1 ? "that area was" : "those areas were";
   return (
-    `Your edits in ${areaCount(count)} were discarded: you and someone else ` +
-    `changed the same voxels there, so ${those} reloaded from storage. ` +
-    "Everything else was saved. Please review your data — one undo puts your " +
-    "version back."
+    `Your edits in ${areaCount(count)} were discarded: ${those} reloaded from ` +
+    "storage to match what's there now. Everything else was saved. Please " +
+    "review your data — one undo puts your version back."
   );
 }
 
@@ -242,9 +243,6 @@ function ActiveTopbarControls({
   // Set only while a refused save waits on a decision; `useSignal` above
   // re-renders when the tracker records or clears it.
   const pendingConflict = saveTracker.pendingConflict();
-  const confirmOverwrite = useCallback(() => {
-    void saveTracker.overwriteConflict(host, session);
-  }, [saveTracker, host, session]);
   // Set when a settled save reconciled by discarding local edits. Held in
   // state rather than read from the tracker at render time because it has to
   // survive until the user acknowledges it, not until the next re-render.
@@ -261,6 +259,12 @@ function ActiveTopbarControls({
     const reloaded = saveTracker.reloadedChunkCount();
     if (reloaded > 0) setReloadNotice(describeConflictReload(reloaded));
   }, [saveTracker]);
+  const confirmOverwrite = useCallback(() => {
+    void (async () => {
+      await saveTracker.overwriteConflict(host, session);
+      reportSaveOutcome();
+    })();
+  }, [saveTracker, host, session, reportSaveOutcome]);
   const confirmMerge = useCallback(() => {
     void (async () => {
       await saveTracker.mergeConflict(host, session);
