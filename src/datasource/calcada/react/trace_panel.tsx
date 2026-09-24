@@ -9,18 +9,18 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { Fragment, useEffect, useReducer } from "react";
+import { Fragment, useCallback, useEffect, useReducer } from "react";
 
 import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
 import type { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import type {
   TraceScope,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 import {
-  TRACE_CURRENT_USER,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
@@ -64,6 +64,7 @@ export interface TracePanelConnection {
     undoLast(): Promise<void>;
   };
   canUndo(): boolean;
+  listCandidateReviewers(): Promise<string[]>;
 }
 
 /**
@@ -105,25 +106,6 @@ const KEY_HINTS: ReadonlyArray<[string, string]> = [
   ["Esc", "put the seed down, then leave"],
 ];
 
-type RejectedByMode = "anyone" | "me" | "custom";
-
-const REJECTED_BY_LABELS: ReadonlyArray<[RejectedByMode, string]> = [
-  ["anyone", "anyone"],
-  ["me", "only me"],
-  ["custom", "me and…"],
-];
-
-function rejectedByMode(rejectedBy: readonly string[]): RejectedByMode {
-  if (rejectedBy.length === 0) return "anyone";
-  return rejectedBy.some((user) => user !== TRACE_CURRENT_USER)
-    ? "custom"
-    : "me";
-}
-
-function otherUsers(rejectedBy: readonly string[]): string[] {
-  return rejectedBy.filter((user) => user !== TRACE_CURRENT_USER);
-}
-
 function clampRadius(radiusNm: number): number {
   return Math.min(
     TRACE_SPHERE_RADIUS_MAX_NM,
@@ -149,6 +131,11 @@ export function CalcadaTracePanel({
   const seedCenter = useWatchable(traceState.sphereCenter);
   const minPieceVoxels = useWatchable(traceState.minPieceVoxels);
   const rejectedBy = useWatchable(traceState.rejectedBy);
+  // Stable, or the picker's fetch-on-mount would refire on every render.
+  const loadReviewers = useCallback(
+    () => connection.listCandidateReviewers(),
+    [connection],
+  );
   const minScore = useWatchable(traceState.minScore);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
@@ -156,14 +143,8 @@ export function CalcadaTracePanel({
   const overviewClass = useWatchable(overviewState.semanticClass);
   const overviewMinFraction = useWatchable(overviewState.minClassFraction);
 
-  const mode = rejectedByMode(rejectedBy);
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
-
-  const setRejectedBy = (nextMode: RejectedByMode, users: string[]) => {
-    traceState.rejectedBy.value =
-      nextMode === "anyone" ? [] : [TRACE_CURRENT_USER, ...users];
-  };
 
   return (
     <div className="calcada-trace-panel">
@@ -297,46 +278,17 @@ export function CalcadaTracePanel({
       </label>
 
       {/* Proofreaders disagree, so whose rejections count is a setting rather
-          than a rule. "me" is sent verbatim — the server resolves it, because
-          the browser holds an opaque token and has no idea whose it is. */}
-      <label className="calcada-trace-panel-row">
+          than a rule. Nothing selected means anyone's. */}
+      <div className="calcada-trace-panel-row">
         Skip rejected by
-        <Select
-          value={mode}
-          onValueChange={(next) =>
-            setRejectedBy(next as RejectedByMode, otherUsers(rejectedBy))
-          }
-        >
-          <SelectTrigger size="sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {REJECTED_BY_LABELS.map(([value, label]) => (
-              <SelectItem key={value} value={value}>
-                {label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </label>
-
-      {mode === "custom" && (
-        <Input
-          type="text"
-          placeholder="tommy@zetta.ai, …"
-          title="Comma-separated users whose rejections to skip as well"
-          defaultValue={otherUsers(rejectedBy).join(", ")}
-          onBlur={(event) =>
-            setRejectedBy(
-              "custom",
-              event.target.value
-                .split(",")
-                .map((user) => user.trim())
-                .filter((user) => user.length > 0),
-            )
-          }
+        <RejectedByPicker
+          value={rejectedBy}
+          onChange={(users) => {
+            traceState.rejectedBy.value = users;
+          }}
+          loadReviewers={loadReviewers}
         />
-      )}
+      </div>
 
       <label className="calcada-trace-panel-check">
         <input

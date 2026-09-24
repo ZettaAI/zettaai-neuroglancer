@@ -2553,6 +2553,10 @@ class CalcadaDebugSession extends RefCounted {
   }
 }
 
+// The server walks history per root; it refuses more than this at once.
+const LATEST_ROOTS_BATCH = 200;
+const FILTER_INPUT_DEBOUNCE_MS = 400;
+
 /**
  * Drives Zetta Trace: fetching candidates for the seed segment, drawing the
  * one under review, and applying the proofreader's verdict.
@@ -2653,21 +2657,29 @@ class ZettaTraceSession extends RefCounted {
         if (state.active.value && state.sphereCenter.value !== undefined) {
           void this.loadCandidates();
         }
-      }, 400),
+      }, FILTER_INPUT_DEBOUNCE_MS),
     );
     this.registerDisposer(
       state.sphereRadiusNm.changed.add(() => refetchOnRadiusChange()),
     );
+    // Typed fields fire on every keystroke; each keystroke here would be a
+    // whole-segment query.
+    const refetchOnSizeChange = this.registerCancellable(
+      debounce(refetchOnFilterChange, FILTER_INPUT_DEBOUNCE_MS),
+    );
     this.registerDisposer(
-      state.minPieceVoxels.changed.add(refetchOnFilterChange),
+      state.minPieceVoxels.changed.add(() => refetchOnSizeChange()),
     );
     this.registerDisposer(state.rejectedBy.changed.add(refetchOnFilterChange));
     // The threshold only hides queued entries, so it needs a repick, not a
     // refetch: lowering it brings back what it skipped, in stack order.
-    this.registerDisposer(
-      state.minScore.changed.add(() => {
+    const repickOnScoreChange = this.registerCancellable(
+      debounce(() => {
         if (state.active.value && !this.busy) this.showCurrent();
-      }),
+      }, FILTER_INPUT_DEBOUNCE_MS),
+    );
+    this.registerDisposer(
+      state.minScore.changed.add(() => repickOnScoreChange()),
     );
     if (state.active.value) this.enter();
   }
@@ -2983,13 +2995,25 @@ class ZettaTraceSession extends RefCounted {
   // comparison on screen is what made merges look like they had done nothing.
   private showOnly(seedRoot: bigint, candidateRoot?: bigint) {
     const { segmentsState } = this;
-    segmentsState.visibleSegments.clear();
-    segmentsState.selectedSegments.clear();
-    segmentsState.visibleSegments.add(seedRoot);
-    segmentsState.selectedSegments.add(seedRoot);
-    if (candidateRoot !== undefined) {
-      segmentsState.visibleSegments.add(candidateRoot);
-      segmentsState.selectedSegments.add(candidateRoot);
+    const wanted =
+      candidateRoot === undefined ? [seedRoot] : [seedRoot, candidateRoot];
+    const unchanged = (set: { size: number; has(id: bigint): boolean }) =>
+      set.size === wanted.length && wanted.every((id) => set.has(id));
+    if (
+      !unchanged(segmentsState.visibleSegments) ||
+      !unchanged(segmentsState.selectedSegments)
+    ) {
+      // The trace swaps what is on screen by itself; the connection's "Hid all
+      // segment(s)" notices are for a proofreader clearing the list, and here
+      // they fired on every threshold or radius change.
+      this.connection.withoutSegmentMessages(() => {
+        segmentsState.visibleSegments.clear();
+        segmentsState.selectedSegments.clear();
+        for (const id of wanted) {
+          segmentsState.visibleSegments.add(id);
+          segmentsState.selectedSegments.add(id);
+        }
+      });
     }
     this.applyRoleColors(seedRoot, candidateRoot);
   }
@@ -4419,6 +4443,7 @@ void main() {
         aiming.value = !aiming.value;
       }),
     );
+    void this.followRetiredRoots();
   }
 
   private graphRenderLayer: SliceViewPanelChunkedGraphLayer | undefined;
@@ -4459,6 +4484,19 @@ void main() {
 
   private previousVisibleSegmentCount: number;
 
+  private segmentMessagesMuted = false;
+
+  /** Run a programmatic change to the segment list without its user notices. */
+  withoutSegmentMessages(change: () => void) {
+    const previous = this.segmentMessagesMuted;
+    this.segmentMessagesMuted = true;
+    try {
+      change();
+    } finally {
+      this.segmentMessagesMuted = previous;
+    }
+  }
+
   private visibleSegmentsChanged(segments: bigint[] | null, added: boolean) {
     const { segmentsState } = this;
     const { state } = this.graph;
@@ -4490,15 +4528,18 @@ void main() {
     }
     if (segments === null) {
       // Don't clear equivalences — they come from LUT and must persist.
-      StatusMessage.showTemporaryMessage(
-        `Hid all ${this.previousVisibleSegmentCount} segment(s).`,
-        3000,
-      );
+      if (!this.segmentMessagesMuted) {
+        StatusMessage.showTemporaryMessage(
+          `Hid all ${this.previousVisibleSegmentCount} segment(s).`,
+          3000,
+        );
+      }
       return;
     }
     for (const segmentId of segments) {
       if (
         !added &&
+        !this.segmentMessagesMuted &&
         !isBaseSegmentId(segmentId, this.graph.info.graph.nBitsForLayerId)
       ) {
         // Don't call deleteSet — equivalences come from the LUT trailer
@@ -4523,11 +4564,13 @@ void main() {
   private selectedSegmentsChanged(segments: bigint[] | null, added: boolean) {
     const { segmentsState } = this;
     if (segments === null) {
-      const leafSegmentCount = this.segmentsState.selectedSegments.size;
-      StatusMessage.showTemporaryMessage(
-        `Deselected all ${leafSegmentCount} segment(s).`,
-        3000,
-      );
+      if (!this.segmentMessagesMuted) {
+        const leafSegmentCount = this.segmentsState.selectedSegments.size;
+        StatusMessage.showTemporaryMessage(
+          `Deselected all ${leafSegmentCount} segment(s).`,
+          3000,
+        );
+      }
       return;
     }
     const nBits = this.graph.info.graph.nBitsForLayerId;
@@ -4838,6 +4881,79 @@ void main() {
       5000,
     );
     return entry;
+  }
+
+  /**
+   * Bring a shared link up to date with the graph.
+   *
+   * A link names roots, and every merge or split since it was made has retired
+   * some of them: opened later, it shows nothing where the author saw a
+   * segment. So each named root is replaced by what its pieces belong to now —
+   * one root after a merge, all of the parts after a split — and dropped when
+   * there is nothing to follow. A link pinned to a timestamp is left alone: it
+   * asks for the past on purpose.
+   */
+  private async followRetiredRoots() {
+    const segmentsState = this.layer.displayState.segmentationGroupState.value;
+    if (segmentsState.timestamp.value !== undefined) return;
+    const named = [
+      ...new Set([
+        ...segmentsState.visibleSegments,
+        ...segmentsState.selectedSegments,
+      ]),
+    ];
+    if (named.length === 0) return;
+
+    const latest = new Map<bigint, bigint[]>();
+    try {
+      for (let i = 0; i < named.length; i += LATEST_ROOTS_BATCH) {
+        const batch = await this.graph.graphServer.fetchLatestRoots(
+          named.slice(i, i + LATEST_ROOTS_BATCH),
+          this.graph.branchId.value,
+        );
+        for (const [root, successors] of batch) latest.set(root, successors);
+      }
+    } catch {
+      // An old server without the endpoint, or a failed read: the link opens
+      // as it always did.
+      return;
+    }
+
+    let followed = 0;
+    let dropped = 0;
+    this.withoutSegmentMessages(() => {
+      for (const [root, successors] of latest) {
+        if (successors.length === 1 && successors[0] === root) continue;
+        const wasVisible = segmentsState.visibleSegments.has(root);
+        const wasSelected = segmentsState.selectedSegments.has(root);
+        segmentsState.visibleSegments.delete(root);
+        segmentsState.selectedSegments.delete(root);
+        if (successors.length === 0) {
+          dropped++;
+          continue;
+        }
+        followed++;
+        for (const successor of successors) {
+          if (wasSelected) segmentsState.selectedSegments.add(successor);
+          if (wasVisible) segmentsState.visibleSegments.add(successor);
+        }
+      }
+    });
+    if (followed + dropped === 0) return;
+    const parts = [];
+    if (followed > 0) {
+      parts.push(
+        `${followed} segment(s) edited since this link was made were updated`,
+      );
+    }
+    if (dropped > 0) parts.push(`${dropped} that no longer exist were removed`);
+    StatusMessage.showTemporaryMessage(`${parts.join("; ")}.`, 6000);
+  }
+
+  listCandidateReviewers(): Promise<string[]> {
+    return this.graph.graphServer.fetchCandidateReviewers(
+      this.graph.branchId.value,
+    );
   }
 
   /**
@@ -5756,6 +5872,48 @@ class CalcadaGraphServerInterface {
         partnerHasInfo: c.partner_has_info === true,
       }),
     );
+  }
+
+  /**
+   * What each root is now: itself while current, what its pieces belong to
+   * after a merge or split, nothing when there is nothing to follow.
+   */
+  async fetchLatestRoots(
+    roots: bigint[],
+    branchId: number,
+  ): Promise<Map<bigint, bigint[]>> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams();
+    if (branchId) params.set("branch_id", String(branchId));
+    const response = await fetchOkImpl(
+      `${baseUrl}/latest_roots?${params.toString()}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ root_ids: roots.map(String) }),
+      },
+    );
+    const jsonResp = await response.json();
+    const out = new Map<bigint, bigint[]>();
+    for (const [root, successors] of Object.entries(jsonResp.roots ?? {})) {
+      out.set(
+        parseUint64(root),
+        (successors as string[]).map((id) => parseUint64(id)),
+      );
+    }
+    return out;
+  }
+
+  /** Who has rejected a candidate on this graph, not counting the caller. */
+  async fetchCandidateReviewers(branchId: number): Promise<string[]> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams();
+    if (branchId) params.set("branch_id", String(branchId));
+    const response = await fetchOkImpl(
+      `${baseUrl}/candidates/reviewers?${params.toString()}`,
+      { priority: "low" },
+    );
+    const jsonResp = await response.json();
+    return (jsonResp.reviewers ?? []).map(String);
   }
 
   async fetchCandidateOverview(
