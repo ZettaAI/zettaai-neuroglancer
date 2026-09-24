@@ -70,7 +70,7 @@ import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePartner,
   overviewColors,
-  partnerColors,
+  heatColor,
   partnersWithSemantics,
   shownCandidates,
   partnerRoots,
@@ -189,7 +189,6 @@ import type {
 } from "#src/segmentation_display_state/frontend.js";
 import {
   getBaseObjectColor,
-  getObjectColor,
   augmentSegmentId,
   resetTemporaryVisibleSegmentsState,
   SegmentationLayerSharedObject,
@@ -3650,10 +3649,6 @@ class CandidateOverviewSession extends RefCounted {
   // erase; relying on which listener happens to run first would work today and
   // break the first time one is added.
   private painted = false;
-  private priorBaseSegmentHighlighting = false;
-  private priorHideSegmentZero = false;
-  private priorHighlightColor: vec4 | undefined;
-  private priorDisplayStateSaved = false;
 
   constructor(
     private connection: GraphConnection,
@@ -3781,77 +3776,42 @@ class CandidateOverviewSession extends RefCounted {
     );
     this.connection.setOverviewPieceColors(colors);
 
-    // Handing over the colour map is not enough to see anything: the map alone
-    // is read by the Debug tab's list, while the viewer paints whole segments
-    // until it is told to render their pieces separately. This is the same
-    // display switch the debug overlay makes, and like it, everything here is
-    // display-only and put back on the way out.
+    // Colour whole candidate segments rather than individual pieces. A mesh
+    // exists per segment, so showing a candidate means showing the segment
+    // holding it; painting only its one piece left the rest of that segment in
+    // per-piece hash colours and a single candidate read as a row of different
+    // ones. The seed segment is left alone entirely and keeps its own colour.
     const { displayState } = this.layer;
     const { segmentsState } = this;
-    const seedRoot = [...segmentsState.visibleSegments][0];
-    if (!this.priorDisplayStateSaved) {
-      this.priorBaseSegmentHighlighting =
-        displayState.baseSegmentHighlighting.value;
-      this.priorHideSegmentZero = displayState.hideSegmentZero.value;
-      this.priorHighlightColor = displayState.highlightColor.value;
-      this.priorDisplayStateSaved = true;
-    }
-    displayState.baseSegmentHighlighting.value = true;
-    displayState.hideSegmentZero.value = false;
-    // Without a highlight colour the mesh never consults the stated colours at
-    // all (see colorFragments in mesh/frontend.ts) and paints every fragment
-    // its segment's hash colour instead — the scale is computed, handed over,
-    // and silently ignored.
-    displayState.highlightColor.value = BLUE_COLOR_HIGHTLIGHT;
-
-    resetTemporaryVisibleSegmentsState(segmentsState);
-    displayState.tempSegmentStatedColors2d.value.clear();
-    displayState.tempSegmentDefaultColor2d.value = undefined;
-    segmentsState.useTemporaryVisibleSegments.value = true;
-    segmentsState.useTemporarySegmentEquivalences.value = true;
-    for (const root of segmentsState.visibleSegments) {
-      segmentsState.temporaryVisibleSegments.add(root);
-    }
-    // The segment keeps its own colour. Painting its pieces individually is a
-    // side effect of the per-fragment mode the candidates need, not something
-    // asked for: the red-to-green scale is there to pick the candidates OUT of
-    // the segment, and a segment wearing the same scale hides them again.
-    const ownColor = BigInt(
-      packColor(getObjectColor(displayState, seedRoot ?? 0n, 1)),
-    );
-    for (const piece of colors.keys()) {
-      segmentsState.temporaryVisibleSegments.add(piece);
-      displayState.tempSegmentStatedColors2d.value.set(piece, ownColor);
-    }
-    // The candidates themselves belong to other segments, so nothing puts them
-    // on screen unless this does. They carry the score of the proposal that
-    // named them, which is what makes a promising neighbour findable at a
-    // glance.
-    const partners = partnerColors(
-      this.pieces,
-      this.state.semanticClass.value,
-      this.state.minClassFraction.value,
-    );
-    for (const [piece, color] of partners) {
-      segmentsState.temporaryVisibleSegments.add(piece);
-      displayState.tempSegmentStatedColors2d.value.set(piece, color);
-    }
-    // The candidates' own segments are brought on screen the way a proofreader
-    // would bring them: added to the visible set, so they load as segments
-    // rather than as loose geometry. A piece has no mesh of its own — it is a
-    // fragment of its segment's — so naming the piece alone asks the mesh
-    // source for something it cannot serve.
     const roots = partnerRoots(
       this.pieces,
       this.state.semanticClass.value,
       this.state.minClassFraction.value,
     );
-    if (roots.length !== 0) {
-      for (const root of roots) {
-        segmentsState.temporaryVisibleSegments.add(root);
+    const scoreByRoot = new Map<bigint, number>();
+    for (const piece of this.pieces) {
+      if (piece.bestPartnerRoot === 0n) continue;
+      const best = scoreByRoot.get(piece.bestPartnerRoot) ?? 0;
+      if (piece.bestScore > best) {
+        scoreByRoot.set(piece.bestPartnerRoot, piece.bestScore);
       }
-      this.connection.meshAddNewSegments(roots);
     }
+
+    displayState.tempSegmentStatedColors2d.value.clear();
+    displayState.tempSegmentDefaultColor2d.value = undefined;
+    resetTemporaryVisibleSegmentsState(segmentsState);
+    segmentsState.useTemporaryVisibleSegments.value = true;
+    for (const root of segmentsState.visibleSegments) {
+      segmentsState.temporaryVisibleSegments.add(root);
+    }
+    for (const root of roots) {
+      segmentsState.temporaryVisibleSegments.add(root);
+      displayState.tempSegmentStatedColors2d.value.set(
+        root,
+        heatColor(scoreByRoot.get(root) ?? 0),
+      );
+    }
+    if (roots.length !== 0) this.connection.meshAddNewSegments(roots);
     displayState.useTempSegmentStatedColors2d.value = true;
     this.painted = true;
   }
@@ -3865,13 +3825,6 @@ class CandidateOverviewSession extends RefCounted {
     displayState.useTempSegmentStatedColors2d.value = false;
     displayState.tempSegmentStatedColors2d.value.clear();
     resetTemporaryVisibleSegmentsState(this.segmentsState);
-    if (this.priorDisplayStateSaved) {
-      displayState.baseSegmentHighlighting.value =
-        this.priorBaseSegmentHighlighting;
-      displayState.hideSegmentZero.value = this.priorHideSegmentZero;
-      displayState.highlightColor.value = this.priorHighlightColor;
-      this.priorDisplayStateSaved = false;
-    }
   }
 
   private get displayState() {
