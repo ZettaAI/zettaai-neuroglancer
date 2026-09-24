@@ -2649,6 +2649,19 @@ class ZettaTraceSession extends RefCounted {
     const refetchOnFilterChange = () => {
       if (state.active.value) void this.loadCandidates();
     };
+    // Widening the seed's own sphere is one of the answers to running out of
+    // candidates, so the radius stays live once the seed is down. Debounced
+    // because the field fires on every keystroke.
+    const refetchOnRadiusChange = this.registerCancellable(
+      debounce(() => {
+        if (state.active.value && state.sphereCenter.value !== undefined) {
+          void this.loadCandidates();
+        }
+      }, 400),
+    );
+    this.registerDisposer(
+      state.sphereRadiusNm.changed.add(() => refetchOnRadiusChange()),
+    );
     this.registerDisposer(
       state.minPieceVoxels.changed.add(refetchOnFilterChange),
     );
@@ -2933,6 +2946,22 @@ class ZettaTraceSession extends RefCounted {
     // No "already the seed" shortcut: the sphere has just moved, so the same
     // segment is a different question and its candidates must be refetched.
     this.setSeed(value, baseValue);
+  }
+
+  /**
+   * Move the view to the seed. A depth-first walk can end up far from where it
+   * started, and the seed is the one place worth going back to.
+   */
+  goToSeed() {
+    const center = this.state.sphereCenter.value;
+    if (center === undefined) return;
+    this.layer.manager.root.globalPosition.value = Float32Array.from(center);
+  }
+
+  /** Drop the seed. No seed is the same thing as no trace. */
+  clearSeed() {
+    this.state.aiming.value = false;
+    this.state.active.value = false;
   }
 
   setSeed(rootId: bigint, pieceId?: bigint) {
