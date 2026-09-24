@@ -70,7 +70,7 @@ export function RejectedByPicker({
         if (open) load();
       }}
     >
-      <ComboboxChips ref={anchor}>
+      <ComboboxChips ref={anchor} className="calcada-trace-panel-reviewers">
         <ComboboxValue>
           {(selected: string[]) =>
             selected.map((user) => (
