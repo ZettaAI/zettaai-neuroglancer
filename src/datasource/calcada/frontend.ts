@@ -71,6 +71,7 @@ import {
   describePartner,
   overviewColors,
   partnerColors,
+  partnersWithSemantics,
   partnerRoots,
   totalCandidates,
 } from "#src/datasource/calcada/candidate_heat.js";
@@ -3649,6 +3650,7 @@ class CandidateOverviewSession extends RefCounted {
   private painted = false;
   private priorBaseSegmentHighlighting = false;
   private priorHideSegmentZero = false;
+  private priorHighlightColor: vec4 | undefined;
   private priorDisplayStateSaved = false;
 
   constructor(
@@ -3763,7 +3765,7 @@ class CandidateOverviewSession extends RefCounted {
     }
     if (token !== this.fetchToken) return;
     this.pieces = fetched.flat();
-    const withInfo = this.pieces.filter((piece) => piece.hasInfo).length;
+    const withInfo = partnersWithSemantics(this.pieces);
     this.setStatus(
       `${totalCandidates(this.pieces).toLocaleString()} candidates · ` +
         `${this.pieces.length} pieces · ${withInfo} with semantics`,
@@ -3791,10 +3793,16 @@ class CandidateOverviewSession extends RefCounted {
       this.priorBaseSegmentHighlighting =
         displayState.baseSegmentHighlighting.value;
       this.priorHideSegmentZero = displayState.hideSegmentZero.value;
+      this.priorHighlightColor = displayState.highlightColor.value;
       this.priorDisplayStateSaved = true;
     }
     displayState.baseSegmentHighlighting.value = true;
     displayState.hideSegmentZero.value = false;
+    // Without a highlight colour the mesh never consults the stated colours at
+    // all (see colorFragments in mesh/frontend.ts) and paints every fragment
+    // its segment's hash colour instead — the scale is computed, handed over,
+    // and silently ignored.
+    displayState.highlightColor.value = BLUE_COLOR_HIGHTLIGHT;
 
     resetTemporaryVisibleSegmentsState(segmentsState);
     displayState.tempSegmentStatedColors2d.value.clear();
@@ -3850,6 +3858,7 @@ class CandidateOverviewSession extends RefCounted {
       displayState.baseSegmentHighlighting.value =
         this.priorBaseSegmentHighlighting;
       displayState.hideSegmentZero.value = this.priorHideSegmentZero;
+      displayState.highlightColor.value = this.priorHighlightColor;
       this.priorDisplayStateSaved = false;
     }
   }
@@ -5767,6 +5776,17 @@ class CalcadaGraphServerInterface {
         bestScore: Number(piece.best_score),
         bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
         bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
+        partnerClasses: {
+          perikaryon: Number(piece.partner_classes?.perikaryon ?? 0),
+          dendrite: Number(piece.partner_classes?.dendrite ?? 0),
+          axon: Number(piece.partner_classes?.axon ?? 0),
+          glia: Number(piece.partner_classes?.glia ?? 0),
+          vasculature: Number(piece.partner_classes?.vasculature ?? 0),
+          nucleus: Number(piece.partner_classes?.nucleus ?? 0),
+          ecs: Number(piece.partner_classes?.ecs ?? 0),
+          other: Number(piece.partner_classes?.other ?? 0),
+        },
+        partnerHasInfo: piece.partner_has_info === true,
         candidateCount: Number(piece.candidate_count ?? 0),
         voxelCount: Number(piece.voxel_count),
         classes: {

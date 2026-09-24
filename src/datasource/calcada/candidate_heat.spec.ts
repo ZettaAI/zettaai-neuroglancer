@@ -31,6 +31,8 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
     bestScore: 0,
     bestPartnerPiece: 0n,
     bestPartnerRoot: 0n,
+    partnerClasses: noClasses,
+    partnerHasInfo: false,
     candidateCount: 0,
     voxelCount: 100,
     classes: noClasses,
