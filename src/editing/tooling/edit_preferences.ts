@@ -186,9 +186,7 @@ function parseAutomerge(x: unknown): boolean | undefined {
 }
 
 /** Parse the merge strategy. Only recognizes the two valid strategies. */
-function parseMergeStrategy(
-  x: unknown,
-): "reload" | "keep-merge" | undefined {
+function parseMergeStrategy(x: unknown): "reload" | "keep-merge" | undefined {
   if (x === "reload" || x === "keep-merge") return x;
   return undefined;
 }

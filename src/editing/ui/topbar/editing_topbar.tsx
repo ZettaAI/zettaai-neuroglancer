@@ -286,7 +286,9 @@ function ActiveTopbarControls({
   const toggleAutomerge = useCallback(() => {
     host.setAutomerge(!automerge);
   }, [host, automerge]);
-  const mergeStrategy = getMergeStrategy(useWatchable(host.editPreferences.value));
+  const mergeStrategy = getMergeStrategy(
+    useWatchable(host.editPreferences.value),
+  );
   const toggleMergeStrategy = useCallback(() => {
     const newStrategy = mergeStrategy === "reload" ? "keep-merge" : "reload";
     host.setMergeStrategy(newStrategy);
