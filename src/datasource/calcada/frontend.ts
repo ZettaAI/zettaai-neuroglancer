@@ -64,8 +64,6 @@ import {
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
 import { BRANCH_PICKER_TITLE } from "#src/datasource/calcada/branch_picker_logic.js";
-import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
-import {} from "#src/datasource/calcada/candidate_ranking.js";
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePartner,
@@ -77,6 +75,7 @@ import {
   totalCandidates,
 } from "#src/datasource/calcada/candidate_heat.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
+import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
   nextEntry,
