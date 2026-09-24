@@ -395,7 +395,10 @@ export function CalcadaTracePanel({
               </label>
             )}
 
-            <label className="calcada-trace-panel-row">
+            <label
+              className="calcada-trace-panel-check"
+              title="Take the segment off screen and leave only its candidates"
+            >
               <input
                 type="checkbox"
                 checked={overviewOnlyCandidates}
@@ -403,7 +406,7 @@ export function CalcadaTracePanel({
                   overviewState.onlyCandidates.value = event.target.checked;
                 }}
               />
-              Hide the segment, show only its candidates
+              Show only the candidates
             </label>
 
             <div className="calcada-trace-panel-buttons">

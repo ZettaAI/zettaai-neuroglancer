@@ -421,6 +421,22 @@
   flex: 0 0 auto;
 }
 
+/* A checkbox carries its label on the right, so it is not the row's "name on
+   the left, control on the right" layout — laid out as one, space-between threw
+   the text to the far edge and the input rule stretched the box to 10em. */
+.calcada-trace-panel-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-check input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
 /* The keys the trace owns. Lives here rather than in a status bubble at the
    bottom of the viewer: the tab is always open, so the bubble only repeated
    what is already on screen. */
