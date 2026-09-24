@@ -14,6 +14,7 @@ import "#src/editing/ui/topbar/editing_topbar.css";
 import type { EditSession } from "@zettaai/edit-session";
 import type { LucideIcon } from "lucide-preact";
 import {
+  Copy,
   Eraser,
   GitMerge,
   Layers,
@@ -23,6 +24,7 @@ import {
   PaintBucket,
   Paintbrush,
   Redo2,
+  RefreshCw,
   Save,
   Undo2,
 } from "lucide-preact";
@@ -45,7 +47,10 @@ import {
   effectiveEditKeybinds,
   type EditKeybindName,
 } from "#src/editing/session_hotkey_binder.js";
-import { automergeEnabled } from "#src/editing/tooling/edit_preferences.js";
+import {
+  automergeEnabled,
+  getMergeStrategy,
+} from "#src/editing/tooling/edit_preferences.js";
 import { ConfirmDialog } from "#src/editing/ui/confirm_dialog.js";
 import { useSignal } from "#src/editing/ui/interop/use_signal.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
@@ -281,6 +286,11 @@ function ActiveTopbarControls({
   const toggleAutomerge = useCallback(() => {
     host.setAutomerge(!automerge);
   }, [host, automerge]);
+  const mergeStrategy = getMergeStrategy(useWatchable(host.editPreferences.value));
+  const toggleMergeStrategy = useCallback(() => {
+    const newStrategy = mergeStrategy === "reload" ? "keep-merge" : "reload";
+    host.setMergeStrategy(newStrategy);
+  }, [host, mergeStrategy]);
   // A merge needs all three inputs; a chunk the scan could not prove has no
   // baseline to merge from, so offering it would promise something we cannot
   // deliver for part of the save.
@@ -556,6 +566,31 @@ function ActiveTopbarControls({
           onClick={toggleAutomerge}
         >
           <GitMerge size={TOOL_ICON_SIZE} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class={
+            "neuroglancer-editing-topbar-icon-button" +
+            (mergeStrategy === "reload" ? " active" : "")
+          }
+          aria-label={
+            mergeStrategy === "reload"
+              ? "Reload conflicting areas from storage"
+              : "Keep local edits on conflicts"
+          }
+          aria-pressed={mergeStrategy === "reload"}
+          data-tooltip={
+            mergeStrategy === "reload"
+              ? "Conflicting areas are reloaded from storage, discarding local edits"
+              : "Conflicting areas are kept, merging both sides"
+          }
+          onClick={toggleMergeStrategy}
+        >
+          {mergeStrategy === "reload" ? (
+            <RefreshCw size={TOOL_ICON_SIZE} aria-hidden="true" />
+          ) : (
+            <Copy size={TOOL_ICON_SIZE} aria-hidden="true" />
+          )}
         </button>
       </div>
 
