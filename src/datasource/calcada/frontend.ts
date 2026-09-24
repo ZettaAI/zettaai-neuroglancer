@@ -3673,6 +3673,11 @@ class CandidateOverviewSession extends RefCounted {
   status = "";
   private fetchToken = 0;
   private pieces: PieceOverview[] = [];
+  // The segments this was scored for. While it is on, what is on screen comes
+  // from the temporary set, so removing a segment from the list changes
+  // nothing visible — the view would go on showing a segment the proofreader
+  // has already put away.
+  private scoredRoots: bigint[] = [];
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -3700,6 +3705,7 @@ class CandidateOverviewSession extends RefCounted {
         } else {
           ++this.fetchToken;
           this.pieces = [];
+          this.scoredRoots = [];
           this.clearColors();
           this.setStatus("");
         }
@@ -3717,6 +3723,17 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       connection.state.zettaTraceState.active.changed.add(() => {
         if (connection.state.zettaTraceState.active.value) {
+          state.active.value = false;
+        }
+      }),
+    );
+    // Putting the segment away is a decision about what to look at, and an
+    // overview of a segment that is no longer shown is not one.
+    this.registerDisposer(
+      this.segmentsState.visibleSegments.changed.add(() => {
+        if (!state.active.value || this.scoredRoots.length === 0) return;
+        const visible = this.segmentsState.visibleSegments;
+        if (this.scoredRoots.some((root) => !visible.has(root))) {
           state.active.value = false;
         }
       }),
@@ -3782,6 +3799,7 @@ class CandidateOverviewSession extends RefCounted {
     }
     if (token !== this.fetchToken) return;
     this.pieces = fetched.flat();
+    this.scoredRoots = wanted;
     const withInfo = partnersWithSemantics(this.pieces);
     const shown = shownCandidates(
       this.pieces,
