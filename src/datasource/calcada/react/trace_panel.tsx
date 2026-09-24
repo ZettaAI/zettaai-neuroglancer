@@ -151,6 +151,7 @@ export function CalcadaTracePanel({
   const rejectedBy = useWatchable(traceState.rejectedBy);
   const overviewActive = useWatchable(overviewState.active);
   const overviewClass = useWatchable(overviewState.semanticClass);
+  const overviewOnlyCandidates = useWatchable(overviewState.onlyCandidates);
   const overviewMinScore = useWatchable(overviewState.minScore);
   const overviewMinFraction = useWatchable(overviewState.minClassFraction);
 
@@ -393,6 +394,17 @@ export function CalcadaTracePanel({
                 />
               </label>
             )}
+
+            <label className="calcada-trace-panel-row">
+              <input
+                type="checkbox"
+                checked={overviewOnlyCandidates}
+                onChange={(event) => {
+                  overviewState.onlyCandidates.value = event.target.checked;
+                }}
+              />
+              Hide the segment, show only its candidates
+            </label>
 
             <div className="calcada-trace-panel-buttons">
               <Button

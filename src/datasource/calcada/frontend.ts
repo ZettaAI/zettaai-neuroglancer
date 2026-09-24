@@ -3727,6 +3727,12 @@ class CandidateOverviewSession extends RefCounted {
         }
       }),
     );
+    // Hiding the segment changes nothing about which candidates were scored,
+    // so it costs a repaint rather than another whole-segment query — which is
+    // what makes it worth a checkbox you can flick while looking.
+    this.registerDisposer(
+      state.onlyCandidates.changed.add(() => this.repaint()),
+    );
     // Putting the segment away is a decision about what to look at, and an
     // overview of a segment that is no longer shown is not one.
     this.registerDisposer(
@@ -3848,8 +3854,10 @@ class CandidateOverviewSession extends RefCounted {
     displayState.tempSegmentDefaultColor2d.value = undefined;
     resetTemporaryVisibleSegmentsState(segmentsState);
     segmentsState.useTemporaryVisibleSegments.value = true;
-    for (const root of segmentsState.visibleSegments) {
-      segmentsState.temporaryVisibleSegments.add(root);
+    if (!this.state.onlyCandidates.value) {
+      for (const root of segmentsState.visibleSegments) {
+        segmentsState.temporaryVisibleSegments.add(root);
+      }
     }
     for (const root of roots) {
       segmentsState.temporaryVisibleSegments.add(root);

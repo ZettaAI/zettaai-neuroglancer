@@ -33,6 +33,7 @@ const OVERVIEW_ACTIVE_KEY = "active";
 const OVERVIEW_MIN_SCORE_KEY = "minScore";
 const OVERVIEW_CLASS_KEY = "semanticClass";
 const OVERVIEW_MIN_FRACTION_KEY = "minClassFraction";
+const OVERVIEW_ONLY_CANDIDATES_KEY = "onlyCandidates";
 
 const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   "any",
@@ -59,6 +60,13 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
    */
   minScore = new WatchableValue<number>(0.8);
   semanticClass = new WatchableValue<SemanticClass>("any");
+  /**
+   * Put the segment itself away and leave only its candidates on screen. A
+   * neuron is far larger than the pieces being offered to it and hides most of
+   * them from the outside, so "where are the candidates" is often only
+   * answerable with the neuron out of the way.
+   */
+  onlyCandidates = new WatchableValue<boolean>(false);
   minClassFraction = new WatchableValue<number>(OVERVIEW_MIN_FRACTION_DEFAULT);
 
   constructor() {
@@ -67,11 +75,13 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
     this.registerDisposer(this.active.changed.add(reemit));
     this.registerDisposer(this.minScore.changed.add(reemit));
     this.registerDisposer(this.semanticClass.changed.add(reemit));
+    this.registerDisposer(this.onlyCandidates.changed.add(reemit));
     this.registerDisposer(this.minClassFraction.changed.add(reemit));
   }
 
   reset() {
     this.active.value = false;
+    this.onlyCandidates.value = false;
   }
 
   toJSON() {
@@ -84,6 +94,7 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
           ? undefined
           : this.semanticClass.value,
       [OVERVIEW_MIN_FRACTION_KEY]: this.minClassFraction.value,
+      [OVERVIEW_ONLY_CANDIDATES_KEY]: this.onlyCandidates.value || undefined,
     };
   }
 
@@ -104,6 +115,9 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, OVERVIEW_MIN_FRACTION_KEY, (value) => {
       this.minClassFraction.value = verifyFiniteFloat(value);
+    });
+    verifyOptionalObjectProperty(x, OVERVIEW_ONLY_CANDIDATES_KEY, (value) => {
+      this.onlyCandidates.value = verifyBoolean(value);
     });
   }
 }
