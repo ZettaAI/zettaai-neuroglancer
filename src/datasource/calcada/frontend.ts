@@ -72,6 +72,7 @@ import {
   overviewColors,
   partnerColors,
   partnersWithSemantics,
+  shownCandidates,
   partnerRoots,
   totalCandidates,
 } from "#src/datasource/calcada/candidate_heat.js";
@@ -3697,14 +3698,6 @@ class CandidateOverviewSession extends RefCounted {
       }),
     );
 
-    // The class filters change nothing the server was asked for, so they
-    // repaint from what is already here rather than going back out.
-    this.registerDisposer(
-      state.semanticClass.changed.add(() => this.repaint()),
-    );
-    this.registerDisposer(
-      state.minClassFraction.changed.add(() => this.repaint()),
-    );
   }
 
   private get segmentsState() {
@@ -3767,8 +3760,14 @@ class CandidateOverviewSession extends RefCounted {
     if (token !== this.fetchToken) return;
     this.pieces = fetched.flat();
     const withInfo = partnersWithSemantics(this.pieces);
+    const shown = shownCandidates(
+      this.pieces,
+      this.state.semanticClass.value,
+      this.state.minClassFraction.value,
+    );
+    const total = totalCandidates(this.pieces);
     this.setStatus(
-      `${totalCandidates(this.pieces).toLocaleString()} candidates · ` +
+      `${shown.toLocaleString()} of ${total.toLocaleString()} candidates · ` +
         `${this.pieces.length} pieces · ${withInfo} with semantics`,
     );
     this.repaint();

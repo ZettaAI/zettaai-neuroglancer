@@ -375,7 +375,7 @@ export function CalcadaTracePanel({
             </div>
 
             <div className="calcada-trace-panel-status">
-              {connection.overviewSession.status}
+              {connection.overviewSession.status || "Set the filters, then Apply"}
             </div>
           </>
         )}
