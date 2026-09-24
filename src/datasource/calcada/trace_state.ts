@@ -42,6 +42,9 @@ const TRACE_ACTIVE_KEY = "active";
 const TRACE_SEED_KEY = "seedRoot";
 const TRACE_MIN_PIECE_VOXELS_KEY = "minPieceVoxels";
 const TRACE_REJECTED_BY_KEY = "rejectedBy";
+const TRACE_MIN_SCORE_KEY = "minScore";
+const TRACE_CENTRE_KEY = "centreOnCandidate";
+const TRACE_ZOOM_KEY = "zoomOnCandidate";
 // Server-side alias for the authenticated user.
 export const TRACE_CURRENT_USER = "me";
 
@@ -75,6 +78,13 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // resolved by the server, which knows who the request is from — the browser
   // never learns its own user id.
   rejectedBy = new WatchableValue<string[]>([]);
+  // One threshold for both the trace and split error detection, so the pieces
+  // painted as likely errors are the ones whose candidates the trace offers.
+  minScore = new WatchableValue<number>(0);
+  // Moving the camera to every candidate costs the proofreader their bearings;
+  // both are theirs to turn off.
+  centreOnCandidate = new WatchableValue<boolean>(true);
+  zoomOnCandidate = new WatchableValue<boolean>(true);
 
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
@@ -94,6 +104,9 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.seedRoot.changed.add(reemit));
     this.registerDisposer(this.minPieceVoxels.changed.add(reemit));
     this.registerDisposer(this.rejectedBy.changed.add(reemit));
+    this.registerDisposer(this.minScore.changed.add(reemit));
+    this.registerDisposer(this.centreOnCandidate.changed.add(reemit));
+    this.registerDisposer(this.zoomOnCandidate.changed.add(reemit));
   }
 
   /**
@@ -136,6 +149,9 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       [TRACE_REJECTED_BY_KEY]: this.rejectedBy.value.length
         ? this.rejectedBy.value
         : undefined,
+      [TRACE_MIN_SCORE_KEY]: this.minScore.value || undefined,
+      [TRACE_CENTRE_KEY]: this.centreOnCandidate.value ? undefined : false,
+      [TRACE_ZOOM_KEY]: this.zoomOnCandidate.value ? undefined : false,
       [TRACE_SCOPE_KEY]: this.scope.value,
       [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
       [TRACE_SPHERE_CENTER_KEY]: this.sphereCenter.value
@@ -156,6 +172,15 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, TRACE_REJECTED_BY_KEY, (value) => {
       this.rejectedBy.value = parseArray(value, verifyString);
+    });
+    verifyOptionalObjectProperty(x, TRACE_MIN_SCORE_KEY, (value) => {
+      this.minScore.value = verifyFiniteFloat(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_CENTRE_KEY, (value) => {
+      this.centreOnCandidate.value = verifyBoolean(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_ZOOM_KEY, (value) => {
+      this.zoomOnCandidate.value = verifyBoolean(value);
     });
     verifyOptionalObjectProperty(x, TRACE_SCOPE_KEY, (value) => {
       this.scope.value =

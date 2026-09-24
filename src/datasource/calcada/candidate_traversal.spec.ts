@@ -118,6 +118,20 @@ describe("nextEntry", () => {
     expect(nextEntry(pool, new Set([1n]))).toBeUndefined();
     expect(remainingCount(pool, new Set([1n]))).toBe(0);
   });
+  it("skips entries below the score threshold without losing them", () => {
+    const pool = prependChildren(
+      seedPool([candidate(1, 0.9)]),
+      [candidate(2, 0.4)],
+      0,
+      new Set(),
+    );
+    expect(Number(nextEntry(pool, new Set(), 0.5)!.candidate.lineId)).toBe(1);
+    expect(remainingCount(pool, new Set(), 0.5)).toBe(1);
+    // Lowering the threshold brings the skipped child back ahead of its
+    // ancestor, where the depth-first walk had it.
+    expect(Number(nextEntry(pool, new Set(), 0.3)!.candidate.lineId)).toBe(2);
+    expect(remainingCount(pool, new Set(), 0.3)).toBe(2);
+  });
 });
 
 describe("prunePool", () => {

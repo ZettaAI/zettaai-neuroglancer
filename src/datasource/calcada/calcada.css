@@ -468,12 +468,12 @@
   border-radius: 4px;
 }
 
-.calcada-trace-panel-overview legend {
-  padding: 0 4px;
+.calcada-trace-panel-overview summary {
   font-size: 12px;
+  cursor: pointer;
 }
 
-/* Without a legend "red or green" is a guess. The bar is the scale itself, so
+/* Without a legend "green or red" is a guess. The bar is the scale itself, so
    it cannot drift from the colours the pieces are painted with. */
 .calcada-trace-panel-legend {
   display: grid;
@@ -488,7 +488,7 @@
   grid-area: scale;
   height: 6px;
   border-radius: 3px;
-  background: linear-gradient(to right, rgb(255 60 60), rgb(40 220 60));
+  background: linear-gradient(to right, rgb(41 219 61), rgb(255 61 61));
 }
 
 .calcada-trace-panel-legend span:nth-child(3) {

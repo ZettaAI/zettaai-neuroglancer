@@ -65,18 +65,35 @@ export function prependChildren(
   return [...fresh, ...pool];
 }
 
+/**
+ * A score threshold hides entries rather than dropping them. They keep their
+ * place in the stack, so lowering the threshold brings back what it skipped in
+ * the order the walk would have met it.
+ */
+function isOpen(
+  entry: PoolEntry,
+  decided: ReadonlySet<bigint>,
+  minScore: number,
+): boolean {
+  return (
+    !decided.has(entry.candidate.lineId) && entry.candidate.score >= minScore
+  );
+}
+
 export function nextEntry(
   pool: readonly PoolEntry[],
   decided: ReadonlySet<bigint>,
+  minScore = 0,
 ): PoolEntry | undefined {
-  return pool.find((entry) => !decided.has(entry.candidate.lineId));
+  return pool.find((entry) => isOpen(entry, decided, minScore));
 }
 
 export function remainingCount(
   pool: readonly PoolEntry[],
   decided: ReadonlySet<bigint>,
+  minScore = 0,
 ): number {
-  return pool.filter((entry) => !decided.has(entry.candidate.lineId)).length;
+  return pool.filter((entry) => isOpen(entry, decided, minScore)).length;
 }
 
 export function prunePool(

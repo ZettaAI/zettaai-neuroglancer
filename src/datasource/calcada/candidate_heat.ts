@@ -9,15 +9,14 @@
  */
 
 /**
- * @file Colouring a segment's pieces by the best merge candidate each still
- * offers, so a proofreader can see where in a neuron there is work before
- * committing to a seed point.
+ * @file Split error detection: colouring a segment's pieces by the best merge
+ * candidate each still offers. A strong candidate is a continuation the
+ * segment is probably missing, so the pieces that carry one are where it was
+ * split.
  *
- * The scale is absolute: red is a score of zero, green is one, and a colour
- * means the same thing on every segment. A segment whose candidates are all
- * weak therefore comes out uniformly red — which is the honest answer, where a
- * scale normalised to the segment's own best would dress its worst candidate up
- * as its most promising.
+ * The scale is absolute: green is a score of zero, red is one, and a colour
+ * means the same thing on every segment. A scale normalised to the segment's
+ * own best would dress its weakest candidate up as a likely error.
  */
 
 import { packColor } from "#src/util/color.js";
@@ -76,15 +75,15 @@ function packed(red: number, green: number, blue: number): bigint {
   return BigInt(packColor(vec4.fromValues(red, green, blue, 1)));
 }
 
-/** Red at zero through amber to green at one. */
+/**
+ * Green at zero through amber to red at one. A piece with no candidate is
+ * where nothing is missing, so it reads as fine; a strong candidate is a
+ * continuation the segment is probably lacking, which is a split error.
+ */
 export function heatColor(bestScore: number): bigint {
   const t = Math.max(0, Math.min(1, bestScore));
-  return packed(1 - t * 0.84, 0.24 + t * 0.62, 0.24);
+  return packed(0.16 + t * 0.84, 0.86 - t * 0.62, 0.24);
 }
-
-/** Outside the scale on purpose: a filtered-out piece is not a cold piece. */
-export const SEMANTIC_FAIL_COLOR = packed(0.27, 0.27, 0.31);
-export const SEMANTIC_UNKNOWN_COLOR = packed(0.43, 0.39, 0.51);
 
 export function classTotal(classes: PieceClasses): number {
   return (
@@ -111,52 +110,71 @@ export function semanticVerdict(
   return piece.classes[wanted] / total >= minFraction ? "pass" : "fail";
 }
 
-/**
- * The pieces the candidates would merge in, coloured by how good the proposal
- * is. These live in other segments and are therefore invisible until something
- * asks for them, which is the whole point of showing them: "where are the
- * candidates" is a question about the neighbours, not about this segment.
- */
-export function partnerColors(
-  pieces: readonly PieceOverview[],
-  wanted: SemanticClass,
-  minFraction: number,
-): Map<bigint, bigint> {
-  const colors = new Map<bigint, bigint>();
-  // Judged on the candidate, not on the piece offering it. A dendrite's
-  // candidates are worth looking at precisely when they are not dendrites, so
-  // testing the offering piece answers the opposite question.
-  const filtered = pieces.some((piece) => partnerTotal(piece) > 0)
-    ? wanted
-    : "any";
-  for (const piece of pieces) {
-    if (piece.bestPartnerPiece === 0n || piece.candidateCount === 0) continue;
-    const verdict = semanticVerdict(
-      { classes: piece.partnerClasses, hasInfo: piece.partnerHasInfo },
-      filtered,
-      minFraction,
-    );
-    // Asking for one class means only what is known to be that class. A
-    // candidate nobody ingested semantics for is not known to be vasculature,
-    // and showing it anyway is how a filter ends up looking like it does
-    // nothing — most candidates on this graph have no breakdown at all.
-    if (filtered === "any" ? verdict === "fail" : verdict !== "pass") continue;
-    colors.set(piece.bestPartnerPiece, heatColor(piece.bestScore));
-  }
-  return colors;
-}
-
-/** How many candidates the current filter would show. */
-export function shownCandidates(
-  pieces: readonly PieceOverview[],
-  wanted: SemanticClass,
-  minFraction: number,
-): number {
-  return partnerColors(pieces, wanted, minFraction).size;
+export interface SplitErrorFilter {
+  wanted: SemanticClass;
+  minFraction: number;
+  /** Shared with the trace: a piece is flagged by the candidates it would offer. */
+  minScore: number;
 }
 
 function partnerTotal(piece: PieceOverview): number {
   return piece.partnerHasInfo ? classTotal(piece.partnerClasses) : 0;
+}
+
+/**
+ * The score a piece is painted with: its best candidate's, or zero when there
+ * is none worth counting.
+ *
+ * The class is judged on the candidate, not on the piece: a dendrite missing a
+ * dendrite continuation is the error being looked for. Naming a class counts
+ * only candidates known to be that class — on a graph where most carry no
+ * breakdown, counting the unknown ones as well is how a filter ends up looking
+ * like it does nothing. A graph with no semantics at all is not filtered, so the
+ * class filter cannot silently paint everything green.
+ */
+function flaggedScores(
+  pieces: readonly PieceOverview[],
+  filter: SplitErrorFilter,
+): Map<bigint, number> {
+  const wanted = pieces.some((piece) => partnerTotal(piece) > 0)
+    ? filter.wanted
+    : "any";
+  const scores = new Map<bigint, number>();
+  for (const piece of pieces) {
+    const counts =
+      piece.candidateCount > 0 &&
+      piece.bestScore >= filter.minScore &&
+      semanticVerdict(
+        { classes: piece.partnerClasses, hasInfo: piece.partnerHasInfo },
+        wanted,
+        filter.minFraction,
+      ) === "pass";
+    scores.set(piece.pieceId, counts ? piece.bestScore : 0);
+  }
+  return scores;
+}
+
+export function splitErrorColors(
+  pieces: readonly PieceOverview[],
+  filter: SplitErrorFilter,
+): Map<bigint, bigint> {
+  const colors = new Map<bigint, bigint>();
+  for (const [pieceId, score] of flaggedScores(pieces, filter)) {
+    colors.set(pieceId, heatColor(score));
+  }
+  return colors;
+}
+
+/** How many pieces the current filter paints as a likely split error. */
+export function flaggedPieceCount(
+  pieces: readonly PieceOverview[],
+  filter: SplitErrorFilter,
+): number {
+  let count = 0;
+  for (const score of flaggedScores(pieces, filter).values()) {
+    if (score > 0) count++;
+  }
+  return count;
 }
 
 /** How many of the candidates on offer carry a semantic breakdown. */
@@ -164,35 +182,6 @@ export function partnersWithSemantics(
   pieces: readonly PieceOverview[],
 ): number {
   return pieces.filter((piece) => partnerTotal(piece) > 0).length;
-}
-
-export function totalCandidates(pieces: readonly PieceOverview[]): number {
-  return pieces.reduce((sum, piece) => sum + piece.candidateCount, 0);
-}
-
-export function overviewColors(
-  pieces: readonly PieceOverview[],
-  wanted: SemanticClass,
-  minFraction: number,
-): Map<bigint, bigint> {
-  const colors = new Map<bigint, bigint>();
-  // A graph with no semantics at all would otherwise answer "unknown" for every
-  // piece and flatten the whole map to one colour — the class filter silently
-  // taking the heat map with it. Nothing was asked of these pieces, so the
-  // filter simply does not apply and the scores stay visible.
-  if (!pieces.some((piece) => piece.hasInfo)) wanted = "any";
-  for (const piece of pieces) {
-    const verdict = semanticVerdict(piece, wanted, minFraction);
-    colors.set(
-      piece.pieceId,
-      verdict === "pass"
-        ? heatColor(piece.bestScore)
-        : verdict === "fail"
-          ? SEMANTIC_FAIL_COLOR
-          : SEMANTIC_UNKNOWN_COLOR,
-    );
-  }
-  return colors;
 }
 
 /** The dominant class of a piece, and how much of it that class accounts for. */
@@ -232,27 +221,4 @@ export function describePartner(piece: {
     `${size} · ${dominant.name} ${Math.round(dominant.fraction * 100)}%` +
     (dominant.name === "axon" ? "" : ` · axon ${axonPct}%`)
   );
-}
-
-/**
- * The segments the candidates live in, which is what has to be loaded — for
- * the candidates the filter actually lets through.
- *
- * Takes the same filter as the colours on purpose. Deriving the two separately
- * is what made a named class look like it did nothing: every candidate segment
- * was still brought on screen and only its colour was withheld.
- */
-export function partnerRoots(
-  pieces: readonly PieceOverview[],
-  wanted: SemanticClass,
-  minFraction: number,
-): bigint[] {
-  const shown = partnerColors(pieces, wanted, minFraction);
-  const roots = new Set<bigint>();
-  for (const piece of pieces) {
-    if (piece.bestPartnerRoot === 0n) continue;
-    if (!shown.has(piece.bestPartnerPiece)) continue;
-    roots.add(piece.bestPartnerRoot);
-  }
-  return [...roots];
 }

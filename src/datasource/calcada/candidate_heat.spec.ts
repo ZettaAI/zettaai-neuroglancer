@@ -4,15 +4,11 @@ import type {
   PieceOverview,
 } from "#src/datasource/calcada/candidate_heat.js";
 import {
-  SEMANTIC_FAIL_COLOR,
   describePartner,
-  SEMANTIC_UNKNOWN_COLOR,
+  flaggedPieceCount,
   heatColor,
-  overviewColors,
-  partnerColors,
-  partnerRoots,
-  totalCandidates,
   semanticVerdict,
+  splitErrorColors,
 } from "#src/datasource/calcada/candidate_heat.js";
 
 const noClasses: PieceClasses = {
@@ -46,9 +42,9 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
 const red = (color: bigint) => Number(color & 0xffn);
 
 describe("heatColor", () => {
-  it("cools toward red and warms toward green", () => {
-    expect(red(heatColor(0))).toBeGreaterThan(red(heatColor(0.5)));
-    expect(red(heatColor(0.5))).toBeGreaterThan(red(heatColor(1)));
+  it("runs from green for no candidate to red for a strong one", () => {
+    expect(red(heatColor(0))).toBeLessThan(red(heatColor(0.5)));
+    expect(red(heatColor(0.5))).toBeLessThan(red(heatColor(1)));
   });
 
   it("clamps scores outside the scale", () => {
@@ -82,33 +78,6 @@ describe("semanticVerdict", () => {
   });
 });
 
-describe("overviewColors", () => {
-  it("keeps the three outcomes apart", () => {
-    const colors = overviewColors(
-      [
-        piece({
-          pieceId: 1n,
-          bestScore: 0.9,
-          hasInfo: true,
-          classes: { ...noClasses, axon: 100 },
-        }),
-        piece({
-          pieceId: 2n,
-          bestScore: 0.9,
-          hasInfo: true,
-          classes: { ...noClasses, dendrite: 100 },
-        }),
-        piece({ pieceId: 3n, bestScore: 0.9, hasInfo: false }),
-      ],
-      "axon",
-      0.8,
-    );
-    expect(colors.get(1n)).toBe(heatColor(0.9));
-    expect(colors.get(2n)).toBe(SEMANTIC_FAIL_COLOR);
-    expect(colors.get(3n)).toBe(SEMANTIC_UNKNOWN_COLOR);
-  });
-});
-
 describe("describePartner", () => {
   const partner = (classes: Partial<PieceClasses>, hasInfo = true) => ({
     partnerVoxels: 2568,
@@ -135,123 +104,60 @@ describe("describePartner", () => {
   });
 });
 
-describe("overviewColors without semantics", () => {
-  it("keeps showing scores instead of flattening to one colour", () => {
-    const colors = overviewColors(
+const dendrite: PieceClasses = { ...noClasses, dendrite: 9, axon: 1 };
+const axon: PieceClasses = { ...noClasses, axon: 9, dendrite: 1 };
+const any = { wanted: "any" as const, minFraction: 0.8, minScore: 0 };
+
+describe("splitErrorColors", () => {
+  it("paints a piece by its best candidate, and a piece with none green", () => {
+    const colors = splitErrorColors(
       [
-        piece({ pieceId: 1n, bestScore: 0.9, hasInfo: false }),
-        piece({ pieceId: 2n, bestScore: 0.1, hasInfo: false }),
+        piece({ pieceId: 1n, bestScore: 0.9, candidateCount: 2 }),
+        piece({ pieceId: 2n }),
       ],
-      "axon",
-      0.8,
+      any,
     );
     expect(colors.get(1n)).toBe(heatColor(0.9));
-    expect(colors.get(2n)).toBe(heatColor(0.1));
+    expect(colors.get(2n)).toBe(heatColor(0));
   });
 
-  it("still applies the filter once any piece has semantics", () => {
-    const colors = overviewColors(
-      [
-        piece({
-          pieceId: 1n,
-          bestScore: 0.9,
-          hasInfo: true,
-          classes: { ...noClasses, dendrite: 100 },
-        }),
-        piece({ pieceId: 2n, bestScore: 0.9, hasInfo: false }),
-      ],
-      "axon",
-      0.8,
+  it("does not flag a piece whose best candidate is under the shared threshold", () => {
+    const pieces = [piece({ pieceId: 1n, bestScore: 0.6, candidateCount: 1 })];
+    expect(splitErrorColors(pieces, { ...any, minScore: 0.7 }).get(1n)).toBe(
+      heatColor(0),
     );
-    expect(colors.get(1n)).toBe(SEMANTIC_FAIL_COLOR);
-    expect(colors.get(2n)).toBe(SEMANTIC_UNKNOWN_COLOR);
-  });
-});
-
-describe("partnerColors", () => {
-  it("colours the candidate's own piece by how good the proposal is", () => {
-    const colors = partnerColors(
-      [
-        piece({
-          pieceId: 1n,
-          bestScore: 0.9,
-          bestPartnerPiece: 77n,
-          candidateCount: 3,
-        }),
-      ],
-      "any",
-      0.8,
-    );
-    expect(colors.get(77n)).toBe(heatColor(0.9));
-    expect(colors.has(1n)).toBe(false);
+    expect(flaggedPieceCount(pieces, { ...any, minScore: 0.7 })).toBe(0);
+    expect(flaggedPieceCount(pieces, { ...any, minScore: 0.5 })).toBe(1);
   });
 
-  it("leaves out pieces that offer nothing", () => {
-    const colors = partnerColors(
-      [piece({ pieceId: 1n, bestPartnerPiece: 0n, candidateCount: 0 })],
-      "any",
-      0.8,
-    );
-    expect(colors.size).toBe(0);
-  });
-});
-
-describe("totalCandidates", () => {
-  it("sums what each piece still offers", () => {
-    expect(
-      totalCandidates([
-        piece({ candidateCount: 3 }),
-        piece({ candidateCount: 4 }),
-      ]),
-    ).toBe(7);
-  });
-});
-
-describe("partnerRoots", () => {
-  const axon = { ...noClasses, axon: 100 };
-  const dendrite = { ...noClasses, dendrite: 100 };
-
-  it("brings on screen only what the filter lets through", () => {
+  it("judges the class on the candidate, not on the piece offering it", () => {
     const pieces = [
       piece({
         pieceId: 1n,
-        bestPartnerPiece: 7n,
-        bestPartnerRoot: 70n,
+        bestScore: 0.9,
         candidateCount: 1,
-        partnerClasses: axon,
-        partnerHasInfo: true,
-      }),
-      piece({
-        pieceId: 2n,
-        bestPartnerPiece: 8n,
-        bestPartnerRoot: 80n,
-        candidateCount: 1,
+        classes: axon,
         partnerClasses: dendrite,
         partnerHasInfo: true,
       }),
-    ];
-    expect(partnerRoots(pieces, "axon", 0.9)).toEqual([70n]);
-    expect(partnerRoots(pieces, "any", 0.9).sort()).toEqual([70n, 80n]);
-  });
-
-  it("leaves out candidates with no semantics once a class is named", () => {
-    const pieces = [
       piece({
-        pieceId: 1n,
-        bestPartnerPiece: 7n,
-        bestPartnerRoot: 70n,
+        pieceId: 2n,
+        bestScore: 0.9,
         candidateCount: 1,
+        classes: dendrite,
         partnerClasses: axon,
         partnerHasInfo: true,
       }),
-      piece({
-        pieceId: 2n,
-        bestPartnerPiece: 9n,
-        bestPartnerRoot: 90n,
-        candidateCount: 1,
-        partnerHasInfo: false,
-      }),
     ];
-    expect(partnerRoots(pieces, "axon", 0.9)).toEqual([70n]);
+    const filter = { ...any, wanted: "dendrite" as const };
+    expect(splitErrorColors(pieces, filter).get(1n)).toBe(heatColor(0.9));
+    expect(splitErrorColors(pieces, filter).get(2n)).toBe(heatColor(0));
+  });
+
+  it("ignores the class filter on a graph with no semantics at all", () => {
+    const pieces = [piece({ pieceId: 1n, bestScore: 0.9, candidateCount: 1 })];
+    expect(
+      flaggedPieceCount(pieces, { ...any, wanted: "dendrite" as const }),
+    ).toBe(1);
   });
 });
