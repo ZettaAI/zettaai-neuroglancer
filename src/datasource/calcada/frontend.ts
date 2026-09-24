@@ -188,6 +188,7 @@ import type {
 } from "#src/segmentation_display_state/frontend.js";
 import {
   getBaseObjectColor,
+  getObjectColor,
   augmentSegmentId,
   resetTemporaryVisibleSegmentsState,
   SegmentationLayerSharedObject,
@@ -3789,6 +3790,7 @@ class CandidateOverviewSession extends RefCounted {
     // display-only and put back on the way out.
     const { displayState } = this.layer;
     const { segmentsState } = this;
+    const seedRoot = [...segmentsState.visibleSegments][0];
     if (!this.priorDisplayStateSaved) {
       this.priorBaseSegmentHighlighting =
         displayState.baseSegmentHighlighting.value;
@@ -3812,9 +3814,16 @@ class CandidateOverviewSession extends RefCounted {
     for (const root of segmentsState.visibleSegments) {
       segmentsState.temporaryVisibleSegments.add(root);
     }
-    for (const [piece, color] of colors) {
+    // The segment keeps its own colour. Painting its pieces individually is a
+    // side effect of the per-fragment mode the candidates need, not something
+    // asked for: the red-to-green scale is there to pick the candidates OUT of
+    // the segment, and a segment wearing the same scale hides them again.
+    const ownColor = BigInt(
+      packColor(getObjectColor(displayState, seedRoot ?? 0n, 1)),
+    );
+    for (const piece of colors.keys()) {
       segmentsState.temporaryVisibleSegments.add(piece);
-      displayState.tempSegmentStatedColors2d.value.set(piece, color);
+      displayState.tempSegmentStatedColors2d.value.set(piece, ownColor);
     }
     // The candidates themselves belong to other segments, so nothing puts them
     // on screen unless this does. They carry the score of the proposal that

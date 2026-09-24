@@ -136,10 +136,23 @@ export function partnerColors(
       filtered,
       minFraction,
     );
-    if (verdict === "fail") continue;
+    // Asking for one class means only what is known to be that class. A
+    // candidate nobody ingested semantics for is not known to be vasculature,
+    // and showing it anyway is how a filter ends up looking like it does
+    // nothing — most candidates on this graph have no breakdown at all.
+    if (filtered === "any" ? verdict === "fail" : verdict !== "pass") continue;
     colors.set(piece.bestPartnerPiece, heatColor(piece.bestScore));
   }
   return colors;
+}
+
+/** How many candidates the current filter would show. */
+export function shownCandidates(
+  pieces: readonly PieceOverview[],
+  wanted: SemanticClass,
+  minFraction: number,
+): number {
+  return partnerColors(pieces, wanted, minFraction).size;
 }
 
 function partnerTotal(piece: PieceOverview): number {
