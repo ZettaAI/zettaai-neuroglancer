@@ -3843,7 +3843,11 @@ class CandidateOverviewSession extends RefCounted {
     // rather than as loose geometry. A piece has no mesh of its own — it is a
     // fragment of its segment's — so naming the piece alone asks the mesh
     // source for something it cannot serve.
-    const roots = partnerRoots(this.pieces);
+    const roots = partnerRoots(
+      this.pieces,
+      this.state.semanticClass.value,
+      this.state.minClassFraction.value,
+    );
     if (roots.length !== 0) {
       for (const root of roots) {
         segmentsState.temporaryVisibleSegments.add(root);

@@ -234,11 +234,25 @@ export function describePartner(piece: {
   );
 }
 
-/** The segments the candidates live in, which is what has to be loaded. */
-export function partnerRoots(pieces: readonly PieceOverview[]): bigint[] {
+/**
+ * The segments the candidates live in, which is what has to be loaded — for
+ * the candidates the filter actually lets through.
+ *
+ * Takes the same filter as the colours on purpose. Deriving the two separately
+ * is what made a named class look like it did nothing: every candidate segment
+ * was still brought on screen and only its colour was withheld.
+ */
+export function partnerRoots(
+  pieces: readonly PieceOverview[],
+  wanted: SemanticClass,
+  minFraction: number,
+): bigint[] {
+  const shown = partnerColors(pieces, wanted, minFraction);
   const roots = new Set<bigint>();
   for (const piece of pieces) {
-    if (piece.bestPartnerRoot !== 0n) roots.add(piece.bestPartnerRoot);
+    if (piece.bestPartnerRoot === 0n) continue;
+    if (!shown.has(piece.bestPartnerPiece)) continue;
+    roots.add(piece.bestPartnerRoot);
   }
   return [...roots];
 }
