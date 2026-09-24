@@ -80,6 +80,17 @@ export interface EditPreferences {
    * asked first. The refusal itself stays server-of-record in the scan.
    */
   readonly automerge?: boolean;
+  /**
+   * Merge strategy when a conflict is reconciled. Absent means
+   * {@link DEFAULT_MERGE_STRATEGY}.
+   *
+   * "reload" (default) drops local edits in chunks where both sides changed
+   * the same voxels, reloading those chunks from the remote.
+   *
+   * "keep-merge" uses the three-way merge result, which keeps local edits on
+   * collisions (the merge kernel keeps mine when both sides disagree).
+   */
+  readonly mergeStrategy?: "reload" | "keep-merge";
 }
 
 /**
@@ -91,6 +102,9 @@ export interface EditPreferences {
  * is one undo step and always announces what it discarded.
  */
 export const DEFAULT_AUTOMERGE = true;
+
+/** Default merge strategy: reload chunks with collisions from the remote. */
+export const DEFAULT_MERGE_STRATEGY: "reload" | "keep-merge" = "reload";
 
 /**
  * Trackable wrapping the `editPreferences` block on `ngState`. The value is
@@ -171,6 +185,14 @@ function parseAutomerge(x: unknown): boolean | undefined {
   return typeof x === "boolean" ? x : undefined;
 }
 
+/** Parse the merge strategy. Only recognizes the two valid strategies. */
+function parseMergeStrategy(
+  x: unknown,
+): "reload" | "keep-merge" | undefined {
+  if (x === "reload" || x === "keep-merge") return x;
+  return undefined;
+}
+
 export function parseEditPreferences(x: unknown): EditPreferences | null {
   if (x === null || x === undefined) return null;
   if (typeof x !== "object") throw new Error("not-an-object");
@@ -178,10 +200,12 @@ export function parseEditPreferences(x: unknown): EditPreferences | null {
   const resolutions = parseResolutions(obj.resolutions);
   const tooling = parseTooling(obj.tooling);
   const automerge = parseAutomerge(obj.automerge);
+  const mergeStrategy = parseMergeStrategy(obj.mergeStrategy);
   if (
     resolutions === undefined &&
     tooling === undefined &&
-    automerge === undefined
+    automerge === undefined &&
+    mergeStrategy === undefined
   ) {
     return null;
   }
@@ -189,6 +213,7 @@ export function parseEditPreferences(x: unknown): EditPreferences | null {
     ...(resolutions !== undefined ? { resolutions } : {}),
     ...(tooling !== undefined ? { tooling } : {}),
     ...(automerge !== undefined ? { automerge } : {}),
+    ...(mergeStrategy !== undefined ? { mergeStrategy } : {}),
   };
 }
 
@@ -201,4 +226,14 @@ export function parseEditPreferences(x: unknown): EditPreferences | null {
  */
 export function automergeEnabled(preferences: EditPreferences | null): boolean {
   return preferences?.automerge ?? DEFAULT_AUTOMERGE;
+}
+
+/**
+ * Merge strategy for reconciling conflicts: reload chunks with collisions
+ * from the remote (default) or keep the merge result (keep local edits).
+ */
+export function getMergeStrategy(
+  preferences: EditPreferences | null,
+): "reload" | "keep-merge" {
+  return preferences?.mergeStrategy ?? DEFAULT_MERGE_STRATEGY;
 }

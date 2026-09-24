@@ -166,7 +166,10 @@ import {
   ZExtrapolationTool,
   zExtrapolationToolDefinition,
 } from "#src/editing/tool_runtimes/z_extrapolation_tool.js";
-import { TrackableEditPreferences } from "#src/editing/tooling/edit_preferences.js";
+import {
+  TrackableEditPreferences,
+  getMergeStrategy,
+} from "#src/editing/tooling/edit_preferences.js";
 import { EditScope } from "#src/editing/tooling/edit_scope.js";
 import type { EditToolContext } from "#src/editing/tooling/edit_tool.js";
 import { SessionToolBinder } from "#src/editing/tooling/session_tool_binder.js";
@@ -2048,12 +2051,12 @@ export class EditSessionHost extends RefCounted {
           remote.asView(),
           write.owned,
         );
-        // Any colliding voxel costs the whole owned box: it goes back to the
-        // remote and the local edits in it are dropped. The merged buffer is
-        // discarded in that case — one chunk-sized allocation wasted on a
-        // path that has just done network reads, and the merge is precisely
-        // what detected the collision.
-        const reload = mustReloadFromRemote(merge);
+        // Decide whether to reload chunks with collisions based on the merge
+        // strategy preference. `mustReloadFromRemote` detects collisions; the
+        // strategy preference determines whether to act on that detection.
+        const hasCollision = mustReloadFromRemote(merge);
+        const strategy = getMergeStrategy(this.editPreferences.value.value);
+        const reload = strategy === "reload" && hasCollision;
         asWritableBytes(slot.data).set(
           reload
             ? reloadedOwnedRegion(slot.data, remote.asView(), write.owned)
@@ -3960,6 +3963,17 @@ export class EditSessionHost extends RefCounted {
   setAutomerge(enabled: boolean): void {
     const prev = this.editPreferences.value.value ?? {};
     this.editPreferences.value.value = { ...prev, automerge: enabled };
+  }
+
+  /**
+   * Change the merge strategy for reconciling conflicts.
+   *
+   * Unlike `tooling`, there is no live state object behind this to mirror, so
+   * it is written on the spot rather than through the debounced persist.
+   */
+  setMergeStrategy(strategy: "reload" | "keep-merge"): void {
+    const prev = this.editPreferences.value.value ?? {};
+    this.editPreferences.value.value = { ...prev, mergeStrategy: strategy };
   }
 
   private handleOpenFailure(err: unknown): void {
