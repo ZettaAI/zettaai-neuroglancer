@@ -3697,7 +3697,6 @@ class CandidateOverviewSession extends RefCounted {
         }
       }),
     );
-
   }
 
   private get segmentsState() {
