@@ -182,6 +182,7 @@
     "#src/editing/ui/tool_settings/z_extrapolation.js": "./src/editing/ui/tool_settings/z_extrapolation.tsx",
     "#src/widget/react/truncated_label.js": "./src/widget/react/truncated_label.tsx",
     "#src/widget/react/searchable_select.js": "./src/widget/react/searchable_select.tsx",
+    "#src/datasource/calcada/react/rejected_by_picker.js": "./src/datasource/calcada/react/rejected_by_picker.tsx",
     "#src/datasource/calcada/react/trace_panel.js": "./src/datasource/calcada/react/trace_panel.tsx",
     "#src/datasource/calcada/react/branch_picker.js": "./src/datasource/calcada/react/branch_picker.tsx",
     "#src/datasource/calcada/react/labeled_timestamp_picker.js": "./src/datasource/calcada/react/labeled_timestamp_picker.tsx",

@@ -9,18 +9,18 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { Fragment, useEffect, useReducer } from "react";
+import { Fragment, useCallback, useEffect, useReducer } from "react";
 
 import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
 import type { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import type {
   TraceScope,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 import {
-  TRACE_CURRENT_USER,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
@@ -64,6 +64,7 @@ export interface TracePanelConnection {
     undoLast(): Promise<void>;
   };
   canUndo(): boolean;
+  listCandidateReviewers(): Promise<string[]>;
 }
 
 /**
@@ -105,25 +106,6 @@ const KEY_HINTS: ReadonlyArray<[string, string]> = [
   ["Esc", "put the seed down, then leave"],
 ];
 
-type RejectedByMode = "anyone" | "me" | "custom";
-
-const REJECTED_BY_LABELS: ReadonlyArray<[RejectedByMode, string]> = [
-  ["anyone", "anyone"],
-  ["me", "only me"],
-  ["custom", "me and…"],
-];
-
-function rejectedByMode(rejectedBy: readonly string[]): RejectedByMode {
-  if (rejectedBy.length === 0) return "anyone";
-  return rejectedBy.some((user) => user !== TRACE_CURRENT_USER)
-    ? "custom"
-    : "me";
-}
-
-function otherUsers(rejectedBy: readonly string[]): string[] {
-  return rejectedBy.filter((user) => user !== TRACE_CURRENT_USER);
-}
-
 function clampRadius(radiusNm: number): number {
   return Math.min(
     TRACE_SPHERE_RADIUS_MAX_NM,
@@ -149,20 +131,20 @@ export function CalcadaTracePanel({
   const seedCenter = useWatchable(traceState.sphereCenter);
   const minPieceVoxels = useWatchable(traceState.minPieceVoxels);
   const rejectedBy = useWatchable(traceState.rejectedBy);
+  // Stable, or the picker's fetch-on-mount would refire on every render.
+  const loadReviewers = useCallback(
+    () => connection.listCandidateReviewers(),
+    [connection],
+  );
+  const minScore = useWatchable(traceState.minScore);
+  const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
+  const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const overviewActive = useWatchable(overviewState.active);
   const overviewClass = useWatchable(overviewState.semanticClass);
-  const overviewOnlyCandidates = useWatchable(overviewState.onlyCandidates);
-  const overviewMinScore = useWatchable(overviewState.minScore);
   const overviewMinFraction = useWatchable(overviewState.minClassFraction);
 
-  const mode = rejectedByMode(rejectedBy);
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
-
-  const setRejectedBy = (nextMode: RejectedByMode, users: string[]) => {
-    traceState.rejectedBy.value =
-      nextMode === "anyone" ? [] : [TRACE_CURRENT_USER, ...users];
-  };
 
   return (
     <div className="calcada-trace-panel">
@@ -274,158 +256,130 @@ export function CalcadaTracePanel({
         />
       </label>
 
-      {/* Proofreaders disagree, so whose rejections count is a setting rather
-          than a rule. "me" is sent verbatim — the server resolves it, because
-          the browser holds an opaque token and has no idea whose it is. */}
+      {/* One threshold for the trace and for split error detection, so the
+          pieces painted as likely errors are the ones the trace will offer.
+          Lowering it brings back skipped candidates in stack order. */}
       <label className="calcada-trace-panel-row">
-        Skip rejected by
-        <Select
-          value={mode}
-          onValueChange={(next) =>
-            setRejectedBy(next as RejectedByMode, otherUsers(rejectedBy))
-          }
-        >
-          <SelectTrigger size="sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {REJECTED_BY_LABELS.map(([value, label]) => (
-              <SelectItem key={value} value={value}>
-                {label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        Min score
+        <Input
+          type="number"
+          min={0}
+          max={1}
+          step={0.05}
+          title="Hide candidates scoring below this, in the trace and in split error detection"
+          value={minScore}
+          onChange={(event) => {
+            const parsed = Number.parseFloat(event.target.value);
+            traceState.minScore.value = Number.isFinite(parsed)
+              ? Math.max(0, Math.min(1, parsed))
+              : 0;
+          }}
+        />
       </label>
 
-      {mode === "custom" && (
-        <Input
-          type="text"
-          placeholder="tommy@zetta.ai, …"
-          title="Comma-separated users whose rejections to skip as well"
-          defaultValue={otherUsers(rejectedBy).join(", ")}
-          onBlur={(event) =>
-            setRejectedBy(
-              "custom",
-              event.target.value
-                .split(",")
-                .map((user) => user.trim())
-                .filter((user) => user.length > 0),
-            )
-          }
+      {/* Proofreaders disagree, so whose rejections count is a setting rather
+          than a rule. Nothing selected means anyone's. */}
+      <div className="calcada-trace-panel-row">
+        Skip rejected by
+        <RejectedByPicker
+          value={rejectedBy}
+          onChange={(users) => {
+            traceState.rejectedBy.value = users;
+          }}
+          loadReviewers={loadReviewers}
         />
-      )}
+      </div>
 
-      <fieldset className="calcada-trace-panel-overview">
-        <legend>
-          <label>
-            <input
-              type="checkbox"
-              checked={overviewActive}
+      <label className="calcada-trace-panel-check">
+        <input
+          type="checkbox"
+          checked={centreOnCandidate}
+          onChange={(event) => {
+            traceState.centreOnCandidate.value = event.target.checked;
+          }}
+        />
+        Centre on each candidate
+      </label>
+      <label className="calcada-trace-panel-check">
+        <input
+          type="checkbox"
+          checked={zoomOnCandidate}
+          onChange={(event) => {
+            traceState.zoomOnCandidate.value = event.target.checked;
+          }}
+        />
+        Zoom the 3D view to each candidate
+      </label>
+
+      <details
+        className="calcada-trace-panel-overview"
+        open={overviewActive}
+        onToggle={(event) => {
+          overviewState.active.value = event.currentTarget.open;
+        }}
+      >
+        <summary>Split error detection</summary>
+        <div className="calcada-trace-panel-legend">
+          <span className="calcada-trace-panel-legend-scale" />
+          <span>likely fine</span>
+          <span>likely split</span>
+        </div>
+
+        <label className="calcada-trace-panel-row">
+          Candidates that are
+          <Select
+            value={overviewClass}
+            onValueChange={(next) => {
+              overviewState.semanticClass.value = next as SemanticClass;
+            }}
+          >
+            <SelectTrigger size="sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SEMANTIC_CLASSES.map((name) => (
+                <SelectItem key={name} value={name}>
+                  {name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </label>
+
+        {overviewClass !== "any" && (
+          <label className="calcada-trace-panel-row">
+            at least, %
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              step={5}
+              value={Math.round(overviewMinFraction * 100)}
               onChange={(event) => {
-                overviewState.active.value = event.target.checked;
+                const parsed = Number.parseFloat(event.target.value);
+                if (Number.isFinite(parsed)) {
+                  overviewState.minClassFraction.value = parsed / 100;
+                }
               }}
             />
-            Candidate overview
           </label>
-        </legend>
-
-        {overviewActive && (
-          <>
-            <div className="calcada-trace-panel-legend">
-              <span className="calcada-trace-panel-legend-scale" />
-              <span>no candidates</span>
-              <span>strong</span>
-            </div>
-
-            <label className="calcada-trace-panel-row">
-              Min score
-              <Input
-                type="number"
-                min={0}
-                max={1}
-                step={0.05}
-                value={overviewMinScore}
-                onChange={(event) => {
-                  const parsed = Number.parseFloat(event.target.value);
-                  if (Number.isFinite(parsed)) {
-                    overviewState.minScore.value = parsed;
-                  }
-                }}
-              />
-            </label>
-
-            <label className="calcada-trace-panel-row">
-              Only pieces that are
-              <Select
-                value={overviewClass}
-                onValueChange={(next) => {
-                  overviewState.semanticClass.value = next as SemanticClass;
-                }}
-              >
-                <SelectTrigger size="sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {SEMANTIC_CLASSES.map((name) => (
-                    <SelectItem key={name} value={name}>
-                      {name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </label>
-
-            {overviewClass !== "any" && (
-              <label className="calcada-trace-panel-row">
-                at least, %
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={Math.round(overviewMinFraction * 100)}
-                  onChange={(event) => {
-                    const parsed = Number.parseFloat(event.target.value);
-                    if (Number.isFinite(parsed)) {
-                      overviewState.minClassFraction.value = parsed / 100;
-                    }
-                  }}
-                />
-              </label>
-            )}
-
-            <label
-              className="calcada-trace-panel-check"
-              title="Take the segment off screen and leave only its candidates"
-            >
-              <input
-                type="checkbox"
-                checked={overviewOnlyCandidates}
-                onChange={(event) => {
-                  overviewState.onlyCandidates.value = event.target.checked;
-                }}
-              />
-              Show only the candidates
-            </label>
-
-            <div className="calcada-trace-panel-buttons">
-              <Button
-                size="xs"
-                title="Load and colour the candidates matching these filters"
-                onClick={() => connection.overviewSession.apply()}
-              >
-                Apply
-              </Button>
-            </div>
-
-            <div className="calcada-trace-panel-status">
-              {connection.overviewSession.status ||
-                "Set the filters, then Apply"}
-            </div>
-          </>
         )}
-      </fieldset>
+
+        <div className="calcada-trace-panel-buttons">
+          <Button
+            size="xs"
+            title="Score every piece of the segment on screen"
+            onClick={() => connection.overviewSession.apply()}
+          >
+            Apply
+          </Button>
+        </div>
+
+        <div className="calcada-trace-panel-status">
+          {connection.overviewSession.status ||
+            "Apply to score the segment on screen"}
+        </div>
+      </details>
 
       <dl className="calcada-trace-panel-keys">
         {KEY_HINTS.map(([keys, meaning]) => (
