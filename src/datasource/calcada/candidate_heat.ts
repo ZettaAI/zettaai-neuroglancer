@@ -52,6 +52,9 @@ export interface PieceOverview {
   bestPartnerPiece: bigint;
   /** The segment holding that piece — what actually has a mesh to load. */
   bestPartnerRoot: bigint;
+  /** What that candidate is made of, which is what the class filter asks about. */
+  partnerClasses: PieceClasses;
+  partnerHasInfo: boolean;
   candidateCount: number;
   voxelCount: number;
   classes: PieceClasses;
@@ -120,13 +123,34 @@ export function partnerColors(
   minFraction: number,
 ): Map<bigint, bigint> {
   const colors = new Map<bigint, bigint>();
-  const filtered = pieces.some((piece) => piece.hasInfo) ? wanted : "any";
+  // Judged on the candidate, not on the piece offering it. A dendrite's
+  // candidates are worth looking at precisely when they are not dendrites, so
+  // testing the offering piece answers the opposite question.
+  const filtered = pieces.some((piece) => partnerTotal(piece) > 0)
+    ? wanted
+    : "any";
   for (const piece of pieces) {
     if (piece.bestPartnerPiece === 0n || piece.candidateCount === 0) continue;
-    if (semanticVerdict(piece, filtered, minFraction) === "fail") continue;
+    const verdict = semanticVerdict(
+      { classes: piece.partnerClasses, hasInfo: piece.partnerHasInfo },
+      filtered,
+      minFraction,
+    );
+    if (verdict === "fail") continue;
     colors.set(piece.bestPartnerPiece, heatColor(piece.bestScore));
   }
   return colors;
+}
+
+function partnerTotal(piece: PieceOverview): number {
+  return piece.partnerHasInfo ? classTotal(piece.partnerClasses) : 0;
+}
+
+/** How many of the candidates on offer carry a semantic breakdown. */
+export function partnersWithSemantics(
+  pieces: readonly PieceOverview[],
+): number {
+  return pieces.filter((piece) => partnerTotal(piece) > 0).length;
 }
 
 export function totalCandidates(pieces: readonly PieceOverview[]): number {
