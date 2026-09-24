@@ -2649,6 +2649,19 @@ class ZettaTraceSession extends RefCounted {
     const refetchOnFilterChange = () => {
       if (state.active.value) void this.loadCandidates();
     };
+    // Widening the seed's own sphere is one of the answers to running out of
+    // candidates, so the radius stays live once the seed is down. Debounced
+    // because the field fires on every keystroke.
+    const refetchOnRadiusChange = this.registerCancellable(
+      debounce(() => {
+        if (state.active.value && state.sphereCenter.value !== undefined) {
+          void this.loadCandidates();
+        }
+      }, 400),
+    );
+    this.registerDisposer(
+      state.sphereRadiusNm.changed.add(() => refetchOnRadiusChange()),
+    );
     this.registerDisposer(
       state.minPieceVoxels.changed.add(refetchOnFilterChange),
     );
@@ -2933,6 +2946,22 @@ class ZettaTraceSession extends RefCounted {
     // No "already the seed" shortcut: the sphere has just moved, so the same
     // segment is a different question and its candidates must be refetched.
     this.setSeed(value, baseValue);
+  }
+
+  /**
+   * Move the view to the seed. A depth-first walk can end up far from where it
+   * started, and the seed is the one place worth going back to.
+   */
+  goToSeed() {
+    const center = this.state.sphereCenter.value;
+    if (center === undefined) return;
+    this.layer.manager.root.globalPosition.value = Float32Array.from(center);
+  }
+
+  /** Drop the seed. No seed is the same thing as no trace. */
+  clearSeed() {
+    this.state.aiming.value = false;
+    this.state.active.value = false;
   }
 
   setSeed(rootId: bigint, pieceId?: bigint) {
@@ -3644,6 +3673,11 @@ class CandidateOverviewSession extends RefCounted {
   status = "";
   private fetchToken = 0;
   private pieces: PieceOverview[] = [];
+  // The segments this was scored for. While it is on, what is on screen comes
+  // from the temporary set, so removing a segment from the list changes
+  // nothing visible — the view would go on showing a segment the proofreader
+  // has already put away.
+  private scoredRoots: bigint[] = [];
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -3671,6 +3705,7 @@ class CandidateOverviewSession extends RefCounted {
         } else {
           ++this.fetchToken;
           this.pieces = [];
+          this.scoredRoots = [];
           this.clearColors();
           this.setStatus("");
         }
@@ -3688,6 +3723,23 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       connection.state.zettaTraceState.active.changed.add(() => {
         if (connection.state.zettaTraceState.active.value) {
+          state.active.value = false;
+        }
+      }),
+    );
+    // Hiding the segment changes nothing about which candidates were scored,
+    // so it costs a repaint rather than another whole-segment query — which is
+    // what makes it worth a checkbox you can flick while looking.
+    this.registerDisposer(
+      state.onlyCandidates.changed.add(() => this.repaint()),
+    );
+    // Putting the segment away is a decision about what to look at, and an
+    // overview of a segment that is no longer shown is not one.
+    this.registerDisposer(
+      this.segmentsState.visibleSegments.changed.add(() => {
+        if (!state.active.value || this.scoredRoots.length === 0) return;
+        const visible = this.segmentsState.visibleSegments;
+        if (this.scoredRoots.some((root) => !visible.has(root))) {
           state.active.value = false;
         }
       }),
@@ -3753,6 +3805,7 @@ class CandidateOverviewSession extends RefCounted {
     }
     if (token !== this.fetchToken) return;
     this.pieces = fetched.flat();
+    this.scoredRoots = wanted;
     const withInfo = partnersWithSemantics(this.pieces);
     const shown = shownCandidates(
       this.pieces,
@@ -3801,8 +3854,10 @@ class CandidateOverviewSession extends RefCounted {
     displayState.tempSegmentDefaultColor2d.value = undefined;
     resetTemporaryVisibleSegmentsState(segmentsState);
     segmentsState.useTemporaryVisibleSegments.value = true;
-    for (const root of segmentsState.visibleSegments) {
-      segmentsState.temporaryVisibleSegments.add(root);
+    if (!this.state.onlyCandidates.value) {
+      for (const root of segmentsState.visibleSegments) {
+        segmentsState.temporaryVisibleSegments.add(root);
+      }
     }
     for (const root of roots) {
       segmentsState.temporaryVisibleSegments.add(root);

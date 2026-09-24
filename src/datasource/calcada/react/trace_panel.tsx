@@ -58,6 +58,8 @@ export interface TracePanelConnection {
     readonly isBusy: boolean;
     reject(): void;
     skip(): void;
+    goToSeed(): void;
+    clearSeed(): void;
     accept(): Promise<void>;
     undoLast(): Promise<void>;
   };
@@ -144,10 +146,12 @@ export function CalcadaTracePanel({
   const scope = useWatchable(traceState.scope);
   const tracing = useWatchable(traceState.active);
   const radiusNm = useWatchable(traceState.sphereRadiusNm);
+  const seedCenter = useWatchable(traceState.sphereCenter);
   const minPieceVoxels = useWatchable(traceState.minPieceVoxels);
   const rejectedBy = useWatchable(traceState.rejectedBy);
   const overviewActive = useWatchable(overviewState.active);
   const overviewClass = useWatchable(overviewState.semanticClass);
+  const overviewOnlyCandidates = useWatchable(overviewState.onlyCandidates);
   const overviewMinScore = useWatchable(overviewState.minScore);
   const overviewMinFraction = useWatchable(overviewState.minClassFraction);
 
@@ -209,6 +213,33 @@ export function CalcadaTracePanel({
         </Select>
       </label>
 
+      {seedCenter !== undefined && (
+        <div className="calcada-trace-panel-row">
+          Seed at{" "}
+          {Array.from(seedCenter)
+            .map((value) => Math.round(value))
+            .join(", ")}
+          <span className="calcada-trace-panel-buttons">
+            <Button
+              size="xs"
+              variant="outline"
+              title="Move the view back to the seed"
+              onClick={() => traceSession.goToSeed()}
+            >
+              Go to
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              title="Drop the seed and end the trace"
+              onClick={() => traceSession.clearSeed()}
+            >
+              Clear
+            </Button>
+          </span>
+        </div>
+      )}
+
       <label className="calcada-trace-panel-row">
         Sphere radius, nm
         <Input
@@ -216,7 +247,7 @@ export function CalcadaTracePanel({
           min={TRACE_SPHERE_RADIUS_MIN_NM}
           max={TRACE_SPHERE_RADIUS_MAX_NM}
           step={100}
-          title="Radius of the cursor sphere (+ / − while aiming)"
+          title="Radius of the sphere. Changing it after the seed is placed re-picks the candidates."
           disabled={scope === "segment"}
           value={Math.round(radiusNm)}
           onChange={(event) => {
@@ -363,6 +394,20 @@ export function CalcadaTracePanel({
                 />
               </label>
             )}
+
+            <label
+              className="calcada-trace-panel-check"
+              title="Take the segment off screen and leave only its candidates"
+            >
+              <input
+                type="checkbox"
+                checked={overviewOnlyCandidates}
+                onChange={(event) => {
+                  overviewState.onlyCandidates.value = event.target.checked;
+                }}
+              />
+              Show only the candidates
+            </label>
 
             <div className="calcada-trace-panel-buttons">
               <Button
