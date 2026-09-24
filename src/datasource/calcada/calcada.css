@@ -421,6 +421,19 @@
   flex: 0 0 auto;
 }
 
+/* The reviewer picker takes a row's control slot as a whole. The rule above
+   would otherwise reach inside it and make each chip's remove button and the
+   search input 10em wide, which is what pushed the input onto its own line. */
+.calcada-trace-panel-reviewers {
+  width: 10em;
+  flex: 0 0 auto;
+}
+
+.calcada-trace-panel-reviewers input,
+.calcada-trace-panel-reviewers button {
+  width: auto;
+}
+
 /* A checkbox carries its label on the right, so it is not the row's "name on
    the left, control on the right" layout — laid out as one, space-between threw
    the text to the far edge and the input rule stretched the box to 10em. */

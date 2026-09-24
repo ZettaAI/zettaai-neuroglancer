@@ -3773,6 +3773,23 @@ class CandidateOverviewSession extends RefCounted {
     );
     this.registerDisposer(state.semanticClass.changed.add(repaint));
     this.registerDisposer(state.minClassFraction.changed.add(repaint));
+    // Size and whose rejections count are the trace's filters too, but they
+    // decide which candidates the server returns, so they cost a query. Only
+    // once something is scored: before that, Apply is still the way in.
+    const rescore = this.registerCancellable(
+      debounce(() => {
+        if (state.active.value && this.scoredRoots.length !== 0) {
+          void this.reload();
+        }
+      }, FILTER_INPUT_DEBOUNCE_MS),
+    );
+    const { zettaTraceState } = connection.state;
+    this.registerDisposer(
+      zettaTraceState.minPieceVoxels.changed.add(() => rescore()),
+    );
+    this.registerDisposer(
+      zettaTraceState.rejectedBy.changed.add(() => rescore()),
+    );
     // Putting the segment away is a decision about what to look at, and an
     // overview of a segment that is no longer shown is not one.
     this.registerDisposer(
@@ -3824,6 +3841,7 @@ class CandidateOverviewSession extends RefCounted {
     }
     const token = ++this.fetchToken;
     const wanted = roots.slice(0, DEBUG_MAX_ROOTS);
+    const traceState = this.connection.state.zettaTraceState;
     // Scoring a whole segment takes seconds. Without saying so the checkbox
     // looks like it did nothing at all.
     this.setStatus(
@@ -3837,6 +3855,8 @@ class CandidateOverviewSession extends RefCounted {
         wanted.map((root) =>
           this.connection.graph.graphServer.fetchCandidateOverview(root, {
             branchId: this.connection.graph.branchId.value,
+            minPieceVoxels: traceState.minPieceVoxels.value,
+            rejectedBy: traceState.rejectedBy.value,
           }),
         ),
       );
