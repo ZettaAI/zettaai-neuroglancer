@@ -10,6 +10,7 @@ import {
   heatColor,
   overviewColors,
   partnerColors,
+  partnerRoots,
   totalCandidates,
   semanticVerdict,
 } from "#src/datasource/calcada/candidate_heat.js";
@@ -203,5 +204,54 @@ describe("totalCandidates", () => {
         piece({ candidateCount: 4 }),
       ]),
     ).toBe(7);
+  });
+});
+
+describe("partnerRoots", () => {
+  const axon = { ...noClasses, axon: 100 };
+  const dendrite = { ...noClasses, dendrite: 100 };
+
+  it("brings on screen only what the filter lets through", () => {
+    const pieces = [
+      piece({
+        pieceId: 1n,
+        bestPartnerPiece: 7n,
+        bestPartnerRoot: 70n,
+        candidateCount: 1,
+        partnerClasses: axon,
+        partnerHasInfo: true,
+      }),
+      piece({
+        pieceId: 2n,
+        bestPartnerPiece: 8n,
+        bestPartnerRoot: 80n,
+        candidateCount: 1,
+        partnerClasses: dendrite,
+        partnerHasInfo: true,
+      }),
+    ];
+    expect(partnerRoots(pieces, "axon", 0.9)).toEqual([70n]);
+    expect(partnerRoots(pieces, "any", 0.9).sort()).toEqual([70n, 80n]);
+  });
+
+  it("leaves out candidates with no semantics once a class is named", () => {
+    const pieces = [
+      piece({
+        pieceId: 1n,
+        bestPartnerPiece: 7n,
+        bestPartnerRoot: 70n,
+        candidateCount: 1,
+        partnerClasses: axon,
+        partnerHasInfo: true,
+      }),
+      piece({
+        pieceId: 2n,
+        bestPartnerPiece: 9n,
+        bestPartnerRoot: 90n,
+        candidateCount: 1,
+        partnerHasInfo: false,
+      }),
+    ];
+    expect(partnerRoots(pieces, "axon", 0.9)).toEqual([70n]);
   });
 });
