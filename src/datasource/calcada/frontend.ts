@@ -3812,6 +3812,10 @@ class CandidateOverviewSession extends RefCounted {
       );
     }
     if (roots.length !== 0) this.connection.meshAddNewSegments(roots);
+    // Two flags gate a stated colour, not one: getBaseObjectColor consults the
+    // temporary map only when BOTH are set, so without this the scale is stored
+    // and the mesh goes on drawing its own hash colour.
+    displayState.honorTempStatedColorAlpha.value = true;
     displayState.useTempSegmentStatedColors2d.value = true;
     this.painted = true;
   }
@@ -3823,6 +3827,7 @@ class CandidateOverviewSession extends RefCounted {
 
     const { displayState } = this;
     displayState.useTempSegmentStatedColors2d.value = false;
+    displayState.honorTempStatedColorAlpha.value = false;
     displayState.tempSegmentStatedColors2d.value.clear();
     resetTemporaryVisibleSegmentsState(this.segmentsState);
   }
