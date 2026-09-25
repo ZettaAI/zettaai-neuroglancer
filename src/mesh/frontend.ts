@@ -590,7 +590,13 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
         const key = getObjectKey(objectId);
         const manifestChunk = manifestChunks.get(key);
         ++totalChunks;
-        if (manifestChunk === undefined) return;
+        // An empty manifest is not an answer either: a source can return one
+        // while it is still generating the object's mesh.
+        const fragmentIds = manifestChunk?.fragmentIds.length
+          ? manifestChunk.fragmentIds
+          : (this.source.provisionalFragmentIds(key) ??
+            manifestChunk?.fragmentIds);
+        if (fragmentIds === undefined) return;
         ++presentChunks;
         if (renderContext.emitColor && !colorFragments) {
           if (ghostSegments !== undefined) {
@@ -614,9 +620,9 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
         if (renderContext.emitPickID && !pickFragments) {
           meshShaderManager.setPickID(gl, shader, pickIndex!);
         }
-        totalChunks += manifestChunk.fragmentIds.length;
+        totalChunks += fragmentIds.length;
 
-        for (const fragmentId of manifestChunk.fragmentIds) {
+        for (const fragmentId of fragmentIds) {
           const { key: fragmentKey } = this.source.getFragmentKey(
             key,
             fragmentId,
@@ -858,6 +864,15 @@ export class MeshSource extends ChunkSource {
   }
   getFragmentKey(objectKey: string, fragmentId: string) {
     return { key: `${objectKey}/${fragmentId}`, fragmentId: fragmentId };
+  }
+
+  // Fragments to draw for an object whose manifest has not arrived yet. A source
+  // that already knows an object's contents — an edit's response names the
+  // pieces of the root it created — can answer here, so the object is drawn
+  // from fragments already on the GPU instead of vanishing until its manifest
+  // round-trips. Default: none, the object waits for its manifest as before.
+  provisionalFragmentIds(_objectKey: string): string[] | undefined {
+    return undefined;
   }
 
   // Per-fragment picking opt-in. When true, MeshLayer.draw assigns a distinct

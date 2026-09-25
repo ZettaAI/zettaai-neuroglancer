@@ -11,6 +11,7 @@
 
 import { Fragment, useCallback, useEffect, useReducer } from "react";
 
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
 import type { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_overview_state.js";
@@ -25,6 +26,7 @@ import {
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
+import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { NullarySignal } from "#src/util/signal.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +44,7 @@ import {
  * the module graph circular, since `frontend.ts` mounts this panel.
  */
 export interface TracePanelConnection {
+  readonly graph: { readonly branchId: WatchableValueInterface<number> };
   readonly state: {
     readonly zettaTraceState: ZettaTraceState;
     readonly overviewState: CalcadaOverviewState;
@@ -49,7 +52,6 @@ export interface TracePanelConnection {
   readonly overviewSession: {
     readonly changed: NullarySignal;
     readonly status: string;
-    apply(): void;
   };
   readonly traceSession: {
     readonly changed: NullarySignal;
@@ -127,6 +129,7 @@ export function CalcadaTracePanel({
   const aiming = useWatchable(traceState.aiming);
   const scope = useWatchable(traceState.scope);
   const tracing = useWatchable(traceState.active);
+  const branchId = useWatchable(connection.graph.branchId);
   const radiusNm = useWatchable(traceState.sphereRadiusNm);
   const seedCenter = useWatchable(traceState.sphereCenter);
   const minPieceVoxels = useWatchable(traceState.minPieceVoxels);
@@ -145,6 +148,20 @@ export function CalcadaTracePanel({
 
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
+
+  // A trace merges into the branch it runs on, so on main there is nothing to
+  // configure — only the way out.
+  if (branchId === MAIN_BRANCH_ID) {
+    return (
+      <div className="calcada-trace-panel">
+        <div className="calcada-trace-panel-warning">
+          Trace works on a branch only: every accept merges into the branch it
+          runs on. Switch to a branch, or create one, with the Branch control —
+          the segments you have selected come with you.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="calcada-trace-panel">
@@ -311,14 +328,17 @@ export function CalcadaTracePanel({
         Zoom the 3D view to each candidate
       </label>
 
-      <details
-        className="calcada-trace-panel-overview"
-        open={overviewActive}
-        onToggle={(event) => {
-          overviewState.active.value = event.currentTarget.open;
-        }}
-      >
-        <summary>Split error detection</summary>
+      <div className="calcada-trace-panel-overview">
+        <label className="calcada-trace-panel-check">
+          <input
+            type="checkbox"
+            checked={overviewActive}
+            onChange={(event) => {
+              overviewState.active.value = event.target.checked;
+            }}
+          />
+          Split error detection
+        </label>
         <div className="calcada-trace-panel-legend">
           <span className="calcada-trace-panel-legend-scale" />
           <span>likely fine</span>
@@ -365,21 +385,12 @@ export function CalcadaTracePanel({
           </label>
         )}
 
-        <div className="calcada-trace-panel-buttons">
-          <Button
-            size="xs"
-            title="Score every piece of the segment on screen"
-            onClick={() => connection.overviewSession.apply()}
-          >
-            Apply
-          </Button>
-        </div>
-
-        <div className="calcada-trace-panel-status">
-          {connection.overviewSession.status ||
-            "Apply to score the segment on screen"}
-        </div>
-      </details>
+        {overviewActive && (
+          <div className="calcada-trace-panel-status">
+            {connection.overviewSession.status}
+          </div>
+        )}
+      </div>
 
       <dl className="calcada-trace-panel-keys">
         {KEY_HINTS.map(([keys, meaning]) => (

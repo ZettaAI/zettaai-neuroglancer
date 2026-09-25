@@ -63,7 +63,10 @@ import {
   RENDER_RATIO_LIMIT,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
-import { BRANCH_PICKER_TITLE } from "#src/datasource/calcada/branch_picker_logic.js";
+import {
+  BRANCH_PICKER_TITLE,
+  MAIN_BRANCH_ID,
+} from "#src/datasource/calcada/branch_picker_logic.js";
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePartner,
@@ -77,6 +80,7 @@ import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
   nextEntry,
   prependChildren,
+  refreshEntries,
   prunePool,
   remainingCount,
   seedPool,
@@ -179,6 +183,7 @@ import {
 } from "#src/render_coordinate_transform.js";
 import type { RenderLayer } from "#src/renderlayer.js";
 import { RenderLayerRole } from "#src/renderlayer.js";
+import { getObjectKey } from "#src/segmentation_display_state/base.js";
 import type {
   SegmentationDisplayState3D,
   Uint64MapEntry,
@@ -386,6 +391,55 @@ class CalcadaMeshSource extends WithParameters(
   getFragmentKey(objectKey: string | null, fragmentId: string) {
     objectKey;
     return getCalcadaFragmentKey(fragmentId);
+  }
+
+  // What a root just made by an edit is drawn from until its own manifest
+  // arrives. Fragments are keyed by piece alone, so the pieces the edit moved
+  // are already on the GPU under the same keys; without this the merged or cut
+  // segment vanished for as long as its manifest took, which after a merge
+  // includes the server generating the mesh.
+  private provisionalManifests = new Map<string, string[]>();
+
+  provisionalFragmentIds(objectKey: string): string[] | undefined {
+    return this.provisionalManifests.get(objectKey);
+  }
+
+  /**
+   * Give each new root the fragments its pieces had under the roots it
+   * replaced. `piecesOf` names a new root's pieces when the edit split one
+   * root; a merge leaves it undefined and takes every old fragment.
+   */
+  provisionRoots(
+    oldRoots: readonly bigint[],
+    newRoots: readonly bigint[],
+    piecesOf?: (newRoot: bigint) => ReadonlySet<bigint>,
+  ) {
+    const oldFragments = oldRoots.flatMap(
+      (root) => this.chunks.get(getObjectKey(root))?.fragmentIds ?? [],
+    );
+    if (oldFragments.length === 0) return;
+    this.forgetSettledProvisions();
+    for (const root of newRoots) {
+      const pieces = piecesOf?.(root);
+      const fragments =
+        pieces === undefined
+          ? oldFragments
+          : oldFragments.filter((fragment) =>
+              pieces.has(this.getFragmentPickId(fragment)),
+            );
+      if (fragments.length !== 0) {
+        this.provisionalManifests.set(getObjectKey(root), fragments);
+      }
+    }
+  }
+
+  // A provision is only wanted until the root's own non-empty manifest is in.
+  private forgetSettledProvisions() {
+    for (const key of [...this.provisionalManifests.keys()]) {
+      if (this.chunks.get(key)?.fragmentIds.length) {
+        this.provisionalManifests.delete(key);
+      }
+    }
   }
 
   // Calcada mesh fragments are per-piece (the manifest lists "{piece_id}:0" per
@@ -2646,6 +2700,11 @@ class ZettaTraceSession extends RefCounted {
         this.onGraphEdited(oldRoots, newRoots),
       ),
     );
+    this.registerDisposer(
+      connection.graph.branchId.changed.add(() => {
+        void this.followSeedToBranch();
+      }),
+    );
     const refetchOnFilterChange = () => {
       if (state.active.value) void this.loadCandidates();
     };
@@ -2681,6 +2740,10 @@ class ZettaTraceSession extends RefCounted {
     this.registerDisposer(
       state.minScore.changed.add(() => repickOnScoreChange()),
     );
+    // A link can carry a running trace onto main; it is not resumed there.
+    if (state.active.value && this.branchId === MAIN_BRANCH_ID) {
+      state.active.value = false;
+    }
     if (state.active.value) this.enter();
   }
 
@@ -2881,7 +2944,7 @@ class ZettaTraceSession extends RefCounted {
   // leave the proofreader looking at a tab that says nothing about what just
   // happened. Only ever called on the way IN: leaving is not a reason to drag
   // the panel away from wherever they have since moved it.
-  private revealTraceTab() {
+  revealTraceTab() {
     for (const panel of this.layer.panels.panels) {
       if (panel.tabs.includes(CALCADA_TRACE_TAB_ID)) {
         panel.selectedTab.value = CALCADA_TRACE_TAB_ID;
@@ -2974,6 +3037,46 @@ class ZettaTraceSession extends RefCounted {
   }
 
   /** Drop the seed. No seed is the same thing as no trace. */
+  /**
+   * Stay on the same segment across a branch switch — the usual one being "I
+   * started on main, now make a branch". The seed is found again by its piece,
+   * which is what survives into a branch; its root and its candidates are read
+   * afresh there, since both differ per branch. The camera stays where it is.
+   */
+  private async followSeedToBranch() {
+    if (this.branchId === MAIN_BRANCH_ID) {
+      this.state.aiming.value = false;
+      this.state.active.value = false;
+      return;
+    }
+    if (!this.state.active.value) return;
+    const seedPiece = this.seedPieceId ?? this.current?.selfPieceId;
+    const token = ++this.fetchToken;
+    this.current = undefined;
+    this.clearAnnotation();
+    this.pool = [];
+    this.setStatus("Switching branch…");
+    let seedRoot: bigint | undefined;
+    try {
+      if (seedPiece !== undefined) {
+        seedRoot = await this.graphServer.getRoot(seedPiece, 0, this.branchId);
+      }
+    } catch {
+      seedRoot = undefined;
+    }
+    if (token !== this.fetchToken) return;
+    if (seedRoot === undefined) {
+      this.clearSeed();
+      StatusMessage.showTemporaryMessage(
+        "The seed does not exist on this branch — place a new one.",
+        6000,
+      );
+      return;
+    }
+    this.state.seedRoot.value = seedRoot;
+    await this.loadCandidates({ moveCamera: false });
+  }
+
   clearSeed() {
     this.state.aiming.value = false;
     this.state.active.value = false;
@@ -3094,7 +3197,13 @@ class ZettaTraceSession extends RefCounted {
     displayState.honorTempStatedColorAlpha.value = false;
   }
 
-  private showCurrent() {
+  /**
+   * `moveCamera` is off when the queue changed under the proofreader rather than
+   * by their hand — an edit made with another tool. Their view is where they
+   * were working; following the queue to its next candidate there is exactly
+   * the teleport a cut in debug mode used to cause.
+   */
+  private showCurrent({ moveCamera = true }: { moveCamera?: boolean } = {}) {
     this.clearAnnotation();
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
@@ -3180,11 +3289,13 @@ class ZettaTraceSession extends RefCounted {
     // a calcada layer. Position.value ignores an array whose length does not
     // match the coordinate space rank, so on a higher-rank space this simply
     // does not move rather than moving somewhere wrong.
-    if (this.state.centreOnCandidate.value) {
+    if (moveCamera && this.state.centreOnCandidate.value) {
       this.layer.manager.root.globalPosition.value =
         Float32Array.from(midpoint);
     }
-    if (this.state.zoomOnCandidate.value) this.frameCandidate(candidate);
+    if (moveCamera && this.state.zoomOnCandidate.value) {
+      this.frameCandidate(candidate);
+    }
 
     this.setStatus(
       `score ${candidate.score.toFixed(2)} · ${candidate.nInterfaces} interface(s)` +
@@ -3304,7 +3415,10 @@ class ZettaTraceSession extends RefCounted {
     };
   }
 
-  private async loadCandidates(retryWhenEmpty = false) {
+  private async loadCandidates({
+    retryWhenEmpty = false,
+    moveCamera = true,
+  }: { retryWhenEmpty?: boolean; moveCamera?: boolean } = {}) {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     const token = ++this.fetchToken;
@@ -3335,7 +3449,7 @@ class ZettaTraceSession extends RefCounted {
 
     this.pool = seedPool(fetched);
     this.warnIfSphereWasIgnored(fetched);
-    this.showCurrent();
+    this.showCurrent({ moveCamera });
   }
 
   /**
@@ -3668,10 +3782,26 @@ class ZettaTraceSession extends RefCounted {
       );
       if (outcome === "superseded") {
         // A cut replaced one of the two pieces. Which half now holds the
-        // candidate is the server's answer, not a guess worth making here, so
-        // the candidate is dropped and the reload below brings back the one it
-        // re-bound.
+        // candidate is the server's answer, not a guess worth making here. The
+        // queue keeps its order, but every entry is swapped for the server's
+        // current version: the queued copy still names the retired piece and
+        // its old root, which is what drew the candidate uncut until a reload.
         this.setStatus("segment was cut — reloading candidates");
+        const fresh = await this.fetchChildren(resolvedSeedRoot);
+        if (token !== this.fetchToken) return;
+        this.current = undefined;
+        this.clearAnnotation();
+        reconcile(resolvedSeedRoot);
+        this.pool = refreshEntries(this.prunedPool(), fresh);
+        if (remainingCount(this.pool, this.decided) === 0) {
+          await this.loadCandidates({
+            retryWhenEmpty: true,
+            moveCamera: false,
+          });
+          return;
+        }
+        this.showCurrent({ moveCamera: false });
+        return;
       }
       if (outcome === "rerooted") {
         this.current = { ...this.current, partnerRootId: newPartnerRoot };
@@ -3690,10 +3820,10 @@ class ZettaTraceSession extends RefCounted {
     if (remainingCount(this.pool, this.decided) === 0) {
       // The edit answered or cut away everything queued, so there is no walk
       // left to preserve and the seed is the only thing still worth asking.
-      await this.loadCandidates(true);
+      await this.loadCandidates({ retryWhenEmpty: true, moveCamera: false });
       return;
     }
-    this.showCurrent();
+    this.showCurrent({ moveCamera: false });
   }
 }
 
@@ -3711,10 +3841,9 @@ class CandidateOverviewSession extends RefCounted {
   readonly changed = new NullarySignal();
   status = "";
   private fetchToken = 0;
-  private pieces: PieceOverview[] = [];
-  // The segments this was scored for. Putting one away ends the detection, so
-  // its piece colours are not left behind for whatever is shown next.
-  private scoredRoots: bigint[] = [];
+  // Scores per segment, so putting one segment away drops only its colours and
+  // leaves the rest of the detection standing.
+  private piecesByRoot = new Map<bigint, PieceOverview[]>();
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -3739,12 +3868,9 @@ class CandidateOverviewSession extends RefCounted {
           connection.state.calcadaDebugState.active.value = false;
           connection.state.zettaTraceState.aiming.value = false;
           connection.state.zettaTraceState.active.value = false;
-          this.setStatus("Apply to score the segment on screen");
+          void this.sync();
         } else {
-          ++this.fetchToken;
-          this.pieces = [];
-          this.scoredRoots = [];
-          this.clearColors();
+          this.forget();
           this.setStatus("");
         }
       }),
@@ -3774,13 +3900,12 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(state.semanticClass.changed.add(repaint));
     this.registerDisposer(state.minClassFraction.changed.add(repaint));
     // Size and whose rejections count are the trace's filters too, but they
-    // decide which candidates the server returns, so they cost a query. Only
-    // once something is scored: before that, Apply is still the way in.
+    // decide which candidates the server returns, so the scores are refetched.
     const rescore = this.registerCancellable(
       debounce(() => {
-        if (state.active.value && this.scoredRoots.length !== 0) {
-          void this.reload();
-        }
+        if (!state.active.value) return;
+        this.piecesByRoot.clear();
+        void this.sync();
       }, FILTER_INPUT_DEBOUNCE_MS),
     );
     const { zettaTraceState } = connection.state;
@@ -3790,17 +3915,41 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       zettaTraceState.rejectedBy.changed.add(() => rescore()),
     );
-    // Putting the segment away is a decision about what to look at, and an
-    // overview of a segment that is no longer shown is not one.
+    // While it is on, detection follows what is on screen: a segment shown is
+    // scored, a segment put away stops being painted. Debounced because
+    // picking segments comes in bursts.
+    const followScreen = this.registerCancellable(
+      debounce(() => {
+        if (state.active.value) void this.sync();
+      }, FILTER_INPUT_DEBOUNCE_MS),
+    );
     this.registerDisposer(
-      this.segmentsState.visibleSegments.changed.add(() => {
-        if (!state.active.value || this.scoredRoots.length === 0) return;
-        const visible = this.segmentsState.visibleSegments;
-        if (this.scoredRoots.some((root) => !visible.has(root))) {
+      this.segmentsState.visibleSegments.changed.add(() => followScreen()),
+    );
+    // Detection lives in the Trace tab, which on main shows nothing but the way
+    // to a branch — so there it would be on with no switch to turn it off. On
+    // any other branch the scores are that branch's, so the old ones go and the
+    // segments carried over are scored afresh.
+    this.registerDisposer(
+      connection.graph.branchId.changed.add(() => {
+        if (!state.active.value) return;
+        if (connection.graph.branchId.value === MAIN_BRANCH_ID) {
           state.active.value = false;
+          return;
         }
+        this.forget();
+        followScreen();
       }),
     );
+    if (
+      state.active.value &&
+      connection.graph.branchId.value === MAIN_BRANCH_ID
+    ) {
+      state.active.value = false;
+    }
+    // A link can arrive with detection already on; nothing changes to set it
+    // going then.
+    if (state.active.value) void this.sync();
   }
 
   private get segmentsState() {
@@ -3811,13 +3960,14 @@ class CandidateOverviewSession extends RefCounted {
     return this.layer.displayState;
   }
 
-  /**
-   * Fetch and paint. Deliberately not automatic: a segment can name hundreds of
-   * candidate segments, and pulling every one of their meshes because a number
-   * changed is a long wait for a view nobody asked for yet.
-   */
-  apply() {
-    void this.reload();
+  private get pieces(): PieceOverview[] {
+    return [...this.piecesByRoot.values()].flat();
+  }
+
+  private forget() {
+    ++this.fetchToken;
+    this.piecesByRoot.clear();
+    this.clearColors();
   }
 
   private setStatus(text: string) {
@@ -3825,34 +3975,42 @@ class CandidateOverviewSession extends RefCounted {
     this.changed.dispatch();
   }
 
-  private async reload() {
+  /**
+   * Bring the scores in line with what is on screen: drop segments put away,
+   * score only the ones that are new. A whole-segment query takes seconds, so
+   * a segment already scored is never asked about again until a filter that
+   * the server applies changes.
+   */
+  private async sync() {
     if (!this.state.active.value) return;
-    const roots = [...this.segmentsState.visibleSegments];
-    if (roots.length === 0) {
-      this.pieces = [];
-      this.clearColors();
-      this.setStatus("Show a segment to see where its candidates are");
+    const visible = [...this.segmentsState.visibleSegments];
+    if (visible.length === 0) {
+      this.forget();
+      this.setStatus("Show a segment to see where it was split");
       return;
     }
-    if (roots.length > DEBUG_MAX_ROOTS) {
-      this.setStatus(
-        `Showing ${DEBUG_MAX_ROOTS} of ${roots.length} segments — each one is a whole-segment query`,
-      );
+    const wanted = visible.slice(0, DEBUG_MAX_ROOTS);
+    for (const root of [...this.piecesByRoot.keys()]) {
+      if (!wanted.includes(root)) this.piecesByRoot.delete(root);
+    }
+    const missing = wanted.filter((root) => !this.piecesByRoot.has(root));
+    if (missing.length === 0) {
+      this.repaint();
+      return;
     }
     const token = ++this.fetchToken;
-    const wanted = roots.slice(0, DEBUG_MAX_ROOTS);
     const traceState = this.connection.state.zettaTraceState;
     // Scoring a whole segment takes seconds. Without saying so the checkbox
     // looks like it did nothing at all.
     this.setStatus(
-      wanted.length === 1
+      missing.length === 1
         ? "Scoring the segment…"
-        : `Scoring ${wanted.length} segments…`,
+        : `Scoring ${missing.length} segments…`,
     );
     let fetched: PieceOverview[][];
     try {
       fetched = await Promise.all(
-        wanted.map((root) =>
+        missing.map((root) =>
           this.connection.graph.graphServer.fetchCandidateOverview(root, {
             branchId: this.connection.graph.branchId.value,
             minPieceVoxels: traceState.minPieceVoxels.value,
@@ -3867,9 +4025,13 @@ class CandidateOverviewSession extends RefCounted {
       return;
     }
     if (token !== this.fetchToken) return;
-    this.pieces = fetched.flat();
-    this.scoredRoots = wanted;
+    missing.forEach((root, i) => this.piecesByRoot.set(root, fetched[i]));
     this.repaint();
+    if (visible.length > DEBUG_MAX_ROOTS) {
+      this.setStatus(
+        `${this.status} · first ${DEBUG_MAX_ROOTS} of ${visible.length} segments`,
+      );
+    }
   }
 
   private get filter() {
@@ -3901,7 +4063,7 @@ class CandidateOverviewSession extends RefCounted {
     resetTemporaryVisibleSegmentsState(segmentsState);
     displayState.tempSegmentStatedColors2d.value.clear();
     segmentsState.useTemporaryVisibleSegments.value = true;
-    for (const root of this.scoredRoots) {
+    for (const root of this.piecesByRoot.keys()) {
       segmentsState.temporaryVisibleSegments.add(root);
     }
     for (const [piece, color] of colors) {
@@ -4056,14 +4218,20 @@ class GraphConnection extends SegmentationGraphSourceConnection {
 
     this.registerDisposer(
       this.graph.branchId.changed.add(() => {
-        // Drop selections + equivalences: piece IDs are branch-local, so
-        // a selected piece from the previous branch may not exist in the
-        // new one and triggers "piece not found" errors on getRoot.
+        // Empty the selections + equivalences: piece IDs are branch-local, so
+        // a selected piece from the previous branch may not exist in the new
+        // one and triggers "piece not found" errors on getRoot. What does
+        // exist there is carried back by carryRootsToBranch.
         // refreshChunkSources re-populates equivalences from the new
         // branch's LUT trailers as chunks load.
-        segmentsState.selectedSegments.clear();
-        segmentsState.visibleSegments.clear();
+        const visible = [...segmentsState.visibleSegments];
+        const selected = [...segmentsState.selectedSegments];
+        this.withoutSegmentMessages(() => {
+          segmentsState.selectedSegments.clear();
+          segmentsState.visibleSegments.clear();
+        });
         segmentsState.segmentEquivalences.clear();
+        void this.carryRootsToBranch(visible, selected);
         // Undo entries are branch-scoped operation ids; drop them so a Ctrl+Z
         // after switching branches can't revert an op on the wrong branch.
         this.undoStack.length = 0;
@@ -4451,6 +4619,12 @@ void main() {
     this.registerDisposer(
       registerActionListener(window, CALCADA_TRACE_TOGGLE_ACTION, () => {
         const { aiming } = state.zettaTraceState;
+        // A trace merges into the branch it runs on, and main is not a place
+        // for that. On main the key only opens the tab, which says why.
+        if (!aiming.value && this.graph.branchId.value === MAIN_BRANCH_ID) {
+          this.traceSession.revealTraceTab();
+          return;
+        }
         if (!aiming.value) {
           const { timestamp } = layer.displayState.segmentationGroupState.value;
           if (timestamp.value !== undefined) {
@@ -4681,6 +4855,18 @@ void main() {
     return undefined;
   }
 
+  // Keep an edited segment on screen while its new root's manifest loads.
+  private provisionMeshes(
+    oldRoots: readonly bigint[],
+    newRoots: readonly bigint[],
+    piecesOf?: (newRoot: bigint) => ReadonlySet<bigint>,
+  ) {
+    const meshSource = this.getMeshSource();
+    if (meshSource instanceof CalcadaMeshSource) {
+      meshSource.provisionRoots(oldRoots, newRoots, piecesOf);
+    }
+  }
+
   getMeshSource() {
     const { layer } = this;
     for (const dataSource of layer.dataSources) {
@@ -4759,6 +4945,14 @@ void main() {
     // voxels that still carry its id have to be read again.
     relabelledVoxels = false,
   ) {
+    const piecesByRoot = new Map(
+      newRoots.map((root, i) => [root, new Set(components[i] ?? [])] as const),
+    );
+    this.provisionMeshes(
+      [oldRoot],
+      newRoots,
+      (root) => piecesByRoot.get(root) ?? new Set<bigint>(),
+    );
     const segmentsState = this.layer.displayState.segmentationGroupState.value;
     // Drop the old root entirely — its equivalence class no longer
     // represents anything, and leaving it in visibleSegments would let a
@@ -4924,20 +5118,10 @@ void main() {
     ];
     if (named.length === 0) return;
 
-    const latest = new Map<bigint, bigint[]>();
-    try {
-      for (let i = 0; i < named.length; i += LATEST_ROOTS_BATCH) {
-        const batch = await this.graph.graphServer.fetchLatestRoots(
-          named.slice(i, i + LATEST_ROOTS_BATCH),
-          this.graph.branchId.value,
-        );
-        for (const [root, successors] of batch) latest.set(root, successors);
-      }
-    } catch {
-      // An old server without the endpoint, or a failed read: the link opens
-      // as it always did.
-      return;
-    }
+    const latest = await this.latestRoots(named);
+    // An old server without the endpoint, or a failed read: the link opens as
+    // it always did.
+    if (latest === undefined) return;
 
     let followed = 0;
     let dropped = 0;
@@ -4968,6 +5152,68 @@ void main() {
     }
     if (dropped > 0) parts.push(`${dropped} that no longer exist were removed`);
     StatusMessage.showTemporaryMessage(`${parts.join("; ")}.`, 6000);
+  }
+
+  /** What each root is on the current branch, or undefined if that is unknown. */
+  private async latestRoots(
+    roots: readonly bigint[],
+  ): Promise<Map<bigint, bigint[]> | undefined> {
+    const latest = new Map<bigint, bigint[]>();
+    try {
+      for (let i = 0; i < roots.length; i += LATEST_ROOTS_BATCH) {
+        const batch = await this.graph.graphServer.fetchLatestRoots(
+          roots.slice(i, i + LATEST_ROOTS_BATCH),
+          this.graph.branchId.value,
+        );
+        for (const [root, successors] of batch) latest.set(root, successors);
+      }
+    } catch {
+      return undefined;
+    }
+    return latest;
+  }
+
+  /**
+   * Carry what was on screen over to the branch just switched to.
+   *
+   * The lists had to be emptied first — piece ids are branch-local, and a
+   * selection naming something the new branch lacks errors on every lookup.
+   * But a branch is usually made from where the proofreader is working, so
+   * dropping everything loses their place: a trace kept its sphere and lost its
+   * segment. So each root is looked up on the new branch and brought back as
+   * whatever it is there, and only what does not exist is left behind.
+   */
+  private async carryRootsToBranch(
+    visible: readonly bigint[],
+    selected: readonly bigint[],
+  ) {
+    const branchId = this.graph.branchId.value;
+    const named = [...new Set([...visible, ...selected])];
+    if (named.length === 0) return;
+    const latest = await this.latestRoots(named);
+    if (latest === undefined || this.graph.branchId.value !== branchId) return;
+    const segmentsState = this.layer.displayState.segmentationGroupState.value;
+    let dropped = 0;
+    this.withoutSegmentMessages(() => {
+      for (const root of named) {
+        const successors = latest.get(root) ?? [];
+        if (successors.length === 0) dropped++;
+        for (const successor of successors) {
+          if (selected.includes(root)) {
+            segmentsState.selectedSegments.add(successor);
+          }
+          if (visible.includes(root)) {
+            segmentsState.visibleSegments.add(successor);
+          }
+        }
+      }
+    });
+    if (dropped > 0) {
+      StatusMessage.showTemporaryMessage(
+        `${dropped} segment(s) do not exist on this branch and were removed.`,
+        6000,
+      );
+    }
   }
 
   listCandidateReviewers(): Promise<string[]> {
@@ -5307,6 +5553,7 @@ void main() {
           selectionInNanometers(submission.source!, annotationToNanometers),
           this.graph.branchId.value,
         );
+        this.provisionMeshes([oldRootA, oldRootB], [newRoot]);
         const oldValues = new Uint64Set();
         oldValues.add(oldRootA);
         oldValues.add(oldRootB);
@@ -7177,7 +7424,6 @@ function branchLayerControl(): LayerControlFactory<SegmentationUserLayer> {
         mountComponent(controlElement, CalcadaBranchPicker, {
           graph: calcadaGraph,
           branchId,
-          segmentationGroupState,
         }),
       );
 
