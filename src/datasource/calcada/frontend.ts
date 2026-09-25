@@ -113,6 +113,7 @@ import {
 } from "#src/datasource/calcada/role_colors.js";
 import {
   classifyCandidateEdit,
+  piecesMergedIntoSeed,
   componentsWithCarvedParents,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
@@ -2638,6 +2639,8 @@ class ZettaTraceSession extends RefCounted {
   // The seed's own piece. Root ids die on every merge and cut; this does not,
   // so it is what the trace re-resolves itself from afterwards.
   private seedPieceId: bigint | undefined;
+  // The newest edit made before the current seed: undo stops above it.
+  private undoFloor: UndoableEdit | undefined;
   // Ordered depth-first: accepting a candidate puts the segment it merged at
   // the head, so its own candidates come before anything the seed offered.
   private pool: PoolEntry[] = [];
@@ -2845,6 +2848,9 @@ class ZettaTraceSession extends RefCounted {
     // at is this mode's exit contract.
     this.savedVisible = [...this.segmentsState.visibleSegments];
     this.savedSelected = [...this.segmentsState.selectedSegments];
+    // A trace resumed from a link has no seed placement to mark history at;
+    // what was edited before entering is not this trace's to undo.
+    this.undoFloor = this.connection.undoTop();
     this.priorUseTempSegmentStatedColors2d =
       this.layer.displayState.useTempSegmentStatedColors2d.value;
     this.dimmed.clear();
@@ -3092,6 +3098,7 @@ class ZettaTraceSession extends RefCounted {
   setSeed(rootId: bigint, pieceId?: bigint) {
     this.state.seedRoot.value = rootId;
     this.seedPieceId = pieceId;
+    this.undoFloor = this.connection.undoTop();
     this.current = undefined;
     this.pool = [];
     this.dimmed.clear();
@@ -3550,6 +3557,13 @@ class ZettaTraceSession extends RefCounted {
     }
     this.decided.add(accepted.lineId);
     this.acceptedLines.push(accepted.lineId);
+    // The edit handler skips the trace's own merges (the trace is busy), so the
+    // roots they retire are recorded here. Without this, leaving the trace put
+    // the pre-merge seed back on screen: a dead id still drawn from cached mesh
+    // and chunks, which no click in 3D could deselect.
+    for (const retired of [seedRoot, accepted.partnerRootId]) {
+      if (retired !== merged) this.retired.add(retired);
+    }
     this.state.seedRoot.value = merged;
     this.showOnly(merged);
 
@@ -3736,7 +3750,15 @@ class ZettaTraceSession extends RefCounted {
     // Taken now, synchronously: the notification that fired this is the edit
     // the carved pieces belong to.
     const carved = this.connection.takeCarvedPieces();
-    await this.refreshFromSeedPiece(oldRoots, newRoots, carved);
+    // Likewise which pieces each retired root held. A merge notifies before it
+    // rewrites the equivalences, so this is the last moment the map can say
+    // which pieces the segment merged into the seed brought with it.
+    const { segmentEquivalences } = this.segmentsState;
+    const piecesBefore = new Map<bigint, ReadonlySet<bigint>>();
+    for (const root of oldRoots) {
+      piecesBefore.set(root, new Set(segmentEquivalences.setElements(root)));
+    }
+    await this.refreshFromSeedPiece(oldRoots, newRoots, carved, piecesBefore);
   }
 
   /**
@@ -3749,8 +3771,23 @@ class ZettaTraceSession extends RefCounted {
    * and an over-eager offer is cheaper than a candidate that can never be
    * revisited.
    */
+  /**
+   * Undo reaches back to the current seed and no further. Each seed is its own
+   * piece of work; pressing Ctrl+Z once too often used to start taking back
+   * the edits of the seed before.
+   */
+  canUndo(): boolean {
+    return (
+      this.connection.canUndo() && this.connection.undoTop() !== this.undoFloor
+    );
+  }
+
   async undoLast() {
     if (this.bindings === undefined || this.busy) return;
+    if (!this.canUndo()) {
+      this.setStatus("Nothing to undo for this seed");
+      return;
+    }
     this.setBusy(true);
     this.setStatus("Undoing…");
     try {
@@ -3775,6 +3812,7 @@ class ZettaTraceSession extends RefCounted {
     oldRoots: Uint64Set,
     newRoots?: Uint64Set,
     carved: ReadonlySet<bigint> = new Set(),
+    piecesBefore: ReadonlyMap<bigint, ReadonlySet<bigint>> = new Map(),
   ) {
     // piece -> root reads go through a materialized view that lags an edit by
     // a moment, so a merge can keep answering with a root it just retired even
@@ -3810,11 +3848,22 @@ class ZettaTraceSession extends RefCounted {
       this.applyRoleColors(seed, candidate);
     };
     const resolveRoot = async (pieceId: bigint) => {
+      // The edit's own response has already rewritten piece -> root in the
+      // equivalences: a split applies its components, a merge its pieces. That
+      // is the answer. The server is asked only for a piece the map does not
+      // hold, because its replica can lag the write — which is how a split of
+      // the seed left the trace on a dead root and painted the halves yellow.
+      const known = this.segmentsState.segmentEquivalences.get(pieceId);
+      if (known !== pieceId && !retiredByEdit.has(known)) return known;
       const resolved = await this.getRootRetrying(pieceId, oldRoots);
       return replacement !== undefined && isStaleRoot(resolved, retiredByEdit)
         ? replacement
         : resolved;
     };
+    // The edit notification fires before a merge has applied its pieces to the
+    // equivalences; letting its synchronous remainder run first is what makes
+    // the map above the current answer.
+    await Promise.resolve();
     // Prefer the seed's own piece; the candidate's is the fallback for a trace
     // restored from a link, which carries no piece.
     const seedPiece = this.seedPieceId ?? this.current?.selfPieceId;
@@ -3919,6 +3968,28 @@ class ZettaTraceSession extends RefCounted {
     this.clearAnnotation();
     reconcile(resolvedSeedRoot);
     this.pool = this.prunedPool();
+    // A merge into the seed made by hand is an accept the trace did not make:
+    // what came in brings its own candidates, and they go on the stack the
+    // same way an accepted candidate's do.
+    const broughtIn = piecesMergedIntoSeed(
+      seedRoot,
+      resolvedSeedRoot,
+      newRoots,
+      piecesBefore,
+    );
+    if (broughtIn.size > 0) {
+      const children = await this.candidatesOfPieces(
+        resolvedSeedRoot,
+        broughtIn,
+      );
+      if (token !== this.fetchToken) return;
+      this.pool = prependChildren(
+        this.pool,
+        children,
+        this.currentDepth,
+        this.decided,
+      );
+    }
     if (remainingCount(this.pool, this.decided) === 0) {
       // The edit answered or cut away everything queued, so there is no walk
       // left to preserve and the seed is the only thing still worth asking.
@@ -3926,6 +3997,30 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     this.showCurrent({ moveCamera: false });
+  }
+
+  /**
+   * The seed's candidates that start on one of these pieces. The server has no
+   * filter by piece, so the whole segment is asked — with a wide limit, since
+   * the merged-in part's candidates compete with the rest of a large seed —
+   * and read consistently, because the merge was a moment ago.
+   */
+  private async candidatesOfPieces(
+    seedRoot: bigint,
+    pieces: ReadonlySet<bigint>,
+  ): Promise<EdgeCandidate[]> {
+    try {
+      const all = await this.graphServer.fetchCandidates(seedRoot, {
+        limit: SPHERE_FETCH_LIMIT,
+        minPieceVoxels: this.state.minPieceVoxels.value,
+        rejectedBy: this.state.rejectedBy.value,
+        branchId: this.branchId,
+        consistent: true,
+      });
+      return all.filter((candidate) => pieces.has(candidate.selfPieceId));
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -5145,6 +5240,11 @@ void main() {
 
   canUndo(): boolean {
     return this.undoStack.length > 0;
+  }
+
+  /** The edit Ctrl+Z would take back next; identity marks a place in history. */
+  undoTop(): UndoableEdit | undefined {
+    return this.undoStack[this.undoStack.length - 1];
   }
 
   /**
