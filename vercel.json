@@ -1,4 +1,41 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "headers": []
+  "headers": [],
+  "redirects": [
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "zettaai-neuroglancer.vercel.app" }],
+      "destination": "https://neuroglancer.research.zetta.ai/",
+      "permanent": false
+    },
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "zettaai-neuroglancer.vercel.app" }],
+      "destination": "https://neuroglancer.research.zetta.ai/:path*",
+      "permanent": false
+    },
+    {
+      "source": "/",
+      "has": [
+        { "type": "host", "value": "zettaai-neuroglancer-dev.vercel.app" }
+      ],
+      "destination": "https://neuroglancer-dev.research.zetta.ai/",
+      "permanent": false
+    },
+    {
+      "source": "/:path*",
+      "has": [
+        { "type": "host", "value": "zettaai-neuroglancer-dev.vercel.app" }
+      ],
+      "destination": "https://neuroglancer-dev.research.zetta.ai/:path*",
+      "permanent": false
+    }
+  ],
+  "git": {
+    "deploymentEnabled": {
+      "**": false,
+      "dev": true,
+      "main": true
+    }
+  }
 }
