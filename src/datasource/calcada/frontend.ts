@@ -2609,6 +2609,13 @@ class CalcadaDebugSession extends RefCounted {
 
 // The server walks history per root; it refuses more than this at once.
 const LATEST_ROOTS_BATCH = 200;
+/** Whether a candidate is bound to any of these pieces, on either end. */
+function namesAny(candidate: EdgeCandidate, pieces: ReadonlySet<bigint>) {
+  return (
+    pieces.has(candidate.partnerPieceId) || pieces.has(candidate.selfPieceId)
+  );
+}
+
 const FILTER_INPUT_DEBOUNCE_MS = 400;
 
 /**
@@ -3579,13 +3586,17 @@ class ZettaTraceSession extends RefCounted {
    * taken, following it is the whole point, and the branch may well leave the
    * region it started in.
    */
-  private async fetchChildren(partnerRoot: bigint): Promise<EdgeCandidate[]> {
+  private async fetchChildren(
+    partnerRoot: bigint,
+    { consistent = false }: { consistent?: boolean } = {},
+  ): Promise<EdgeCandidate[]> {
     try {
       return await this.graphServer.fetchCandidates(partnerRoot, {
         limit: CANDIDATE_FETCH_LIMIT,
         minPieceVoxels: this.state.minPieceVoxels.value,
         rejectedBy: this.state.rejectedBy.value,
         branchId: this.branchId,
+        consistent,
       });
     } catch {
       // A branch that cannot be read is a branch with no children, not a failed
@@ -3602,6 +3613,65 @@ class ZettaTraceSession extends RefCounted {
    * "not in my segment" would quietly delete the far half of the queue, which
    * is exactly the part a depth-first walk is heading towards.
    */
+  /**
+   * The current versions of the candidates a carve touched.
+   *
+   * Asked per candidate, in a small sphere around its own contact point: a
+   * re-bind keeps the contact and only changes the piece, so the answer there is
+   * exactly the re-bound candidate. Asking for the seed's whole candidate list
+   * instead returns its top scores only, and on a large neuron the candidate
+   * under review is often not among them — it was then dropped and the trace
+   * moved on to another. Consistent reads, because a plain one goes to a replica
+   * that has not seen the carve yet.
+   */
+  private async fetchAfterCarve(
+    seedRoot: bigint,
+    affected: readonly EdgeCandidate[],
+    carved: ReadonlySet<bigint>,
+  ): Promise<EdgeCandidate[]> {
+    const radius = traceSphereSemiAxes(
+      CARVE_REFRESH_RADIUS_NM,
+      this.layer.manager.root.coordinateSpace.value,
+    );
+    const around = async (candidate: EdgeCandidate) => {
+      if (radius === undefined) {
+        return this.fetchChildren(seedRoot, { consistent: true });
+      }
+      try {
+        return await this.graphServer.fetchCandidates(seedRoot, {
+          limit: SPHERE_FETCH_LIMIT,
+          minPieceVoxels: this.state.minPieceVoxels.value,
+          rejectedBy: this.state.rejectedBy.value,
+          branchId: this.branchId,
+          consistent: true,
+          center: [
+            candidate.pointA[0],
+            candidate.pointA[1],
+            candidate.pointA[2],
+          ],
+          radius: [radius[0], radius[1], radius[2]],
+        });
+      } catch {
+        return [];
+      }
+    };
+    const targets = affected.slice(0, CARVE_REFRESH_MAX_CANDIDATES);
+    const wanted = new Set(targets.map((candidate) => candidate.lineId));
+    let fresh = (await Promise.all(targets.map(around))).flat();
+    // A fallback, not the mechanism: the consistent read should already see
+    // the re-bind.
+    for (const delayMs of EMPTY_RETRY_DELAYS_MS) {
+      const stale = fresh.some(
+        (candidate) =>
+          wanted.has(candidate.lineId) && namesAny(candidate, carved),
+      );
+      if (!stale) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      fresh = (await Promise.all(targets.map(around))).flat();
+    }
+    return fresh;
+  }
+
   /** The candidate partner's current root, or the one it was fetched with. */
   private rootOfPiece(candidate: EdgeCandidate): bigint {
     const root = this.segmentsState.segmentEquivalences.get(
@@ -3663,7 +3733,10 @@ class ZettaTraceSession extends RefCounted {
     for (const id of oldRoots) {
       if (!newRoots.has(id)) this.retired.add(id);
     }
-    await this.refreshFromSeedPiece(oldRoots, newRoots);
+    // Taken now, synchronously: the notification that fired this is the edit
+    // the carved pieces belong to.
+    const carved = this.connection.takeCarvedPieces();
+    await this.refreshFromSeedPiece(oldRoots, newRoots, carved);
   }
 
   /**
@@ -3701,6 +3774,7 @@ class ZettaTraceSession extends RefCounted {
   private async refreshFromSeedPiece(
     oldRoots: Uint64Set,
     newRoots?: Uint64Set,
+    carved: ReadonlySet<bigint> = new Set(),
   ) {
     // piece -> root reads go through a materialized view that lags an edit by
     // a moment, so a merge can keep answering with a root it just retired even
@@ -3766,10 +3840,20 @@ class ZettaTraceSession extends RefCounted {
     // An edit that only re-rooted the candidate under review is not a reason to
     // throw away the review queue: follow the partner's piece and redraw in
     // place, so the proofreader keeps their position.
+    // A carve's response already says whether it cut the candidate, and asking
+    // the server instead is asking a view that lags the write: straight after
+    // the cut it still answers the carved piece with its old root, which read
+    // as a candidate merely re-rooted and drew it uncut.
+    const candidateWasCut =
+      this.current !== undefined &&
+      (carved.has(this.current.partnerPieceId) ||
+        carved.has(this.current.selfPieceId));
     if (this.current !== undefined) {
       let newPartnerRoot: bigint;
       try {
-        newPartnerRoot = await resolveRoot(this.current.partnerPieceId);
+        newPartnerRoot = candidateWasCut
+          ? 0n
+          : await resolveRoot(this.current.partnerPieceId);
       } catch (e) {
         this.setStatus(`Failed to re-resolve the candidate: ${e}`);
         return;
@@ -3787,12 +3871,30 @@ class ZettaTraceSession extends RefCounted {
         // current version: the queued copy still names the retired piece and
         // its old root, which is what drew the candidate uncut until a reload.
         this.setStatus("segment was cut — reloading candidates");
-        const fresh = await this.fetchChildren(resolvedSeedRoot);
+        // The candidate on screen, and anything else queued on a carved piece.
+        const affected = new Map<bigint, EdgeCandidate>([
+          [this.current.lineId, this.current],
+        ]);
+        for (const { candidate } of this.pool) {
+          if (namesAny(candidate, carved)) {
+            affected.set(candidate.lineId, candidate);
+          }
+        }
+        const fresh = await this.fetchAfterCarve(
+          resolvedSeedRoot,
+          [...affected.values()],
+          carved,
+        );
         if (token !== this.fetchToken) return;
         this.current = undefined;
         this.clearAnnotation();
         reconcile(resolvedSeedRoot);
-        this.pool = refreshEntries(this.prunedPool(), fresh);
+        // Whatever still names a carved piece is the view's stale answer, not
+        // a candidate: leaving it out beats drawing it whole.
+        this.pool = prunePool(
+          refreshEntries(this.prunedPool(), fresh),
+          (candidate) => !namesAny(candidate, carved),
+        );
         if (remainingCount(this.pool, this.decided) === 0) {
           await this.loadCandidates({
             retryWhenEmpty: true,
@@ -4932,6 +5034,25 @@ void main() {
    * or re-fetching chunks (which silently re-applies the stale LUT for
    * chunks the chunk manager still has cached).
    */
+  /**
+   * The pieces the next edit notification retired by carving. A carve's own
+   * response is the only prompt source for this: the server's reads go through
+   * a materialized view that lags the write, so straight after the cut it still
+   * answers the carved piece with its old root and still returns candidates
+   * bound to it. Taken once by whoever handles that notification.
+   */
+  private carvedPieces = new Set<bigint>();
+
+  noteCarvedPieces(pieces: readonly bigint[]) {
+    this.carvedPieces = new Set(pieces);
+  }
+
+  takeCarvedPieces(): ReadonlySet<bigint> {
+    const taken = this.carvedPieces;
+    this.carvedPieces = new Set();
+    return taken;
+  }
+
   notifyGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
     this.state.replaceSegments(oldRoots, newRoots);
   }
@@ -6086,11 +6207,15 @@ class CalcadaGraphServerInterface {
       // Both or neither: the server rejects half a sphere.
       center?: readonly [number, number, number];
       radius?: readonly [number, number, number];
+      // Read what every replica has, including a write made a moment ago. Many
+      // times the cost of a plain read, so only for straight after an edit.
+      consistent?: boolean;
     },
   ): Promise<EdgeCandidate[]> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     const params = new URLSearchParams({ int64_as_str: "1" });
     if (opts.batch) params.set("batch", opts.batch);
+    if (opts.consistent) params.set("consistent", "1");
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
     if (opts.minScore !== undefined) {
       params.set("min_score", String(opts.minScore));
@@ -8966,6 +9091,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             carved.ambiguous.length > 0,
           );
           graphConnection.meshAddNewSegments(newRoots);
+          graphConnection.noteCarvedPieces(splitPieces.map((sp) => sp.old));
           const oldRootSet = new Uint64Set();
           oldRootSet.add(oldRoot);
           const newRootSet = new Uint64Set();
@@ -9153,6 +9279,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             withParents.ambiguous.length > 0,
           );
           graphConnection.meshAddNewSegments(newRoots);
+          graphConnection.noteCarvedPieces(splitPieces.map((sp) => sp.old));
           const oldRootSet = new Uint64Set();
           oldRootSet.add(focus);
           const newRootSet = new Uint64Set();
@@ -9379,6 +9506,12 @@ const CANDIDATE_FETCH_LIMIT = 50;
 // A sphere holds few candidates, so trimming them to 50 buys nothing; 500 is
 // the server's own maxCandidateLimit.
 const SPHERE_FETCH_LIMIT = 500;
+// Around a candidate's contact point after a carve: the re-bound candidate keeps
+// that point, so a small sphere is enough to find it, and stays cheap.
+const CARVE_REFRESH_RADIUS_NM = 1000;
+// A carve touches a handful of queued candidates; more than this is not worth a
+// request each.
+const CARVE_REFRESH_MAX_CANDIDATES = 8;
 
 /**
  * Turns Zetta Trace on and off.
