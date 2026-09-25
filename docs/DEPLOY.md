@@ -72,4 +72,4 @@ Google sign-in derives its redirect from the page's own origin.
 ## Re-enabling cross-origin isolation
 
 COOP/COEP are commented out in three places that must move together: `nginx.conf`,
-`vercel.json`, and the dev server in `build_tools/cli.ts`. See TM-324.
+`vercel.json`, and the dev server in `build_tools/cli.ts`.

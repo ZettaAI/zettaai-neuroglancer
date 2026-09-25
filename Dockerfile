@@ -6,8 +6,6 @@ ENV HUSKY=0
 
 COPY package.json package-lock.json .npmrc ./
 
-# --ignore-scripts mirrors CI: it skips the Playwright browser download, which
-# the production bundle does not need.
 RUN --mount=type=secret,id=npm_token \
     printf '//npm.pkg.github.com/:_authToken=%s\n' "$(cat /run/secrets/npm_token)" > /tmp/npmrc \
  && npm ci --ignore-scripts --userconfig=/tmp/npmrc \
@@ -15,18 +13,16 @@ RUN --mount=type=secret,id=npm_token \
 
 COPY . .
 
-# Read by `zettaDefine()` in rspack.config.js and baked into the bundle. The deploy
-# workflow forwards every NEUROGLANCER_* env var on the service as a --build-arg, and
-# BuildKit drops one with no matching ARG silently, so this list must cover them all.
+# Every NEUROGLANCER_* env var on the service is forwarded as a --build-arg, and BuildKit
+# drops one with no matching ARG silently, so this must cover every zettaDefine() call in
+# rspack.config.js.
 ARG NEUROGLANCER_ZETTA_BACKEND_URL
 ARG NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP
 ARG NEUROGLANCER_ZETTA_BACKEND_TOKEN
 
-# Lint and typecheck already gate the PR; repeating them here only slows deploys.
 RUN npm run build:zetta -- --no-typecheck --no-lint
 
-# Pre-compress for `gzip_static`: nginx:alpine has no brotli module, so gzip -9
-# ahead of time is the closest we get to Vercel's brotli.
+# Pre-compressed for `gzip_static` in nginx.conf; the alpine image has no brotli module.
 RUN find dist/client -type f \
       \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' \
          -o -name '*.wasm' -o -name '*.svg' \) \
