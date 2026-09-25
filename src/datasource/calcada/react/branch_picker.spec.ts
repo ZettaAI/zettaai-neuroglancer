@@ -22,7 +22,6 @@ import {
   branchOptions,
   CalcadaBranchPicker,
 } from "#src/datasource/calcada/react/branch_picker.js";
-import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import { TrackableValue, WatchableValue } from "#src/trackable_value.js";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -38,7 +37,6 @@ interface Harness {
   graph: CalcadaGraphSource;
   branchId: TrackableValue<number>;
   branches: WatchableValue<CalcadaBranch[]>;
-  segmentationGroupState: SegmentationUserLayerGroupState;
   /** Every state mutation the picker performs, in the order it performed it. */
   mutations: string[];
   refreshCount: () => number;
@@ -68,18 +66,10 @@ function makeHarness(initialBranchId = 0): Harness {
       },
     },
   } as unknown as CalcadaGraphSource;
-  const segmentationGroupState = {
-    selectedSegments: { clear: () => mutations.push("selectedSegments") },
-    visibleSegments: { clear: () => mutations.push("visibleSegments") },
-    segmentEquivalences: {
-      clear: () => mutations.push("segmentEquivalences"),
-    },
-  } as unknown as SegmentationUserLayerGroupState;
   return {
     graph,
     branchId,
     branches,
-    segmentationGroupState,
     mutations,
     refreshCount: () => refreshes,
     set createBody(body: Record<string, unknown>) {
@@ -113,7 +103,6 @@ function mount(harness: Harness) {
       createElement(CalcadaBranchPicker, {
         graph: harness.graph,
         branchId: harness.branchId,
-        segmentationGroupState: harness.segmentationGroupState,
       }),
     );
   });
@@ -237,19 +226,18 @@ describe("CalcadaBranchPicker", () => {
     expect(harness.refreshCount()).toBe(1);
   });
 
-  it("clears segment state before updating branchId", () => {
+  // Emptying the segment lists is the connection's job on the branch change,
+  // together with carrying over what exists on the new branch. The picker
+  // doing it first left nothing to carry, and a selection vanished on every
+  // switch.
+  it("only switches the branch, leaving the segments to the connection", () => {
     const harness = makeHarness();
     mount(harness);
     openPanel();
     act(() => {
       optionElements()[1].click();
     });
-    expect(harness.mutations).toEqual([
-      "selectedSegments",
-      "visibleSegments",
-      "segmentEquivalences",
-      "branchId=1",
-    ]);
+    expect(harness.mutations).toEqual(["branchId=1"]);
   });
 
   it("refuses to switch to a creating branch", () => {

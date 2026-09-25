@@ -102,3 +102,25 @@ export function prunePool(
 ): PoolEntry[] {
   return pool.filter((entry) => keep(entry.candidate));
 }
+
+/**
+ * Swap in the server's current version of each queued candidate, keeping its
+ * place in the stack.
+ *
+ * A carve retires a piece and the server re-binds its candidates to the half
+ * that kept them, under the same line id. The queued copy still names the
+ * retired piece and the root it had, so showing it draws the segment as it was
+ * before the cut.
+ */
+export function refreshEntries(
+  pool: readonly PoolEntry[],
+  fresh: readonly EdgeCandidate[],
+): PoolEntry[] {
+  const byLine = new Map(
+    fresh.map((candidate) => [candidate.lineId, candidate]),
+  );
+  return pool.map((entry) => {
+    const current = byLine.get(entry.candidate.lineId);
+    return current === undefined ? entry : { ...entry, candidate: current };
+  });
+}

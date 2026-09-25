@@ -407,6 +407,15 @@
   opacity: 0.85;
 }
 
+/* The trace edits the graph it runs on, so running it on main is worth
+   saying before the first accept rather than after. */
+.calcada-trace-panel-warning {
+  font-size: 12px;
+  padding: 4px 6px;
+  border-left: 2px solid rgb(230 170 40);
+  background: rgb(230 170 40 / 12%);
+}
+
 .calcada-trace-panel-row {
   display: flex;
   align-items: center;
@@ -479,11 +488,6 @@
   padding: 6px 8px 8px;
   border: 1px solid #444;
   border-radius: 4px;
-}
-
-.calcada-trace-panel-overview summary {
-  font-size: 12px;
-  cursor: pointer;
 }
 
 /* Without a legend "green or red" is a guess. The bar is the scale itself, so

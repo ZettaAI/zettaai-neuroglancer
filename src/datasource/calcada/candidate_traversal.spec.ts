@@ -4,6 +4,7 @@ import {
   nextEntry,
   prependChildren,
   prunePool,
+  refreshEntries,
   remainingCount,
   seedPool,
 } from "#src/datasource/calcada/candidate_traversal.js";
@@ -142,5 +143,21 @@ describe("prunePool", () => {
     ]);
     const kept = prunePool(pool, (entry) => entry.selfPieceId === 10n);
     expect(lineIds(kept)).toEqual([1]);
+  });
+});
+
+describe("refreshEntries", () => {
+  it("replaces a queued candidate with its current version in place", () => {
+    const pool = prependChildren(
+      seedPool([candidate(1, 0.9)]),
+      [candidate(2, 0.4)],
+      0,
+      new Set(),
+    );
+    const rebound = { ...candidate(1, 0.9), partnerPieceId: 77n };
+    const next = refreshEntries(pool, [rebound]);
+    expect(lineIds(next)).toEqual([2, 1]);
+    expect(next[1].candidate.partnerPieceId).toBe(77n);
+    expect(next[1].depth).toBe(0);
   });
 });

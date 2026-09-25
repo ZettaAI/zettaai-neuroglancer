@@ -15,7 +15,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   BRANCH_CREATE_FOLLOW_LIMIT_MS,
   branchOptions,
-  clearSegmentSelection,
   defaultParentForNewBranch,
   diffUrl,
   MAIN_BRANCH_ID,
@@ -26,7 +25,6 @@ import {
 } from "#src/datasource/calcada/branch_picker_logic.js";
 import type { CalcadaGraphSource } from "#src/datasource/calcada/frontend.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
-import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
 import {
@@ -85,11 +83,9 @@ function BranchSelect({
 export function CalcadaBranchPicker({
   graph,
   branchId,
-  segmentationGroupState,
 }: {
   graph: CalcadaGraphSource | undefined;
   branchId: WatchableValueInterface<number>;
-  segmentationGroupState: SegmentationUserLayerGroupState;
 }) {
   const selectedId = useWatchable(branchId);
   const branches = useWatchable(graph?.branches ?? NO_BRANCHES);
@@ -165,7 +161,9 @@ export function CalcadaBranchPicker({
     const targetBranch = branches.find((branch) => branch.id === parsed);
     if (targetBranch !== undefined && targetBranch.status === "creating")
       return;
-    clearSegmentSelection(segmentationGroupState);
+    // The connection empties and refills the segment lists on the branch
+    // change itself, carrying over what exists on the new branch. Emptying
+    // them here first left it nothing to carry.
     branchId.value = parsed;
   };
 
@@ -246,7 +244,6 @@ export function CalcadaBranchPicker({
         );
       }
       if (newStatus === "active") {
-        clearSegmentSelection(segmentationGroupState);
         graph.branchId.value = newId;
         setNewBranchName("");
         setFormOpen(false);
