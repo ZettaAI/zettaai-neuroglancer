@@ -1,0 +1,89 @@
+name: Deploy preview
+
+on:
+  pull_request:
+    types: [opened, labeled, closed]
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: Delete the preview instead of deploying it
+        type: boolean
+        default: false
+
+concurrency:
+  group: preview-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  name:
+    if: >-
+      !contains(fromJSON('["dev","main"]'), github.head_ref || github.ref_name) &&
+      (github.event_name == 'workflow_dispatch' ||
+        github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      service: ${{ steps.name.outputs.service }}
+    steps:
+      - id: name
+        run: |
+          set -euo pipefail
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state all \
+              --json number --jq 'max_by(.number).number // empty')
+          fi
+          if [ -z "$PR" ]; then
+            echo "::error::No PR found for $BRANCH; previews are named after the PR"
+            exit 1
+          fi
+          echo "service=neuroglancer-pr-$PR" >> "$GITHUB_OUTPUT"
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+
+  deploy:
+    needs: name
+    if: >-
+      (github.event_name == 'workflow_dispatch' && !inputs.delete) ||
+      (github.event.action == 'labeled' && github.event.label.name == 'deploy-preview') ||
+      (github.event.action == 'opened' &&
+        contains(github.event.pull_request.labels.*.name, 'deploy-preview'))
+    uses: ./.github/workflows/deploy-cloud-run.yml
+    with:
+      service: ${{ needs.name.outputs.service }}
+      template: neuroglancer-dev
+      public: true
+    secrets: inherit
+
+  cleanup:
+    needs: name
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.delete) ||
+      github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_ID: zetta-research
+      REGION: us-east1
+      SERVICE: ${{ needs.name.outputs.service }}
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: |
+          set -euo pipefail
+          existing=$(gcloud run services list --project="$PROJECT_ID" --region="$REGION" \
+            --filter="metadata.name=$SERVICE" --format='value(metadata.name)')
+          if [ -z "$existing" ]; then
+            echo "$SERVICE does not exist, nothing to clean up"
+            exit 0
+          fi
+          gcloud run services delete "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --quiet
