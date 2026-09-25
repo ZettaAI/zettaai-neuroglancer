@@ -59,13 +59,13 @@ export interface TracePanelConnection {
     readonly current: EdgeCandidate | undefined;
     readonly isBusy: boolean;
     reject(): void;
+    canUndo(): boolean;
     skip(): void;
     goToSeed(): void;
     clearSeed(): void;
     accept(): Promise<void>;
     undoLast(): Promise<void>;
   };
-  canUndo(): boolean;
   listCandidateReviewers(): Promise<string[]>;
 }
 
@@ -434,7 +434,7 @@ export function CalcadaTracePanel({
         <Button
           size="xs"
           variant="outline"
-          disabled={busy || !connection.canUndo()}
+          disabled={busy || !traceSession.canUndo()}
           title="Take back the last edit (⌘/ctrl+Z)"
           onClick={() => void traceSession.undoLast()}
         >
