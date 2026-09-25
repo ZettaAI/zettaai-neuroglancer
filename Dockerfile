@@ -15,9 +15,12 @@ RUN --mount=type=secret,id=npm_token \
 
 COPY . .
 
-# Read by `zettaDefine()` in rspack.config.js and baked into the bundle.
+# Read by `zettaDefine()` in rspack.config.js and baked into the bundle. The deploy
+# workflow forwards every NEUROGLANCER_* env var on the service as a --build-arg, and
+# BuildKit drops one with no matching ARG silently, so this list must cover them all.
 ARG NEUROGLANCER_ZETTA_BACKEND_URL
 ARG NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP
+ARG NEUROGLANCER_ZETTA_BACKEND_TOKEN
 
 # Lint and typecheck already gate the PR; repeating them here only slows deploys.
 RUN npm run build:zetta -- --no-typecheck --no-lint

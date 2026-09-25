@@ -25,7 +25,6 @@ permissions:
 
 env:
   PROJECT_ID: zetta-research
-  PROJECT_NUMBER: "349854005841"
   REGION: us-east1
   ALIAS_DOMAIN: research.zetta.ai
   IMAGE: us-east1-docker.pkg.dev/zetta-research/neuroglancer/zettaai-neuroglancer
@@ -135,13 +134,6 @@ jobs:
         id: deploy
         run: |
           set -euo pipefail
-          alias="$SERVICE.$ALIAS_DOMAIN"
-          if getent hosts "$alias" >/dev/null; then
-            url="https://$alias"
-          else
-            url="https://$SERVICE-$PROJECT_NUMBER.$REGION.run.app"
-          fi
-          echo "url=$url" >> "$GITHUB_OUTPUT"
           args=(--project="$PROJECT_ID" --region="$REGION" --image="$IMAGE:$GITHUB_SHA-$SERVICE" --quiet)
           exists=$(gcloud run services list --project="$PROJECT_ID" --region="$REGION" \
             --filter="metadata.name=$SERVICE" --format='value(metadata.name)')
@@ -161,6 +153,14 @@ jobs:
             args+=(--allow-unauthenticated)
           fi
           gcloud run deploy "$SERVICE" "${args[@]}"
+          alias="$SERVICE.$ALIAS_DOMAIN"
+          if getent hosts "$alias" >/dev/null; then
+            url="https://$alias"
+          else
+            url=$(gcloud run services describe "$SERVICE" \
+              --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
         env:
           PUBLIC: ${{ inputs.public }}
 
