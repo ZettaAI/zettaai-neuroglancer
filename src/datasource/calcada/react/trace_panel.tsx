@@ -13,8 +13,11 @@ import { Fragment, useCallback, useEffect, useReducer } from "react";
 
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
+import {
+  describePiece,
+  SEMANTIC_CLASSES,
+} from "#src/datasource/calcada/candidate_heat.js";
 import type { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
-import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import type {
@@ -115,6 +118,60 @@ function clampRadius(radiusNm: number): number {
   );
 }
 
+/** One end's class filter: a class, and when one is named, its minimum share. */
+function ClassFilterRow({
+  label,
+  title,
+  wanted,
+  minFraction,
+}: {
+  label: string;
+  title: string;
+  wanted: WatchableValueInterface<SemanticClass>;
+  minFraction: WatchableValueInterface<number>;
+}) {
+  const wantedValue = useWatchable(wanted);
+  const fraction = useWatchable(minFraction);
+  return (
+    <div className="calcada-trace-panel-row" title={title}>
+      {label}
+      <span className="calcada-trace-panel-class-filter">
+        <Select
+          value={wantedValue}
+          onValueChange={(next) => {
+            wanted.value = next as SemanticClass;
+          }}
+        >
+          <SelectTrigger size="sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SEMANTIC_CLASSES.map((name) => (
+              <SelectItem key={name} value={name}>
+                {name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {wantedValue !== "any" && (
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step={5}
+            title="At least this share of the piece, %"
+            value={Math.round(fraction * 100)}
+            onChange={(event) => {
+              const parsed = Number.parseFloat(event.target.value);
+              if (Number.isFinite(parsed)) minFraction.value = parsed / 100;
+            }}
+          />
+        )}
+      </span>
+    </div>
+  );
+}
+
 export function CalcadaTracePanel({
   connection,
 }: {
@@ -143,8 +200,6 @@ export function CalcadaTracePanel({
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const overviewActive = useWatchable(overviewState.active);
-  const overviewClass = useWatchable(overviewState.semanticClass);
-  const overviewMinFraction = useWatchable(overviewState.minClassFraction);
 
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
@@ -190,6 +245,30 @@ export function CalcadaTracePanel({
             ? traceSession.status
             : "Press T, then click a mesh to start a trace."}
       </div>
+
+      {/* Both ends of the candidate, in full: the partner is judged against the
+          seed's side, and tuning a class filter needs to see how mixed each
+          piece really is. */}
+      {tracing && traceSession.current !== undefined && (
+        <dl className="calcada-trace-panel-pieces">
+          <dt>Seed piece</dt>
+          <dd>
+            {describePiece({
+              voxels: traceSession.current.selfVoxels,
+              classes: traceSession.current.selfClasses,
+              hasInfo: traceSession.current.selfHasInfo,
+            })}
+          </dd>
+          <dt>Candidate</dt>
+          <dd>
+            {describePiece({
+              voxels: traceSession.current.partnerVoxels,
+              classes: traceSession.current.partnerClasses,
+              hasInfo: traceSession.current.partnerHasInfo,
+            })}
+          </dd>
+        </dl>
+      )}
 
       <label className="calcada-trace-panel-row">
         Seed scope
@@ -307,6 +386,22 @@ export function CalcadaTracePanel({
         />
       </div>
 
+      {/* What each end of a candidate must be. Shared with split error
+          detection, like the score: the pieces it paints are the ones the trace
+          will offer. */}
+      <ClassFilterRow
+        label="Seed piece is"
+        title="The seed's piece at the contact"
+        wanted={traceState.sourceClass}
+        minFraction={traceState.sourceMinFraction}
+      />
+      <ClassFilterRow
+        label="Candidate is"
+        title="The piece the candidate would merge in"
+        wanted={traceState.targetClass}
+        minFraction={traceState.targetMinFraction}
+      />
+
       <label className="calcada-trace-panel-check">
         <input
           type="checkbox"
@@ -344,46 +439,6 @@ export function CalcadaTracePanel({
           <span>likely fine</span>
           <span>likely split</span>
         </div>
-
-        <label className="calcada-trace-panel-row">
-          Candidates that are
-          <Select
-            value={overviewClass}
-            onValueChange={(next) => {
-              overviewState.semanticClass.value = next as SemanticClass;
-            }}
-          >
-            <SelectTrigger size="sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {SEMANTIC_CLASSES.map((name) => (
-                <SelectItem key={name} value={name}>
-                  {name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </label>
-
-        {overviewClass !== "any" && (
-          <label className="calcada-trace-panel-row">
-            at least, %
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              step={5}
-              value={Math.round(overviewMinFraction * 100)}
-              onChange={(event) => {
-                const parsed = Number.parseFloat(event.target.value);
-                if (Number.isFinite(parsed)) {
-                  overviewState.minClassFraction.value = parsed / 100;
-                }
-              }}
-            />
-          </label>
-        )}
 
         {overviewActive && (
           <div className="calcada-trace-panel-status">

@@ -407,6 +407,41 @@
   opacity: 0.85;
 }
 
+/* A class and, once one is named, its minimum share, side by side in the
+   row's control slot. */
+.calcada-trace-panel-class-filter {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* Two controls share one slot, so each is narrower than the row's usual 10em —
+   and the selectors outrank that rule, which comes later in this file. */
+.calcada-trace-panel-row .calcada-trace-panel-class-filter button {
+  width: 7em;
+}
+
+.calcada-trace-panel-row .calcada-trace-panel-class-filter input {
+  width: 4em;
+}
+
+/* The two ends of the candidate under review, label beside value. */
+.calcada-trace-panel-pieces {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-pieces dt {
+  opacity: 0.7;
+}
+
+.calcada-trace-panel-pieces dd {
+  margin: 0;
+}
+
 /* The trace edits the graph it runs on, so running it on main is worth
    saying before the first accept rather than after. */
 .calcada-trace-panel-warning {

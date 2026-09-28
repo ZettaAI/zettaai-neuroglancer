@@ -19,6 +19,7 @@
  * own best would dress its weakest candidate up as a likely error.
  */
 
+import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import { packColor } from "#src/util/color.js";
 import { vec4 } from "#src/util/geom.js";
 
@@ -32,6 +33,18 @@ export type SemanticClass =
   | "nucleus"
   | "ecs"
   | "other";
+
+export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
+  "any",
+  "perikaryon",
+  "dendrite",
+  "axon",
+  "glia",
+  "vasculature",
+  "nucleus",
+  "ecs",
+  "other",
+];
 
 export interface PieceClasses {
   perikaryon: number;
@@ -110,11 +123,97 @@ export function semanticVerdict(
   return piece.classes[wanted] / total >= minFraction ? "pass" : "fail";
 }
 
-export interface SplitErrorFilter {
+/** One side of a candidate asked to be a class, at least this share of it. */
+export interface ClassFilter {
   wanted: SemanticClass;
   minFraction: number;
-  /** Shared with the trace: a piece is flagged by the candidates it would offer. */
+}
+
+const ANY_CLASS: ClassFilter = { wanted: "any", minFraction: 0 };
+
+/**
+ * The filters the trace and split error detection share. Source is the seed's
+ * piece at the contact, target the piece the candidate would merge in — "axons
+ * continuing into axons" names both.
+ */
+export interface CandidateFilter {
+  source: ClassFilter;
+  target: ClassFilter;
   minScore: number;
+}
+
+export type SplitErrorFilter = CandidateFilter;
+
+interface Side {
+  classes: PieceClasses;
+  hasInfo: boolean;
+}
+
+function sideTotal(side: Side): number {
+  return side.hasInfo ? classTotal(side.classes) : 0;
+}
+
+/**
+ * Naming a class admits only pieces known to be that class. On a graph where
+ * most pieces carry no breakdown, admitting the unknown ones too is how a
+ * filter ends up looking like it does nothing.
+ */
+export function passesClass(side: Side, filter: ClassFilter): boolean {
+  if (filter.wanted === "any") return true;
+  return semanticVerdict(side, filter.wanted, filter.minFraction) === "pass";
+}
+
+/**
+ * The filter as it can actually apply here: a side with no semantics anywhere
+ * is not filtered, or naming a class would silently hide everything.
+ */
+export function applicableFilter(
+  filter: CandidateFilter,
+  sources: Iterable<Side>,
+  targets: Iterable<Side>,
+): CandidateFilter {
+  const known = (sides: Iterable<Side>) => {
+    for (const side of sides) if (sideTotal(side) > 0) return true;
+    return false;
+  };
+  return {
+    minScore: filter.minScore,
+    source: known(sources) ? filter.source : ANY_CLASS,
+    target: known(targets) ? filter.target : ANY_CLASS,
+  };
+}
+
+/** Whether a queued candidate passes the shared filters. */
+export function candidatePasses(
+  candidate: EdgeCandidate,
+  filter: CandidateFilter,
+): boolean {
+  return (
+    candidate.score >= filter.minScore &&
+    passesClass(
+      { classes: candidate.selfClasses, hasInfo: candidate.selfHasInfo },
+      filter.source,
+    ) &&
+    passesClass(
+      { classes: candidate.partnerClasses, hasInfo: candidate.partnerHasInfo },
+      filter.target,
+    )
+  );
+}
+
+/** A trace filter narrowed to what the queued candidates can answer. */
+export function applicableToCandidates(
+  filter: CandidateFilter,
+  candidates: readonly EdgeCandidate[],
+): CandidateFilter {
+  return applicableFilter(
+    filter,
+    candidates.map((c) => ({ classes: c.selfClasses, hasInfo: c.selfHasInfo })),
+    candidates.map((c) => ({
+      classes: c.partnerClasses,
+      hasInfo: c.partnerHasInfo,
+    })),
+  );
 }
 
 function partnerTotal(piece: PieceOverview): number {
@@ -123,32 +222,34 @@ function partnerTotal(piece: PieceOverview): number {
 
 /**
  * The score a piece is painted with: its best candidate's, or zero when there
- * is none worth counting.
- *
- * The class is judged on the candidate, not on the piece: a dendrite missing a
- * dendrite continuation is the error being looked for. Naming a class counts
- * only candidates known to be that class — on a graph where most carry no
- * breakdown, counting the unknown ones as well is how a filter ends up looking
- * like it does nothing. A graph with no semantics at all is not filtered, so the
- * class filter cannot silently paint everything green.
+ * is none worth counting. Source is the piece itself, target its best
+ * candidate — a dendrite missing a dendrite continuation is the error.
  */
 function flaggedScores(
   pieces: readonly PieceOverview[],
   filter: SplitErrorFilter,
 ): Map<bigint, number> {
-  const wanted = pieces.some((piece) => partnerTotal(piece) > 0)
-    ? filter.wanted
-    : "any";
+  const applied = applicableFilter(
+    filter,
+    pieces.map((piece) => ({ classes: piece.classes, hasInfo: piece.hasInfo })),
+    pieces.map((piece) => ({
+      classes: piece.partnerClasses,
+      hasInfo: piece.partnerHasInfo,
+    })),
+  );
   const scores = new Map<bigint, number>();
   for (const piece of pieces) {
     const counts =
       piece.candidateCount > 0 &&
-      piece.bestScore >= filter.minScore &&
-      semanticVerdict(
+      piece.bestScore >= applied.minScore &&
+      passesClass(
+        { classes: piece.classes, hasInfo: piece.hasInfo },
+        applied.source,
+      ) &&
+      passesClass(
         { classes: piece.partnerClasses, hasInfo: piece.partnerHasInfo },
-        wanted,
-        filter.minFraction,
-      ) === "pass";
+        applied.target,
+      );
     scores.set(piece.pieceId, counts ? piece.bestScore : 0);
   }
   return scores;
@@ -202,23 +303,24 @@ export function dominantClass(
 }
 
 /**
- * How the piece a candidate would merge in reads at a glance: its size, what it
- * mostly is, and how sure that is. Says so plainly when the graph carries no
- * semantics, rather than reporting a confident "other".
+ * One piece as the proofreader reads it: size, then every class it holds, as a
+ * share of the piece, largest first. The full breakdown rather than the
+ * dominant class alone — tuning a class filter needs to see how mixed a piece
+ * is. Says so plainly when the graph carries no semantics, rather than
+ * reporting a confident "other".
  */
-export function describePartner(piece: {
-  partnerVoxels: number;
-  partnerClasses: PieceClasses;
-  partnerHasInfo: boolean;
+export function describePiece(piece: {
+  voxels: number;
+  classes: PieceClasses;
+  hasInfo: boolean;
 }): string {
-  const size = `${piece.partnerVoxels.toLocaleString()} vx`;
-  if (!piece.partnerHasInfo) return `${size} · no semantics`;
-  const dominant = dominantClass(piece.partnerClasses);
-  if (dominant === undefined) return `${size} · no semantics`;
-  const axonTotal = classTotal(piece.partnerClasses);
-  const axonPct = Math.round((100 * piece.partnerClasses.axon) / axonTotal);
-  return (
-    `${size} · ${dominant.name} ${Math.round(dominant.fraction * 100)}%` +
-    (dominant.name === "axon" ? "" : ` · axon ${axonPct}%`)
-  );
+  const size = `${piece.voxels.toLocaleString()} vx`;
+  const total = classTotal(piece.classes);
+  if (!piece.hasInfo || total === 0) return `${size} · no semantics`;
+  const shares = (Object.keys(piece.classes) as (keyof PieceClasses)[])
+    .map((name) => ({ name, percent: (100 * piece.classes[name]) / total }))
+    .filter(({ percent }) => percent >= 1)
+    .sort((a, b) => b.percent - a.percent)
+    .map(({ name, percent }) => `${name} ${Math.round(percent)}%`);
+  return [size, ...shares].join(" · ");
 }

@@ -23,4 +23,8 @@ export interface EdgeCandidate {
   partnerVoxels: number;
   partnerClasses: PieceClasses;
   partnerHasInfo: boolean;
+  /** The seed's own piece at the contact. */
+  selfVoxels: number;
+  selfClasses: PieceClasses;
+  selfHasInfo: boolean;
 }
