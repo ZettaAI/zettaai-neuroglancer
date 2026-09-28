@@ -12,7 +12,6 @@ import type {
   CalcadaBranch,
   CalcadaGraphSource,
 } from "#src/datasource/calcada/frontend.js";
-import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
 
@@ -98,14 +97,6 @@ export function defaultParentForNewBranch(graph: CalcadaGraphSource): number {
 // "Could not fetch root: piece not found" spam that would otherwise fire from
 // any in-flight selectedSegments changes referencing pieces local to the
 // previous branch.
-export function clearSegmentSelection(
-  segmentationGroupState: SegmentationUserLayerGroupState,
-) {
-  segmentationGroupState.selectedSegments.clear();
-  segmentationGroupState.visibleSegments.clear();
-  segmentationGroupState.segmentEquivalences.clear();
-}
-
 export function watchBranchUntilActive(
   graph: CalcadaGraphSource,
   id: number,
@@ -119,7 +110,7 @@ export function watchBranchUntilActive(
     // Only follow the user onto the new branch if they're still where they
     // were when the fork was requested — a slow copy can take minutes, and
     // switching branchId out from under someone who navigated elsewhere
-    // would wipe their selected segments and undo stack.
+    // would move their view and drop their undo stack.
     if (graph.branchId.value === originBranchId) {
       graph.branchId.value = id;
     }

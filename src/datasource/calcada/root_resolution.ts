@@ -87,3 +87,30 @@ export function componentsWithCarvedParents(
   }
   return { components: out, ambiguous };
 }
+
+/**
+ * The pieces a merge brought into the seed: those of every root it absorbed
+ * other than the seed's own. Empty for anything but a merge into the seed.
+ */
+export function piecesMergedIntoSeed(
+  seedBefore: bigint,
+  seedAfter: bigint,
+  newRoots: { size: number; has(id: bigint): boolean } | undefined,
+  piecesBefore: ReadonlyMap<bigint, ReadonlySet<bigint>>,
+): Set<bigint> {
+  const brought = new Set<bigint>();
+  const mergedIntoSeed =
+    seedAfter !== seedBefore &&
+    newRoots !== undefined &&
+    newRoots.size === 1 &&
+    newRoots.has(seedAfter) &&
+    piecesBefore.has(seedBefore);
+  if (!mergedIntoSeed) return brought;
+  for (const [root, pieces] of piecesBefore) {
+    if (root === seedBefore) continue;
+    for (const piece of pieces) {
+      if (piece !== root) brought.add(piece);
+    }
+  }
+  return brought;
+}

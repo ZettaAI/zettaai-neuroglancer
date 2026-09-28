@@ -19,7 +19,6 @@ import type {
 } from "#src/datasource/calcada/frontend.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
-import type { SegmentationUserLayerGroupState } from "#src/layer/segmentation/index.js";
 import { TrackableValue, WatchableValue } from "#src/trackable_value.js";
 import type { Disposer } from "#src/util/disposable.js";
 import { invokeDisposer } from "#src/util/disposable.js";
@@ -82,12 +81,7 @@ function makeGraph() {
       },
     },
   } as unknown as CalcadaGraphSource;
-  const segmentationGroupState = {
-    selectedSegments: { clear: () => {} },
-    visibleSegments: { clear: () => {} },
-    segmentEquivalences: { clear: () => {} },
-  } as unknown as SegmentationUserLayerGroupState;
-  return { graph, branchId, segmentationGroupState };
+  return { graph, branchId };
 }
 
 async function settle(ms: number) {
@@ -98,13 +92,12 @@ async function settle(ms: number) {
 const OPEN_WAIT = 900;
 
 beforeEach(async () => {
-  const { graph, segmentationGroupState, branchId: id } = makeGraph();
+  const { graph, branchId: id } = makeGraph();
   branchId = id;
   mountBranchRow();
   disposer = mountComponent(host, CalcadaBranchPicker, {
     graph,
     branchId,
-    segmentationGroupState,
   });
   await pickerRendered();
 });

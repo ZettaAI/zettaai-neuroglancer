@@ -3,6 +3,7 @@ import {
   classifyCandidateEdit,
   componentsWithCarvedParents,
   isStaleRoot,
+  piecesMergedIntoSeed,
 } from "#src/datasource/calcada/root_resolution.js";
 
 describe("isStaleRoot", () => {
@@ -94,5 +95,32 @@ describe("componentsWithCarvedParents", () => {
     );
     expect(components).toEqual([[1n], [2n]]);
     expect(ambiguous).toEqual([]);
+  });
+});
+
+describe("piecesMergedIntoSeed", () => {
+  const before = new Map<bigint, ReadonlySet<bigint>>([
+    [10n, new Set([10n, 1n, 2n])],
+    [20n, new Set([20n, 3n, 4n])],
+  ]);
+
+  it("names what a merge into the seed brought in, and not the seed's own", () => {
+    expect([...piecesMergedIntoSeed(10n, 30n, new Set([30n]), before)]).toEqual(
+      [3n, 4n],
+    );
+  });
+
+  it("is empty when the seed was not part of the merge", () => {
+    expect(piecesMergedIntoSeed(99n, 30n, new Set([30n]), before).size).toBe(0);
+  });
+
+  it("is empty for a split, which leaves more than one root", () => {
+    expect(
+      piecesMergedIntoSeed(10n, 30n, new Set([30n, 31n]), before).size,
+    ).toBe(0);
+  });
+
+  it("is empty when the seed kept its root", () => {
+    expect(piecesMergedIntoSeed(10n, 10n, new Set([10n]), before).size).toBe(0);
   });
 });

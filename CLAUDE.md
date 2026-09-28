@@ -45,6 +45,8 @@ npm run e2e / npm run perf  # Playwright; rebuilds the bundle + regenerates fixt
   touching editing code paths.
 - e2e/perf fixtures require `uv` (`testdata/editing/generate.py`, served via fake-gcs —
   deterministic, no live `gs://` access).
+- Deploys are Cloud Run, not Vercel: `dev` → `neuroglancer-dev`, `main` → `neuroglancer`,
+  one service per PR behind the `deploy-preview` label. See `docs/DEPLOY.md`.
 
 ## Imports and TypeScript
 

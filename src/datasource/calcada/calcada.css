@@ -365,33 +365,30 @@
   visibility: hidden;
 }
 
-/* Lives in the Graph tab rather than a tool-activation bubble, so it stacks:
-   the tab scrolls and has room. The status ellipsises instead of wrapping so a
-   long score/partner line cannot push the buttons around. */
-.calcada-zetta-trace {
+/* The Trace tab. Its controls are shadcn components inside the UI scope, so all
+   this holds is the stacking; colours and spacing come from the tokens. */
+.calcada-trace-tab {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 2px;
-  font: 12px sans-serif;
+  overflow-y: auto;
 }
 
-/* The mode outlives its activation, so its section can be created before or
-   after a merge/cut activation creates theirs. Ordering it first keeps it in
-   one place regardless — above whichever tool the proofreader picks up. */
-.calcada-zetta-trace-mode {
-  order: -1;
+.calcada-trace-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
 }
 
-.calcada-zetta-trace-header {
+.calcada-trace-panel-header {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
 /* Reads as a mode banner, not a label: the proofreader has to be able to tell
-   at a glance that arrow keys are answering candidates rather than panning. */
-.calcada-zetta-trace-badge {
+   at a glance whether arrow keys are answering candidates or panning. */
+.calcada-trace-panel-badge {
   flex: 1 1 auto;
   padding: 2px 6px;
   border-radius: 3px;
@@ -403,50 +400,217 @@
   font-size: 11px;
 }
 
-.calcada-zetta-trace-size {
+/* Sits over the panels, where the proofreader is looking. Faded until hovered
+   so it does not cover the meshes it sits on. */
+.calcada-trace-notice-overlay {
+  position: absolute;
+  z-index: 100;
+  max-width: min(320px, calc(100% - 32px));
+}
+
+.calcada-trace-notice {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #b58900;
+  color: #000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.calcada-trace-notice:hover {
+  opacity: 1;
+}
+
+.calcada-trace-notice-mode {
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.calcada-trace-notice-error {
+  background: #dc322f;
+  color: #fff;
+}
+
+.calcada-trace-notice-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.calcada-trace-notice-detail {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calcada-trace-notice-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: piece-split-spin 0.8s linear infinite;
+}
+
+/* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
+   the width to show a whole hint. */
+.calcada-trace-panel-status {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* The seed's position on a line of its own, its buttons beneath: beside the
+   buttons the coordinates had room for one number per line. */
+.calcada-trace-panel-seed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-seed-position {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One end of a candidate — its filters and, while tracing, the current piece
+   on that end — set apart from the other end. */
+.calcada-trace-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.calcada-trace-panel-section legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calcada-trace-panel-current {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* The trace edits the graph it runs on, so running it on main is worth
+   saying before the first accept rather than after. */
+.calcada-trace-panel-warning {
+  font-size: 12px;
+  padding: 4px 6px;
+  border-left: 2px solid rgb(230 170 40);
+  background: rgb(230 170 40 / 12%);
+}
+
+.calcada-trace-panel-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  font-size: 12px;
 }
 
-.calcada-zetta-trace-size input {
-  width: 6em;
-  background: #222;
-  color: inherit;
-  border: 1px solid #444;
-}
-
-.calcada-zetta-trace-size select,
-.calcada-zetta-trace-users {
-  background: #222;
-  color: inherit;
-  border: 1px solid #444;
-}
-
-.calcada-zetta-trace-users {
-  width: 100%;
-}
-
-.calcada-zetta-trace-buttons {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.calcada-zetta-trace-status {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.calcada-zetta-trace .neuroglancer-icon {
+.calcada-trace-panel-row input,
+.calcada-trace-panel-row button {
+  width: 10em;
   flex: 0 0 auto;
 }
 
-.calcada-zetta-trace .neuroglancer-icon.disabled {
-  opacity: 0.4;
-  pointer-events: none;
+/* The reviewer picker takes a row's control slot as a whole. The rule above
+   would otherwise reach inside it and make each chip's remove button and the
+   search input 10em wide, which is what pushed the input onto its own line. */
+.calcada-trace-panel-reviewers {
+  width: 10em;
+  flex: 0 0 auto;
+}
+
+.calcada-trace-panel-reviewers input,
+.calcada-trace-panel-reviewers button {
+  width: auto;
+}
+
+/* A checkbox carries its label on the right, so it is not the row's "name on
+   the left, control on the right" layout — laid out as one, space-between threw
+   the text to the far edge and the input rule stretched the box to 10em. */
+.calcada-trace-panel-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-check input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
+/* The keys the trace owns. Lives here rather than in a status bubble at the
+   bottom of the viewer: the tab is always open, so the bubble only repeated
+   what is already on screen. */
+.calcada-trace-panel-keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.calcada-trace-panel-keys dt {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.calcada-trace-panel-keys dd {
+  margin: 0;
+}
+
+.calcada-trace-panel-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+/* Without a legend "green or red" is a guess. The bar is the scale itself, so
+   it cannot drift from the colours the pieces are painted with. */
+.calcada-trace-panel-legend {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "scale scale" "low high";
+  gap: 2px;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.calcada-trace-panel-legend-scale {
+  grid-area: scale;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, rgb(41 219 61), rgb(255 61 61));
+}
+
+.calcada-trace-panel-legend span:nth-child(3) {
+  text-align: right;
+}
+
+.calcada-trace-panel-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
