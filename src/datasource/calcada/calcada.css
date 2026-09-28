@@ -407,6 +407,20 @@
   opacity: 0.85;
 }
 
+/* The seed's position on a line of its own, its buttons beneath: beside the
+   buttons the coordinates had room for one number per line. */
+.calcada-trace-panel-seed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-seed-position {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* One end of a candidate — its filters and, while tracing, the current piece
    on that end — set apart from the other end. */
 .calcada-trace-panel-section {

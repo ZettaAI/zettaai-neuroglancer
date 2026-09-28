@@ -296,11 +296,13 @@ export function CalcadaTracePanel({
       </label>
 
       {seedCenter !== undefined && (
-        <div className="calcada-trace-panel-row">
-          Seed at{" "}
-          {Array.from(seedCenter)
-            .map((value) => Math.round(value))
-            .join(", ")}
+        <div className="calcada-trace-panel-seed">
+          <span className="calcada-trace-panel-seed-position">
+            Seed at{" "}
+            {Array.from(seedCenter)
+              .map((value) => Math.round(value))
+              .join(", ")}
+          </span>
           <span className="calcada-trace-panel-buttons">
             <Button
               size="xs"
