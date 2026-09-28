@@ -50,6 +50,7 @@ const TRACE_REJECTED_BY_KEY = "rejectedBy";
 const TRACE_MIN_SCORE_KEY = "minScore";
 const TRACE_CENTRE_KEY = "centreOnCandidate";
 const TRACE_ZOOM_KEY = "zoomOnCandidate";
+const TRACE_SOURCE_MIN_VOXELS_KEY = "sourceMinVoxels";
 const TRACE_SOURCE_CLASS_KEY = "sourceClass";
 const TRACE_SOURCE_FRACTION_KEY = "sourceMinFraction";
 const TRACE_TARGET_CLASS_KEY = "targetClass";
@@ -111,6 +112,10 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // What each end of a candidate must be — source the seed's piece at the
   // contact, target the piece it would merge in. Shared with split error
   // detection like the score threshold.
+  // The seed's piece at the contact must be at least this large. Checked on
+  // the client, from the size each candidate carries; the candidate's own
+  // minimum is minPieceVoxels, which the server applies.
+  sourceMinVoxels = new WatchableValue<number>(0);
   sourceClass = new WatchableValue<SemanticClass>("any");
   sourceMinFraction = new WatchableValue<number>(CLASS_FRACTION_DEFAULT);
   targetClass = new WatchableValue<SemanticClass>("any");
@@ -137,6 +142,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.minScore.changed.add(reemit));
     this.registerDisposer(this.centreOnCandidate.changed.add(reemit));
     this.registerDisposer(this.zoomOnCandidate.changed.add(reemit));
+    this.registerDisposer(this.sourceMinVoxels.changed.add(reemit));
     this.registerDisposer(this.sourceClass.changed.add(reemit));
     this.registerDisposer(this.sourceMinFraction.changed.add(reemit));
     this.registerDisposer(this.targetClass.changed.add(reemit));
@@ -148,10 +154,12 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     return {
       minScore: this.minScore.value,
       source: {
+        minVoxels: this.sourceMinVoxels.value,
         wanted: this.sourceClass.value,
         minFraction: this.sourceMinFraction.value,
       },
       target: {
+        minVoxels: this.minPieceVoxels.value,
         wanted: this.targetClass.value,
         minFraction: this.targetMinFraction.value,
       },
@@ -162,6 +170,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   get candidateFilterSignals() {
     return [
       this.minScore,
+      this.sourceMinVoxels,
       this.sourceClass,
       this.sourceMinFraction,
       this.targetClass,
@@ -212,6 +221,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       [TRACE_MIN_SCORE_KEY]: this.minScore.value || undefined,
       [TRACE_CENTRE_KEY]: this.centreOnCandidate.value ? undefined : false,
       [TRACE_ZOOM_KEY]: this.zoomOnCandidate.value ? undefined : false,
+      [TRACE_SOURCE_MIN_VOXELS_KEY]: this.sourceMinVoxels.value || undefined,
       [TRACE_SOURCE_CLASS_KEY]: classOrUndefined(this.sourceClass.value),
       [TRACE_SOURCE_FRACTION_KEY]: fractionOrUndefined(
         this.sourceMinFraction.value,
@@ -249,6 +259,9 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, TRACE_ZOOM_KEY, (value) => {
       this.zoomOnCandidate.value = verifyBoolean(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_SOURCE_MIN_VOXELS_KEY, (value) => {
+      this.sourceMinVoxels.value = verifyInt(value);
     });
     verifyOptionalObjectProperty(x, TRACE_SOURCE_CLASS_KEY, (value) => {
       this.sourceClass.value = parseClass(value);

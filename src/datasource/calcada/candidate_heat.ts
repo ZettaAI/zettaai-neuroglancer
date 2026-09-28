@@ -123,13 +123,15 @@ export function semanticVerdict(
   return piece.classes[wanted] / total >= minFraction ? "pass" : "fail";
 }
 
-/** One side of a candidate asked to be a class, at least this share of it. */
-export interface ClassFilter {
+/**
+ * What one end of a candidate must be: at least this many voxels, and — when a
+ * class is named — at least this share of that class.
+ */
+export interface SideFilter {
+  minVoxels: number;
   wanted: SemanticClass;
   minFraction: number;
 }
-
-const ANY_CLASS: ClassFilter = { wanted: "any", minFraction: 0 };
 
 /**
  * The filters the trace and split error detection share. Source is the seed's
@@ -137,8 +139,8 @@ const ANY_CLASS: ClassFilter = { wanted: "any", minFraction: 0 };
  * continuing into axons" names both.
  */
 export interface CandidateFilter {
-  source: ClassFilter;
-  target: ClassFilter;
+  source: SideFilter;
+  target: SideFilter;
   minScore: number;
 }
 
@@ -158,9 +160,16 @@ function sideTotal(side: Side): number {
  * most pieces carry no breakdown, admitting the unknown ones too is how a
  * filter ends up looking like it does nothing.
  */
-export function passesClass(side: Side, filter: ClassFilter): boolean {
+export function passesClass(
+  side: Side,
+  filter: Pick<SideFilter, "wanted" | "minFraction">,
+): boolean {
   if (filter.wanted === "any") return true;
   return semanticVerdict(side, filter.wanted, filter.minFraction) === "pass";
+}
+
+function passesSide(side: Side & { voxels: number }, filter: SideFilter) {
+  return side.voxels >= filter.minVoxels && passesClass(side, filter);
 }
 
 /**
@@ -176,10 +185,14 @@ export function applicableFilter(
     for (const side of sides) if (sideTotal(side) > 0) return true;
     return false;
   };
+  const classless = (side: SideFilter): SideFilter => ({
+    ...side,
+    wanted: "any",
+  });
   return {
     minScore: filter.minScore,
-    source: known(sources) ? filter.source : ANY_CLASS,
-    target: known(targets) ? filter.target : ANY_CLASS,
+    source: known(sources) ? filter.source : classless(filter.source),
+    target: known(targets) ? filter.target : classless(filter.target),
   };
 }
 
@@ -190,12 +203,20 @@ export function candidatePasses(
 ): boolean {
   return (
     candidate.score >= filter.minScore &&
-    passesClass(
-      { classes: candidate.selfClasses, hasInfo: candidate.selfHasInfo },
+    passesSide(
+      {
+        voxels: candidate.selfVoxels,
+        classes: candidate.selfClasses,
+        hasInfo: candidate.selfHasInfo,
+      },
       filter.source,
     ) &&
-    passesClass(
-      { classes: candidate.partnerClasses, hasInfo: candidate.partnerHasInfo },
+    passesSide(
+      {
+        voxels: candidate.partnerVoxels,
+        classes: candidate.partnerClasses,
+        hasInfo: candidate.partnerHasInfo,
+      },
       filter.target,
     )
   );
@@ -242,10 +263,16 @@ function flaggedScores(
     const counts =
       piece.candidateCount > 0 &&
       piece.bestScore >= applied.minScore &&
-      passesClass(
-        { classes: piece.classes, hasInfo: piece.hasInfo },
+      passesSide(
+        {
+          voxels: piece.voxelCount,
+          classes: piece.classes,
+          hasInfo: piece.hasInfo,
+        },
         applied.source,
       ) &&
+      // The candidate's size is filtered by the server, which returns only
+      // candidates large enough; the overview row does not carry it.
       passesClass(
         { classes: piece.partnerClasses, hasInfo: piece.partnerHasInfo },
         applied.target,

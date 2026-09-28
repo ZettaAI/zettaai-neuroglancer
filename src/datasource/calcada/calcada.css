@@ -407,39 +407,27 @@
   opacity: 0.85;
 }
 
-/* A class and, once one is named, its minimum share, side by side in the
-   row's control slot. */
-.calcada-trace-panel-class-filter {
+/* One end of a candidate — its filters and, while tracing, the current piece
+   on that end — set apart from the other end. */
+.calcada-trace-panel-section {
   display: flex;
-  gap: 4px;
-  flex: 0 0 auto;
-}
-
-/* Two controls share one slot, so each is narrower than the row's usual 10em —
-   and the selectors outrank that rule, which comes later in this file. */
-.calcada-trace-panel-row .calcada-trace-panel-class-filter button {
-  width: 7em;
-}
-
-.calcada-trace-panel-row .calcada-trace-panel-class-filter input {
-  width: 4em;
-}
-
-/* The two ends of the candidate under review, label beside value. */
-.calcada-trace-panel-pieces {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 2px 8px;
+  flex-direction: column;
+  gap: 6px;
   margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.calcada-trace-panel-section legend {
+  padding: 0 4px;
   font-size: 12px;
+  font-weight: 600;
 }
 
-.calcada-trace-panel-pieces dt {
-  opacity: 0.7;
-}
-
-.calcada-trace-panel-pieces dd {
-  margin: 0;
+.calcada-trace-panel-current {
+  font-size: 12px;
+  opacity: 0.85;
 }
 
 /* The trace edits the graph it runs on, so running it on main is worth

@@ -111,9 +111,13 @@ describe("describePiece", () => {
 
 const dendrite: PieceClasses = { ...noClasses, dendrite: 9, axon: 1 };
 const axon: PieceClasses = { ...noClasses, axon: 9, dendrite: 1 };
-const anyClass = { wanted: "any" as const, minFraction: 0.8 };
+const anyClass = { wanted: "any" as const, minFraction: 0.8, minVoxels: 0 };
 const any = { source: anyClass, target: anyClass, minScore: 0 };
-const only = (wanted: "axon" | "dendrite") => ({ wanted, minFraction: 0.8 });
+const only = (wanted: "axon" | "dendrite") => ({
+  wanted,
+  minFraction: 0.8,
+  minVoxels: 0,
+});
 
 describe("splitErrorColors", () => {
   it("paints a piece by its best candidate, and a piece with none green", () => {
@@ -181,6 +185,21 @@ describe("splitErrorColors", () => {
     expect(flaggedPieceCount(mixed, axonIntoDendrite)).toBe(1);
   });
 
+  it("skips pieces smaller than the seed-side minimum", () => {
+    const pieces = [
+      piece({ pieceId: 1n, bestScore: 0.9, candidateCount: 1, voxelCount: 50 }),
+      piece({
+        pieceId: 2n,
+        bestScore: 0.9,
+        candidateCount: 1,
+        voxelCount: 500,
+      }),
+    ];
+    const filter = { ...any, source: { ...anyClass, minVoxels: 100 } };
+    expect(splitErrorColors(pieces, filter).get(1n)).toBe(heatColor(0));
+    expect(splitErrorColors(pieces, filter).get(2n)).toBe(heatColor(0.9));
+  });
+
   it("ignores the class filter on a graph with no semantics at all", () => {
     const pieces = [piece({ pieceId: 1n, bestScore: 0.9, candidateCount: 1 })];
     expect(
@@ -201,8 +220,10 @@ describe("candidatePasses", () => {
   ) =>
     ({
       score,
+      selfVoxels: 100,
       selfClasses: self,
       selfHasInfo: true,
+      partnerVoxels: 100,
       partnerClasses: partner,
       partnerHasInfo: true,
     }) as EdgeCandidate;
@@ -218,9 +239,25 @@ describe("candidatePasses", () => {
     expect(candidatePasses(axonToAxon, { ...any, minScore: 0.95 })).toBe(false);
   });
 
+  it("applies a minimum size on each end", () => {
+    const axonToAxon = candidate(0.9, axon, axon);
+    const bigger = (minVoxels: number) => ({ ...anyClass, minVoxels });
+    expect(candidatePasses(axonToAxon, { ...any, source: bigger(100) })).toBe(
+      true,
+    );
+    expect(candidatePasses(axonToAxon, { ...any, source: bigger(101) })).toBe(
+      false,
+    );
+    expect(candidatePasses(axonToAxon, { ...any, target: bigger(101) })).toBe(
+      false,
+    );
+  });
+
   it("stops filtering a side that no queued candidate has semantics for", () => {
     const unknown = {
       score: 0.9,
+      selfVoxels: 100,
+      partnerVoxels: 100,
       selfClasses: noClasses,
       selfHasInfo: false,
       partnerClasses: noClasses,

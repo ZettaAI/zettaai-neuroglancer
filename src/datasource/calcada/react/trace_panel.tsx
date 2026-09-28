@@ -118,24 +118,48 @@ function clampRadius(radiusNm: number): number {
   );
 }
 
-/** One end's class filter: a class, and when one is named, its minimum share. */
-function ClassFilterRow({
-  label,
+/**
+ * One end of a candidate: the filters it must pass — size, and a class with
+ * its minimum share — and, while tracing, what the current candidate's piece
+ * on that end actually is.
+ */
+function PieceFilterSection({
   title,
+  hint,
+  minVoxels,
   wanted,
   minFraction,
+  current,
 }: {
-  label: string;
   title: string;
+  hint: string;
+  minVoxels: WatchableValueInterface<number>;
   wanted: WatchableValueInterface<SemanticClass>;
   minFraction: WatchableValueInterface<number>;
+  current: string | undefined;
 }) {
+  const voxels = useWatchable(minVoxels);
   const wantedValue = useWatchable(wanted);
   const fraction = useWatchable(minFraction);
   return (
-    <div className="calcada-trace-panel-row" title={title}>
-      {label}
-      <span className="calcada-trace-panel-class-filter">
+    <fieldset className="calcada-trace-panel-section" title={hint}>
+      <legend>{title}</legend>
+      <label className="calcada-trace-panel-row">
+        Min size, voxels
+        <Input
+          type="number"
+          min={0}
+          step={100}
+          value={voxels}
+          onChange={(event) => {
+            const parsed = Number.parseInt(event.target.value, 10);
+            minVoxels.value =
+              Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+          }}
+        />
+      </label>
+      <div className="calcada-trace-panel-row">
+        Class
         <Select
           value={wantedValue}
           onValueChange={(next) => {
@@ -153,22 +177,27 @@ function ClassFilterRow({
             ))}
           </SelectContent>
         </Select>
-        {wantedValue !== "any" && (
+      </div>
+      {wantedValue !== "any" && (
+        <label className="calcada-trace-panel-row">
+          At least, %
           <Input
             type="number"
             min={0}
             max={100}
             step={5}
-            title="At least this share of the piece, %"
             value={Math.round(fraction * 100)}
             onChange={(event) => {
               const parsed = Number.parseFloat(event.target.value);
               if (Number.isFinite(parsed)) minFraction.value = parsed / 100;
             }}
           />
-        )}
-      </span>
-    </div>
+        </label>
+      )}
+      {current !== undefined && (
+        <div className="calcada-trace-panel-current">{current}</div>
+      )}
+    </fieldset>
   );
 }
 
@@ -189,7 +218,6 @@ export function CalcadaTracePanel({
   const branchId = useWatchable(connection.graph.branchId);
   const radiusNm = useWatchable(traceState.sphereRadiusNm);
   const seedCenter = useWatchable(traceState.sphereCenter);
-  const minPieceVoxels = useWatchable(traceState.minPieceVoxels);
   const rejectedBy = useWatchable(traceState.rejectedBy);
   // Stable, or the picker's fetch-on-mount would refire on every render.
   const loadReviewers = useCallback(
@@ -245,30 +273,6 @@ export function CalcadaTracePanel({
             ? traceSession.status
             : "Press T, then click a mesh to start a trace."}
       </div>
-
-      {/* Both ends of the candidate, in full: the partner is judged against the
-          seed's side, and tuning a class filter needs to see how mixed each
-          piece really is. */}
-      {tracing && traceSession.current !== undefined && (
-        <dl className="calcada-trace-panel-pieces">
-          <dt>Seed piece</dt>
-          <dd>
-            {describePiece({
-              voxels: traceSession.current.selfVoxels,
-              classes: traceSession.current.selfClasses,
-              hasInfo: traceSession.current.selfHasInfo,
-            })}
-          </dd>
-          <dt>Candidate</dt>
-          <dd>
-            {describePiece({
-              voxels: traceSession.current.partnerVoxels,
-              classes: traceSession.current.partnerClasses,
-              hasInfo: traceSession.current.partnerHasInfo,
-            })}
-          </dd>
-        </dl>
-      )}
 
       <label className="calcada-trace-panel-row">
         Seed scope
@@ -336,22 +340,6 @@ export function CalcadaTracePanel({
         />
       </label>
 
-      <label className="calcada-trace-panel-row">
-        Min candidate size
-        <Input
-          type="number"
-          min={0}
-          step={100}
-          title="Skip candidates whose piece is smaller than this many voxels"
-          value={minPieceVoxels}
-          onChange={(event) => {
-            const parsed = Number.parseInt(event.target.value, 10);
-            traceState.minPieceVoxels.value =
-              Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-          }}
-        />
-      </label>
-
       {/* One threshold for the trace and for split error detection, so the
           pieces painted as likely errors are the ones the trace will offer.
           Lowering it brings back skipped candidates in stack order. */}
@@ -389,17 +377,37 @@ export function CalcadaTracePanel({
       {/* What each end of a candidate must be. Shared with split error
           detection, like the score: the pieces it paints are the ones the trace
           will offer. */}
-      <ClassFilterRow
-        label="Seed piece is"
-        title="The seed's piece at the contact"
+      <PieceFilterSection
+        title="Seed piece"
+        hint="The seed's piece at the contact"
+        minVoxels={traceState.sourceMinVoxels}
         wanted={traceState.sourceClass}
         minFraction={traceState.sourceMinFraction}
+        current={
+          tracing && traceSession.current !== undefined
+            ? describePiece({
+                voxels: traceSession.current.selfVoxels,
+                classes: traceSession.current.selfClasses,
+                hasInfo: traceSession.current.selfHasInfo,
+              })
+            : undefined
+        }
       />
-      <ClassFilterRow
-        label="Candidate is"
-        title="The piece the candidate would merge in"
+      <PieceFilterSection
+        title="Candidate"
+        hint="The piece the candidate would merge in"
+        minVoxels={traceState.minPieceVoxels}
         wanted={traceState.targetClass}
         minFraction={traceState.targetMinFraction}
+        current={
+          tracing && traceSession.current !== undefined
+            ? describePiece({
+                voxels: traceSession.current.partnerVoxels,
+                classes: traceSession.current.partnerClasses,
+                hasInfo: traceSession.current.partnerHasInfo,
+              })
+            : undefined
+        }
       />
 
       <label className="calcada-trace-panel-check">
