@@ -74,6 +74,7 @@ import type {
 import {
   applicableToCandidates,
   candidatePasses,
+  describePiece,
   flaggedPieceCount,
   partnersWithSemantics,
   splitErrorColors,
@@ -108,6 +109,7 @@ import {
   CalcadaTimestampPicker,
   TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/timestamp_picker.js";
+import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
 import {
   interceptedRemovals,
   TRACE_CANDIDATE_COLOR_PACKED,
@@ -137,6 +139,7 @@ import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cur
 import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
+import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
 import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
 import { CalcadaTraceTab } from "#src/datasource/calcada/trace_tab.js";
 import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
@@ -2651,6 +2654,8 @@ class ZettaTraceSession extends RefCounted {
   // The panel reads these; it re-renders on `changed`.
   readonly changed = new NullarySignal();
   status = "Press T, then Ctrl+click a mesh to seed the trace";
+  // What the viewer overlay announces; unset while a candidate is on screen.
+  notice: TraceNotice | undefined;
   current: EdgeCandidate | undefined;
   remaining = 0;
 
@@ -2787,9 +2792,18 @@ class ZettaTraceSession extends RefCounted {
     return this.connection.graph.branchId.value;
   }
 
-  private setStatus(text: string) {
+  private setStatus(text: string, notice?: TraceNotice) {
     this.status = text;
+    this.notice = notice;
     this.changed.dispatch();
+  }
+
+  private setProgress(text: string) {
+    this.setStatus(text, { kind: "loading", title: text });
+  }
+
+  private setFailure(text: string) {
+    this.setStatus(text, { kind: "error", title: text });
   }
 
   /**
@@ -3086,7 +3100,7 @@ class ZettaTraceSession extends RefCounted {
     this.current = undefined;
     this.clearAnnotation();
     this.pool = [];
-    this.setStatus("Switching branch…");
+    this.setProgress("Switching branch…");
     let seedRoot: bigint | undefined;
     try {
       if (seedPiece !== undefined) {
@@ -3259,11 +3273,27 @@ class ZettaTraceSession extends RefCounted {
     if (this.current === undefined) {
       this.showOnly(seedRoot);
       const hidden = remainingCount(this.pool, this.decided);
-      this.setStatus(
-        hidden > 0
-          ? `No candidates pass the filters — ${hidden} more hidden by them`
-          : "No candidates left — widen the sphere with + or press T to place a new one",
-      );
+      if (hidden > 0) {
+        this.setStatus(
+          `No candidates pass the filters — ${hidden} more hidden by them`,
+          {
+            kind: "empty",
+            title: "No candidates pass the filters",
+            details: [
+              `${hidden} more hidden by them — loosen them in the Trace tab`,
+            ],
+          },
+        );
+      } else {
+        this.setStatus(
+          "No candidates left — widen the sphere with + or press T to place a new one",
+          {
+            kind: "empty",
+            title: "No candidates left",
+            details: ["Widen the sphere with + or press T to place a new one"],
+          },
+        );
+      }
       return;
     }
     const candidate = this.current;
@@ -3329,11 +3359,30 @@ class ZettaTraceSession extends RefCounted {
       this.frameCandidate(candidate);
     }
 
-    this.setStatus(
-      `score ${candidate.score.toFixed(2)} · ${candidate.nInterfaces} interface(s)` +
-        ` · depth ${this.currentDepth} · ${this.remaining} left`,
-    );
+    this.reportCandidate(candidate);
     this.prefetchNext(candidate);
+  }
+
+  // The banner keeps to what a verdict turns on; interfaces and depth stay in
+  // the Trace tab.
+  private reportCandidate(candidate: EdgeCandidate) {
+    const score = `score ${candidate.score.toFixed(2)}`;
+    const left = `${this.remaining} left`;
+    this.setStatus(
+      `${score} · ${candidate.nInterfaces} interface(s)` +
+        ` · depth ${this.currentDepth} · ${left}`,
+      {
+        kind: "candidate",
+        title: `${score} · ${left}`,
+        details: [
+          describePiece({
+            voxels: candidate.partnerVoxels,
+            classes: candidate.partnerClasses,
+            hasInfo: candidate.partnerHasInfo,
+          }),
+        ],
+      },
+    );
   }
 
   /**
@@ -3449,14 +3498,14 @@ class ZettaTraceSession extends RefCounted {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     const token = ++this.fetchToken;
-    this.setStatus("Fetching candidates…");
+    this.setProgress("Loading candidates…");
 
     let fetched: EdgeCandidate[];
     try {
       fetched = await this.fetchOnce(seedRoot);
     } catch (e) {
       if (token === this.fetchToken) {
-        this.setStatus(`Failed to fetch candidates: ${e}`);
+        this.setFailure(`Failed to fetch candidates: ${e}`);
       }
       return;
     }
@@ -3541,7 +3590,7 @@ class ZettaTraceSession extends RefCounted {
     const acceptedDepth = this.currentDepth;
     this.setBusy(true);
     this.clearAnnotation();
-    this.setStatus("Merging…");
+    this.setProgress("Merging…");
 
     // Started before the merge on purpose: the partner root stops existing the
     // moment it is absorbed, so afterwards there is no id left to ask about.
@@ -3564,7 +3613,7 @@ class ZettaTraceSession extends RefCounted {
     } catch (e) {
       // The candidate stays current so the right arrow retries it; a locked
       // root usually frees up within seconds.
-      this.setStatus(`Merge failed: ${e}`);
+      this.setFailure(`Merge failed: ${e}`);
       this.setBusy(false);
       return;
     }
@@ -3814,7 +3863,7 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     this.setBusy(true);
-    this.setStatus("Undoing…");
+    this.setProgress("Undoing…");
     try {
       // Only forget an accept when something actually reverted. An empty undo
       // stack and a failed revert both leave the graph as it was, and popping
@@ -3895,7 +3944,7 @@ class ZettaTraceSession extends RefCounted {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     const token = ++this.fetchToken;
-    this.setStatus("Refreshing after edit…");
+    this.setProgress("Refreshing after edit…");
     try {
       // Resolving the seed's own piece is what makes a cut safe: whichever side
       // of the cut that piece landed on is the segment the proofreader is on.
@@ -3905,7 +3954,7 @@ class ZettaTraceSession extends RefCounted {
         this.state.seedRoot.value = resolved;
       }
     } catch (e) {
-      this.setStatus(`Failed to re-resolve the seed: ${e}`);
+      this.setFailure(`Failed to re-resolve the seed: ${e}`);
       return;
     }
     if (token !== this.fetchToken) return;
@@ -3929,7 +3978,7 @@ class ZettaTraceSession extends RefCounted {
           ? 0n
           : await resolveRoot(this.current.partnerPieceId);
       } catch (e) {
-        this.setStatus(`Failed to re-resolve the candidate: ${e}`);
+        this.setFailure(`Failed to re-resolve the candidate: ${e}`);
         return;
       }
       if (token !== this.fetchToken) return;
@@ -3944,7 +3993,7 @@ class ZettaTraceSession extends RefCounted {
         // queue keeps its order, but every entry is swapped for the server's
         // current version: the queued copy still names the retired piece and
         // its old root, which is what drew the candidate uncut until a reload.
-        this.setStatus("segment was cut — reloading candidates");
+        this.setProgress("Segment was cut — reloading candidates…");
         // The candidate on screen, and anything else queued on a carved piece.
         const affected = new Map<bigint, EdgeCandidate>([
           [this.current.lineId, this.current],
@@ -3982,7 +4031,7 @@ class ZettaTraceSession extends RefCounted {
       if (outcome === "rerooted") {
         this.current = { ...this.current, partnerRootId: newPartnerRoot };
         reconcile(resolvedSeedRoot, newPartnerRoot);
-        this.setStatus(`partner ${newPartnerRoot} · ${this.remaining} left`);
+        this.reportCandidate(this.current);
         return;
       }
       if (outcome === "absorbed") {
@@ -4794,6 +4843,13 @@ void main() {
 
     this.traceSession = this.registerDisposer(
       new ZettaTraceSession(this, layer, state.zettaTraceState),
+    );
+    this.registerDisposer(
+      new TraceNoticeOverlay(layer.manager.root.display, {
+        active: state.zettaTraceState.active,
+        sphereCenter: state.zettaTraceState.sphereCenter,
+        session: this.traceSession,
+      }),
     );
     const sphereState = this.registerDisposer(
       new TraceSphereState(

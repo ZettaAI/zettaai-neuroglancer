@@ -79,7 +79,7 @@ export interface TracePanelConnection {
  * `useSyncExternalStore`, which cannot cache it, so the signal drives a
  * re-render and the fields are read during it.
  */
-function useSignalRerender(signal: NullarySignal) {
+export function useSignalRerender(signal: NullarySignal) {
   const [, rerender] = useReducer((tick: number) => tick + 1, 0);
   useEffect(() => {
     const unsubscribe = signal.add(rerender);
@@ -296,11 +296,13 @@ export function CalcadaTracePanel({
       </label>
 
       {seedCenter !== undefined && (
-        <div className="calcada-trace-panel-row">
-          Seed at{" "}
-          {Array.from(seedCenter)
-            .map((value) => Math.round(value))
-            .join(", ")}
+        <div className="calcada-trace-panel-seed">
+          <span className="calcada-trace-panel-seed-position">
+            Seed at{" "}
+            {Array.from(seedCenter)
+              .map((value) => Math.round(value))
+              .join(", ")}
+          </span>
           <span className="calcada-trace-panel-buttons">
             <Button
               size="xs"
