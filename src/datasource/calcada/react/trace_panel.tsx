@@ -79,7 +79,7 @@ export interface TracePanelConnection {
  * `useSyncExternalStore`, which cannot cache it, so the signal drives a
  * re-render and the fields are read during it.
  */
-function useSignalRerender(signal: NullarySignal) {
+export function useSignalRerender(signal: NullarySignal) {
   const [, rerender] = useReducer((tick: number) => tick + 1, 0);
   useEffect(() => {
     const unsubscribe = signal.add(rerender);
