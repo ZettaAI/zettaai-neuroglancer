@@ -66,34 +66,36 @@ export function prependChildren(
 }
 
 /**
- * A score threshold hides entries rather than dropping them. They keep their
- * place in the stack, so lowering the threshold brings back what it skipped in
- * the order the walk would have met it.
+ * The shared filters hide entries rather than dropping them. They keep their
+ * place in the stack, so loosening a filter brings back what it skipped in the
+ * order the walk would have met it.
  */
+type Shown = (candidate: EdgeCandidate) => boolean;
+
+const everything: Shown = () => true;
+
 function isOpen(
   entry: PoolEntry,
   decided: ReadonlySet<bigint>,
-  minScore: number,
+  shown: Shown,
 ): boolean {
-  return (
-    !decided.has(entry.candidate.lineId) && entry.candidate.score >= minScore
-  );
+  return !decided.has(entry.candidate.lineId) && shown(entry.candidate);
 }
 
 export function nextEntry(
   pool: readonly PoolEntry[],
   decided: ReadonlySet<bigint>,
-  minScore = 0,
+  shown: Shown = everything,
 ): PoolEntry | undefined {
-  return pool.find((entry) => isOpen(entry, decided, minScore));
+  return pool.find((entry) => isOpen(entry, decided, shown));
 }
 
 export function remainingCount(
   pool: readonly PoolEntry[],
   decided: ReadonlySet<bigint>,
-  minScore = 0,
+  shown: Shown = everything,
 ): number {
-  return pool.filter((entry) => isOpen(entry, decided, minScore)).length;
+  return pool.filter((entry) => isOpen(entry, decided, shown)).length;
 }
 
 export function prunePool(

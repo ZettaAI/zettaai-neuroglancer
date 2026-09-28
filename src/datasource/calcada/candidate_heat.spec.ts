@@ -4,12 +4,15 @@ import type {
   PieceOverview,
 } from "#src/datasource/calcada/candidate_heat.js";
 import {
-  describePartner,
+  describePiece,
   flaggedPieceCount,
   heatColor,
   semanticVerdict,
   splitErrorColors,
+  applicableToCandidates,
+  candidatePasses,
 } from "#src/datasource/calcada/candidate_heat.js";
+import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 
 const noClasses: PieceClasses = {
   perikaryon: 0,
@@ -78,35 +81,43 @@ describe("semanticVerdict", () => {
   });
 });
 
-describe("describePartner", () => {
-  const partner = (classes: Partial<PieceClasses>, hasInfo = true) => ({
-    partnerVoxels: 2568,
-    partnerClasses: { ...noClasses, ...classes },
-    partnerHasInfo: hasInfo,
+describe("describePiece", () => {
+  it("gives the size and every class as a share, largest first", () => {
+    expect(
+      describePiece({
+        voxels: 34871,
+        classes: { ...noClasses, dendrite: 88, axon: 9, glia: 3 },
+        hasInfo: true,
+      }),
+    ).toBe("34,871 vx · dendrite 88% · axon 9% · glia 3%");
   });
 
-  it("leads with the size and what the piece mostly is", () => {
-    const text = describePartner(partner({ axon: 2336, perikaryon: 231 }));
-    expect(text).toContain("2,568 vx");
-    expect(text).toContain("axon 91%");
-  });
-
-  it("adds the axon share when something else dominates", () => {
-    const text = describePartner(partner({ dendrite: 700, axon: 300 }));
-    expect(text).toContain("dendrite 70%");
-    expect(text).toContain("axon 30%");
+  it("leaves out classes under one percent", () => {
+    expect(
+      describePiece({
+        voxels: 10,
+        classes: { ...noClasses, axon: 995, other: 5 },
+        hasInfo: true,
+      }),
+    ).toBe("10 vx · axon 100%");
   });
 
   it("says so rather than guessing when the graph has no semantics", () => {
-    expect(describePartner(partner({}, false))).toContain("no semantics");
-    // A row that exists but sums to zero is just as uninformative.
-    expect(describePartner(partner({}, true))).toContain("no semantics");
+    expect(
+      describePiece({ voxels: 5, classes: noClasses, hasInfo: false }),
+    ).toBe("5 vx · no semantics");
   });
 });
 
 const dendrite: PieceClasses = { ...noClasses, dendrite: 9, axon: 1 };
 const axon: PieceClasses = { ...noClasses, axon: 9, dendrite: 1 };
-const any = { wanted: "any" as const, minFraction: 0.8, minScore: 0 };
+const anyClass = { wanted: "any" as const, minFraction: 0.8, minVoxels: 0 };
+const any = { source: anyClass, target: anyClass, minScore: 0 };
+const only = (wanted: "axon" | "dendrite") => ({
+  wanted,
+  minFraction: 0.8,
+  minVoxels: 0,
+});
 
 describe("splitErrorColors", () => {
   it("paints a piece by its best candidate, and a piece with none green", () => {
@@ -130,34 +141,131 @@ describe("splitErrorColors", () => {
     expect(flaggedPieceCount(pieces, { ...any, minScore: 0.5 })).toBe(1);
   });
 
-  it("judges the class on the candidate, not on the piece offering it", () => {
+  const mixed = [
+    piece({
+      pieceId: 1n,
+      bestScore: 0.9,
+      candidateCount: 1,
+      classes: axon,
+      hasInfo: true,
+      partnerClasses: dendrite,
+      partnerHasInfo: true,
+    }),
+    piece({
+      pieceId: 2n,
+      bestScore: 0.9,
+      candidateCount: 1,
+      classes: dendrite,
+      hasInfo: true,
+      partnerClasses: axon,
+      partnerHasInfo: true,
+    }),
+  ];
+
+  it("judges the target class on the candidate", () => {
+    const filter = { ...any, target: only("dendrite") };
+    expect(splitErrorColors(mixed, filter).get(1n)).toBe(heatColor(0.9));
+    expect(splitErrorColors(mixed, filter).get(2n)).toBe(heatColor(0));
+  });
+
+  it("judges the source class on the piece offering it", () => {
+    const filter = { ...any, source: only("dendrite") };
+    expect(splitErrorColors(mixed, filter).get(1n)).toBe(heatColor(0));
+    expect(splitErrorColors(mixed, filter).get(2n)).toBe(heatColor(0.9));
+  });
+
+  it("needs both sides when both are named", () => {
+    const axonIntoAxon = { ...any, source: only("axon"), target: only("axon") };
+    expect(flaggedPieceCount(mixed, axonIntoAxon)).toBe(0);
+    const axonIntoDendrite = {
+      ...any,
+      source: only("axon"),
+      target: only("dendrite"),
+    };
+    expect(flaggedPieceCount(mixed, axonIntoDendrite)).toBe(1);
+  });
+
+  it("skips pieces smaller than the seed-side minimum", () => {
     const pieces = [
-      piece({
-        pieceId: 1n,
-        bestScore: 0.9,
-        candidateCount: 1,
-        classes: axon,
-        partnerClasses: dendrite,
-        partnerHasInfo: true,
-      }),
+      piece({ pieceId: 1n, bestScore: 0.9, candidateCount: 1, voxelCount: 50 }),
       piece({
         pieceId: 2n,
         bestScore: 0.9,
         candidateCount: 1,
-        classes: dendrite,
-        partnerClasses: axon,
-        partnerHasInfo: true,
+        voxelCount: 500,
       }),
     ];
-    const filter = { ...any, wanted: "dendrite" as const };
-    expect(splitErrorColors(pieces, filter).get(1n)).toBe(heatColor(0.9));
-    expect(splitErrorColors(pieces, filter).get(2n)).toBe(heatColor(0));
+    const filter = { ...any, source: { ...anyClass, minVoxels: 100 } };
+    expect(splitErrorColors(pieces, filter).get(1n)).toBe(heatColor(0));
+    expect(splitErrorColors(pieces, filter).get(2n)).toBe(heatColor(0.9));
   });
 
   it("ignores the class filter on a graph with no semantics at all", () => {
     const pieces = [piece({ pieceId: 1n, bestScore: 0.9, candidateCount: 1 })];
     expect(
-      flaggedPieceCount(pieces, { ...any, wanted: "dendrite" as const }),
+      flaggedPieceCount(pieces, {
+        ...any,
+        source: only("dendrite"),
+        target: only("dendrite"),
+      }),
     ).toBe(1);
+  });
+});
+
+describe("candidatePasses", () => {
+  const candidate = (
+    score: number,
+    self: PieceClasses,
+    partner: PieceClasses,
+  ) =>
+    ({
+      score,
+      selfVoxels: 100,
+      selfClasses: self,
+      selfHasInfo: true,
+      partnerVoxels: 100,
+      partnerClasses: partner,
+      partnerHasInfo: true,
+    }) as EdgeCandidate;
+
+  it("applies the score and both class filters", () => {
+    const axonToAxon = candidate(0.9, axon, axon);
+    expect(candidatePasses(axonToAxon, { ...any, source: only("axon") })).toBe(
+      true,
+    );
+    expect(
+      candidatePasses(axonToAxon, { ...any, target: only("dendrite") }),
+    ).toBe(false);
+    expect(candidatePasses(axonToAxon, { ...any, minScore: 0.95 })).toBe(false);
+  });
+
+  it("applies a minimum size on each end", () => {
+    const axonToAxon = candidate(0.9, axon, axon);
+    const bigger = (minVoxels: number) => ({ ...anyClass, minVoxels });
+    expect(candidatePasses(axonToAxon, { ...any, source: bigger(100) })).toBe(
+      true,
+    );
+    expect(candidatePasses(axonToAxon, { ...any, source: bigger(101) })).toBe(
+      false,
+    );
+    expect(candidatePasses(axonToAxon, { ...any, target: bigger(101) })).toBe(
+      false,
+    );
+  });
+
+  it("stops filtering a side that no queued candidate has semantics for", () => {
+    const unknown = {
+      score: 0.9,
+      selfVoxels: 100,
+      partnerVoxels: 100,
+      selfClasses: noClasses,
+      selfHasInfo: false,
+      partnerClasses: noClasses,
+      partnerHasInfo: false,
+    } as EdgeCandidate;
+    const filter = applicableToCandidates({ ...any, source: only("axon") }, [
+      unknown,
+    ]);
+    expect(candidatePasses(unknown, filter)).toBe(true);
   });
 });

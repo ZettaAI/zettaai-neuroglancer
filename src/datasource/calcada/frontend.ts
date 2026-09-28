@@ -67,9 +67,13 @@ import {
   BRANCH_PICKER_TITLE,
   MAIN_BRANCH_ID,
 } from "#src/datasource/calcada/branch_picker_logic.js";
-import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
+import type {
+  PieceClasses,
+  PieceOverview,
+} from "#src/datasource/calcada/candidate_heat.js";
 import {
-  describePartner,
+  applicableToCandidates,
+  candidatePasses,
   flaggedPieceCount,
   partnersWithSemantics,
   splitErrorColors,
@@ -2610,6 +2614,20 @@ class CalcadaDebugSession extends RefCounted {
 
 // The server walks history per root; it refuses more than this at once.
 const LATEST_ROOTS_BATCH = 200;
+/** A semantic breakdown as the server sends it; absent classes count zero. */
+function parseClassCounts(raw: any): PieceClasses {
+  return {
+    perikaryon: Number(raw?.perikaryon ?? 0),
+    dendrite: Number(raw?.dendrite ?? 0),
+    axon: Number(raw?.axon ?? 0),
+    glia: Number(raw?.glia ?? 0),
+    vasculature: Number(raw?.vasculature ?? 0),
+    nucleus: Number(raw?.nucleus ?? 0),
+    ecs: Number(raw?.ecs ?? 0),
+    other: Number(raw?.other ?? 0),
+  };
+}
+
 /** Whether a candidate is bound to any of these pieces, on either end. */
 function namesAny(candidate: EdgeCandidate, pieces: ReadonlySet<bigint>) {
   return (
@@ -2740,16 +2758,16 @@ class ZettaTraceSession extends RefCounted {
       state.minPieceVoxels.changed.add(() => refetchOnSizeChange()),
     );
     this.registerDisposer(state.rejectedBy.changed.add(refetchOnFilterChange));
-    // The threshold only hides queued entries, so it needs a repick, not a
-    // refetch: lowering it brings back what it skipped, in stack order.
-    const repickOnScoreChange = this.registerCancellable(
+    // Score and class filters only hide queued entries, so they need a repick,
+    // not a refetch: loosening one brings back what it skipped, in stack order.
+    const repickOnFilterChange = this.registerCancellable(
       debounce(() => {
         if (state.active.value && !this.busy) this.showCurrent();
       }, FILTER_INPUT_DEBOUNCE_MS),
     );
-    this.registerDisposer(
-      state.minScore.changed.add(() => repickOnScoreChange()),
-    );
+    for (const signal of state.candidateFilterSignals) {
+      this.registerDisposer(signal.changed.add(() => repickOnFilterChange()));
+    }
     // A link can carry a running trace onto main; it is not resumed there.
     if (state.active.value && this.branchId === MAIN_BRANCH_ID) {
       state.active.value = false;
@@ -3222,8 +3240,8 @@ class ZettaTraceSession extends RefCounted {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     this.dimmed.clear();
-    const minScore = this.state.minScore.value;
-    const entry = nextEntry(this.pool, this.decided, minScore);
+    const shown = this.shownCandidates();
+    const entry = nextEntry(this.pool, this.decided, shown);
     // Never trust the root a queued candidate was fetched with. Roots are
     // replaced by every merge and every split, while the piece survives both,
     // so the root is resolved from the piece at the moment of showing it.
@@ -3237,13 +3255,13 @@ class ZettaTraceSession extends RefCounted {
             partnerRootId: this.rootOfPiece(entry.candidate),
           };
     this.currentDepth = entry?.depth ?? 0;
-    this.remaining = remainingCount(this.pool, this.decided, minScore);
+    this.remaining = remainingCount(this.pool, this.decided, shown);
     if (this.current === undefined) {
       this.showOnly(seedRoot);
       const hidden = remainingCount(this.pool, this.decided);
       this.setStatus(
         hidden > 0
-          ? `No candidates at score ${minScore} or above — ${hidden} more below it`
+          ? `No candidates pass the filters — ${hidden} more hidden by them`
           : "No candidates left — widen the sphere with + or press T to place a new one",
       );
       return;
@@ -3313,7 +3331,6 @@ class ZettaTraceSession extends RefCounted {
 
     this.setStatus(
       `score ${candidate.score.toFixed(2)} · ${candidate.nInterfaces} interface(s)` +
-        ` · ${describePartner(candidate)}` +
         ` · depth ${this.currentDepth} · ${this.remaining} left`,
     );
     this.prefetchNext(candidate);
@@ -3356,11 +3373,7 @@ class ZettaTraceSession extends RefCounted {
     // The reject branch: the mesh of whichever candidate comes next.
     const decidedAfterThis = new Set(this.decided);
     decidedAfterThis.add(current.lineId);
-    const next = nextEntry(
-      this.pool,
-      decidedAfterThis,
-      this.state.minScore.value,
-    );
+    const next = nextEntry(this.pool, decidedAfterThis, this.shownCandidates());
     if (next !== undefined) {
       this.connection.meshPrefetchSegments([next.candidate.partnerRootId]);
     }
@@ -3684,6 +3697,18 @@ class ZettaTraceSession extends RefCounted {
       fresh = (await Promise.all(targets.map(around))).flat();
     }
     return fresh;
+  }
+
+  /**
+   * Whether a queued candidate passes the shared filters, as far as the queue
+   * can answer: a side none of them has semantics for is not filtered.
+   */
+  private shownCandidates(): (candidate: EdgeCandidate) => boolean {
+    const filter = applicableToCandidates(
+      this.state.candidateFilter,
+      this.pool.map((entry) => entry.candidate),
+    );
+    return (candidate) => candidatePasses(candidate, filter);
   }
 
   /** The candidate partner's current root, or the one it was fetched with. */
@@ -4091,11 +4116,10 @@ class CandidateOverviewSession extends RefCounted {
     // The threshold is the trace's, shared on purpose. Every filter works on
     // scores already fetched, so moving one is a repaint rather than a query.
     const repaint = () => this.repaint();
-    this.registerDisposer(
-      connection.state.zettaTraceState.minScore.changed.add(repaint),
-    );
-    this.registerDisposer(state.semanticClass.changed.add(repaint));
-    this.registerDisposer(state.minClassFraction.changed.add(repaint));
+    for (const signal of connection.state.zettaTraceState
+      .candidateFilterSignals) {
+      this.registerDisposer(signal.changed.add(repaint));
+    }
     // Size and whose rejections count are the trace's filters too, but they
     // decide which candidates the server returns, so the scores are refetched.
     const rescore = this.registerCancellable(
@@ -4232,11 +4256,7 @@ class CandidateOverviewSession extends RefCounted {
   }
 
   private get filter() {
-    return {
-      wanted: this.state.semanticClass.value,
-      minFraction: this.state.minClassFraction.value,
-      minScore: this.connection.state.zettaTraceState.minScore.value,
-    };
+    return this.connection.state.zettaTraceState.candidateFilter;
   }
 
   /**
@@ -6351,17 +6371,11 @@ class CalcadaGraphServerInterface {
         nInterfaces: Number(c.n_interfaces),
         modelDecision: String(c.model_decision),
         partnerVoxels: Number(c.partner_voxels ?? 0),
-        partnerClasses: {
-          perikaryon: Number(c.partner_classes?.perikaryon ?? 0),
-          dendrite: Number(c.partner_classes?.dendrite ?? 0),
-          axon: Number(c.partner_classes?.axon ?? 0),
-          glia: Number(c.partner_classes?.glia ?? 0),
-          vasculature: Number(c.partner_classes?.vasculature ?? 0),
-          nucleus: Number(c.partner_classes?.nucleus ?? 0),
-          ecs: Number(c.partner_classes?.ecs ?? 0),
-          other: Number(c.partner_classes?.other ?? 0),
-        },
+        partnerClasses: parseClassCounts(c.partner_classes),
         partnerHasInfo: c.partner_has_info === true,
+        selfVoxels: Number(c.self_voxels ?? 0),
+        selfClasses: parseClassCounts(c.self_classes),
+        selfHasInfo: c.self_has_info === true,
       }),
     );
   }
@@ -6443,29 +6457,11 @@ class CalcadaGraphServerInterface {
         bestScore: Number(piece.best_score),
         bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
         bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
-        partnerClasses: {
-          perikaryon: Number(piece.partner_classes?.perikaryon ?? 0),
-          dendrite: Number(piece.partner_classes?.dendrite ?? 0),
-          axon: Number(piece.partner_classes?.axon ?? 0),
-          glia: Number(piece.partner_classes?.glia ?? 0),
-          vasculature: Number(piece.partner_classes?.vasculature ?? 0),
-          nucleus: Number(piece.partner_classes?.nucleus ?? 0),
-          ecs: Number(piece.partner_classes?.ecs ?? 0),
-          other: Number(piece.partner_classes?.other ?? 0),
-        },
+        partnerClasses: parseClassCounts(piece.partner_classes),
         partnerHasInfo: piece.partner_has_info === true,
         candidateCount: Number(piece.candidate_count ?? 0),
         voxelCount: Number(piece.voxel_count),
-        classes: {
-          perikaryon: Number(piece.classes?.perikaryon ?? 0),
-          dendrite: Number(piece.classes?.dendrite ?? 0),
-          axon: Number(piece.classes?.axon ?? 0),
-          glia: Number(piece.classes?.glia ?? 0),
-          vasculature: Number(piece.classes?.vasculature ?? 0),
-          nucleus: Number(piece.classes?.nucleus ?? 0),
-          ecs: Number(piece.classes?.ecs ?? 0),
-          other: Number(piece.classes?.other ?? 0),
-        },
+        classes: parseClassCounts(piece.classes),
         hasInfo: piece.has_info === true,
       }),
     );

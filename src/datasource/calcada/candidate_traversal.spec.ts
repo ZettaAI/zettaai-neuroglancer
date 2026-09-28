@@ -37,6 +37,18 @@ function candidate(
       other: 0,
     },
     partnerHasInfo: false,
+    selfVoxels: 0,
+    selfClasses: {
+      perikaryon: 0,
+      dendrite: 0,
+      axon: 0,
+      glia: 0,
+      vasculature: 0,
+      nucleus: 0,
+      ecs: 0,
+      other: 0,
+    },
+    selfHasInfo: false,
   };
 }
 
@@ -126,12 +138,20 @@ describe("nextEntry", () => {
       0,
       new Set(),
     );
-    expect(Number(nextEntry(pool, new Set(), 0.5)!.candidate.lineId)).toBe(1);
-    expect(remainingCount(pool, new Set(), 0.5)).toBe(1);
+    expect(
+      Number(
+        nextEntry(pool, new Set(), (c) => c.score >= 0.5)!.candidate.lineId,
+      ),
+    ).toBe(1);
+    expect(remainingCount(pool, new Set(), (c) => c.score >= 0.5)).toBe(1);
     // Lowering the threshold brings the skipped child back ahead of its
     // ancestor, where the depth-first walk had it.
-    expect(Number(nextEntry(pool, new Set(), 0.3)!.candidate.lineId)).toBe(2);
-    expect(remainingCount(pool, new Set(), 0.3)).toBe(2);
+    expect(
+      Number(
+        nextEntry(pool, new Set(), (c) => c.score >= 0.3)!.candidate.lineId,
+      ),
+    ).toBe(2);
+    expect(remainingCount(pool, new Set(), (c) => c.score >= 0.3)).toBe(2);
   });
 });
 

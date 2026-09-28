@@ -407,6 +407,29 @@
   opacity: 0.85;
 }
 
+/* One end of a candidate — its filters and, while tracing, the current piece
+   on that end — set apart from the other end. */
+.calcada-trace-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.calcada-trace-panel-section legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calcada-trace-panel-current {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
 /* The trace edits the graph it runs on, so running it on main is worth
    saying before the first accept rather than after. */
 .calcada-trace-panel-warning {

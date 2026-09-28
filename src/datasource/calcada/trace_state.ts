@@ -8,6 +8,11 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import type {
+  CandidateFilter,
+  SemanticClass,
+} from "#src/datasource/calcada/candidate_heat.js";
+import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_heat.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { Uint64Set } from "#src/uint64_set.js";
 import { RefCounted } from "#src/util/disposable.js";
@@ -45,8 +50,27 @@ const TRACE_REJECTED_BY_KEY = "rejectedBy";
 const TRACE_MIN_SCORE_KEY = "minScore";
 const TRACE_CENTRE_KEY = "centreOnCandidate";
 const TRACE_ZOOM_KEY = "zoomOnCandidate";
+const TRACE_SOURCE_MIN_VOXELS_KEY = "sourceMinVoxels";
+const TRACE_SOURCE_CLASS_KEY = "sourceClass";
+const TRACE_SOURCE_FRACTION_KEY = "sourceMinFraction";
+const TRACE_TARGET_CLASS_KEY = "targetClass";
+const TRACE_TARGET_FRACTION_KEY = "targetMinFraction";
+const CLASS_FRACTION_DEFAULT = 0.8;
 // Server-side alias for the authenticated user.
 export const TRACE_CURRENT_USER = "me";
+
+function classOrUndefined(name: SemanticClass) {
+  return name === "any" ? undefined : name;
+}
+
+function fractionOrUndefined(fraction: number) {
+  return fraction === CLASS_FRACTION_DEFAULT ? undefined : fraction;
+}
+
+function parseClass(value: unknown): SemanticClass {
+  const name = verifyString(value) as SemanticClass;
+  return SEMANTIC_CLASSES.includes(name) ? name : "any";
+}
 
 /**
  * Zetta Trace is a mode, not a tool: a proofreader stays in it while switching
@@ -85,6 +109,17 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // both are theirs to turn off.
   centreOnCandidate = new WatchableValue<boolean>(true);
   zoomOnCandidate = new WatchableValue<boolean>(true);
+  // What each end of a candidate must be — source the seed's piece at the
+  // contact, target the piece it would merge in. Shared with split error
+  // detection like the score threshold.
+  // The seed's piece at the contact must be at least this large. Checked on
+  // the client, from the size each candidate carries; the candidate's own
+  // minimum is minPieceVoxels, which the server applies.
+  sourceMinVoxels = new WatchableValue<number>(0);
+  sourceClass = new WatchableValue<SemanticClass>("any");
+  sourceMinFraction = new WatchableValue<number>(CLASS_FRACTION_DEFAULT);
+  targetClass = new WatchableValue<SemanticClass>("any");
+  targetMinFraction = new WatchableValue<number>(CLASS_FRACTION_DEFAULT);
 
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
@@ -107,6 +142,40 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.minScore.changed.add(reemit));
     this.registerDisposer(this.centreOnCandidate.changed.add(reemit));
     this.registerDisposer(this.zoomOnCandidate.changed.add(reemit));
+    this.registerDisposer(this.sourceMinVoxels.changed.add(reemit));
+    this.registerDisposer(this.sourceClass.changed.add(reemit));
+    this.registerDisposer(this.sourceMinFraction.changed.add(reemit));
+    this.registerDisposer(this.targetClass.changed.add(reemit));
+    this.registerDisposer(this.targetMinFraction.changed.add(reemit));
+  }
+
+  /** The shared filters as one value, for the trace and split error detection. */
+  get candidateFilter(): CandidateFilter {
+    return {
+      minScore: this.minScore.value,
+      source: {
+        minVoxels: this.sourceMinVoxels.value,
+        wanted: this.sourceClass.value,
+        minFraction: this.sourceMinFraction.value,
+      },
+      target: {
+        minVoxels: this.minPieceVoxels.value,
+        wanted: this.targetClass.value,
+        minFraction: this.targetMinFraction.value,
+      },
+    };
+  }
+
+  /** Every filter that hides candidates already fetched, without a refetch. */
+  get candidateFilterSignals() {
+    return [
+      this.minScore,
+      this.sourceMinVoxels,
+      this.sourceClass,
+      this.sourceMinFraction,
+      this.targetClass,
+      this.targetMinFraction,
+    ];
   }
 
   /**
@@ -152,6 +221,15 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       [TRACE_MIN_SCORE_KEY]: this.minScore.value || undefined,
       [TRACE_CENTRE_KEY]: this.centreOnCandidate.value ? undefined : false,
       [TRACE_ZOOM_KEY]: this.zoomOnCandidate.value ? undefined : false,
+      [TRACE_SOURCE_MIN_VOXELS_KEY]: this.sourceMinVoxels.value || undefined,
+      [TRACE_SOURCE_CLASS_KEY]: classOrUndefined(this.sourceClass.value),
+      [TRACE_SOURCE_FRACTION_KEY]: fractionOrUndefined(
+        this.sourceMinFraction.value,
+      ),
+      [TRACE_TARGET_CLASS_KEY]: classOrUndefined(this.targetClass.value),
+      [TRACE_TARGET_FRACTION_KEY]: fractionOrUndefined(
+        this.targetMinFraction.value,
+      ),
       [TRACE_SCOPE_KEY]: this.scope.value,
       [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
       [TRACE_SPHERE_CENTER_KEY]: this.sphereCenter.value
@@ -181,6 +259,21 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, TRACE_ZOOM_KEY, (value) => {
       this.zoomOnCandidate.value = verifyBoolean(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_SOURCE_MIN_VOXELS_KEY, (value) => {
+      this.sourceMinVoxels.value = verifyInt(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_SOURCE_CLASS_KEY, (value) => {
+      this.sourceClass.value = parseClass(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_SOURCE_FRACTION_KEY, (value) => {
+      this.sourceMinFraction.value = verifyFiniteFloat(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_TARGET_CLASS_KEY, (value) => {
+      this.targetClass.value = parseClass(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_TARGET_FRACTION_KEY, (value) => {
+      this.targetMinFraction.value = verifyFiniteFloat(value);
     });
     verifyOptionalObjectProperty(x, TRACE_SCOPE_KEY, (value) => {
       this.scope.value =
