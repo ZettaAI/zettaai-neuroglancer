@@ -61,7 +61,7 @@ import type { Uint64Map } from "#src/uint64_map.js";
 import type { Borrowed, RefCounted } from "#src/util/disposable.js";
 import {
   vec4,
-  getFrustrumPlanes,
+  getFrustumPlanes,
   mat3,
   mat3FromMat4,
   mat4,
@@ -1049,7 +1049,7 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
       modelMatrix,
     );
 
-    const clippingPlanes = getFrustrumPlanes(
+    const clippingPlanes = getFrustumPlanes(
       new Float32Array(24),
       modelViewProjection,
     );
@@ -1221,7 +1221,7 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
       modelMatrix,
     );
 
-    const clippingPlanes = getFrustrumPlanes(
+    const clippingPlanes = getFrustumPlanes(
       new Float32Array(24),
       modelViewProjection,
     );

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { FragmentSpatialIndex } from "#src/datasource/calcada/fragment_spatial.js";
 import type { FragmentSpatialHint } from "#src/mesh/backend.js";
-import { getFrustrumPlanes, mat4, vec3 } from "#src/util/geom.js";
+import { getFrustumPlanes, mat4, vec3 } from "#src/util/geom.js";
 
 // A 2000x2000x2000 nm box centered at the origin, viewed head-on with the
 // focus at the origin, gives simple, hand-checkable in/out-of-frustum math.
 function makeHint(): FragmentSpatialHint {
   const mvp = mat4.ortho(mat4.create(), -1000, 1000, -1000, 1000, -1000, 1000);
-  const clippingPlanes = getFrustrumPlanes(new Float32Array(24), mvp);
+  const clippingPlanes = getFrustumPlanes(new Float32Array(24), mvp);
   return { clippingPlanes, focusModel: vec3.fromValues(0, 0, 0) };
 }
 
@@ -186,7 +186,7 @@ describe("FragmentSpatialIndex", () => {
         1000,
       );
       const hint: FragmentSpatialHint = {
-        clippingPlanes: getFrustrumPlanes(new Float32Array(24), mvp),
+        clippingPlanes: getFrustumPlanes(new Float32Array(24), mvp),
         focusModel: vec3.fromValues(100, 0, 0),
       };
       index.updateHint(hint);
@@ -202,7 +202,7 @@ describe("FragmentSpatialIndex", () => {
       index.setFromManifest(["big:0"], [3000, 0, 0], [5]);
       const mvp = mat4.ortho(mat4.create(), -200, 200, -200, 200, -200, 200);
       const hint: FragmentSpatialHint = {
-        clippingPlanes: getFrustrumPlanes(new Float32Array(24), mvp),
+        clippingPlanes: getFrustumPlanes(new Float32Array(24), mvp),
         focusModel: vec3.fromValues(0, 0, 0),
       };
       index.updateHint(hint);
@@ -282,7 +282,7 @@ describe("FragmentSpatialIndex", () => {
       1000,
     );
     const distantHint: FragmentSpatialHint = {
-      clippingPlanes: getFrustrumPlanes(new Float32Array(24), distantMvp),
+      clippingPlanes: getFrustumPlanes(new Float32Array(24), distantMvp),
       focusModel: vec3.fromValues(10000, 0, 0),
     };
     index.updateHint(makeHint());

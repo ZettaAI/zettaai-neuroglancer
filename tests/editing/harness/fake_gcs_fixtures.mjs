@@ -71,7 +71,7 @@ export async function startFakeGcsFixtures({ port } = {}) {
     throw new Error(
       `fake-gcs-server not built at ${BIN}\n` +
         `It is built by the vitest workspace setup, or run:\n` +
-        `  npx tsx -e "import('./build_tools/vitest/build_fake_gcs_server.ts').then(m=>m.getFakeGcsServerBin())"`,
+        `  node -e "import('./build_tools/vitest/build_fake_gcs_server.ts').then(m=>m.getFakeGcsServerBin())"`,
     );
   }
   if (!existsSync(BUCKETS_ROOT)) {

@@ -19,15 +19,10 @@ import "#src/layer/annotation/style.css";
 import type { AnnotationDisplayState } from "#src/annotation/annotation_layer_state.js";
 import { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
 import { MultiscaleAnnotationSource } from "#src/annotation/frontend_source.js";
-import type {
-  Annotation,
-  AnnotationPropertySpec,
-  AnnotationSource,
-} from "#src/annotation/index.js";
+import type { AnnotationPropertySpec } from "#src/annotation/index.js";
 import {
   annotationPropertySpecsToJson,
   AnnotationType,
-  isAnnotationTagPropertySpec,
   LocalAnnotationSource,
   parseAnnotationPropertySpecs,
 } from "#src/annotation/index.js";
@@ -35,6 +30,15 @@ import type { CoordinateTransformSpecification } from "#src/coordinate_transform
 import { makeCoordinateSpace } from "#src/coordinate_transform.js";
 import type { DataSourceSpecification } from "#src/datasource/index.js";
 import { localAnnotationsUrl, LocalDataSource } from "#src/datasource/local.js";
+import {
+  registerAnnotationPropertyTools,
+  removeInvalidPropertyToolBindings,
+} from "#src/layer/annotation/property_tools.js";
+import { buildShaderPropertyList } from "#src/layer/annotation/shader_ui_property_list.js";
+import {
+  SELECT_NEXT_ANNOTATION_TOOL_ID,
+  SELECT_PREVIOUS_ANNOTATION_TOOL_ID,
+} from "#src/layer/annotation/tool_state.js";
 import type { LayerManager, ManagedUserLayer } from "#src/layer/index.js";
 import {
   LayerReference,
@@ -54,23 +58,18 @@ import {
   TrackableBooleanCheckbox,
 } from "#src/trackable_boolean.js";
 import {
-  ComputedWatchableValue,
   makeCachedLazyDerivedWatchableValue,
   WatchableValue,
+  observeWatchable,
 } from "#src/trackable_value.js";
+import { AnnotationSchemaTab } from "#src/ui/annotation_schema_tab.js";
 import type {
   AnnotationLayerView,
   MergedAnnotationStates,
 } from "#src/ui/annotations.js";
 import { UserLayerWithAnnotationsMixin } from "#src/ui/annotations.js";
-import { MessagesView } from "#src/ui/layer_data_sources_tab.js";
 import type { ToolActivation } from "#src/ui/tool.js";
-import {
-  LayerTool,
-  makeToolButton,
-  registerTool,
-  unregisterTool,
-} from "#src/ui/tool.js";
+import { LayerTool, registerTool } from "#src/ui/tool.js";
 import { animationFrameDebounce } from "#src/util/animation_frame_debounce.js";
 import type { Borrowed, Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
@@ -86,10 +85,7 @@ import {
   verifyString,
   verifyStringArray,
 } from "#src/util/json.js";
-import { MessageList, MessageSeverity } from "#src/util/message_list.js";
 import { NullarySignal } from "#src/util/signal.js";
-import { makeAddButton } from "#src/widget/add_button.js";
-import { makeDeleteButton } from "#src/widget/delete_button.js";
 import { DependentViewWidget } from "#src/widget/dependent_view_widget.js";
 import {
   addLayerControlToOptionsTab,
@@ -108,8 +104,6 @@ import {
   ShaderControls,
 } from "#src/widget/shader_controls.js";
 import { Tab } from "#src/widget/tab_view.js";
-import type { VirtualListSource } from "#src/widget/virtual_list.js";
-import { VirtualList } from "#src/widget/virtual_list.js";
 
 const POINTS_JSON_KEY = "points";
 const ANNOTATIONS_JSON_KEY = "annotations";
@@ -172,6 +166,7 @@ const LINKED_SEGMENTATION_LAYER_JSON_KEY = "linkedSegmentationLayer";
 const FILTER_BY_SEGMENTATION_JSON_KEY = "filterBySegmentation";
 const IGNORE_NULL_SEGMENT_FILTER_JSON_KEY = "ignoreNullSegmentFilter";
 const CODE_VISIBLE_KEY = "codeVisible";
+const HIDE_INACTIVE_SHADER_CONTROLS_JSON_KEY = "hideInactiveShaderControls";
 const SWAP_VISIBLE_SEGMENTS_ON_MOVE_JSON_KEY = "swapVisbleSegmentsOnMove";
 
 class LinkedSegmentationLayers extends RefCounted {
@@ -414,283 +409,45 @@ class LinkedSegmentationLayersWidget extends RefCounted {
   }
 }
 
-function getSelectedAnnotation(layer: AnnotationUserLayer) {
-  const { localAnnotations } = layer;
-  if (localAnnotations) {
-    const ourSelectionState =
-      layer.manager.root.selectionState.value?.layers.find(
-        (x) => x.layer === layer,
-      );
-    if (ourSelectionState && ourSelectionState.state.annotationId) {
-      return localAnnotations.get(ourSelectionState.state.annotationId);
-    }
-  }
-  return undefined;
-}
+const Base = UserLayerWithAnnotationsMixin(UserLayer);
 
-function triggerAnnotationUpdate(
-  source: AnnotationSource,
-  annotation: Annotation,
-) {
-  const reference = source.getReference(annotation.id);
-  source.update(reference, annotation);
-  source.commit(reference); // commmit may not be necessary
-}
-
-class TagTool extends LayerTool<AnnotationUserLayer> {
-  static TOOL_ID = "tagTool";
-
-  constructor(
-    public propertyIdentifier: string,
-    layer: AnnotationUserLayer,
-  ) {
-    super(layer, true);
-  }
-
-  get tag(): string {
-    const { localAnnotations } = this.layer;
-    if (localAnnotations) {
-      const property = localAnnotations.properties.value.find(
-        (x) => x.identifier === this.propertyIdentifier,
-      );
-      if (property && isAnnotationTagPropertySpec(property)) {
-        return property.tag;
-      }
-    }
-    return "unknown";
-  }
-
+class SelectPreviousAnnotationTool extends LayerTool<AnnotationUserLayer> {
   activate(activation: ToolActivation<this>) {
-    const { localAnnotations } = this.layer;
-    if (!localAnnotations) return;
-    const annotation = getSelectedAnnotation(this.layer);
-    if (annotation) {
-      const { propertyIdentifier } = this;
-      const propertyIndex = localAnnotations.properties.value.findIndex(
-        (x) => x.identifier === propertyIdentifier,
-      );
-      if (propertyIndex > -1) {
-        annotation.properties[propertyIndex] =
-          1 - annotation.properties[propertyIndex];
-        triggerAnnotationUpdate(localAnnotations, annotation);
-      }
-    }
+    this.layer.dispatchLayerEvent("select-previous");
     activation.cancel();
   }
-
   toJSON() {
-    return `${TagTool.TOOL_ID}_${this.propertyIdentifier}`;
+    return SELECT_PREVIOUS_ANNOTATION_TOOL_ID;
   }
-
   get description() {
-    // currently this updates correctly because property changes trigger layer changes
-    // which triggers tool widgets to be recreated when the layer is active
-    return `tag ${this.tag}`;
+    return "select previous annotation";
   }
 }
 
-class TagsTab extends Tab {
-  tools = new Set<string>();
-
-  constructor(public layer: Borrowed<AnnotationUserLayer>) {
-    super();
-    const { element } = this;
-    element.classList.add("neuroglancer-tags-tab");
-    const { localAnnotations } = layer;
-    if (!localAnnotations) return;
-    const { properties } = localAnnotations;
-    const tagsContainer = document.createElement("div");
-    tagsContainer.classList.add("neuroglancer-tags-container");
-    element.appendChild(tagsContainer);
-
-    let previousListLength = 0;
-
-    let prevList: string[] = [];
-    const messages = new MessageList();
-
-    const validateNewTag = (tag: string) => {
-      messages.clearMessages();
-      if (prevList.includes(tag)) {
-        messages.addMessage({
-          severity: MessageSeverity.error,
-          message: `tag: "${tag}" already exists`,
-        });
-        return false;
-      }
-      return true;
-    };
-
-    const getUniqueTagPropertyId = (source: AnnotationSource) => {
-      const { properties } = source;
-      let largestTagId = -1;
-      for (const p of properties.value) {
-        const res = p.identifier.match(/tag([\d]+)/);
-        largestTagId++;
-        if (res && res.length > 1) {
-          largestTagId = parseInt(res[1]);
-        }
-      }
-      return `tag${largestTagId + 1}`;
-    };
-
-    const addTag = (input: HTMLInputElement) => {
-      const { value } = input;
-      if (input.validity.valid) {
-        if (validateNewTag(value)) {
-          localAnnotations.addProperty({
-            type: "uint8",
-            tag: value,
-            default: 0,
-            description: undefined,
-            identifier: getUniqueTagPropertyId(localAnnotations),
-          });
-        }
-      }
-    };
-
-    const listSource: VirtualListSource = {
-      length: 1,
-      render: (index: number) => {
-        const el = document.createElement("div");
-        el.classList.add("neuroglancer-tag-list-entry");
-        const inputElement = document.createElement("input");
-        inputElement.required = true;
-        el.append(inputElement);
-        if (index === listSource.length - 1) {
-          // add new tag UI
-          el.classList.add("add");
-          // this is created just to match the width of the tool button
-          const tool = makeToolButton(this, layer.toolBinder, {
-            toolJson: `${TagTool.TOOL_ID}_${"_invalid"}`,
-          });
-          el.prepend(tool);
-          inputElement.placeholder = "Tag name";
-          // select input when number of tags increases, this is useful for adding multiple tags in a row
-          if (previousListLength < listSource.length) {
-            setTimeout(() => {
-              inputElement.focus();
-            }, 0);
-          }
-          inputElement.addEventListener("keyup", (evt) => {
-            if (evt.key === "Enter") {
-              addTag(inputElement);
-            }
-          });
-          const addNewTagButton = makeAddButton({
-            title: "Add additional tag",
-            onClick: () => addTag(inputElement),
-          });
-          el.append(addNewTagButton);
-          previousListLength = listSource.length;
-        } else {
-          const property = localAnnotations.getTagProperties()[index];
-          const { tag } = property;
-          const tool = makeToolButton(this, layer.toolBinder, {
-            toolJson: `${TagTool.TOOL_ID}_${property.identifier}`,
-            title: `Tag selected annotation with ${tag}`,
-          });
-          el.prepend(tool);
-          inputElement.value = tag;
-          inputElement.addEventListener("change", () => {
-            const { value } = inputElement;
-            if (
-              !validateNewTag(value) ||
-              !confirm(`Rename tag ${tag} to ${value}?`)
-            ) {
-              inputElement.value = tag;
-              return;
-            }
-            property.tag = value;
-            properties.changed.dispatch();
-
-            // is this a better way to update the selection?
-            const annotation = getSelectedAnnotation(this.layer);
-            if (annotation) {
-              triggerAnnotationUpdate(localAnnotations, annotation);
-            }
-            // or something like this?
-            // this.layer.manager.root.selectionState.changed.dispatch(); // TODO, this is probably not the best way to handle it
-          });
-          const deleteButton = makeDeleteButton({
-            title: "Delete tag",
-            onClick: (event) => {
-              event.stopPropagation();
-              event.preventDefault();
-              if (confirm(`Delete tag ${tag}?`)) {
-                localAnnotations.removeProperty(property.identifier);
-              }
-              // is this a better way to update the selection?
-              const annotation = getSelectedAnnotation(this.layer);
-              if (annotation) {
-                triggerAnnotationUpdate(localAnnotations, annotation);
-              }
-              // or something like this?
-              // this.layer.manager.root.selectionState.changed.dispatch(); // TODO, this is probably not the best way to handle it
-            },
-          });
-          deleteButton.classList.add("neuroglancer-tag-list-entry-delete");
-          el.append(deleteButton);
-        }
-        return el;
-      },
-      changed: new NullarySignal(),
-    };
-    const list = this.registerDisposer(
-      new VirtualList({
-        source: listSource,
-      }),
-    );
-    tagsContainer.appendChild(list.element);
-    const messagesView = this.registerDisposer(new MessagesView(messages));
-    tagsContainer.appendChild(messagesView.element);
-    list.body.classList.add("neuroglancer-tag-list");
-    list.element.classList.add("neuroglancer-tag-list-outer");
-
-    const updateTagList = () => {
-      let retainCount = 1; // new entry
-      let deleteCount = 0;
-      let insertCount = 0;
-      const newList = localAnnotations.getTagProperties().map((x) => x.tag);
-      for (const tag of newList) {
-        if (prevList.includes(tag)) {
-          retainCount++;
-        } else {
-          insertCount++;
-        }
-      }
-      for (const tag of prevList) {
-        if (!newList.includes(tag)) {
-          deleteCount++;
-        }
-      }
-      listSource.length = newList.length + 1;
-      prevList = newList;
-      if (deleteCount > 0 || insertCount > 0) {
-        listSource.changed!.dispatch([
-          {
-            retainCount,
-            deleteCount,
-            insertCount,
-          },
-        ]);
-      }
-    };
-    this.registerDisposer(properties.changed.add(updateTagList));
-    updateTagList();
+class SelectNextAnnotationTool extends LayerTool<AnnotationUserLayer> {
+  activate(activation: ToolActivation<this>) {
+    this.layer.dispatchLayerEvent("select-next");
+    activation.cancel();
+  }
+  toJSON() {
+    return SELECT_NEXT_ANNOTATION_TOOL_ID;
+  }
+  get description() {
+    return "select next annotation";
   }
 }
 
-const Base = UserLayerWithAnnotationsMixin(UserLayer);
 export class AnnotationUserLayer extends Base {
   localAnnotations: LocalAnnotationSource | undefined;
   codeVisible = new TrackableBoolean(true);
-  private localAnnotationProperties: WatchableValue<AnnotationPropertySpec[]> =
+  hideInactiveShaderControls = new TrackableBoolean(false);
+  readonly localAnnotationProperties: WatchableValue<AnnotationPropertySpec[]> =
     new WatchableValue([]);
   private localAnnotationRelationships: string[];
   private localAnnotationsJson: any = undefined;
   private pointAnnotationsJson: any = undefined;
   static supportColorPickerInAnnotationTab = false;
-  private tagTools: string[] = [];
+
   linkedSegmentationLayers = this.registerDisposer(
     new LinkedSegmentationLayers(
       this.manager.rootLayers,
@@ -709,10 +466,23 @@ export class AnnotationUserLayer extends Base {
 
   constructor(managedLayer: Borrowed<ManagedUserLayer>) {
     super(managedLayer);
+    this.registerDisposer(
+      this.registerLayerEvent("select-previous", () =>
+        this.shiftSelectedIndexBy(-1),
+      ),
+    );
+    this.registerDisposer(
+      this.registerLayerEvent("select-next", () =>
+        this.shiftSelectedIndexBy(1),
+      ),
+    );
     this.linkedSegmentationLayers.changed.add(
       this.specificationChanged.dispatch,
     );
     this.codeVisible.changed.add(this.specificationChanged.dispatch);
+    this.hideInactiveShaderControls.changed.add(
+      this.specificationChanged.dispatch,
+    );
     this.annotationDisplayState.ignoreNullSegmentFilter.changed.add(
       this.specificationChanged.dispatch,
     );
@@ -722,89 +492,38 @@ export class AnnotationUserLayer extends Base {
     this.annotationProjectionRenderScaleTarget.changed.add(
       this.specificationChanged.dispatch,
     );
-    this.registerDisposer(
-      this.localAnnotationProperties.changed.add(() => {
-        const { localAnnotations } = this;
-        if (localAnnotations) {
-          const tagIdentifiers = localAnnotations
-            .getTagProperties()
-            .map((x) => x.identifier);
-          this.syncTagTools(tagIdentifiers);
-        }
-      }),
-    );
     this.tabs.add("rendering", {
       label: "Rendering",
       order: -100,
       getter: () => new RenderingOptionsTab(this),
     });
-    const hideTagsTab = this.registerDisposer(
-      new ComputedWatchableValue(() => {
-        return this.localAnnotations === undefined;
-      }, this.dataSourcesChanged),
-    );
-    this.tabs.add("tags", {
-      label: "Tags",
-      order: 10,
-      getter: () => new TagsTab(this),
-      hidden: hideTagsTab,
+    this.tabs.add("schema", {
+      label: "Schema",
+      order: 20,
+      getter: () => new AnnotationSchemaTab(this),
     });
     this.tabs.default = "annotations";
+    this.registerDisposer(
+      this.localAnnotationProperties.changed.add(() =>
+        removeInvalidPropertyToolBindings(this),
+      ),
+    );
   }
 
-  syncTagTools = (tagIdentifiers: string[]) => {
-    // TODO, change to set? intersection etc
-    for (const propertyIdentifier of this.tagTools) {
-      if (!tagIdentifiers.includes(propertyIdentifier)) {
-        unregisterTool(
-          AnnotationUserLayer,
-          `${TagTool.TOOL_ID}_${propertyIdentifier}`,
-        );
-        for (const [key, tool] of this.toolBinder.bindings.entries()) {
-          if (
-            tool instanceof TagTool &&
-            tool.propertyIdentifier === propertyIdentifier
-          ) {
-            this.toolBinder.deleteTool(key);
-          }
-        }
-      }
-    }
-    this.tagTools = this.tagTools.filter((x) => tagIdentifiers.includes(x));
-    for (const tagIdentifier of tagIdentifiers) {
-      if (!this.tagTools.includes(tagIdentifier)) {
-        this.tagTools.push(tagIdentifier);
-        registerTool(
-          AnnotationUserLayer,
-          `${TagTool.TOOL_ID}_${tagIdentifier}`,
-          (layer) => {
-            const tool = new TagTool(tagIdentifier, layer);
-            return tool;
-          },
-        );
-      }
-    }
-  };
-
   restoreState(specification: any) {
-    // restore tag tools before super so tag tools are registered
     const properties = verifyOptionalObjectProperty(
       specification,
       ANNOTATION_PROPERTIES_JSON_KEY,
       parseAnnotationPropertySpecs,
     );
-    if (properties) {
-      this.syncTagTools(
-        properties.filter(isAnnotationTagPropertySpec).map((x) => x.identifier),
-      );
-    }
+    this.localAnnotationProperties.value = properties ?? [];
     super.restoreState(specification);
     this.linkedSegmentationLayers.restoreState(specification);
     this.codeVisible.restoreState(specification[CODE_VISIBLE_KEY]);
+    this.hideInactiveShaderControls.restoreState(
+      specification[HIDE_INACTIVE_SHADER_CONTROLS_JSON_KEY],
+    );
     this.localAnnotationsJson = specification[ANNOTATIONS_JSON_KEY];
-    if (properties) {
-      this.localAnnotationProperties.value = properties || [];
-    }
     this.localAnnotationRelationships = verifyOptionalObjectProperty(
       specification,
       ANNOTATION_RELATIONSHIPS_JSON_KEY,
@@ -940,9 +659,9 @@ export class AnnotationUserLayer extends Base {
             this.localAnnotations = undefined;
           });
           refCounted.registerDisposer(
-            this.localAnnotations.changed.add(() => {
-              this.specificationChanged.dispatch();
-            }),
+            this.localAnnotations.changed.add(
+              this.specificationChanged.dispatch,
+            ),
           );
           try {
             addPointAnnotations(
@@ -995,21 +714,21 @@ export class AnnotationUserLayer extends Base {
       }
       loadedSubsource.deactivate("Not compatible with annotation layer");
     }
+    const prevAnnotationProperties =
+      this.annotationDisplayState.annotationProperties.value;
     if (
-      properties &&
-      stableStringify(
-        this.annotationDisplayState.annotationProperties.value,
-      ) !== stableStringify(properties?.value)
+      properties !== undefined &&
+      stableStringify(prevAnnotationProperties) !==
+        stableStringify(properties.value)
     ) {
       this.registerDisposer(
         properties.changed.add(() => {
-          this.annotationDisplayState.annotationProperties.value = [
-            ...properties!.value,
-          ];
+          this.annotationDisplayState.annotationProperties.value =
+            properties !== undefined ? [...properties.value] : [];
         }),
       );
       this.annotationDisplayState.annotationProperties.value = [
-        ...properties!.value,
+        ...properties.value,
       ];
     }
   }
@@ -1097,6 +816,8 @@ export class AnnotationUserLayer extends Base {
     x[CROSS_SECTION_RENDER_SCALE_JSON_KEY] =
       this.annotationCrossSectionRenderScaleTarget.toJSON();
     x[CODE_VISIBLE_KEY] = this.codeVisible.toJSON();
+    x[HIDE_INACTIVE_SHADER_CONTROLS_JSON_KEY] =
+      this.hideInactiveShaderControls.toJSON();
     x[PROJECTION_RENDER_SCALE_JSON_KEY] =
       this.annotationProjectionRenderScaleTarget.toJSON();
     if (this.localAnnotations !== undefined) {
@@ -1124,8 +845,37 @@ export class AnnotationUserLayer extends Base {
     return x;
   }
 
+  observeLayerColor(callback: () => void) {
+    const disposer = super.observeLayerColor(callback);
+    const subDisposer = observeWatchable(
+      callback,
+      this.annotationDisplayState.color,
+    );
+    const shaderDisposer = observeWatchable(
+      callback,
+      this.annotationDisplayState.shader,
+    );
+    return () => {
+      disposer();
+      subDisposer();
+      shaderDisposer();
+    };
+  }
+
+  get automaticLayerBarColors() {
+    const shaderHasDefaultColor =
+      this.annotationDisplayState.shader.value.includes("defaultColor");
+    if (shaderHasDefaultColor && this.annotationDisplayState.color.value) {
+      const [r, g, b] = this.annotationDisplayState.color.value;
+      return [`rgb(${r * 255}, ${g * 255}, ${b * 255})`];
+    }
+
+    return undefined;
+  }
+
   static type = "annotation";
   static typeAbbreviation = "ann";
+  static supportsLayerBarColorSyncOption = true;
 }
 
 function makeShaderCodeWidget(layer: AnnotationUserLayer) {
@@ -1158,40 +908,7 @@ class RenderingOptionsTab extends Tab {
         layer.annotationDisplayState.annotationProperties,
         (properties, parent) => {
           if (properties === undefined || properties.length === 0) return;
-          const propertyList = document.createElement("div");
-          parent.appendChild(propertyList);
-          propertyList.classList.add(
-            "neuroglancer-annotation-shader-property-list",
-          );
-          for (const property of properties) {
-            const div = document.createElement("div");
-            div.classList.add("neuroglancer-annotation-shader-property");
-            const typeElement = document.createElement("span");
-            typeElement.classList.add(
-              "neuroglancer-annotation-shader-property-type",
-            );
-            typeElement.textContent = property.type;
-            const nameElement = document.createElement("span");
-            nameElement.classList.add(
-              "neuroglancer-annotation-shader-property-identifier",
-            );
-            nameElement.textContent = `prop_${property.identifier}`;
-            div.appendChild(typeElement);
-            div.appendChild(nameElement);
-            const { description } = property;
-            if (description !== undefined) {
-              div.title = description;
-            }
-            if (isAnnotationTagPropertySpec(property)) {
-              const tagElement = document.createElement("span");
-              tagElement.classList.add(
-                "neuroglancer-annotation-tag-property-type",
-              );
-              tagElement.textContent = `(${property.tag})`;
-              div.appendChild(tagElement);
-            }
-            propertyList.appendChild(div);
-          }
+          buildShaderPropertyList(properties, parent);
         },
       ),
     ).element;
@@ -1224,7 +941,10 @@ class RenderingOptionsTab extends Tab {
           layer.annotationDisplayState.shaderControls,
           this.layer.manager.root.display,
           this.layer,
-          { visibility: this.visibility },
+          {
+            visibility: this.visibility,
+            hideInactiveShaderControls: layer.hideInactiveShaderControls,
+          },
         ),
       ).element,
     );
@@ -1266,6 +986,20 @@ for (const control of Object.values(LAYER_CONTROLS)) {
 
 registerLayerType(AnnotationUserLayer);
 registerLayerType(AnnotationUserLayer, "pointAnnotation");
+
+registerAnnotationPropertyTools(AnnotationUserLayer);
+
+registerTool(
+  AnnotationUserLayer,
+  SELECT_PREVIOUS_ANNOTATION_TOOL_ID,
+  (layer) => new SelectPreviousAnnotationTool(layer),
+);
+registerTool(
+  AnnotationUserLayer,
+  SELECT_NEXT_ANNOTATION_TOOL_ID,
+  (layer) => new SelectNextAnnotationTool(layer),
+);
+
 registerLayerTypeDetector((subsource) => {
   if (subsource.local === LocalDataSource.annotations) {
     return { layerConstructor: AnnotationUserLayer, priority: 100 };

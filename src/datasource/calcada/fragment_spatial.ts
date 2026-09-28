@@ -62,7 +62,7 @@ function distanceTo(
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-// getFrustrumPlanes returns non-unit normals, so the raw plane equation is a
+// getFrustumPlanes returns non-unit normals, so the raw plane equation is a
 // distance scaled by |(a, b, c)| — unusable against a radius until
 // normalized. A degenerate plane (zero normal) is made to never reject.
 function normalizePlanes(clippingPlanes: Float32Array): Float32Array {
