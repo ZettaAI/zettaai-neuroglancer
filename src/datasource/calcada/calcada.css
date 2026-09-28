@@ -400,9 +400,106 @@
   font-size: 11px;
 }
 
+/* Sits over the panels, where the proofreader is looking. Faded until hovered
+   so it does not cover the meshes it sits on. */
+.calcada-trace-notice-overlay {
+  position: absolute;
+  z-index: 100;
+  max-width: min(320px, calc(100% - 32px));
+}
+
+.calcada-trace-notice {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #b58900;
+  color: #000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.calcada-trace-notice:hover {
+  opacity: 1;
+}
+
+.calcada-trace-notice-mode {
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.calcada-trace-notice-error {
+  background: #dc322f;
+  color: #fff;
+}
+
+.calcada-trace-notice-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.calcada-trace-notice-detail {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calcada-trace-notice-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: piece-split-spin 0.8s linear infinite;
+}
+
 /* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
    the width to show a whole hint. */
 .calcada-trace-panel-status {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* The seed's position on a line of its own, its buttons beneath: beside the
+   buttons the coordinates had room for one number per line. */
+.calcada-trace-panel-seed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-seed-position {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One end of a candidate — its filters and, while tracing, the current piece
+   on that end — set apart from the other end. */
+.calcada-trace-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.calcada-trace-panel-section legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calcada-trace-panel-current {
   font-size: 12px;
   opacity: 0.85;
 }
