@@ -27,7 +27,7 @@ env:
   PROJECT_ID: zetta-research
   REGION: us-east1
   ALIAS_DOMAIN: research.zetta.ai
-  IMAGE: us-east1-docker.pkg.dev/zetta-research/neuroglancer/zettaai-neuroglancer
+  IMAGE: us-east1-docker.pkg.dev/zetta-research/zettaai-neuroglancer/zettaai-neuroglancer
 
 jobs:
   targets:

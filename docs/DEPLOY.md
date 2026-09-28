@@ -49,7 +49,7 @@ Needs a project admin. The two long-lived services must exist before the first d
 because the workflow reads its build config off them.
 
 ```bash
-gcloud artifacts repositories create neuroglancer \
+gcloud artifacts repositories create zettaai-neuroglancer \
   --repository-format=docker --location=us-east1 --project=zetta-research
 
 for svc in neuroglancer neuroglancer-dev; do
