@@ -9,20 +9,22 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { Fragment, useCallback, useEffect, useReducer } from "react";
+import { Fragment, useCallback, useEffect, useReducer, useState } from "react";
 
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
-import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
-import {
-  describePiece,
-  SEMANTIC_CLASSES,
-} from "#src/datasource/calcada/candidate_heat.js";
+import { describePiece } from "#src/datasource/calcada/candidate_heat.js";
 import type {
   CalcadaOverviewState,
   SplitDetectionFocus,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import type {
+  FilterPreset,
+  FilterPresetsClient,
+} from "#src/datasource/calcada/filter_presets.js";
 import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
+import { FilterPresetBar } from "#src/datasource/calcada/react/filter_preset_bar.js";
+import { FilterTreeEditor } from "#src/datasource/calcada/react/filter_tree_editor.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import type {
   TraceScope,
@@ -79,6 +81,10 @@ export interface TracePanelConnection {
     undoLast(): Promise<void>;
   };
   listCandidateReviewers(): Promise<string[]>;
+  readonly filterPresets: Pick<
+    FilterPresetsClient,
+    "list" | "create" | "update" | "remove"
+  >;
 }
 
 /**
@@ -127,84 +133,6 @@ function clampRadius(radiusNm: number): number {
   return Math.min(
     TRACE_SPHERE_RADIUS_MAX_NM,
     Math.max(TRACE_SPHERE_RADIUS_MIN_NM, radiusNm),
-  );
-}
-
-/**
- * One end of a candidate: the filters it must pass — size, and a class with
- * its minimum share — and, while tracing, what the current candidate's piece
- * on that end actually is.
- */
-function PieceFilterSection({
-  title,
-  hint,
-  minVoxels,
-  wanted,
-  minFraction,
-  current,
-}: {
-  title: string;
-  hint: string;
-  minVoxels: WatchableValueInterface<number>;
-  wanted: WatchableValueInterface<SemanticClass>;
-  minFraction: WatchableValueInterface<number>;
-  current: string | undefined;
-}) {
-  const voxels = useWatchable(minVoxels);
-  const wantedValue = useWatchable(wanted);
-  const fraction = useWatchable(minFraction);
-  return (
-    <fieldset className="calcada-trace-panel-section" title={hint}>
-      <legend>{title}</legend>
-      <label className="calcada-trace-panel-row">
-        Min size, voxels
-        <FilterNumberInput
-          min={0}
-          step={100}
-          value={voxels}
-          onValueChange={(next) => {
-            minVoxels.value = Math.max(0, Math.round(next));
-          }}
-        />
-      </label>
-      <div className="calcada-trace-panel-row">
-        Class
-        <Select
-          value={wantedValue}
-          onValueChange={(next) => {
-            wanted.value = next as SemanticClass;
-          }}
-        >
-          <SelectTrigger size="sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {SEMANTIC_CLASSES.map((name) => (
-              <SelectItem key={name} value={name}>
-                {name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      {wantedValue !== "any" && (
-        <label className="calcada-trace-panel-row">
-          At least, %
-          <FilterNumberInput
-            min={0}
-            max={100}
-            step={5}
-            value={Math.round(fraction * 100)}
-            onValueChange={(next) => {
-              minFraction.value = Math.max(0, Math.min(100, next)) / 100;
-            }}
-          />
-        </label>
-      )}
-      {current !== undefined && (
-        <div className="calcada-trace-panel-current">{current}</div>
-      )}
-    </fieldset>
   );
 }
 
@@ -299,7 +227,20 @@ export function CalcadaTracePanel({
     () => connection.listCandidateReviewers(),
     [connection],
   );
-  const minScore = useWatchable(traceState.minScore);
+  const filterTree = useWatchable(traceState.filter);
+  const presetId = useWatchable(traceState.filterPresetId);
+  const [presets, setPresets] = useState<FilterPreset[]>([]);
+  // Stable, or the effect below would refetch the list on every render.
+  const reloadPresets = useCallback(async () => {
+    try {
+      setPresets(await connection.filterPresets.list());
+    } catch {
+      setPresets([]);
+    }
+  }, [connection]);
+  useEffect(() => {
+    void reloadPresets();
+  }, [reloadPresets]);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const overviewActive = useWatchable(overviewState.active);
@@ -414,23 +355,6 @@ export function CalcadaTracePanel({
         />
       </label>
 
-      {/* One threshold for the trace and for split error detection, so the
-          pieces painted as likely errors are the ones the trace will offer.
-          Lowering it brings back skipped candidates in stack order. */}
-      <label className="calcada-trace-panel-row">
-        Min score
-        <FilterNumberInput
-          min={0}
-          max={1}
-          step={0.05}
-          title="Hide candidates scoring below this, in the trace and in split error detection"
-          value={minScore}
-          onValueChange={(next) => {
-            traceState.minScore.value = Math.max(0, Math.min(1, next));
-          }}
-        />
-      </label>
-
       {/* Proofreaders disagree, so whose rejections count is a setting rather
           than a rule. Nothing selected means anyone's. */}
       <div className="calcada-trace-panel-row">
@@ -444,41 +368,52 @@ export function CalcadaTracePanel({
         />
       </div>
 
-      {/* What each end of a candidate must be. Shared with split error
-          detection, like the score: the pieces it paints are the ones the trace
-          will offer. */}
-      <PieceFilterSection
-        title="Seed piece"
-        hint="The seed's piece at the contact"
-        minVoxels={traceState.sourceMinVoxels}
-        wanted={traceState.sourceClass}
-        minFraction={traceState.sourceMinFraction}
-        current={
-          tracing && traceSession.current !== undefined
-            ? describePiece({
+      {/* The filter both the trace and split error detection apply, so the
+          pieces painted as likely errors are the ones the trace will offer. */}
+      <fieldset className="calcada-trace-panel-section">
+        <legend>Candidate filter</legend>
+        <FilterPresetBar
+          presets={presets}
+          store={connection.filterPresets}
+          tree={filterTree}
+          selectedId={presetId}
+          onSelect={(preset) => {
+            traceState.filterPresetId.value = preset?.id;
+            if (preset?.tree !== undefined)
+              traceState.filter.value = preset.tree;
+          }}
+          onChanged={(selectId) => {
+            traceState.filterPresetId.value = selectId;
+            void reloadPresets();
+          }}
+        />
+        <FilterTreeEditor
+          tree={filterTree}
+          onChange={(next) => {
+            traceState.filter.value = next;
+          }}
+        />
+        {tracing && traceSession.current !== undefined && (
+          <>
+            <div className="calcada-trace-panel-current">
+              Seed piece:{" "}
+              {describePiece({
                 voxels: traceSession.current.selfVoxels,
                 classes: traceSession.current.selfClasses,
                 hasInfo: traceSession.current.selfHasInfo,
-              })
-            : undefined
-        }
-      />
-      <PieceFilterSection
-        title="Candidate"
-        hint="The piece the candidate would merge in"
-        minVoxels={traceState.minPieceVoxels}
-        wanted={traceState.targetClass}
-        minFraction={traceState.targetMinFraction}
-        current={
-          tracing && traceSession.current !== undefined
-            ? describePiece({
+              })}
+            </div>
+            <div className="calcada-trace-panel-current">
+              Candidate:{" "}
+              {describePiece({
                 voxels: traceSession.current.partnerVoxels,
                 classes: traceSession.current.partnerClasses,
                 hasInfo: traceSession.current.partnerHasInfo,
-              })
-            : undefined
-        }
-      />
+              })}
+            </div>
+          </>
+        )}
+      </fieldset>
 
       <label className="calcada-trace-panel-check">
         <input

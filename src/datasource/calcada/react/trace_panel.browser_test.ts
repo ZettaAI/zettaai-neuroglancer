@@ -57,6 +57,7 @@ function makeConnection(rejectedBy: string[] = []): TracePanelConnection {
           bestScore: 0.87,
           bestPartnerPiece: 2n,
           bestPartnerRoot: 3n,
+          bestPartnerVoxels: 2125,
           partnerClasses: noClasses,
           partnerHasInfo: false,
           candidateCount: 3,
@@ -85,6 +86,29 @@ function makeConnection(rejectedBy: string[] = []): TracePanelConnection {
       undoLast: async () => {},
     },
     listCandidateReviewers: async () => [],
+    filterPresets: {
+      list: async () => [
+        {
+          id: "1",
+          name: "axons",
+          tree: { kind: "group", op: "and", children: [] },
+          updatedAt: "",
+        },
+      ],
+      create: async (name) => ({
+        id: "2",
+        name,
+        tree: undefined,
+        updatedAt: "",
+      }),
+      update: async (id) => ({
+        id,
+        name: "axons",
+        tree: undefined,
+        updatedAt: "",
+      }),
+      remove: async () => {},
+    },
   };
 }
 
@@ -111,6 +135,14 @@ async function mountPanel(connection: TracePanelConnection) {
 const REVIEWER_INPUT_MIN_WIDTH_PX = 40;
 
 describe("CalcadaTracePanel", () => {
+  it("shows the preset bar and the filter editor", async () => {
+    await mountPanel(makeConnection());
+    await vi.waitFor(() => {
+      expect(tab.querySelector(".calcada-filter-preset-bar")).not.toBe(null);
+      expect(tab.querySelector(".calcada-filter-tree")).not.toBe(null);
+    });
+  });
+
   it("shows the reviewer picker's placeholder when nobody is picked", async () => {
     await mountPanel(makeConnection());
     const input = tab.querySelector<HTMLInputElement>(

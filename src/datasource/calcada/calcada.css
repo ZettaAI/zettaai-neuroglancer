@@ -460,6 +460,113 @@
   animation: piece-split-spin 0.8s linear infinite;
 }
 
+/* The filter outline: a group is the line down its left edge; the word
+   between rows is the group's operator. */
+.calcada-filter-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* The right padding is the group's own ✕: sitting over the rows, it would
+   take the clicks meant for the first row's ✕ and delete the whole group. */
+.calcada-filter-group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 2px 4px;
+  padding: 2px 16px 2px 8px;
+  border-left: 2px solid #444;
+  min-width: 0;
+}
+
+.calcada-filter-group-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.calcada-filter-condition {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-condition .calcada-filter-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.calcada-filter-condition .calcada-filter-cmp {
+  flex: 0 0 3em;
+  width: 3em;
+}
+
+.calcada-filter-condition .calcada-filter-value {
+  flex: 0 0 4.5em;
+  width: 4.5em;
+  min-width: 0;
+}
+
+.calcada-filter-op {
+  align-self: flex-start;
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid #5a4700;
+  border-radius: 3px;
+  background: none;
+  color: #b58900;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.calcada-filter-remove {
+  flex: none;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: #888;
+  cursor: pointer;
+}
+
+.calcada-filter-add {
+  display: flex;
+  gap: 4px;
+}
+
+.calcada-filter-preset-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-preset-row .calcada-filter-preset-select,
+.calcada-filter-preset-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.calcada-filter-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
 /* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
    the width to show a whole hint. */
 .calcada-trace-panel-status {

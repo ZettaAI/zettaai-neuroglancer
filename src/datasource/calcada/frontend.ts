@@ -68,15 +68,19 @@ import {
   BRANCH_PICKER_TITLE,
   MAIN_BRANCH_ID,
 } from "#src/datasource/calcada/branch_picker_logic.js";
+import {
+  semanticsKnown,
+  subjectPasses,
+} from "#src/datasource/calcada/candidate_filter_tree.js";
 import type {
   PieceClasses,
   PieceOverview,
 } from "#src/datasource/calcada/candidate_heat.js";
 import {
-  applicableToCandidates,
-  candidatePasses,
   describePiece,
+  edgeCandidateSubject,
   partnersWithSemantics,
+  pieceOverviewSubject,
   rankFlaggedPieces,
   splitErrorColors,
 } from "#src/datasource/calcada/candidate_heat.js";
@@ -100,6 +104,7 @@ import {
   debugEdgeLines,
   mergeDebugGraphs,
 } from "#src/datasource/calcada/debug_graph.js";
+import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
@@ -3751,11 +3756,12 @@ class ZettaTraceSession extends RefCounted {
    * can answer: a side none of them has semantics for is not filtered.
    */
   private shownCandidates(): (candidate: EdgeCandidate) => boolean {
-    const filter = applicableToCandidates(
-      this.state.candidateFilter,
-      this.pool.map((entry) => entry.candidate),
+    const tree = this.state.filter.value;
+    const known = semanticsKnown(
+      this.pool.map((entry) => edgeCandidateSubject(entry.candidate)),
     );
-    return (candidate) => candidatePasses(candidate, filter);
+    return (candidate) =>
+      subjectPasses(edgeCandidateSubject(candidate), tree, known);
   }
 
   /** The candidate partner's current root, or the one it was fetched with. */
@@ -4304,8 +4310,12 @@ class CandidateOverviewSession extends RefCounted {
     return this.layer.displayState;
   }
 
-  private get filter() {
-    return this.connection.state.zettaTraceState.candidateFilter;
+  // A side none of the scored pieces has semantics for is not filtered by
+  // class, or naming a class on such a graph would hide every piece.
+  private get passes(): (piece: PieceOverview) => boolean {
+    const tree = this.connection.state.zettaTraceState.filter.value;
+    const known = semanticsKnown(this.pieces.map(pieceOverviewSubject));
+    return (piece) => subjectPasses(pieceOverviewSubject(piece), tree, known);
   }
 
   private enter() {
@@ -4461,8 +4471,7 @@ class CandidateOverviewSession extends RefCounted {
   }
 
   private paint(targetRoot: bigint) {
-    const { filter } = this;
-    const colors = splitErrorColors(this.pieces, filter);
+    const colors = splitErrorColors(this.pieces, this.passes);
     this.connection.setOverviewPieceColors(colors);
 
     const { displayState, segmentsState } = this;
@@ -4491,7 +4500,7 @@ class CandidateOverviewSession extends RefCounted {
   // loosening a filter does not throw the proofreader back to the top.
   private rerank() {
     const focused = this.ranked[this.focusIndex]?.pieceId;
-    this.ranked = rankFlaggedPieces(this.pieces, this.filter);
+    this.ranked = rankFlaggedPieces(this.pieces, this.passes);
     const kept = this.ranked.findIndex((piece) => piece.pieceId === focused);
     // Nothing chosen yet stays that way; a piece the filter now hides hands
     // its place to the next one down.
@@ -5752,6 +5761,10 @@ void main() {
     );
   }
 
+  get filterPresets() {
+    return this.graph.filterPresets;
+  }
+
   /**
    * Paint pieces without claiming the Debug tab.
    *
@@ -6746,6 +6759,7 @@ class CalcadaGraphServerInterface {
         bestScore: Number(piece.best_score),
         bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
         bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
+        bestPartnerVoxels: Number(piece.best_partner_voxels ?? 0),
         partnerClasses: parseClassCounts(piece.partner_classes),
         partnerHasInfo: piece.partner_has_info === true,
         candidateCount: Number(piece.candidate_count ?? 0),
@@ -7129,6 +7143,7 @@ export interface CalcadaBranch {
 
 export class CalcadaGraphSource extends SegmentationGraphSource {
   public graphServer: CalcadaGraphServerInterface;
+  public filterPresets: FilterPresetsClient;
   private l2CacheAvailable: boolean | undefined = undefined;
   private httpSource: HttpSource;
   private meshingHttpSource: HttpSource;
@@ -7153,6 +7168,7 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
       url,
     );
     this.graphServer = new CalcadaGraphServerInterface(this.httpSource);
+    this.filterPresets = new FilterPresetsClient(this.httpSource);
     this.meshingHttpSource = getHttpSource(
       chunkSource.sharedKvStoreContext.kvStoreContext,
       info.app!.meshingUrl,

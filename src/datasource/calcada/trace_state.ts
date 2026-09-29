@@ -9,9 +9,17 @@
  */
 
 import type {
-  CandidateFilter,
-  SemanticClass,
-} from "#src/datasource/calcada/candidate_heat.js";
+  FilterGroup,
+  LegacyFilter,
+} from "#src/datasource/calcada/candidate_filter_tree.js";
+import {
+  emptyFilterTree,
+  legacyFilterTree,
+  minCandidateVoxels,
+  parseFilterTree,
+  serializeFilterTree,
+} from "#src/datasource/calcada/candidate_filter_tree.js";
+import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
 import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_heat.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { Uint64Set } from "#src/uint64_set.js";
@@ -21,7 +29,6 @@ import {
   parseFixedLengthArray,
   verifyBoolean,
   verifyFiniteFloat,
-  verifyInt,
   verifyOptionalObjectProperty,
   verifyString,
 } from "#src/util/json.js";
@@ -43,8 +50,13 @@ const TRACE_SCOPE_KEY = "scope";
 const TRACE_SPHERE_RADIUS_KEY = "sphereRadiusNm";
 const TRACE_SPHERE_CENTER_KEY = "sphereCenter";
 
+const TRACE_FILTER_KEY = "filter";
+const TRACE_FILTER_PRESET_KEY = "filterPreset";
+
 const TRACE_ACTIVE_KEY = "active";
 const TRACE_SEED_KEY = "seedRoot";
+// Links written before the filter tree carried the filter as these separate
+// keys. They are read so an old link opens with its filter, never written.
 const TRACE_MIN_PIECE_VOXELS_KEY = "minPieceVoxels";
 const TRACE_REJECTED_BY_KEY = "rejectedBy";
 const TRACE_MIN_SCORE_KEY = "minScore";
@@ -59,17 +71,28 @@ const CLASS_FRACTION_DEFAULT = 0.8;
 // Server-side alias for the authenticated user.
 export const TRACE_CURRENT_USER = "me";
 
-function classOrUndefined(name: SemanticClass) {
-  return name === "any" ? undefined : name;
-}
-
-function fractionOrUndefined(fraction: number) {
-  return fraction === CLASS_FRACTION_DEFAULT ? undefined : fraction;
-}
-
 function parseClass(value: unknown): SemanticClass {
   const name = verifyString(value) as SemanticClass;
   return SEMANTIC_CLASSES.includes(name) ? name : "any";
+}
+
+function readLegacyFilter(x: unknown): LegacyFilter {
+  const number = (key: string, fallback: number) =>
+    verifyOptionalObjectProperty(x, key, verifyFiniteFloat) ?? fallback;
+  const cls = (key: string) =>
+    verifyOptionalObjectProperty(x, key, parseClass) ?? "any";
+  return {
+    minScore: number(TRACE_MIN_SCORE_KEY, 0),
+    seedMinVoxels: number(TRACE_SOURCE_MIN_VOXELS_KEY, 0),
+    candidateMinVoxels: number(TRACE_MIN_PIECE_VOXELS_KEY, 0),
+    seedClass: cls(TRACE_SOURCE_CLASS_KEY),
+    seedMinFraction: number(TRACE_SOURCE_FRACTION_KEY, CLASS_FRACTION_DEFAULT),
+    candidateClass: cls(TRACE_TARGET_CLASS_KEY),
+    candidateMinFraction: number(
+      TRACE_TARGET_FRACTION_KEY,
+      CLASS_FRACTION_DEFAULT,
+    ),
+  };
 }
 
 /**
@@ -95,31 +118,24 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   sphereRadiusNm = new WatchableValue<number>(TRACE_SPHERE_RADIUS_DEFAULT_NM);
   sphereCenter = new WatchableValue<Float32Array | undefined>(undefined);
   seedRoot = new WatchableValue<bigint | undefined>(undefined);
-  // Candidates whose partner piece is smaller than this are debris the model
-  // still scores highly. Zero offers everything.
-  minPieceVoxels = new WatchableValue<number>(0);
+  // The candidate filter, shared by the trace and split error detection so the
+  // pieces painted as likely errors are the ones the trace will offer.
+  filter = new WatchableValue<FilterGroup>(emptyFilterTree());
+  // The saved preset the filter was loaded from, if any. Only its owner's list
+  // knows it; anyone else opening the link sees the same tree, unnamed.
+  filterPresetId = new WatchableValue<string | undefined>(undefined);
+  // The one part of the filter the server applies: the smallest candidate it
+  // can pass, so debris does not crowd the rest out of the fetch limit.
+  // Derived from `filter`, never set or saved on its own.
+  readonly minPieceVoxels = new WatchableValue<number>(0);
   // Whose rejections to honour. Empty means anyone's. The literal "me" is
   // resolved by the server, which knows who the request is from — the browser
   // never learns its own user id.
   rejectedBy = new WatchableValue<string[]>([]);
-  // One threshold for both the trace and split error detection, so the pieces
-  // painted as likely errors are the ones whose candidates the trace offers.
-  minScore = new WatchableValue<number>(0);
   // Moving the camera to every candidate costs the proofreader their bearings;
   // both are theirs to turn off.
   centreOnCandidate = new WatchableValue<boolean>(true);
   zoomOnCandidate = new WatchableValue<boolean>(true);
-  // What each end of a candidate must be — source the seed's piece at the
-  // contact, target the piece it would merge in. Shared with split error
-  // detection like the score threshold.
-  // The seed's piece at the contact must be at least this large. Checked on
-  // the client, from the size each candidate carries; the candidate's own
-  // minimum is minPieceVoxels, which the server applies.
-  sourceMinVoxels = new WatchableValue<number>(0);
-  sourceClass = new WatchableValue<SemanticClass>("any");
-  sourceMinFraction = new WatchableValue<number>(CLASS_FRACTION_DEFAULT);
-  targetClass = new WatchableValue<SemanticClass>("any");
-  targetMinFraction = new WatchableValue<number>(CLASS_FRACTION_DEFAULT);
 
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
@@ -137,45 +153,21 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.sphereRadiusNm.changed.add(reemit));
     this.registerDisposer(this.sphereCenter.changed.add(reemit));
     this.registerDisposer(this.seedRoot.changed.add(reemit));
-    this.registerDisposer(this.minPieceVoxels.changed.add(reemit));
     this.registerDisposer(this.rejectedBy.changed.add(reemit));
-    this.registerDisposer(this.minScore.changed.add(reemit));
     this.registerDisposer(this.centreOnCandidate.changed.add(reemit));
     this.registerDisposer(this.zoomOnCandidate.changed.add(reemit));
-    this.registerDisposer(this.sourceMinVoxels.changed.add(reemit));
-    this.registerDisposer(this.sourceClass.changed.add(reemit));
-    this.registerDisposer(this.sourceMinFraction.changed.add(reemit));
-    this.registerDisposer(this.targetClass.changed.add(reemit));
-    this.registerDisposer(this.targetMinFraction.changed.add(reemit));
+    this.registerDisposer(
+      this.filter.changed.add(() => {
+        this.minPieceVoxels.value = minCandidateVoxels(this.filter.value);
+      }),
+    );
+    this.registerDisposer(this.filter.changed.add(reemit));
+    this.registerDisposer(this.filterPresetId.changed.add(reemit));
   }
 
-  /** The shared filters as one value, for the trace and split error detection. */
-  get candidateFilter(): CandidateFilter {
-    return {
-      minScore: this.minScore.value,
-      source: {
-        minVoxels: this.sourceMinVoxels.value,
-        wanted: this.sourceClass.value,
-        minFraction: this.sourceMinFraction.value,
-      },
-      target: {
-        minVoxels: this.minPieceVoxels.value,
-        wanted: this.targetClass.value,
-        minFraction: this.targetMinFraction.value,
-      },
-    };
-  }
-
-  /** Every filter that hides candidates already fetched, without a refetch. */
+  /** Every filter change hides or shows queued entries without a refetch. */
   get candidateFilterSignals() {
-    return [
-      this.minScore,
-      this.sourceMinVoxels,
-      this.sourceClass,
-      this.sourceMinFraction,
-      this.targetClass,
-      this.targetMinFraction,
-    ];
+    return [this.filter];
   }
 
   /**
@@ -214,22 +206,16 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     return {
       [TRACE_ACTIVE_KEY]: this.active.value ? true : undefined,
       [TRACE_SEED_KEY]: this.seedRoot.value?.toString(),
-      [TRACE_MIN_PIECE_VOXELS_KEY]: this.minPieceVoxels.value || undefined,
       [TRACE_REJECTED_BY_KEY]: this.rejectedBy.value.length
         ? this.rejectedBy.value
         : undefined,
-      [TRACE_MIN_SCORE_KEY]: this.minScore.value || undefined,
       [TRACE_CENTRE_KEY]: this.centreOnCandidate.value ? undefined : false,
       [TRACE_ZOOM_KEY]: this.zoomOnCandidate.value ? undefined : false,
-      [TRACE_SOURCE_MIN_VOXELS_KEY]: this.sourceMinVoxels.value || undefined,
-      [TRACE_SOURCE_CLASS_KEY]: classOrUndefined(this.sourceClass.value),
-      [TRACE_SOURCE_FRACTION_KEY]: fractionOrUndefined(
-        this.sourceMinFraction.value,
-      ),
-      [TRACE_TARGET_CLASS_KEY]: classOrUndefined(this.targetClass.value),
-      [TRACE_TARGET_FRACTION_KEY]: fractionOrUndefined(
-        this.targetMinFraction.value,
-      ),
+      [TRACE_FILTER_KEY]:
+        this.filter.value.children.length > 0
+          ? serializeFilterTree(this.filter.value)
+          : undefined,
+      [TRACE_FILTER_PRESET_KEY]: this.filterPresetId.value,
       [TRACE_SCOPE_KEY]: this.scope.value,
       [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
       [TRACE_SPHERE_CENTER_KEY]: this.sphereCenter.value
@@ -245,14 +231,8 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     verifyOptionalObjectProperty(x, TRACE_SEED_KEY, (value) => {
       this.seedRoot.value = BigInt(verifyString(value));
     });
-    verifyOptionalObjectProperty(x, TRACE_MIN_PIECE_VOXELS_KEY, (value) => {
-      this.minPieceVoxels.value = verifyInt(value);
-    });
     verifyOptionalObjectProperty(x, TRACE_REJECTED_BY_KEY, (value) => {
       this.rejectedBy.value = parseArray(value, verifyString);
-    });
-    verifyOptionalObjectProperty(x, TRACE_MIN_SCORE_KEY, (value) => {
-      this.minScore.value = verifyFiniteFloat(value);
     });
     verifyOptionalObjectProperty(x, TRACE_CENTRE_KEY, (value) => {
       this.centreOnCandidate.value = verifyBoolean(value);
@@ -260,21 +240,23 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     verifyOptionalObjectProperty(x, TRACE_ZOOM_KEY, (value) => {
       this.zoomOnCandidate.value = verifyBoolean(value);
     });
-    verifyOptionalObjectProperty(x, TRACE_SOURCE_MIN_VOXELS_KEY, (value) => {
-      this.sourceMinVoxels.value = verifyInt(value);
-    });
-    verifyOptionalObjectProperty(x, TRACE_SOURCE_CLASS_KEY, (value) => {
-      this.sourceClass.value = parseClass(value);
-    });
-    verifyOptionalObjectProperty(x, TRACE_SOURCE_FRACTION_KEY, (value) => {
-      this.sourceMinFraction.value = verifyFiniteFloat(value);
-    });
-    verifyOptionalObjectProperty(x, TRACE_TARGET_CLASS_KEY, (value) => {
-      this.targetClass.value = parseClass(value);
-    });
-    verifyOptionalObjectProperty(x, TRACE_TARGET_FRACTION_KEY, (value) => {
-      this.targetMinFraction.value = verifyFiniteFloat(value);
-    });
+    const linked = verifyOptionalObjectProperty(
+      x,
+      TRACE_FILTER_KEY,
+      (value) => {
+        const tree = parseFilterTree(value);
+        if (tree === undefined) {
+          console.warn("[calcada] ignoring a malformed trace filter", value);
+        }
+        return tree;
+      },
+    );
+    this.filter.value = linked ?? legacyFilterTree(readLegacyFilter(x));
+    this.filterPresetId.value = verifyOptionalObjectProperty(
+      x,
+      TRACE_FILTER_PRESET_KEY,
+      verifyString,
+    );
     verifyOptionalObjectProperty(x, TRACE_SCOPE_KEY, (value) => {
       this.scope.value =
         verifyString(value) === "segment" ? "segment" : "sphere";
