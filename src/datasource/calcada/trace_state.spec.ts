@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { minCandidateVoxels } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   TRACE_SPHERE_RADIUS_DEFAULT_NM,
   ZettaTraceState,
@@ -92,5 +93,65 @@ describe("ZettaTraceState", () => {
     state.restoreState({ scope: "everything" });
     expect(state.scope.value).toBe("sphere");
     state.dispose();
+  });
+});
+
+describe("ZettaTraceState filter", () => {
+  it("rebuilds an old link's fixed filters as a tree and never writes them back", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({
+      minScore: 0.5,
+      minPieceVoxels: 2000,
+      targetClass: "axon",
+    });
+    expect(state.filter.value.children).toHaveLength(3);
+    expect(state.minPieceVoxels.value).toBe(2000);
+    const json = state.toJSON() as Record<string, unknown>;
+    expect(json.minScore).toBeUndefined();
+    expect(json.minPieceVoxels).toBeUndefined();
+    expect(json.targetClass).toBeUndefined();
+    expect(json.filter).toBeDefined();
+  });
+
+  it("round-trips the tree and the preset id", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ minScore: 0.4 });
+    state.filterPresetId.value = "17";
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.filter.value).toEqual(state.filter.value);
+    expect(restored.filterPresetId.value).toBe("17");
+  });
+
+  it("derives the server's size floor from the tree", () => {
+    const state = new ZettaTraceState();
+    state.filter.value = {
+      kind: "group",
+      op: "or",
+      children: [
+        {
+          kind: "condition",
+          field: { side: "candidate", measure: "voxels" },
+          cmp: ">=",
+          value: 500,
+        },
+        {
+          kind: "condition",
+          field: { side: "candidate", measure: "voxels" },
+          cmp: ">=",
+          value: 300,
+        },
+      ],
+    };
+    expect(state.minPieceVoxels.value).toBe(
+      minCandidateVoxels(state.filter.value),
+    );
+    expect(state.minPieceVoxels.value).toBe(300);
+  });
+
+  it("ignores a malformed linked filter", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ filter: { v: 1, root: { kind: "nope" } } });
+    expect(state.filter.value.children).toEqual([]);
   });
 });

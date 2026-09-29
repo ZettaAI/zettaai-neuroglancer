@@ -14,6 +14,7 @@
  */
 
 import type { CoordinateSpace } from "#src/coordinate_transform.js";
+import { nanometresPerGlobalUnit } from "#src/datasource/calcada/global_nanometres.js";
 import {
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
@@ -55,17 +56,13 @@ export function traceSphereSemiAxes(
   radiusNm: number,
   coordinateSpace: CoordinateSpace,
 ): vec3 | undefined {
-  if (!coordinateSpace.valid || coordinateSpace.rank < 3) return undefined;
-  const out = vec3.create();
-  for (let dim = 0; dim < 3; ++dim) {
-    const scale = coordinateSpace.scales[dim];
-    if (!Number.isFinite(scale) || scale <= 0) return undefined;
-    // Scales are SI when a unit is given; a unitless space is already in
-    // nanometres as far as this conversion is concerned.
-    const nm = coordinateSpace.units[dim] === "m" ? scale * 1e9 : scale;
-    out[dim] = radiusNm / nm;
-  }
-  return out;
+  const nmPerUnit = nanometresPerGlobalUnit(coordinateSpace);
+  if (nmPerUnit === undefined) return undefined;
+  return vec3.fromValues(
+    radiusNm / nmPerUnit[0],
+    radiusNm / nmPerUnit[1],
+    radiusNm / nmPerUnit[2],
+  );
 }
 
 /**
