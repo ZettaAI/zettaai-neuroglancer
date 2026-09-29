@@ -263,6 +263,7 @@ export class SidePanelManager extends RefCounted {
   private registeredPanels = new Set<RegisteredSidePanel>();
   dragSource: DragSource | undefined;
   private layoutNeedsUpdate = false;
+  private shouldResetFlexGroupSizes = false;
 
   get visible() {
     return this.visibility.visible;
@@ -331,6 +332,17 @@ export class SidePanelManager extends RefCounted {
   endDrag() {
     delete this.element.dataset.neuroglancerSidePanelDrag;
     this.dragSource = undefined;
+  }
+
+  /**
+   * Once a panel is added to a flex group, the panel no longer controls the
+   * size of the flex group. This resets the flex group sizes so that
+   * panels can set the size of the flex group. This is useful when
+   * panel sizes are manually set from the JSON state.
+   */
+  reset() {
+    this.shouldResetFlexGroupSizes = true;
+    this.invalidateLayout();
   }
 
   private makeDropZone(
@@ -460,6 +472,7 @@ export class SidePanelManager extends RefCounted {
       yield self.sides.bottom.outerDropZoneElement;
     }
     updateChildren(this.centerColumn, getColumnChildren());
+    this.shouldResetFlexGroupSizes = false;
   }
 
   private makeCrossGutter(side: Side, crossIndex: number) {
@@ -665,7 +678,9 @@ export class SidePanelManager extends RefCounted {
         } else {
           flexGroup.visible = visible;
           flexGroup.minSize = minSize;
-          flexGroup.crossSize = Math.max(flexGroup.crossSize, minSize);
+          if (!visible) {
+            flexGroup.crossSize = -1;
+          }
         }
         function* getCells() {
           yield flexGroup.beginDropZone;
@@ -686,8 +701,12 @@ export class SidePanelManager extends RefCounted {
               cell.registeredPanel = registeredPanel;
             }
             const oldLocation = cell.registeredPanel.location.value;
-            if (flexGroup.crossSize === -1) {
-              flexGroup.crossSize = Math.max(minSize, oldLocation.size);
+            if (oldLocation.visible) {
+              const suggestedSize =
+                self.shouldResetFlexGroupSizes || flexGroup.crossSize === -1
+                  ? oldLocation.size
+                  : flexGroup.crossSize;
+              flexGroup.crossSize = Math.max(minSize, suggestedSize);
             }
             if (
               oldLocation[crossKey] !== crossIndex ||

@@ -76,7 +76,7 @@ export class ToolActivation<ToolType extends Tool = Tool> extends RefCounted {
   cancel() {
     const { globalBinder } = this.tool;
     if (this === globalBinder.activeTool_) {
-      globalBinder.deactivate_();
+      globalBinder.deactivateAndReactivateQueued_();
     }
   }
 }
@@ -105,7 +105,9 @@ export abstract class Tool<Context extends object = object> extends RefCounted {
   abstract activate(activation: ToolActivation<this>): void;
   renderInPalette(context: RefCounted): HTMLElement | undefined {
     context;
-    return undefined;
+    const content = document.createElement("div");
+    content.textContent = this.description;
+    return content;
   }
 
   abstract toJSON(): any;
@@ -130,13 +132,6 @@ export abstract class LayerTool<
   }
   get mouseState() {
     return this.layer.manager.root.layerSelectedValues.mouseState;
-  }
-  renderInPalette(context: RefCounted): HTMLElement | undefined {
-    context;
-    this.description;
-    const el = document.createElement("div");
-    el.innerHTML = this.description;
-    return el;
   }
 }
 
@@ -327,10 +322,6 @@ export class GlobalToolBinder extends RefCounted {
   localBindersChanged = new Signal();
 
   constructor(
-    // Public so a persistent mode — one that must keep its keys while the user
-    // switches tools — can bind an event map for its own lifetime instead of a
-    // tool activation's. ToolActivation exposes the same binder for the same
-    // reason.
     public readonly inputEventMapBinder: InputEventMapBinder,
     public toolPaletteState: MultiToolPaletteState,
   ) {
@@ -339,6 +330,10 @@ export class GlobalToolBinder extends RefCounted {
 
   get(key: string): Borrowed<Tool> | undefined {
     return this.bindings.get(key);
+  }
+
+  isActive(tool: Tool | undefined) {
+    return tool !== undefined && this.activeTool_?.tool === tool;
   }
 
   private deleteBinding(tool: Tool) {
@@ -418,20 +413,23 @@ export class GlobalToolBinder extends RefCounted {
   }
 
   activate(key: string, tool?: Tool<object>): Borrowed<Tool> | undefined {
-    tool = tool || this.get(key);
+    tool = tool ?? this.get(key);
     if (tool === undefined) {
       this.deactivate_();
       return;
     }
     this.debounceDeactivate.cancel();
     const activeTool = this.activeTool_;
-    if (tool.toJSON() === activeTool?.tool.toJSON()) {
-      if (tool.toggle) {
-        this.deactivate_();
-      }
-      return;
-    }
     if (activeTool !== undefined) {
+      if (
+        activeTool.tool.constructor === tool.constructor &&
+        activeTool.tool.context === tool.context
+      ) {
+        if (tool.toggle) {
+          this.deactivate_();
+        }
+        return;
+      }
       if (activeTool.tool.toggle && !tool.toggle) {
         this.queuedTool = activeTool.tool;
       }
@@ -508,8 +506,32 @@ export class GlobalToolBinder extends RefCounted {
     activation.dispose();
   }
 
+  // Deactivate the current tool and, if a toggle tool was displaced by it,
+  // restore that toggle tool. Used when a momentary tool ends via
+  // `ToolActivation.cancel()`: without this, a tool that cancels synchronously
+  // (e.g. select-next-annotation) would orphan the queued toggle tool, dropping
+  // its active key bindings.
+  deactivateAndReactivateQueued_() {
+    this.deactivate_();
+    this.reactivateQueuedTool();
+  }
+
   public deactivate() {
     this.debounceDeactivate();
+  }
+
+  // Activate a tool that has no letter-key binding. The tool is treated as
+  // toggle-mode (stays active until explicitly deactivated). The ToolActivation
+  // takes ownership of the tool via registerDisposer so the tool is disposed
+  // automatically when the activation ends.
+  activateDirect(tool: Owned<Tool>): void {
+    this.queuedTool = undefined; // explicit activation clears any queued toggle tool
+    this.deactivate_(); // cancels debounce + disposes current activation
+    const activation = new ToolActivation(tool, this.inputEventMapBinder);
+    activation.registerDisposer(tool);
+    this.activeTool_ = activation;
+    tool.activate(activation);
+    this.changed.dispatch();
   }
 }
 
@@ -578,19 +600,6 @@ export class LocalToolBinder<
 
   convertLocalJSONToPaletteJSON(toolJson: any) {
     return toolJson;
-  }
-
-  deleteTool(key: string) {
-    const { globalBinder, bindings, jsonToKey } = this;
-    const existingTool = bindings.get(key);
-    if (existingTool) {
-      bindings.delete(key);
-      globalBinder.bindings.delete(key);
-      jsonToKey.delete(JSON.stringify(existingTool.toJSON()));
-      globalBinder.destroyTool(existingTool);
-      globalBinder.changed.dispatch();
-      this.changed.dispatch();
-    }
   }
 
   clear() {
@@ -820,15 +829,14 @@ export function makeToolButton(
 ) {
   const element = document.createElement("div");
   element.classList.add("neuroglancer-tool-button");
-  element.appendChild(
-    context.registerDisposer(
-      new ToolBindingWidget(
-        localBinder,
-        options.toolJson,
-        options.dragElement ?? element,
-      ),
-    ).element,
+  const bindingWidget = context.registerDisposer(
+    new ToolBindingWidget(
+      localBinder,
+      options.toolJson,
+      options.dragElement ?? element,
+    ),
   );
+  element.appendChild(bindingWidget.element);
   const labelElement = document.createElement("div");
   labelElement.classList.add("neuroglancer-tool-button-label");
   const labelText = options.label;
@@ -836,36 +844,51 @@ export function makeToolButton(
     labelElement.textContent = labelText;
   }
   if (options.title) {
-    labelElement.title = options.title;
+    // Combine the caller's description with the key-binding widget's own hint.
+    // The label element never surfaces its title when there is no visible
+    // label, so also apply the combined title to the key-binding widget, which
+    // is the only hover target in that case.
+    const combinedTitle = `${options.title}\n(${bindingWidget.element.title})`;
+    labelElement.title = combinedTitle;
+    bindingWidget.element.title = combinedTitle;
   }
   element.appendChild(labelElement);
   return element;
 }
 
-export function makeToolActivationStatusMessage(activation: ToolActivation) {
+export function makeToolActivationStatusMessage(
+  activation: ToolActivation,
+  options: { showBindings?: boolean } = {},
+) {
   const message = activation.registerDisposer(new StatusMessage(false));
   message.element.classList.add("neuroglancer-tool-status");
   const content = document.createElement("div");
   content.classList.add("neuroglancer-tool-status-content");
   message.element.appendChild(content);
-  const { inputEventMapBinder } = activation;
-  activation.inputEventMapBinder = (
-    inputEventMap: EventActionMap,
-    context: RefCounted,
-  ) => {
-    const bindingHelp = document.createElement("div");
-    bindingHelp.textContent = inputEventMap.describe();
-    bindingHelp.classList.add("neuroglancer-tool-status-bindings");
-    message.element.appendChild(bindingHelp);
-    inputEventMapBinder(inputEventMap, context);
-  };
+  if (options.showBindings !== false) {
+    const { inputEventMapBinder } = activation;
+    activation.inputEventMapBinder = (
+      inputEventMap: EventActionMap,
+      context: RefCounted,
+    ) => {
+      const bindingHelp = document.createElement("div");
+      bindingHelp.textContent = inputEventMap.describe();
+      bindingHelp.classList.add("neuroglancer-tool-status-bindings");
+      message.element.appendChild(bindingHelp);
+      inputEventMapBinder(inputEventMap, context);
+    };
+  }
   return { message, content };
 }
 
 export function makeToolActivationStatusMessageWithHeader(
   activation: ToolActivation,
+  options: { showBindings?: boolean } = {},
 ) {
-  const { message, content } = makeToolActivationStatusMessage(activation);
+  const { message, content } = makeToolActivationStatusMessage(
+    activation,
+    options,
+  );
   const header = document.createElement("div");
   header.classList.add("neuroglancer-tool-status-header");
   const headerContainer = document.createElement("div");

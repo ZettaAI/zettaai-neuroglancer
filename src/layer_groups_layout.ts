@@ -422,6 +422,7 @@ function getCommonViewerState(viewer: Viewer) {
     crossSectionBackgroundColor: viewer.crossSectionBackgroundColor,
     perspectiveViewBackgroundColor: viewer.perspectiveViewBackgroundColor,
     hideCrossSectionBackground3D: viewer.hideCrossSectionBackground3D,
+    pickRadius: viewer.uiConfiguration.pickRadius,
   };
 }
 
@@ -446,7 +447,7 @@ export class SingletonLayerGroupViewer
           ...getCommonViewerState(viewer),
         },
         {
-          showLayerPanel: viewer.uiControlVisibility.showLayerPanel,
+          showLayerPanel: viewer.effectiveShowLayerPanel,
           showViewerMenu: false,
           showLayerHoverValues: viewer.uiControlVisibility.showLayerHoverValues,
         },
@@ -763,9 +764,10 @@ function makeComponent(container: LayoutComponentContainer, spec: any) {
           ...getCommonViewerState(viewer),
         },
         {
-          showLayerPanel: viewer.uiControlVisibility.showLayerPanel,
+          showLayerPanel: viewer.effectiveShowLayerPanel,
           showViewerMenu: true,
           showLayerHoverValues: viewer.uiControlVisibility.showLayerHoverValues,
+          showAllPlotBounds: viewer.uiConfiguration.showAllDimensionPlotBounds,
         },
       );
       try {
