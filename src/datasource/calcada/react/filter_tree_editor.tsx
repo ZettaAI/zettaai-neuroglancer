@@ -22,8 +22,8 @@ import type {
   FilterField,
   FilterGroup,
   FilterPath,
+  ConditionSide,
   PieceClass,
-  TreeSide,
 } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   addChild,
@@ -45,40 +45,42 @@ import {
 } from "@/components/ui/select";
 
 const PERCENT = 100;
-const SIDE_LABELS: Record<TreeSide, string> = {
+const SIDE_LABELS: Record<ConditionSide, string> = {
   seed: "Seed",
   candidate: "Candidate",
+  both: "Both",
 };
+// Most filters ask the same of both ends, so a new sided criterion starts there.
+const DEFAULT_SIDE: ConditionSide = "both";
 const CLASSES = SEMANTIC_CLASSES.filter(
   (name): name is PieceClass => name !== "any",
 );
 
-function fieldKey(field: FilterField): string {
-  if (field.measure === "score") return "score";
-  if (field.measure === "voxels") return `${field.side}:voxels`;
-  return `${field.side}:share:${field.class}`;
+// What a condition measures, apart from which end it asks.
+function criterionKey(field: FilterField): string {
+  if (field.measure === "share") return `share:${field.class}`;
+  return field.measure;
 }
 
-function parseFieldKey(key: string): FilterField {
-  if (key === "score") return { measure: "score" };
-  const [side, measure, cls] = key.split(":") as [TreeSide, string, PieceClass];
-  return measure === "voxels"
-    ? { side, measure: "voxels" }
-    : { side, measure: "share", class: cls };
+function capitalized(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
-const FIELD_OPTIONS: ReadonlyArray<[string, string]> = [
+const CRITERION_OPTIONS: ReadonlyArray<[string, string]> = [
   ["score", "Score"],
-  ...(["seed", "candidate"] as const).flatMap(
-    (side): Array<[string, string]> => [
-      [`${side}:voxels`, `${SIDE_LABELS[side]} · size`],
-      ...CLASSES.map((cls): [string, string] => [
-        `${side}:share:${cls}`,
-        `${SIDE_LABELS[side]} · ${cls} %`,
-      ]),
-    ],
-  ),
+  ["voxels", "Size"],
+  ...CLASSES.map((cls): [string, string] => [
+    `share:${cls}`,
+    `${capitalized(cls)} %`,
+  ]),
 ];
+
+function withCriterion(field: FilterField, key: string): FilterField {
+  if (key === "score") return { measure: "score" };
+  const side = field.measure === "score" ? DEFAULT_SIDE : field.side;
+  if (key === "voxels") return { side, measure: "voxels" };
+  return { side, measure: "share", class: key.split(":")[1] as PieceClass };
+}
 
 const CMP_LABELS: Record<FilterCondition["cmp"], string> = {
   ">=": "≥",
@@ -86,9 +88,9 @@ const CMP_LABELS: Record<FilterCondition["cmp"], string> = {
 };
 
 // The trigger shows the label, not the stored key.
-function fieldLabel(field: FilterField): string {
-  const key = fieldKey(field);
-  return FIELD_OPTIONS.find(([option]) => option === key)?.[1] ?? key;
+function criterionLabel(field: FilterField): string {
+  const key = criterionKey(field);
+  return CRITERION_OPTIONS.find(([option]) => option === key)?.[1] ?? key;
 }
 
 // Condition values are stored as the tree evaluates them; share is a fraction
@@ -118,64 +120,98 @@ function ConditionRow({
   const { field } = condition;
   return (
     <div className="calcada-filter-condition">
-      <Select
-        value={fieldKey(field)}
-        onValueChange={(key) =>
-          onChange({
-            ...condition,
-            field: parseFieldKey(key as string),
-            value: 0,
-          })
-        }
-      >
-        <SelectTrigger
-          size="sm"
-          className="calcada-filter-field"
-          title={fieldLabel(field)}
+      <div className="calcada-filter-condition-what">
+        <Select
+          value={criterionKey(field)}
+          onValueChange={(key) =>
+            onChange({
+              ...condition,
+              field: withCriterion(field, key as string),
+              value: 0,
+            })
+          }
         >
-          <SelectValue>{fieldLabel(field)}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {FIELD_OPTIONS.map(([key, label]) => (
-            <SelectItem key={key} value={key}>
-              {label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Select
-        value={condition.cmp}
-        onValueChange={(cmp) =>
-          onChange({ ...condition, cmp: cmp as FilterCondition["cmp"] })
-        }
-      >
-        <SelectTrigger size="sm" className="calcada-filter-cmp">
-          <SelectValue>{CMP_LABELS[condition.cmp]}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value=">=">{CMP_LABELS[">="]}</SelectItem>
-          <SelectItem value="<=">{CMP_LABELS["<="]}</SelectItem>
-        </SelectContent>
-      </Select>
-      <FilterNumberInput
-        className="calcada-filter-value"
-        min={0}
-        step={
-          field.measure === "score" ? 0.05 : field.measure === "share" ? 5 : 100
-        }
-        value={shownValue(condition)}
-        onValueChange={(shown) =>
-          onChange({ ...condition, value: storedValue(field, shown) })
-        }
-      />
-      <button
-        type="button"
-        className="calcada-filter-remove"
-        title="Remove condition"
-        onClick={onRemove}
-      >
-        ✕
-      </button>
+          <SelectTrigger
+            size="sm"
+            className="calcada-filter-field"
+            title={criterionLabel(field)}
+          >
+            <SelectValue>{criterionLabel(field)}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {CRITERION_OPTIONS.map(([key, label]) => (
+              <SelectItem key={key} value={key}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {field.measure !== "score" && (
+          <Select
+            value={field.side}
+            onValueChange={(side) =>
+              onChange({
+                ...condition,
+                field: { ...field, side: side as ConditionSide },
+              })
+            }
+          >
+            <SelectTrigger
+              size="sm"
+              className="calcada-filter-side"
+              title="Which end of the candidate this applies to"
+            >
+              <SelectValue>{SIDE_LABELS[field.side]}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(SIDE_LABELS) as ConditionSide[]).map((side) => (
+                <SelectItem key={side} value={side}>
+                  {SIDE_LABELS[side]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+      <div className="calcada-filter-condition-bound">
+        <Select
+          value={condition.cmp}
+          onValueChange={(cmp) =>
+            onChange({ ...condition, cmp: cmp as FilterCondition["cmp"] })
+          }
+        >
+          <SelectTrigger size="sm" className="calcada-filter-cmp">
+            <SelectValue>{CMP_LABELS[condition.cmp]}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value=">=">{CMP_LABELS[">="]}</SelectItem>
+            <SelectItem value="<=">{CMP_LABELS["<="]}</SelectItem>
+          </SelectContent>
+        </Select>
+        <FilterNumberInput
+          className="calcada-filter-value"
+          min={0}
+          step={
+            field.measure === "score"
+              ? 0.05
+              : field.measure === "share"
+                ? 5
+                : 100
+          }
+          value={shownValue(condition)}
+          onValueChange={(shown) =>
+            onChange({ ...condition, value: storedValue(field, shown) })
+          }
+        />
+        <button
+          type="button"
+          className="calcada-filter-remove"
+          title="Remove condition"
+          onClick={onRemove}
+        >
+          ✕
+        </button>
+      </div>
     </div>
   );
 }
