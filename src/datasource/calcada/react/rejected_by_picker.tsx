@@ -74,7 +74,15 @@ export function RejectedByPicker({
         <ComboboxValue>
           {(selected: string[]) =>
             selected.map((user) => (
-              <ComboboxChip key={user}>{labelOf(user)}</ComboboxChip>
+              <ComboboxChip
+                key={user}
+                className="calcada-trace-panel-reviewer"
+                title={labelOf(user)}
+              >
+                <span className="calcada-trace-panel-reviewer-name">
+                  {labelOf(user)}
+                </span>
+              </ComboboxChip>
             ))
           }
         </ComboboxValue>

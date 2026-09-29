@@ -31,6 +31,7 @@ import type {
 import { makeSliceViewChunkSpecification } from "#src/sliceview/base.js";
 import type { mat4 } from "#src/util/geom.js";
 import type { FetchOk, HttpError } from "#src/util/http_request.js";
+import { parseUint64 } from "#src/util/json.js";
 
 export const PYCG_APP_VERSION = 1;
 // NOTE: every RPC_ID / shared-object identifier below MUST be calcada-specific.
@@ -141,6 +142,12 @@ export function getCalcadaFragmentKey(fragmentId: string) {
     return { key: parts[0], fragmentId: parts[1] };
   }
   return { key: fragmentId, fragmentId: fragmentId };
+}
+
+// A calcada fragment id is "{piece_id}:{lod}": each fragment is one piece.
+export function pieceIdOfFragment(fragmentId: string): bigint {
+  const colon = fragmentId.indexOf(":");
+  return parseUint64(colon === -1 ? fragmentId : fragmentId.slice(0, colon));
 }
 
 export const CHUNKED_GRAPH_LAYER_RPC_ID = "CalcadaChunkedGraphLayer";

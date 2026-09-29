@@ -218,6 +218,12 @@ export interface SegmentationDisplayState {
   // (multicut's red/blue/off tinting, calcada's own piece-split preview) leave
   // it false and keep their pre-existing behavior of being ignored there.
   honorTempStatedColorAlpha: WatchableValueInterface<boolean>;
+  // Opt-in for a caller that tints only some pieces (calcada split error
+  // detection): while a highlight colour has the mesh colouring each fragment
+  // by its piece, a fragment with no temp colour takes its segment's colour
+  // rather than its own piece's hash colour, so every other segment on screen
+  // still reads as one object.
+  unstatedFragmentsUseSegmentColor: WatchableValueInterface<boolean>;
   segmentDefaultColor: WatchableValueInterface<vec3 | undefined>;
   tempSegmentDefaultColor2d: WatchableValueInterface<vec3 | vec4 | undefined>;
   highlightColor: WatchableValueInterface<vec4 | undefined>;

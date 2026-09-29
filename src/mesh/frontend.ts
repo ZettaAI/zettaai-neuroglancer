@@ -644,9 +644,14 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
               continue;
             }
             if (colorFragments) {
+              const unstated =
+                displayState.unstatedFragmentsUseSegmentColor.value &&
+                !displayState.tempSegmentStatedColors2d.value.has(
+                  fragmentSegment,
+                );
               let fragmentColor = getObjectColor(
                 displayState,
-                fragmentSegment,
+                unstated ? objectId : fragmentSegment,
                 objectAlpha,
               );
               // Piece-view tools tint pieces via the temporary stated colors;

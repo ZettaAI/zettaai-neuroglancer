@@ -622,6 +622,8 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   hoverHighlightSuppressed = new WatchableValue<boolean>(false);
   // See SegmentationDisplayState.honorTempStatedColorAlpha.
   honorTempStatedColorAlpha = new WatchableValue<boolean>(false);
+  // See SegmentationDisplayState.unstatedFragmentsUseSegmentColor.
+  unstatedFragmentsUseSegmentColor = new WatchableValue<boolean>(false);
   silhouetteRendering = new TrackableValue<number>(
     0,
     verifyFiniteNonNegativeFloat,

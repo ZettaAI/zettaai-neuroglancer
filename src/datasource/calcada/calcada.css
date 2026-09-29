@@ -367,9 +367,12 @@
 
 /* The Trace tab. Its controls are shadcn components inside the UI scope, so all
    this holds is the stacking; colours and spacing come from the tokens. */
+/* Never sideways: a control that outgrows the panel is shrunk or clipped, not
+   scrolled to. */
 .calcada-trace-tab {
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -400,6 +403,208 @@
   font-size: 11px;
 }
 
+/* Sits over the panels, where the proofreader is looking. Faded until hovered
+   so it does not cover the meshes it sits on. */
+.calcada-trace-notice-overlay {
+  position: absolute;
+  z-index: 100;
+  max-width: min(320px, calc(100% - 32px));
+}
+
+.calcada-trace-notice {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #b58900;
+  color: #000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.calcada-trace-notice:hover {
+  opacity: 1;
+}
+
+.calcada-trace-notice-mode {
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.calcada-trace-notice-error {
+  background: #dc322f;
+  color: #fff;
+}
+
+.calcada-trace-notice-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.calcada-trace-notice-detail {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calcada-trace-notice-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: piece-split-spin 0.8s linear infinite;
+}
+
+/* The filter outline: a group is the line down its left edge; the word
+   between rows is the group's operator. */
+.calcada-filter-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* The right padding is the group's own ✕: sitting over the rows, it would
+   take the clicks meant for the first row's ✕ and delete the whole group. */
+.calcada-filter-group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 2px 4px;
+  padding: 2px 16px 2px 8px;
+  border-left: 2px solid #444;
+  min-width: 0;
+}
+
+.calcada-filter-group-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.calcada-filter-condition {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-condition .calcada-filter-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+/* One symbol; the chevron would leave it no room. */
+.calcada-filter-condition .calcada-filter-cmp {
+  flex: 0 0 2.4em;
+  width: 2.4em;
+  justify-content: center;
+  padding: 0;
+}
+
+.calcada-filter-condition .calcada-filter-cmp svg {
+  display: none;
+}
+
+.calcada-filter-condition .calcada-filter-cmp [data-slot="select-value"] {
+  justify-content: center;
+}
+
+.calcada-filter-condition .calcada-filter-field,
+.calcada-filter-preset-select {
+  overflow: hidden;
+}
+
+/* Cut short on screen; the trigger's tooltip carries the whole text. */
+.calcada-filter-condition .calcada-filter-field [data-slot="select-value"],
+.calcada-filter-preset-select [data-slot="select-value"] {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* No spinner arrows: in this width they cover the digits. */
+.calcada-filter-condition .calcada-filter-value {
+  flex: 0 0 5em;
+  width: 5em;
+  min-width: 0;
+  padding: 0 6px;
+  appearance: textfield;
+}
+
+.calcada-filter-condition .calcada-filter-value::-webkit-inner-spin-button,
+.calcada-filter-condition .calcada-filter-value::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.calcada-filter-op {
+  align-self: flex-start;
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid #5a4700;
+  border-radius: 3px;
+  background: none;
+  color: #b58900;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.calcada-filter-remove {
+  flex: none;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: #888;
+  cursor: pointer;
+}
+
+.calcada-filter-add {
+  display: flex;
+  gap: 4px;
+}
+
+.calcada-filter-preset-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-preset-row .calcada-filter-preset-select,
+.calcada-filter-preset-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.calcada-filter-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
 /* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
    the width to show a whole hint. */
 .calcada-trace-panel-status {
@@ -407,12 +612,29 @@
   opacity: 0.85;
 }
 
+/* The seed's position on a line of its own, its buttons beneath: beside the
+   buttons the coordinates had room for one number per line. */
+.calcada-trace-panel-seed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-seed-position {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* One end of a candidate — its filters and, while tracing, the current piece
    on that end — set apart from the other end. */
+/* A fieldset is never narrower than its content by default, so one long
+   label in it would widen the whole tab. */
 .calcada-trace-panel-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
   margin: 0;
   padding: 6px 8px 8px;
   border: 1px solid #444;
@@ -464,6 +686,28 @@
 .calcada-trace-panel-reviewers input,
 .calcada-trace-panel-reviewers button {
   width: auto;
+}
+
+/* The chip input's intrinsic width is a browser default wider than the
+   control; it is meant to take whatever the chips leave. The row rule above
+   pins inputs to their own width, so the growth has to be restated here. */
+.calcada-trace-panel-reviewers input {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 3em;
+}
+
+/* An email is one unbreakable word; the chip shortens it instead of pushing
+   the tab sideways. The full address is in the chip's tooltip. */
+.calcada-trace-panel-reviewer {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.calcada-trace-panel-reviewer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* A checkbox carries its label on the right, so it is not the row's "name on
@@ -533,6 +777,25 @@
 
 .calcada-trace-panel-legend span:nth-child(3) {
   text-align: right;
+}
+
+.calcada-trace-panel-navigator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-navigator-position {
+  min-width: 4em;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: pointer;
 }
 
 .calcada-trace-panel-buttons {

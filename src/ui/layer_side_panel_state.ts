@@ -56,6 +56,9 @@ export class UserLayerSidePanelState extends RefCounted {
 
   initialize() {
     const { panels } = this;
+    this.selectedTab.changed.add(() => {
+      if (!this.normalizing) this.restoredTab = undefined;
+    });
     this.tabsChanged.add(panels.specificationChanged.dispatch);
     this.selectedTab.changed.add(panels.specificationChanged.dispatch);
     this.location.changed.add(() => {
@@ -93,8 +96,27 @@ export class UserLayerSidePanelState extends RefCounted {
   selectedTab = new WatchableValue<string | undefined>(undefined);
   explicitTabs: Set<string> | undefined;
   tabs: string[] = [];
+  // A tab a data source adds (Graph, Trace) does not exist yet when the state
+  // is restored, so the selection falls back to the first tab. The restored
+  // choice is kept until that tab arrives or the user picks another one.
+  private restoredTab: string | undefined;
+  private normalizing = false;
+
+  restoreSelectedTab(tab: string | undefined) {
+    this.selectedTab.value = tab;
+    this.restoredTab = tab;
+  }
 
   normalizeTabs() {
+    this.normalizing = true;
+    try {
+      this.selectAvailableTab();
+    } finally {
+      this.normalizing = false;
+    }
+  }
+
+  private selectAvailableTab() {
     const { tabs } = this;
     if (tabs.length === 0) {
       this.selectedTab.value = undefined;
@@ -103,7 +125,12 @@ export class UserLayerSidePanelState extends RefCounted {
     const layerTabs = this.layer.tabs.options;
     const getOrder = (tab: string) => layerTabs.get(tab)!.order ?? 0;
     tabs.sort((a, b) => getOrder(a) - getOrder(b));
-    const { selectedTab } = this;
+    const { selectedTab, restoredTab } = this;
+    if (restoredTab !== undefined && tabs.includes(restoredTab)) {
+      selectedTab.value = restoredTab;
+      this.restoredTab = undefined;
+      return;
+    }
     const selectedTabValue = selectedTab.value;
     if (selectedTabValue === undefined || !tabs.includes(selectedTabValue)) {
       selectedTab.value = tabs[0];
@@ -238,10 +265,8 @@ export class UserLayerSidePanelsState {
 
   restoreState(obj: unknown) {
     const { panels } = this;
-    panels[0].selectedTab.value = verifyOptionalObjectProperty(
-      obj,
-      TAB_JSON_KEY,
-      verifyString,
+    panels[0].restoreSelectedTab(
+      verifyOptionalObjectProperty(obj, TAB_JSON_KEY, verifyString),
     );
     const { layer } = this;
     const { tabs } = layer;
@@ -252,10 +277,8 @@ export class UserLayerSidePanelsState {
         const panel = new UserLayerSidePanelState(this);
         panel.location.restoreState(panelObj);
         if (!panel.location.visible) return;
-        panel.selectedTab.value = verifyOptionalObjectProperty(
-          panelObj,
-          TAB_JSON_KEY,
-          verifyString,
+        panel.restoreSelectedTab(
+          verifyOptionalObjectProperty(panelObj, TAB_JSON_KEY, verifyString),
         );
         panel.explicitTabs = verifyOptionalObjectProperty(
           panelObj,
