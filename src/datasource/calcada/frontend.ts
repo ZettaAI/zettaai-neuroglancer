@@ -57,6 +57,7 @@ import {
   CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID,
   isBaseSegmentId,
   makeChunkedGraphChunkSpecification,
+  pieceIdOfFragment,
   MeshSourceParameters,
   parseCalcadaError,
   PYCG_APP_VERSION,
@@ -75,10 +76,11 @@ import {
   applicableToCandidates,
   candidatePasses,
   describePiece,
-  flaggedPieceCount,
   partnersWithSemantics,
+  rankFlaggedPieces,
   splitErrorColors,
 } from "#src/datasource/calcada/candidate_heat.js";
+import type { SplitDetectionFocus } from "#src/datasource/calcada/candidate_overview_state.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
@@ -99,7 +101,13 @@ import {
   mergeDebugGraphs,
 } from "#src/datasource/calcada/debug_graph.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
+import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
+import type { PieceSphere } from "#src/datasource/calcada/piece_centers.js";
+import {
+  nanometresToGlobal,
+  parsePieceSpheres,
+} from "#src/datasource/calcada/piece_centers.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
   CalcadaLabeledTimestampPicker,
@@ -469,11 +477,9 @@ class CalcadaMeshSource extends WithParameters(
   }
 
   getFragmentPickId(fragmentId: string): bigint {
-    // fragmentId is "{piece_id}:0" (":0" is the LOD suffix); take the piece id.
     // Piece ids are always non-zero, so MeshLayer's `getFragmentPickId(...) ||
     // objectId` fallback only fires when a fragment genuinely has no id.
-    const colon = fragmentId.indexOf(":");
-    return parseUint64(colon === -1 ? fragmentId : fragmentId.slice(0, colon));
+    return pieceIdOfFragment(fragmentId);
   }
 }
 
@@ -2178,6 +2184,69 @@ function parseEntry(value: any): PointEntry {
   return { voxel, layer, pieceId, origin };
 }
 
+/**
+ * Zoom the 3D view onto what lies between two global points.
+ *
+ * Recentring alone leaves the target a few pixels wide at a zoom that fits a
+ * whole neuron, which is not a view anyone can judge from. Only the 3D panel is
+ * touched: the slice panels are where a proofreader sets a working scale and
+ * keeps it, and yanking that around on every step would cost more than it
+ * gives.
+ */
+function framePerspective(
+  layer: SegmentationUserLayer,
+  pointA: ArrayLike<number>,
+  pointB: ArrayLike<number>,
+) {
+  for (const panel of layer.manager.root.display.panels) {
+    if (!(panel instanceof PerspectivePanel)) continue;
+    const { navigationState } = panel;
+    navigationState.zoomFactor.value = framingZoom(
+      pointA,
+      pointB,
+      navigationState.displayDimensionRenderInfo.value,
+    );
+    return;
+  }
+}
+
+/**
+ * Binds a mode's keys for as long as the returned object lives.
+ *
+ * The same binder a tool activation uses, but scoped to the mode, so the keys
+ * keep working while merge or cut holds the active-tool slot. That binder only
+ * reaches the data panels, so the keys went dead the moment focus moved to the
+ * side panel — a proofreader who had just clicked a segment in the list had to
+ * click back onto the image before an arrow did anything. A document-level
+ * binder covers the rest of the viewer; it steps aside over a data panel so
+ * the two never both fire, and KeyboardEventBinder already ignores keys typed
+ * into form fields.
+ */
+function bindModeInputs(
+  layer: SegmentationUserLayer,
+  inputEventMap: EventActionMap,
+  handlers: Record<string, () => void>,
+): RefCounted {
+  const bindings = new RefCounted();
+  layer.toolBinder.globalBinder.inputEventMapBinder(inputEventMap, bindings);
+  const documentKeys = bindings.registerDisposer(
+    new KeyboardEventBinder(document, inputEventMap),
+  );
+  documentKeys.shouldIgnore = (event: KeyboardEvent) =>
+    (event.target as HTMLElement | null)?.closest?.(
+      ".neuroglancer-rendered-data-panel",
+    ) != null;
+  for (const [action, handler] of Object.entries(handlers)) {
+    bindings.registerDisposer(
+      registerActionListener(window, action, (event: ActionEvent<unknown>) => {
+        event.stopPropagation();
+        handler();
+      }),
+    );
+  }
+  return bindings;
+}
+
 const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
@@ -2814,44 +2883,25 @@ class ZettaTraceSession extends RefCounted {
   private bindAiming() {
     if (this.aimBindings !== undefined) return;
     this.revealTraceTab();
-    const bindings = new RefCounted();
-    this.aimBindings = bindings;
-    this.layer.toolBinder.globalBinder.inputEventMapBinder(
-      CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
-      bindings,
-    );
-    const documentKeys = bindings.registerDisposer(
-      new KeyboardEventBinder(document, CALCADA_TRACE_AIM_INPUT_EVENT_MAP),
-    );
-    documentKeys.shouldIgnore = (event: KeyboardEvent) =>
-      (event.target as HTMLElement | null)?.closest?.(
-        ".neuroglancer-rendered-data-panel",
-      ) != null;
-    const bind = (action: string, handler: () => void) => {
-      bindings.registerDisposer(
-        registerActionListener(
-          window,
-          action,
-          (event: ActionEvent<unknown>) => {
-            event.stopPropagation();
-            handler();
-          },
-        ),
-      );
-    };
     const resize = (direction: 1 | -1) => {
       this.state.sphereRadiusNm.value = stepTraceSphereRadiusNm(
         this.state.sphereRadiusNm.value,
         direction,
       );
     };
-    bind("trace-radius-increase", () => resize(1));
-    bind("trace-radius-decrease", () => resize(-1));
-    bind("trace-place-sphere", () => this.placeSphere());
-    // Cancels the aim, not the trace: a live session has to survive a stray T
-    // in the middle of a review, because exit() restores the segment snapshot
-    // and drops the seed.
-    bind("trace-cancel-aim", () => this.state.cancelInnermost());
+    this.aimBindings = bindModeInputs(
+      this.layer,
+      CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
+      {
+        "trace-radius-increase": () => resize(1),
+        "trace-radius-decrease": () => resize(-1),
+        "trace-place-sphere": () => this.placeSphere(),
+        // Cancels the aim, not the trace: a live session has to survive a
+        // stray T in the middle of a review, because exit() restores the
+        // segment snapshot and drops the seed.
+        "trace-cancel-aim": () => this.state.cancelInnermost(),
+      },
+    );
   }
 
   /**
@@ -2888,45 +2938,15 @@ class ZettaTraceSession extends RefCounted {
     this.dimmed.clear();
     this.retired.clear();
 
-    const bindings = new RefCounted();
+    // Arrows review candidates instead of panning until the mode ends.
+    const bindings = bindModeInputs(this.layer, ZETTA_TRACE_INPUT_EVENT_MAP, {
+      "reject-candidate": () => this.reject(),
+      "accept-candidate": () => void this.accept(),
+      "skip-candidate": () => this.skip(),
+      "trace-undo": () => void this.undoLast(),
+      "exit-trace": () => this.state.cancelInnermost(),
+    });
     this.bindings = bindings;
-    // The same binder a tool activation uses, but scoped to the mode, so the
-    // keys keep working while merge or cut holds the active-tool slot. Arrows
-    // therefore review candidates instead of panning until the mode ends.
-    this.layer.toolBinder.globalBinder.inputEventMapBinder(
-      ZETTA_TRACE_INPUT_EVENT_MAP,
-      bindings,
-    );
-    // That binder only reaches the data panels, so the keys went dead the
-    // moment focus moved to the side panel — a proofreader who had just
-    // clicked a segment in the list had to click back onto the image before an
-    // arrow did anything. A document-level binder covers the rest of the
-    // viewer; it steps aside over a data panel so the two never both fire, and
-    // KeyboardEventBinder already ignores keys typed into form fields.
-    const documentKeys = bindings.registerDisposer(
-      new KeyboardEventBinder(document, ZETTA_TRACE_INPUT_EVENT_MAP),
-    );
-    documentKeys.shouldIgnore = (event: KeyboardEvent) =>
-      (event.target as HTMLElement | null)?.closest?.(
-        ".neuroglancer-rendered-data-panel",
-      ) != null;
-    const bind = (action: string, handler: () => void) => {
-      bindings.registerDisposer(
-        registerActionListener(
-          window,
-          action,
-          (event: ActionEvent<unknown>) => {
-            event.stopPropagation();
-            handler();
-          },
-        ),
-      );
-    };
-    bind("reject-candidate", () => this.reject());
-    bind("accept-candidate", () => void this.accept());
-    bind("skip-candidate", () => this.skip());
-    bind("trace-undo", () => void this.undoLast());
-    bind("exit-trace", () => this.state.cancelInnermost());
 
     // Toggling a role segment off would drop half the comparison. Put it back
     // and record it as dimmed instead, so it renders faint rather than gone.
@@ -3356,7 +3376,7 @@ class ZettaTraceSession extends RefCounted {
         Float32Array.from(midpoint);
     }
     if (moveCamera && this.state.zoomOnCandidate.value) {
-      this.frameCandidate(candidate);
+      framePerspective(this.layer, candidate.pointA, candidate.pointB);
     }
 
     this.reportCandidate(candidate);
@@ -3383,28 +3403,6 @@ class ZettaTraceSession extends RefCounted {
         ],
       },
     );
-  }
-
-  /**
-   * Zoom the 3D view onto the candidate that just came up.
-   *
-   * Recentring alone leaves the pair a few pixels wide at a zoom that fits a
-   * whole neuron, which is not a view anyone can judge a merge from. Only the
-   * 3D panel is touched: the slice panels are where a proofreader sets a
-   * working scale and keeps it, and yanking that around every verdict would
-   * cost more than it gives.
-   */
-  private frameCandidate(candidate: EdgeCandidate) {
-    for (const panel of this.layer.manager.root.display.panels) {
-      if (!(panel instanceof PerspectivePanel)) continue;
-      const { navigationState } = panel;
-      navigationState.zoomFactor.value = framingZoom(
-        candidate.pointA,
-        candidate.pointB,
-        navigationState.displayDimensionRenderInfo.value,
-      );
-      return;
-    }
   }
 
   /**
@@ -4108,18 +4106,37 @@ class ZettaTraceSession extends RefCounted {
  * at where the work is only pays off if you can then pick up a tool and go
  * there, and a tool activation would tear this down at that exact moment.
  */
+// Held only while split error detection is on. Ctrl like the trace's sphere,
+// so a plain click stays a click; the seed is taken from a 2D view only
+// (the handler refuses 3D), where the voxel under the cursor is unambiguous.
+const SPLIT_DETECTION_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:arrowleft": { action: "split-detection-previous" },
+  "at:arrowright": { action: "split-detection-next" },
+  "at:control+mousedown0": { action: "split-detection-place-seed" },
+});
+
 class CandidateOverviewSession extends RefCounted {
   readonly changed = new NullarySignal();
   status = "";
   private fetchToken = 0;
-  // Scores per segment, so putting one segment away drops only its colours and
-  // leaves the rest of the detection standing.
-  private piecesByRoot = new Map<bigint, PieceOverview[]>();
+  // The one segment being scored, resolved from the seed piece.
+  private targetRoot: bigint | undefined;
+  private pieces: PieceOverview[] = [];
+  // Positions come from the mesh manifest, which can take many seconds on a
+  // segment the server has not seen lately; scoring never waits for it.
+  private spheres: Promise<Map<bigint, PieceSphere>> = Promise.resolve(
+    new Map(),
+  );
+  // Flagged pieces, strongest first: the order the arrows step through.
+  private ranked: PieceOverview[] = [];
+  private focusIndex = -1;
+  private bindings: RefCounted | undefined;
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
   // break the first time one is added.
   private painted = false;
+  private repainting = false;
   private priorHighlightColor: vec4 | undefined;
 
   constructor(
@@ -4139,13 +4156,13 @@ class CandidateOverviewSession extends RefCounted {
           connection.state.calcadaDebugState.active.value = false;
           connection.state.zettaTraceState.aiming.value = false;
           connection.state.zettaTraceState.active.value = false;
-          void this.sync();
+          this.enter();
         } else {
-          this.forget();
-          this.setStatus("");
+          this.exit();
         }
       }),
     );
+    this.registerDisposer(() => this.bindings?.dispose());
     this.registerDisposer(
       connection.state.calcadaDebugState.active.changed.add(() => {
         if (connection.state.calcadaDebugState.active.value) {
@@ -4162,6 +4179,12 @@ class CandidateOverviewSession extends RefCounted {
         }
       }),
     );
+    this.registerDisposer(
+      state.seedPiece.changed.add(() => {
+        this.forget();
+        void this.sync();
+      }),
+    );
     // The threshold is the trace's, shared on purpose. Every filter works on
     // scores already fetched, so moving one is a repaint rather than a query.
     const repaint = () => this.repaint();
@@ -4174,7 +4197,7 @@ class CandidateOverviewSession extends RefCounted {
     const rescore = this.registerCancellable(
       debounce(() => {
         if (!state.active.value) return;
-        this.piecesByRoot.clear();
+        this.targetRoot = undefined;
         void this.sync();
       }, FILTER_INPUT_DEBOUNCE_MS),
     );
@@ -4185,21 +4208,18 @@ class CandidateOverviewSession extends RefCounted {
     this.registerDisposer(
       zettaTraceState.rejectedBy.changed.add(() => rescore()),
     );
-    // While it is on, detection follows what is on screen: a segment shown is
-    // scored, a segment put away stops being painted. Debounced because
-    // picking segments comes in bursts.
+    // Other segments stay on screen in their own colours; showing or hiding
+    // one only changes what the temporary visible set has to carry.
     const followScreen = this.registerCancellable(
-      debounce(() => {
-        if (state.active.value) void this.sync();
-      }, FILTER_INPUT_DEBOUNCE_MS),
+      debounce(() => this.repaint(), FILTER_INPUT_DEBOUNCE_MS),
     );
     this.registerDisposer(
       this.segmentsState.visibleSegments.changed.add(() => followScreen()),
     );
     // Detection lives in the Trace tab, which on main shows nothing but the way
     // to a branch — so there it would be on with no switch to turn it off. On
-    // any other branch the scores are that branch's, so the old ones go and the
-    // segments carried over are scored afresh.
+    // any other branch the scores are that branch's, so the segment is found
+    // again from its piece and scored afresh.
     this.registerDisposer(
       connection.graph.branchId.changed.add(() => {
         if (!state.active.value) return;
@@ -4208,7 +4228,7 @@ class CandidateOverviewSession extends RefCounted {
           return;
         }
         this.forget();
-        followScreen();
+        void this.sync();
       }),
     );
     if (
@@ -4217,9 +4237,61 @@ class CandidateOverviewSession extends RefCounted {
     ) {
       state.active.value = false;
     }
+    // A tool that paints pieces itself (merge, multicut) resets the shared
+    // colour map, and the mesh then shows every piece in its own hash colour
+    // under the highlight this mode leaves on. Paint again whenever ours is gone.
+    const { displayState } = this;
+    for (const signal of [
+      displayState.tempSegmentStatedColors2d.value.changed,
+      displayState.useTempSegmentStatedColors2d.changed,
+      displayState.highlightColor.changed,
+      displayState.unstatedFragmentsUseSegmentColor.changed,
+    ]) {
+      this.registerDisposer(signal.add(() => this.reassertColors()));
+    }
     // A link can arrive with detection already on; nothing changes to set it
     // going then.
-    if (state.active.value) void this.sync();
+    if (state.active.value) this.enter();
+  }
+
+  get focus(): SplitDetectionFocus | undefined {
+    const piece = this.ranked[this.focusIndex];
+    if (piece === undefined) return undefined;
+    return { index: this.focusIndex, total: this.ranked.length, piece };
+  }
+
+  get hasSeed() {
+    return this.state.seedPiece.value !== undefined;
+  }
+
+  previousPiece() {
+    this.step(-1);
+  }
+
+  nextPiece() {
+    this.step(1);
+  }
+
+  /** Back to the piece on show, after panning away from it. */
+  showFocus() {
+    const piece = this.ranked[this.focusIndex];
+    if (piece !== undefined) void this.goToPiece(piece);
+  }
+
+  clearSeed() {
+    this.state.seedPiece.value = undefined;
+    this.state.seedPoint.value = undefined;
+  }
+
+  /**
+   * An edit rewrote roots. The segment is found again from its piece, which
+   * is what survives a merge or a cut, and scored afresh.
+   */
+  onGraphEdited(oldRoots: Uint64Set) {
+    const { targetRoot } = this;
+    if (targetRoot === undefined || !oldRoots.has(targetRoot)) return;
+    this.targetRoot = undefined;
+    void this.sync();
   }
 
   private get segmentsState() {
@@ -4230,13 +4302,39 @@ class CandidateOverviewSession extends RefCounted {
     return this.layer.displayState;
   }
 
-  private get pieces(): PieceOverview[] {
-    return [...this.piecesByRoot.values()].flat();
+  private get filter() {
+    return this.connection.state.zettaTraceState.candidateFilter;
+  }
+
+  private enter() {
+    if (this.bindings === undefined) {
+      this.bindings = bindModeInputs(
+        this.layer,
+        SPLIT_DETECTION_INPUT_EVENT_MAP,
+        {
+          "split-detection-previous": () => this.previousPiece(),
+          "split-detection-next": () => this.nextPiece(),
+          "split-detection-place-seed": () => this.placeSeed(),
+        },
+      );
+    }
+    void this.sync();
+  }
+
+  private exit() {
+    this.bindings?.dispose();
+    this.bindings = undefined;
+    this.forget();
+    this.setStatus("");
   }
 
   private forget() {
     ++this.fetchToken;
-    this.piecesByRoot.clear();
+    this.targetRoot = undefined;
+    this.pieces = [];
+    this.spheres = Promise.resolve(new Map());
+    this.ranked = [];
+    this.focusIndex = -1;
     this.clearColors();
   }
 
@@ -4246,48 +4344,67 @@ class CandidateOverviewSession extends RefCounted {
   }
 
   /**
-   * Bring the scores in line with what is on screen: drop segments put away,
-   * score only the ones that are new. A whole-segment query takes seconds, so
-   * a segment already scored is never asked about again until a filter that
-   * the server applies changes.
+   * Take the segment under the cursor. 2D only: in 3D the pick is whatever
+   * mesh face is nearest, which after a cut can be a piece of a segment that
+   * no longer contains the one the proofreader meant.
+   */
+  private placeSeed() {
+    const { mouseState } = this.layer.manager.root.layerSelectedValues;
+    if (mouseState.pickedRenderLayer instanceof PerspectiveViewRenderLayer) {
+      StatusMessage.showTemporaryMessage(
+        "Pick the segment for split error detection in a 2D view.",
+        4000,
+      );
+      return;
+    }
+    const { value: rootId, baseValue: pieceId } =
+      this.displayState.segmentSelectionState;
+    if (!rootId || !pieceId) return;
+    const position = mouseState.unsnappedPosition;
+    this.segmentsState.visibleSegments.add(rootId);
+    this.state.seedPoint.value =
+      position.length >= 3
+        ? Float32Array.of(position[0], position[1], position[2])
+        : undefined;
+    this.state.seedPiece.value = pieceId;
+  }
+
+  /**
+   * Score the seed's segment. A whole-segment query takes seconds, so a
+   * segment already scored is not asked about again until its root changes or
+   * a filter the server applies does.
    */
   private async sync() {
     if (!this.state.active.value) return;
-    const visible = [...this.segmentsState.visibleSegments];
-    if (visible.length === 0) {
+    const seedPiece = this.state.seedPiece.value;
+    if (seedPiece === undefined) {
       this.forget();
-      this.setStatus("Show a segment to see where it was split");
+      this.setStatus(
+        "Ctrl+click a segment in a 2D view to choose the segment to check",
+      );
       return;
     }
-    const wanted = visible.slice(0, DEBUG_MAX_ROOTS);
-    for (const root of [...this.piecesByRoot.keys()]) {
-      if (!wanted.includes(root)) this.piecesByRoot.delete(root);
-    }
-    const missing = wanted.filter((root) => !this.piecesByRoot.has(root));
-    if (missing.length === 0) {
+    if (this.targetRoot !== undefined) {
       this.repaint();
       return;
     }
     const token = ++this.fetchToken;
+    const { graph } = this.connection;
     const traceState = this.connection.state.zettaTraceState;
     // Scoring a whole segment takes seconds. Without saying so the checkbox
     // looks like it did nothing at all.
-    this.setStatus(
-      missing.length === 1
-        ? "Scoring the segment…"
-        : `Scoring ${missing.length} segments…`,
-    );
-    let fetched: PieceOverview[][];
+    this.setStatus("Scoring the segment…");
+    let root: bigint;
+    let pieces: PieceOverview[];
     try {
-      fetched = await Promise.all(
-        missing.map((root) =>
-          this.connection.graph.graphServer.fetchCandidateOverview(root, {
-            branchId: this.connection.graph.branchId.value,
-            minPieceVoxels: traceState.minPieceVoxels.value,
-            rejectedBy: traceState.rejectedBy.value,
-          }),
-        ),
-      );
+      const branchId = graph.branchId.value;
+      root = await graph.graphServer.getRoot(seedPiece, 0, branchId);
+      if (token === this.fetchToken) this.loadSpheres(root);
+      pieces = await graph.graphServer.fetchCandidateOverview(root, {
+        branchId,
+        minPieceVoxels: traceState.minPieceVoxels.value,
+        rejectedBy: traceState.rejectedBy.value,
+      });
     } catch (e) {
       if (token === this.fetchToken) {
         this.setStatus(`Failed to score the segment: ${e}`);
@@ -4295,28 +4412,53 @@ class CandidateOverviewSession extends RefCounted {
       return;
     }
     if (token !== this.fetchToken) return;
-    missing.forEach((root, i) => this.piecesByRoot.set(root, fetched[i]));
+    this.targetRoot = root;
+    this.pieces = pieces;
+    this.focusIndex = -1;
+    this.segmentsState.visibleSegments.add(root);
     this.repaint();
-    if (visible.length > DEBUG_MAX_ROOTS) {
-      this.setStatus(
-        `${this.status} · first ${DEBUG_MAX_ROOTS} of ${visible.length} segments`,
-      );
-    }
-  }
-
-  private get filter() {
-    return this.connection.state.zettaTraceState.candidateFilter;
+    // Straight to the strongest: that is what turning detection on is for.
+    this.showFocus();
   }
 
   /**
    * Same recipe as the debug piece view. The mesh tints fragments by piece only
    * while a highlight colour is set, and takes each piece's colour from the
    * temporary stated colours — which is why a colour map on its own changed
-   * nothing on screen. The pieces are made visible alongside their roots so the
-   * 2D view paints them too.
+   * nothing on screen. The pieces are made visible alongside their root so the
+   * 2D view paints them too; every other visible segment is carried over
+   * untouched, and without a stated colour it keeps its own.
    */
   private repaint() {
-    if (!this.state.active.value || this.pieces.length === 0) return;
+    const { targetRoot } = this;
+    if (!this.state.active.value || targetRoot === undefined) return;
+    this.repainting = true;
+    try {
+      this.paint(targetRoot);
+    } finally {
+      this.repainting = false;
+    }
+    this.rerank();
+    this.setStatus(
+      `${this.ranked.length.toLocaleString()} of ` +
+        `${this.pieces.length.toLocaleString()} pieces flagged · ` +
+        `${partnersWithSemantics(this.pieces)} candidates with semantics`,
+    );
+  }
+
+  private reassertColors() {
+    if (this.repainting || !this.painted) return;
+    const { displayState } = this;
+    const map = displayState.tempSegmentStatedColors2d.value;
+    const intact =
+      displayState.useTempSegmentStatedColors2d.value &&
+      displayState.unstatedFragmentsUseSegmentColor.value &&
+      displayState.highlightColor.value !== undefined &&
+      this.pieces.every((piece) => map.has(piece.pieceId));
+    if (!intact) this.repaint();
+  }
+
+  private paint(targetRoot: bigint) {
     const { filter } = this;
     const colors = splitErrorColors(this.pieces, filter);
     this.connection.setOverviewPieceColors(colors);
@@ -4329,20 +4471,82 @@ class CandidateOverviewSession extends RefCounted {
     resetTemporaryVisibleSegmentsState(segmentsState);
     displayState.tempSegmentStatedColors2d.value.clear();
     segmentsState.useTemporaryVisibleSegments.value = true;
-    for (const root of this.piecesByRoot.keys()) {
-      segmentsState.temporaryVisibleSegments.add(root);
+    const { temporaryVisibleSegments } = segmentsState;
+    for (const root of segmentsState.visibleSegments) {
+      if (root !== targetRoot) temporaryVisibleSegments.add(root);
     }
+    temporaryVisibleSegments.add(targetRoot);
     for (const [piece, color] of colors) {
-      segmentsState.temporaryVisibleSegments.add(piece);
+      temporaryVisibleSegments.add(piece);
       displayState.tempSegmentStatedColors2d.value.set(piece, color);
     }
     displayState.useTempSegmentStatedColors2d.value = true;
+    displayState.unstatedFragmentsUseSegmentColor.value = true;
     this.painted = true;
-    this.setStatus(
-      `${flaggedPieceCount(this.pieces, filter).toLocaleString()} of ` +
-        `${this.pieces.length.toLocaleString()} pieces flagged · ` +
-        `${partnersWithSemantics(this.pieces)} candidates with semantics`,
+  }
+
+  // A filter change keeps the piece on show when it still qualifies, so
+  // loosening a filter does not throw the proofreader back to the top.
+  private rerank() {
+    const focused = this.ranked[this.focusIndex]?.pieceId;
+    this.ranked = rankFlaggedPieces(this.pieces, this.filter);
+    const kept = this.ranked.findIndex((piece) => piece.pieceId === focused);
+    this.focusIndex =
+      kept !== -1
+        ? kept
+        : Math.min(Math.max(this.focusIndex, 0), this.ranked.length - 1);
+  }
+
+  private step(direction: 1 | -1) {
+    const total = this.ranked.length;
+    if (total === 0) return;
+    this.focusIndex = (this.focusIndex + direction + total) % total;
+    this.changed.dispatch();
+    this.showFocus();
+  }
+
+  private async goToPiece(piece: PieceOverview) {
+    const sphere = await this.sphereOf(piece.pieceId);
+    if (this.ranked[this.focusIndex] !== piece) return;
+    const { coordinateSpace } = this.layer.manager.root;
+    const center =
+      sphere && nanometresToGlobal(sphere.center, coordinateSpace.value);
+    if (sphere === undefined || center === undefined) {
+      StatusMessage.showTemporaryMessage(
+        "This piece's position is not known yet — its mesh has not loaded.",
+        4000,
+      );
+      return;
+    }
+    const [x, y, z] = sphere.center;
+    const edgeA = nanometresToGlobal(
+      [x - sphere.radiusNm, y, z],
+      coordinateSpace.value,
     );
+    const edgeB = nanometresToGlobal(
+      [x + sphere.radiusNm, y, z],
+      coordinateSpace.value,
+    );
+    this.layer.manager.root.globalPosition.value = center;
+    // The trace's zoom setting, shared: a proofreader who keeps their own 3D
+    // scale while tracing wants to keep it here too.
+    if (
+      this.connection.state.zettaTraceState.zoomOnCandidate.value &&
+      edgeA !== undefined &&
+      edgeB !== undefined
+    ) {
+      framePerspective(this.layer, edgeA, edgeB);
+    }
+  }
+
+  private loadSpheres(root: bigint) {
+    this.spheres = this.connection.graph
+      .fetchPieceSpheres(root)
+      .catch(() => new Map<bigint, PieceSphere>());
+  }
+
+  private async sphereOf(pieceId: bigint): Promise<PieceSphere | undefined> {
+    return (await this.spheres).get(pieceId);
   }
 
   private clearColors() {
@@ -4350,6 +4554,7 @@ class CandidateOverviewSession extends RefCounted {
     this.painted = false;
     this.connection.setOverviewPieceColors(undefined);
     const { displayState } = this;
+    displayState.unstatedFragmentsUseSegmentColor.value = false;
     displayState.useTempSegmentStatedColors2d.value = false;
     displayState.tempSegmentStatedColors2d.value.clear();
     resetTemporaryVisibleSegmentsState(this.segmentsState);
@@ -4910,6 +5115,22 @@ void main() {
         aiming.value = !aiming.value;
       }),
     );
+    // Detection lives in the Trace tab, so on main — where the tab shows only
+    // the way to a branch — the key just opens it, like the trace's.
+    this.registerDisposer(
+      registerActionListener(
+        window,
+        CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
+        () => {
+          const { active } = state.overviewState;
+          this.traceSession.revealTraceTab();
+          if (!active.value && this.graph.branchId.value === MAIN_BRANCH_ID) {
+            return;
+          }
+          active.value = !active.value;
+        },
+      ),
+    );
     void this.followRetiredRoots();
   }
 
@@ -5226,6 +5447,7 @@ void main() {
 
   notifyGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
     this.state.replaceSegments(oldRoots, newRoots);
+    this.overviewSession.onGraphEdited(oldRoots);
   }
 
   updateAfterSplit(
@@ -6898,6 +7120,7 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
   public graphServer: CalcadaGraphServerInterface;
   private l2CacheAvailable: boolean | undefined = undefined;
   private httpSource: HttpSource;
+  private meshingHttpSource: HttpSource;
   public timestampLimit = new TrackableValue<number>(0, (x) => x);
   public branches = new WatchableValue<CalcadaBranch[]>([]);
   public labeledTimestamps = new WatchableValue<CalcadaLabeledTimestamp[]>([]);
@@ -6919,12 +7142,27 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
       url,
     );
     this.graphServer = new CalcadaGraphServerInterface(this.httpSource);
+    this.meshingHttpSource = getHttpSource(
+      chunkSource.sharedKvStoreContext.kvStoreContext,
+      info.app!.meshingUrl,
+    );
     this.graphServer.getTimestampLimit().then((limit) => {
       this.timestampLimit.value = limit;
     });
     this.startBranchRefreshWithRetry();
     this.startLabeledTimestampRefreshWithRetry();
     this.branchId.changed.add(() => this.triggerLabeledTimestampRefresh());
+  }
+
+  /**
+   * Where each piece of a segment is, read from its mesh manifest — the same
+   * request the mesh layer makes, so it is usually answered from cache.
+   */
+  async fetchPieceSpheres(rootId: bigint): Promise<Map<bigint, PieceSphere>> {
+    const { fetchOkImpl, baseUrl } = this.meshingHttpSource;
+    const path = buildManifestPath(rootId, 0, this.branchId.value);
+    const response = await fetchOkImpl(baseUrl + path, { priority: "low" });
+    return parsePieceSpheres(await response.json());
   }
 
   // startBranchRefreshWithRetry kicks off /branches and retries on failure —
@@ -7478,6 +7716,8 @@ const CALCADA_DEBUG_TOOL_ID = "calcadaDebug";
 // Bound straight to a key in config/custom-keybinds.json, bypassing the tool
 // slot so toggling the overlay never puts down the tool in hand.
 const CALCADA_DEBUG_TOGGLE_ACTION = "calcada-toggle-debug-mode";
+// A mode like the other two, bound straight to a key for the same reason.
+const CALCADA_SPLIT_DETECTION_TOGGLE_ACTION = "calcada-toggle-split-detection";
 
 class MulticutAnnotationLayerView extends AnnotationLayerView {
   declare private _annotationStates: MergedAnnotationStates;
@@ -8706,10 +8946,14 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       return root === first.pieceId ? undefined : root;
     };
 
+    // Debug mode and split error detection paint the same temporary state.
+    // Resetting it here would silently undo either overlay the moment any
+    // split point changed, leaving every piece in its own hash colour.
+    const pieceViewOwnedElsewhere = () =>
+      graphConnection.state.calcadaDebugState.active.value ||
+      graphConnection.state.overviewState.active.value;
     const resetPieceSplitDisplay = () => {
-      // Debug mode paints the same temporary state. Resetting it here would
-      // silently undo the overlay the moment any split point changed.
-      if (graphConnection.state.calcadaDebugState.active.value) return;
+      if (pieceViewOwnedElsewhere()) return;
       resetTemporaryVisibleSegmentsState(segmentationGroupState);
       displayState.useTempSegmentStatedColors2d.value = false;
       displayState.tempSegmentStatedColors2d.value.clear();
@@ -8722,7 +8966,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     activation.registerDisposer(() => resetPieceSplitDisplay());
 
     const updatePieceSplitDisplay = () => {
-      if (graphConnection.state.calcadaDebugState.active.value) return;
+      if (pieceViewOwnedElsewhere()) return;
       resetPieceSplitDisplay();
       if (priorHideSegmentZero === undefined) {
         priorHideSegmentZero = displayState.hideSegmentZero.value;

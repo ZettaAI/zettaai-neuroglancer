@@ -7,6 +7,7 @@ import {
   describePiece,
   flaggedPieceCount,
   heatColor,
+  rankFlaggedPieces,
   semanticVerdict,
   splitErrorColors,
   applicableToCandidates,
@@ -267,5 +268,20 @@ describe("candidatePasses", () => {
       unknown,
     ]);
     expect(candidatePasses(unknown, filter)).toBe(true);
+  });
+});
+
+describe("rankFlaggedPieces", () => {
+  it("keeps only flagged pieces, strongest first", () => {
+    const ranked = rankFlaggedPieces(
+      [
+        piece({ pieceId: 1n, bestScore: 0.4, candidateCount: 1 }),
+        piece({ pieceId: 2n }),
+        piece({ pieceId: 3n, bestScore: 0.9, candidateCount: 1 }),
+        piece({ pieceId: 4n, bestScore: 0.6, candidateCount: 1 }),
+      ],
+      { ...any, minScore: 0.5 },
+    );
+    expect(ranked.map((p) => p.pieceId)).toEqual([3n, 4n]);
   });
 });

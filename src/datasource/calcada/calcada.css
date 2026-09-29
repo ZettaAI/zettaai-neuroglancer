@@ -540,6 +540,28 @@
   width: auto;
 }
 
+/* The chip input's intrinsic width is a browser default wider than the
+   control; it is meant to take whatever the chips leave. The row rule above
+   pins inputs to their own width, so the growth has to be restated here. */
+.calcada-trace-panel-reviewers input {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 3em;
+}
+
+/* An email is one unbreakable word; the chip shortens it instead of pushing
+   the tab sideways. The full address is in the chip's tooltip. */
+.calcada-trace-panel-reviewer {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.calcada-trace-panel-reviewer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* A checkbox carries its label on the right, so it is not the row's "name on
    the left, control on the right" layout — laid out as one, space-between threw
    the text to the far edge and the input rule stretched the box to 10em. */
@@ -607,6 +629,25 @@
 
 .calcada-trace-panel-legend span:nth-child(3) {
   text-align: right;
+}
+
+.calcada-trace-panel-navigator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-navigator-position {
+  min-width: 4em;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: pointer;
 }
 
 .calcada-trace-panel-buttons {

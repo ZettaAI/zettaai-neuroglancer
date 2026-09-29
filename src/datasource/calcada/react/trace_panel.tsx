@@ -17,8 +17,12 @@ import {
   describePiece,
   SEMANTIC_CLASSES,
 } from "#src/datasource/calcada/candidate_heat.js";
-import type { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
+import type {
+  CalcadaOverviewState,
+  SplitDetectionFocus,
+} from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import type {
   TraceScope,
@@ -32,7 +36,6 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { NullarySignal } from "#src/util/signal.js";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -55,6 +58,12 @@ export interface TracePanelConnection {
   readonly overviewSession: {
     readonly changed: NullarySignal;
     readonly status: string;
+    readonly focus: SplitDetectionFocus | undefined;
+    readonly hasSeed: boolean;
+    previousPiece(): void;
+    nextPiece(): void;
+    showFocus(): void;
+    clearSeed(): void;
   };
   readonly traceSession: {
     readonly changed: NullarySignal;
@@ -109,6 +118,9 @@ const KEY_HINTS: ReadonlyArray<[string, string]> = [
   ["↓", "skip for now"],
   ["Ctrl+Z", "undo the last edit"],
   ["Esc", "put the seed down, then leave"],
+  ["E", "split error detection on / off"],
+  ["Ctrl+click in 2D", "choose the segment to check"],
+  ["← / →", "previous / next flagged piece, by score"],
 ];
 
 function clampRadius(radiusNm: number): number {
@@ -146,15 +158,12 @@ function PieceFilterSection({
       <legend>{title}</legend>
       <label className="calcada-trace-panel-row">
         Min size, voxels
-        <Input
-          type="number"
+        <FilterNumberInput
           min={0}
           step={100}
           value={voxels}
-          onChange={(event) => {
-            const parsed = Number.parseInt(event.target.value, 10);
-            minVoxels.value =
-              Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+          onValueChange={(next) => {
+            minVoxels.value = Math.max(0, Math.round(next));
           }}
         />
       </label>
@@ -181,15 +190,13 @@ function PieceFilterSection({
       {wantedValue !== "any" && (
         <label className="calcada-trace-panel-row">
           At least, %
-          <Input
-            type="number"
+          <FilterNumberInput
             min={0}
             max={100}
             step={5}
             value={Math.round(fraction * 100)}
-            onChange={(event) => {
-              const parsed = Number.parseFloat(event.target.value);
-              if (Number.isFinite(parsed)) minFraction.value = parsed / 100;
+            onValueChange={(next) => {
+              minFraction.value = Math.max(0, Math.min(100, next)) / 100;
             }}
           />
         </label>
@@ -198,6 +205,73 @@ function PieceFilterSection({
         <div className="calcada-trace-panel-current">{current}</div>
       )}
     </fieldset>
+  );
+}
+
+/**
+ * One flagged piece at a time, strongest first, so a proofreader is taken to
+ * each likely split instead of hunting for red on a whole segment.
+ */
+function SplitDetectionNavigator({
+  session,
+}: {
+  session: TracePanelConnection["overviewSession"];
+}) {
+  const { focus } = session;
+  return (
+    <>
+      <div className="calcada-trace-panel-status">{session.status}</div>
+      {focus !== undefined && (
+        <div className="calcada-trace-panel-navigator">
+          <Button
+            size="xs"
+            variant="outline"
+            title="Previous flagged piece (left arrow)"
+            onClick={() => session.previousPiece()}
+          >
+            ‹
+          </Button>
+          <button
+            type="button"
+            className="calcada-trace-panel-navigator-position"
+            title="Go back to this piece"
+            onClick={() => session.showFocus()}
+          >
+            {focus.index + 1} / {focus.total}
+          </button>
+          <Button
+            size="xs"
+            variant="outline"
+            title="Next flagged piece (right arrow)"
+            onClick={() => session.nextPiece()}
+          >
+            ›
+          </Button>
+        </div>
+      )}
+      {focus !== undefined && (
+        <div className="calcada-trace-panel-current">
+          score {focus.piece.bestScore.toFixed(2)} ·{" "}
+          {describePiece({
+            voxels: focus.piece.voxelCount,
+            classes: focus.piece.classes,
+            hasInfo: focus.piece.hasInfo,
+          })}
+        </div>
+      )}
+      {session.hasSeed && (
+        <div className="calcada-trace-panel-buttons">
+          <Button
+            size="xs"
+            variant="outline"
+            title="Forget the segment; Ctrl+click another in a 2D view"
+            onClick={() => session.clearSeed()}
+          >
+            Clear segment
+          </Button>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -326,18 +400,15 @@ export function CalcadaTracePanel({
 
       <label className="calcada-trace-panel-row">
         Sphere radius, nm
-        <Input
-          type="number"
+        <FilterNumberInput
           min={TRACE_SPHERE_RADIUS_MIN_NM}
           max={TRACE_SPHERE_RADIUS_MAX_NM}
           step={100}
           title="Radius of the sphere. Changing it after the seed is placed re-picks the candidates."
           disabled={scope === "segment"}
           value={Math.round(radiusNm)}
-          onChange={(event) => {
-            const parsed = Number.parseFloat(event.target.value);
-            if (!Number.isFinite(parsed)) return;
-            traceState.sphereRadiusNm.value = clampRadius(parsed);
+          onValueChange={(next) => {
+            traceState.sphereRadiusNm.value = clampRadius(next);
           }}
         />
       </label>
@@ -347,18 +418,14 @@ export function CalcadaTracePanel({
           Lowering it brings back skipped candidates in stack order. */}
       <label className="calcada-trace-panel-row">
         Min score
-        <Input
-          type="number"
+        <FilterNumberInput
           min={0}
           max={1}
           step={0.05}
           title="Hide candidates scoring below this, in the trace and in split error detection"
           value={minScore}
-          onChange={(event) => {
-            const parsed = Number.parseFloat(event.target.value);
-            traceState.minScore.value = Number.isFinite(parsed)
-              ? Math.max(0, Math.min(1, parsed))
-              : 0;
+          onValueChange={(next) => {
+            traceState.minScore.value = Math.max(0, Math.min(1, next));
           }}
         />
       </label>
@@ -451,9 +518,7 @@ export function CalcadaTracePanel({
         </div>
 
         {overviewActive && (
-          <div className="calcada-trace-panel-status">
-            {connection.overviewSession.status}
-          </div>
+          <SplitDetectionNavigator session={connection.overviewSession} />
         )}
       </div>
 

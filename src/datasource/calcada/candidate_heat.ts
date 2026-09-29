@@ -298,11 +298,21 @@ export function flaggedPieceCount(
   pieces: readonly PieceOverview[],
   filter: SplitErrorFilter,
 ): number {
-  let count = 0;
-  for (const score of flaggedScores(pieces, filter).values()) {
-    if (score > 0) count++;
-  }
-  return count;
+  return rankFlaggedPieces(pieces, filter).length;
+}
+
+/**
+ * The pieces the current filter paints as a likely split error, strongest
+ * first — the order a proofreader steps through them in.
+ */
+export function rankFlaggedPieces(
+  pieces: readonly PieceOverview[],
+  filter: SplitErrorFilter,
+): PieceOverview[] {
+  const scores = flaggedScores(pieces, filter);
+  return pieces
+    .filter((piece) => (scores.get(piece.pieceId) ?? 0) > 0)
+    .sort((a, b) => b.bestScore - a.bestScore);
 }
 
 /** How many of the candidates on offer carry a semantic breakdown. */
