@@ -4255,9 +4255,11 @@ class CandidateOverviewSession extends RefCounted {
   }
 
   get focus(): SplitDetectionFocus | undefined {
+    const total = this.ranked.length;
+    if (total === 0) return undefined;
     const piece = this.ranked[this.focusIndex];
-    if (piece === undefined) return undefined;
-    return { index: this.focusIndex, total: this.ranked.length, piece };
+    if (piece === undefined) return { total };
+    return { index: this.focusIndex, total, piece };
   }
 
   get hasSeed() {
@@ -4416,9 +4418,9 @@ class CandidateOverviewSession extends RefCounted {
     this.pieces = pieces;
     this.focusIndex = -1;
     this.segmentsState.visibleSegments.add(root);
+    // The camera stays where the seed was placed: the list starts on the
+    // strongest piece, but going to it is the proofreader's call.
     this.repaint();
-    // Straight to the strongest: that is what turning detection on is for.
-    this.showFocus();
   }
 
   /**
@@ -4491,16 +4493,25 @@ class CandidateOverviewSession extends RefCounted {
     const focused = this.ranked[this.focusIndex]?.pieceId;
     this.ranked = rankFlaggedPieces(this.pieces, this.filter);
     const kept = this.ranked.findIndex((piece) => piece.pieceId === focused);
+    // Nothing chosen yet stays that way; a piece the filter now hides hands
+    // its place to the next one down.
     this.focusIndex =
-      kept !== -1
+      kept !== -1 || this.focusIndex === -1
         ? kept
-        : Math.min(Math.max(this.focusIndex, 0), this.ranked.length - 1);
+        : Math.min(this.focusIndex, this.ranked.length - 1);
   }
 
   private step(direction: 1 | -1) {
     const total = this.ranked.length;
     if (total === 0) return;
-    this.focusIndex = (this.focusIndex + direction + total) % total;
+    // From nothing chosen, forward starts at the strongest and back at the
+    // weakest.
+    this.focusIndex =
+      this.focusIndex === -1
+        ? direction === 1
+          ? 0
+          : total - 1
+        : (this.focusIndex + direction + total) % total;
     this.changed.dispatch();
     this.showFocus();
   }

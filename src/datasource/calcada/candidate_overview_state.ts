@@ -36,9 +36,10 @@ import type { Trackable } from "#src/util/trackable.js";
 
 /** The piece split error detection is showing, and where it sits in the list. */
 export interface SplitDetectionFocus {
-  index: number;
   total: number;
-  piece: PieceOverview;
+  /** Unset until the proofreader steps onto a piece. */
+  index?: number;
+  piece?: PieceOverview;
 }
 
 const OVERVIEW_ACTIVE_KEY = "active";

@@ -235,9 +235,10 @@ function SplitDetectionNavigator({
             type="button"
             className="calcada-trace-panel-navigator-position"
             title="Go back to this piece"
+            disabled={focus.index === undefined}
             onClick={() => session.showFocus()}
           >
-            {focus.index + 1} / {focus.total}
+            {focus.index === undefined ? "–" : focus.index + 1} / {focus.total}
           </button>
           <Button
             size="xs"
@@ -249,7 +250,7 @@ function SplitDetectionNavigator({
           </Button>
         </div>
       )}
-      {focus !== undefined && (
+      {focus?.piece !== undefined && (
         <div className="calcada-trace-panel-current">
           score {focus.piece.bestScore.toFixed(2)} ·{" "}
           {describePiece({
