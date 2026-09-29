@@ -41,6 +41,20 @@ function makeConnection(rejectedBy: string[] = []): TracePanelConnection {
   zettaTraceState.active.value = true;
   zettaTraceState.sphereCenter.value = Float32Array.of(149532, 124617, 7226);
   zettaTraceState.rejectedBy.value = rejectedBy;
+  // The longest field label there is, which must shorten rather than widen
+  // the filter section.
+  zettaTraceState.filter.value = {
+    kind: "group",
+    op: "and",
+    children: [
+      {
+        kind: "condition",
+        field: { side: "candidate", measure: "share", class: "vasculature" },
+        cmp: ">=",
+        value: 0.8,
+      },
+    ],
+  };
   const overviewState = new CalcadaOverviewState();
   overviewState.active.value = true;
   return {

@@ -367,9 +367,12 @@
 
 /* The Trace tab. Its controls are shadcn components inside the UI scope, so all
    this holds is the stacking; colours and spacing come from the tokens. */
+/* Never sideways: a control that outgrows the panel is shrunk or clipped, not
+   scrolled to. */
 .calcada-trace-tab {
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -501,15 +504,50 @@
   width: auto;
 }
 
+/* One symbol; the chevron would leave it no room. */
 .calcada-filter-condition .calcada-filter-cmp {
-  flex: 0 0 3em;
-  width: 3em;
+  flex: 0 0 2.4em;
+  width: 2.4em;
+  justify-content: center;
+  padding: 0;
 }
 
-.calcada-filter-condition .calcada-filter-value {
-  flex: 0 0 4.5em;
-  width: 4.5em;
+.calcada-filter-condition .calcada-filter-cmp svg {
+  display: none;
+}
+
+.calcada-filter-condition .calcada-filter-cmp [data-slot="select-value"] {
+  justify-content: center;
+}
+
+.calcada-filter-condition .calcada-filter-field,
+.calcada-filter-preset-select {
+  overflow: hidden;
+}
+
+/* Cut short on screen; the trigger's tooltip carries the whole text. */
+.calcada-filter-condition .calcada-filter-field [data-slot="select-value"],
+.calcada-filter-preset-select [data-slot="select-value"] {
+  display: block;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* No spinner arrows: in this width they cover the digits. */
+.calcada-filter-condition .calcada-filter-value {
+  flex: 0 0 5em;
+  width: 5em;
+  min-width: 0;
+  padding: 0 6px;
+  appearance: textfield;
+}
+
+.calcada-filter-condition .calcada-filter-value::-webkit-inner-spin-button,
+.calcada-filter-condition .calcada-filter-value::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
 }
 
 .calcada-filter-op {
@@ -590,10 +628,13 @@
 
 /* One end of a candidate — its filters and, while tracing, the current piece
    on that end — set apart from the other end. */
+/* A fieldset is never narrower than its content by default, so one long
+   label in it would widen the whole tab. */
 .calcada-trace-panel-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
   margin: 0;
   padding: 6px 8px 8px;
   border: 1px solid #444;

@@ -111,6 +111,34 @@ describe("FilterTreeEditor", () => {
     expect(hit).toBe(rowRemove);
   });
 
+  it("shows each condition's labels, not its stored keys", async () => {
+    mount({
+      kind: "group",
+      op: "and",
+      children: [
+        {
+          kind: "condition",
+          field: { measure: "score" },
+          cmp: ">=",
+          value: 0.95,
+        },
+      ],
+    });
+    await vi.waitFor(() => {
+      const row = host.querySelector(".calcada-filter-condition");
+      expect(
+        row?.querySelector(".calcada-filter-field")?.textContent,
+      ).toContain("Score");
+      // A long label is cut short on screen; the whole of it is the tooltip.
+      expect(
+        row?.querySelector(".calcada-filter-field")?.getAttribute("title"),
+      ).toBe("Score");
+      expect(row?.querySelector(".calcada-filter-cmp")?.textContent).toContain(
+        "≥",
+      );
+    });
+  });
+
   it("fits the side panel with a three-level tree", async () => {
     const leaf = {
       kind: "condition" as const,

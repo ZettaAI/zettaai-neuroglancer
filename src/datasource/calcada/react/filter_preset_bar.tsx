@@ -116,7 +116,11 @@ export function FilterPresetBar({
           value={selectedId ?? NO_PRESET}
           onValueChange={(id) => onSelect(presets.find((p) => p.id === id))}
         >
-          <SelectTrigger size="sm" className="calcada-filter-preset-select">
+          <SelectTrigger
+            size="sm"
+            className="calcada-filter-preset-select"
+            title={selected?.name}
+          >
             <SelectValue>
               {selected ? `${selected.name}${dirty ? " •" : ""}` : "— none —"}
             </SelectValue>

@@ -80,6 +80,17 @@ const FIELD_OPTIONS: ReadonlyArray<[string, string]> = [
   ),
 ];
 
+const CMP_LABELS: Record<FilterCondition["cmp"], string> = {
+  ">=": "≥",
+  "<=": "≤",
+};
+
+// The trigger shows the label, not the stored key.
+function fieldLabel(field: FilterField): string {
+  const key = fieldKey(field);
+  return FIELD_OPTIONS.find(([option]) => option === key)?.[1] ?? key;
+}
+
 // Condition values are stored as the tree evaluates them; share is a fraction
 // there and a percentage on screen.
 function shownValue(condition: FilterCondition): number {
@@ -117,8 +128,12 @@ function ConditionRow({
           })
         }
       >
-        <SelectTrigger size="sm" className="calcada-filter-field">
-          <SelectValue />
+        <SelectTrigger
+          size="sm"
+          className="calcada-filter-field"
+          title={fieldLabel(field)}
+        >
+          <SelectValue>{fieldLabel(field)}</SelectValue>
         </SelectTrigger>
         <SelectContent>
           {FIELD_OPTIONS.map(([key, label]) => (
@@ -135,11 +150,11 @@ function ConditionRow({
         }
       >
         <SelectTrigger size="sm" className="calcada-filter-cmp">
-          <SelectValue />
+          <SelectValue>{CMP_LABELS[condition.cmp]}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value=">=">≥</SelectItem>
-          <SelectItem value="<=">≤</SelectItem>
+          <SelectItem value=">=">{CMP_LABELS[">="]}</SelectItem>
+          <SelectItem value="<=">{CMP_LABELS["<="]}</SelectItem>
         </SelectContent>
       </Select>
       <FilterNumberInput
