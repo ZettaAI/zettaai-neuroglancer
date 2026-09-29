@@ -24,12 +24,14 @@ import {
 } from "#src/datasource/calcada/candidate_heat.js";
 
 export type TreeSide = "seed" | "candidate";
+/** Which end a condition asks about; "both" holds only when each end does. */
+export type ConditionSide = TreeSide | "both";
 export type PieceClass = Exclude<SemanticClass, "any">;
 
 export type FilterField =
   | { measure: "score" }
-  | { side: TreeSide; measure: "voxels" }
-  | { side: TreeSide; measure: "share"; class: PieceClass };
+  | { side: ConditionSide; measure: "voxels" }
+  | { side: ConditionSide; measure: "share"; class: PieceClass };
 
 export interface FilterCondition {
   kind: "condition";
@@ -71,6 +73,7 @@ export interface SemanticsKnown {
 }
 
 const SIDES: readonly TreeSide[] = ["seed", "candidate"];
+const CONDITION_SIDES: readonly ConditionSide[] = [...SIDES, "both"];
 const PIECE_CLASSES = SEMANTIC_CLASSES.filter(
   (name): name is PieceClass => name !== "any",
 );
@@ -96,8 +99,8 @@ function parseField(value: unknown): FilterField | undefined {
   const field = value as Record<string, unknown> | null;
   if (typeof field !== "object" || field === null) return undefined;
   if (field.measure === "score") return { measure: "score" };
-  const side = field.side as TreeSide;
-  if (!SIDES.includes(side)) return undefined;
+  const side = field.side as ConditionSide;
+  if (!CONDITION_SIDES.includes(side)) return undefined;
   if (field.measure === "voxels") return { side, measure: "voxels" };
   if (
     field.measure === "share" &&
@@ -173,12 +176,20 @@ export function semanticsKnown(
   return known;
 }
 
-function measure(subject: FilterSubject, field: FilterField): number {
-  if (field.measure === "score") return subject.score;
-  const side = subject[field.side];
+function sideMeasure(
+  side: FilterSubjectSide,
+  field: Exclude<FilterField, { measure: "score" }>,
+): number {
   if (field.measure === "voxels") return side.voxels;
   const total = side.hasInfo ? classTotal(side.classes) : 0;
   return total > 0 ? side.classes[field.class] / total : Number.NaN;
+}
+
+function compares(value: number, condition: FilterCondition): boolean {
+  if (Number.isNaN(value)) return false;
+  return condition.cmp === ">="
+    ? value >= condition.value
+    : value <= condition.value;
 }
 
 function conditionPasses(
@@ -187,14 +198,15 @@ function conditionPasses(
   known: SemanticsKnown,
 ): boolean {
   const { field } = condition;
-  // A graph with no semantics on a side cannot answer a class question there;
-  // failing it would hide every candidate the moment a class is named.
-  if (field.measure === "share" && !known[field.side]) return true;
-  const value = measure(subject, field);
-  if (Number.isNaN(value)) return false;
-  return condition.cmp === ">="
-    ? value >= condition.value
-    : value <= condition.value;
+  if (field.measure === "score") return compares(subject.score, condition);
+  const sides = field.side === "both" ? SIDES : [field.side];
+  return sides.every(
+    (side) =>
+      // A graph with no semantics on a side cannot answer a class question
+      // there; failing it would hide every candidate once a class is named.
+      (field.measure === "share" && !known[side]) ||
+      compares(sideMeasure(subject[side], field), condition),
+  );
 }
 
 function nodePasses(
@@ -226,7 +238,7 @@ export function minCandidateVoxels(node: FilterNode): number {
   if (node.kind === "condition") {
     const { field } = node;
     return field.measure === "voxels" &&
-      field.side === "candidate" &&
+      field.side !== "seed" &&
       node.cmp === ">="
       ? Math.max(0, node.value)
       : 0;

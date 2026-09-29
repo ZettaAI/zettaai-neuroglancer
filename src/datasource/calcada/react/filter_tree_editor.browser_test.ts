@@ -139,6 +139,40 @@ describe("FilterTreeEditor", () => {
     });
   });
 
+  it("sets the criterion and the side a condition applies to apart", async () => {
+    mount({
+      kind: "group",
+      op: "and",
+      children: [
+        {
+          kind: "condition",
+          field: { side: "both", measure: "share", class: "axon" },
+          cmp: ">=",
+          value: 0.8,
+        },
+        {
+          kind: "condition",
+          field: { measure: "score" },
+          cmp: ">=",
+          value: 0.5,
+        },
+      ],
+    });
+    await vi.waitFor(() => {
+      const [shareRow, scoreRow] = host.querySelectorAll(
+        ".calcada-filter-condition",
+      );
+      expect(
+        shareRow.querySelector(".calcada-filter-field")?.textContent,
+      ).toContain("Axon %");
+      expect(
+        shareRow.querySelector(".calcada-filter-side")?.textContent,
+      ).toContain("Both");
+      // Score belongs to the candidate as a whole; it has no side.
+      expect(scoreRow.querySelector(".calcada-filter-side")).toBe(null);
+    });
+  });
+
   it("fits the side panel with a three-level tree", async () => {
     const leaf = {
       kind: "condition" as const,

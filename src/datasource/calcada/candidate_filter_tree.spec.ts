@@ -218,3 +218,52 @@ describe("edits", () => {
     expect(subjectPasses(subject(), tree, known)).toBe(true);
   });
 });
+
+describe("conditions on both sides", () => {
+  const both = (cmp: ">=" | "<=", value: number) => ({
+    kind: "condition" as const,
+    field: {
+      side: "both" as const,
+      measure: "share" as const,
+      class: "axon" as const,
+    },
+    cmp,
+    value,
+  });
+
+  it("needs the seed and the candidate to pass", () => {
+    const axonToAxon = subject();
+    const axonToDendrite = subject({
+      candidate: { voxels: 6000, classes: dendrite, hasInfo: true },
+    });
+    const tree = and(both(">=", 0.8));
+    expect(subjectPasses(axonToAxon, tree, known)).toBe(true);
+    expect(subjectPasses(axonToDendrite, tree, known)).toBe(false);
+  });
+
+  it("does not filter a side nobody has semantics for", () => {
+    const blind = subject({
+      candidate: { voxels: 6000, classes: none, hasInfo: false },
+    });
+    expect(
+      subjectPasses(blind, and(both(">=", 0.8)), semanticsKnown([blind])),
+    ).toBe(true);
+  });
+
+  it("pushes a size floor down, since it covers the candidate", () => {
+    const tree = and({
+      kind: "condition",
+      field: { side: "both", measure: "voxels" },
+      cmp: ">=",
+      value: 5000,
+    });
+    expect(minCandidateVoxels(tree)).toBe(5000);
+  });
+
+  it("round-trips through the link format", () => {
+    const tree = and(both("<=", 0.3));
+    expect(
+      parseFilterTree(JSON.parse(JSON.stringify(serializeFilterTree(tree)))),
+    ).toEqual(tree);
+  });
+});

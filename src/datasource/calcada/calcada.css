@@ -491,6 +491,9 @@
   right: 0;
 }
 
+/* The criterion over the end it applies to, and the bound beside both,
+   centred on them: the criterion gets the whole column instead of sharing a
+   line with four other controls. */
 .calcada-filter-condition {
   display: flex;
   align-items: center;
@@ -498,10 +501,28 @@
   min-width: 0;
 }
 
-.calcada-filter-condition .calcada-filter-field {
+.calcada-filter-condition-what {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
-  width: auto;
+}
+
+.calcada-filter-condition-bound {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.calcada-filter-condition .calcada-filter-side {
+  width: 100%;
+}
+
+.calcada-filter-condition .calcada-filter-field {
+  width: 100%;
+  min-width: 0;
 }
 
 /* One symbol; the chevron would leave it no room. */
