@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+// jsdom's AbortSignal.timeout runs on the faked setTimeout; the patched
+// environment swaps in Node's, whose timer vitest cannot advance.
+// @vitest-environment jsdom
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchOk,

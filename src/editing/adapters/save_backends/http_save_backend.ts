@@ -168,7 +168,7 @@ export function buildCutoutParams(input: {
 }
 
 /** Gzip a byte buffer, as `/cutout` requires (it always `gzip.decompress`es the body). */
-async function gzip(bytes: Uint8Array): Promise<ArrayBuffer> {
+async function gzip(bytes: Uint8Array<ArrayBuffer>): Promise<ArrayBuffer> {
   const compression = new CompressionStream("gzip");
   const writer = compression.writable.getWriter();
   void writer.write(bytes);
@@ -330,7 +330,7 @@ export class HttpSaveBackend implements SaveBackend {
     // `ownedRegionBytes` returns the live overlay buffer uncopied in that case,
     // so copy before handing it to the async gzip.
     const bytes = ownedRegionBytes(write.bytes.asView(), owned);
-    const body = await gzip(owned.coversWholeChunk ? bytes.slice() : bytes);
+    const body = await gzip(bytes.slice());
 
     // `is_fortran` is left at its `/cutout` default (true), which consumes the
     // native-dtype, X-fastest bytes NG produces — no axis reorder needed.

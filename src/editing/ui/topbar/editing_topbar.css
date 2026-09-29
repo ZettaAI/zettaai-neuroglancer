@@ -295,8 +295,8 @@
 }
 
 .neuroglancer-editing-topbar-edit-button-wrap:has(
-    > .neuroglancer-editing-topbar-edit-button:disabled
-  ) {
+  > .neuroglancer-editing-topbar-edit-button:disabled
+) {
   cursor: not-allowed;
 }
 

@@ -79,6 +79,10 @@
   width: var(--neuroglancer-segment-list-width);
 }
 
+.neuroglancer-segment-list-entry-id.stated-color {
+  border: 1px solid white;
+}
+
 .neuroglancer-segment-list .neuroglancer-segment-list-entry-sticky {
   position: sticky;
   left: 0;

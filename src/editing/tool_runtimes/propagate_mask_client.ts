@@ -85,7 +85,8 @@ function buildRequestForm(input: PropagateMaskInput): FormData {
 }
 
 function octetStreamBlob(bytes: Uint8Array): Blob {
-  return new Blob([bytes], { type: "application/octet-stream" });
+  // A Blob cannot be built over a SharedArrayBuffer-backed view.
+  return new Blob([bytes.slice()], { type: "application/octet-stream" });
 }
 
 const GZIP_MAGIC_BYTE_0 = 0x1f;

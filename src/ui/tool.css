@@ -41,6 +41,7 @@
 .neuroglancer-tool-button {
   display: inline-flex;
   flex-direction: row;
+  align-items: baseline;
 }
 
 #neuroglancer-status-container li.neuroglancer-tool-status {
