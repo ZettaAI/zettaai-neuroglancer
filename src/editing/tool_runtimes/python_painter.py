@@ -9,6 +9,7 @@
 # worker then calls `apply_morphology` per request.
 
 import json
+import math
 import time
 
 import numpy as np
@@ -149,22 +150,26 @@ def apply_morphology(
 _FOOTPRINT_STRIPE_ROWS = 256
 
 
-def _footprint_mask(tx, ty, lo_tx, lo_ty, points, radius, r2):
+def _footprint_mask(tx, ty, lo_tx, lo_ty, points, padding, r2):
     """Rasterize the union of per-segment capsules of `points` (footprint only).
 
     Returns the (t_sy, t_sx) bool swept-capsule footprint — no thresholding.
     Bit-for-bit twin of `painting_compute.ts::segmentDistanceSq` /
     `rasterizePolylineFootprint`. `tx`/`ty` are 1-D float64 ABSOLUTE target voxel
-    coordinate arrays (`tx[i] = lo_tx + i`); `points` is an (N, 2) array of
-    un-floored target voxel coords (one point = disk, two = capsule, more = the
-    union of consecutive segments).
+    coordinate arrays (`tx[i] = lo_tx + i`); `points` is an (N, 2) array of stamp
+    ANCHORS in target voxel coords (one point = disk, two = capsule, more = the
+    union of consecutive segments). Anchors are whole voxels for an odd brush size
+    and half-voxels for an even one — see
+    `brush_disk_footprint.ts`, which defines the shape all three rasterizers
+    share. `padding` is the whole-voxel reach used to size scan windows; `r2` is
+    the squared radius the distance test compares against (`radius² + 0.25`).
 
     Two narrowings keep cost proportional to the brush, not its bounding box:
 
       * Per SEGMENT, only its own capsule sub-bbox.
       * Per row-STRIPE, an x-CLIP to a SUPERSET of the stadium's x-extent over
-        those rows (expand the band by `radius`, map to the segment x-span, pad
-        by `radius`), so a long diagonal capsule skips its empty bbox corners.
+        those rows (expand the band by `padding`, map to the segment x-span, pad
+        by `padding`), so a long diagonal capsule skips its empty bbox corners.
         Because the window is a superset, the exact `dist² <= r²` test over it is
         byte-identical to testing the full sub-bbox.
 
@@ -182,7 +187,7 @@ def _footprint_mask(tx, ty, lo_tx, lo_ty, points, radius, r2):
     on which path ran — an accepted trade-off (TM-317 P3) for the off-thread
     speedup. The window/clip math below stays float64; it only needs to be a
     superset of the inside set, which it remains (it pads the segment by an
-    integer `radius`, far more than the sub-voxel float32 boundary shift).
+    integer `padding`, far more than the sub-voxel float32 boundary shift).
     """
     w = tx.shape[0]
     h = ty.shape[0]
@@ -205,10 +210,10 @@ def _footprint_mask(tx, ty, lo_tx, lo_ty, points, radius, r2):
             bx = ax
             by = ay
         # Segment capsule sub-bbox in LOCAL footprint indices (clip to bounds).
-        ix0 = int(np.floor(min(ax, bx))) - radius - lo_tx
-        ix1 = int(np.ceil(max(ax, bx))) + radius - lo_tx
-        iy0 = int(np.floor(min(ay, by))) - radius - lo_ty
-        iy1 = int(np.ceil(max(ay, by))) + radius - lo_ty
+        ix0 = int(np.floor(min(ax, bx))) - padding - lo_tx
+        ix1 = int(np.ceil(max(ax, bx))) + padding - lo_tx
+        iy0 = int(np.floor(min(ay, by))) - padding - lo_ty
+        iy1 = int(np.ceil(max(ay, by))) + padding - lo_ty
         if ix0 < 0:
             ix0 = 0
         if iy0 < 0:
@@ -233,11 +238,11 @@ def _footprint_mask(tx, ty, lo_tx, lo_ty, points, radius, r2):
         for ys in range(iy0, iy1 + 1, _FOOTPRINT_STRIPE_ROWS):
             ye = min(ys + _FOOTPRINT_STRIPE_ROWS, iy1 + 1)
             # Per-stripe x-window: superset of the stadium's x-extent over these
-            # rows. Expanding the band by `radius` captures the perpendicular
+            # rows. Expanding the band by `padding` captures the perpendicular
             # foot of any inside voxel, so its x lies within
-            # `segment-x(t over the band) ± radius`.
-            ya = lo_ty + ys - radius
-            yb = lo_ty + (ye - 1) + radius
+            # `segment-x(t over the band) ± padding`.
+            ya = lo_ty + ys - padding
+            yb = lo_ty + (ye - 1) + padding
             if by != ay:
                 ta = (ya - ay) / (by - ay)
                 tb = (yb - ay) / (by - ay)
@@ -250,8 +255,8 @@ def _footprint_mask(tx, ty, lo_tx, lo_ty, points, radius, r2):
                 t2 = 1.0
             segx1 = ax + t1 * abx
             segx2 = ax + t2 * abx
-            sxlo = (segx1 if segx1 < segx2 else segx2) - radius
-            sxhi = (segx2 if segx1 < segx2 else segx1) + radius
+            sxlo = (segx1 if segx1 < segx2 else segx2) - padding
+            sxhi = (segx2 if segx1 < segx2 else segx1) + padding
             wx0 = int(np.floor(sxlo)) - lo_tx
             wx1 = int(np.ceil(sxhi)) - lo_tx
             if wx0 < ix0:
@@ -391,9 +396,10 @@ def apply_paint_pipeline(
             block that must be in-band to paint it. 0.5 = majority. Only matters
             when a ratio > 1 (target coarser than image); at ratio <= 1 the block
             is one voxel and this reduces to the plain in-band test.
-        path_points: flattened [x0, y0, x1, y1, ...] un-floored target voxel
+        path_points: flattened [x0, y0, x1, y1, ...] stamp-anchor target voxel
             coords of the swept-capsule polyline.
-        radius: brush radius in target voxels (already floored).
+        radius: brush radius in target voxels, `(size - 1) / 2` — a half-integer
+            for an even brush size.
         binary_closing_iterations: closing iterations; 0 disables.
         min_component_size: minimum kept component size; <= 1 disables.
         filter_components_first: True -> filter then close; False -> close then
@@ -419,7 +425,14 @@ def apply_paint_pipeline(
     # in-band test. These per-axis arrays are tiny (length t_sx / t_sy); the
     # gather happens only over footprint voxels inside the coverage pass.
     tm = time.perf_counter()
-    radius = int(radius)
+    # `radius` may be a half-integer: brush size is the diameter in voxels and
+    # even sizes anchor the stamp on a voxel boundary. Both derivations below
+    # mirror `brush_disk_footprint.ts` (`brushBoundsPadding` /
+    # `brushRadiusSquared`) — the definition of the shape all three rasterizers
+    # share. The `+ 0.25` is the half-voxel shift into the voxel-INDEX frame the
+    # distance test measures in; for whole `radius` it selects the same voxels as
+    # the plain `dx² + dy² <= radius²` test, so odd sizes are unchanged.
+    padding = int(math.ceil(float(radius)))
     tx = lo_tx + np.arange(t_sx, dtype=np.float64)
     ty = lo_ty + np.arange(t_sy, dtype=np.float64)
     ix_lo = np.floor(tx * sx_ratio).astype(np.int64) - lo_image_x
@@ -427,8 +440,8 @@ def apply_paint_pipeline(
     iy_lo = np.floor(ty * sy_ratio).astype(np.int64) - lo_image_y
     iy_hi = np.ceil((ty + 1.0) * sy_ratio).astype(np.int64) - 1 - lo_image_y
 
-    r2 = float(radius) * float(radius)
-    combined = _footprint_mask(tx, ty, lo_tx, lo_ty, pts, radius, r2)
+    r2 = float(radius) * float(radius) + 0.25
+    combined = _footprint_mask(tx, ty, lo_tx, lo_ty, pts, padding, r2)
     _threshold_footprint_coverage_inplace(
         combined, image, ix_lo, ix_hi, iy_lo, iy_hi, thr_low, thr_high,
         coverage_threshold,

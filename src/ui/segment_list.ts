@@ -1462,6 +1462,9 @@ export class SegmentDisplayTab extends Tab {
           (graph, parent, context) => {
             if (graph === undefined) return;
             if (graph.tabContents) {
+              if (graph.segmentsTabContents) {
+                parent.appendChild(graph.segmentsTabContents(layer, context));
+              }
               return;
             }
             const toolbox = document.createElement("div");

@@ -17,7 +17,7 @@
  *
  *   1. `NgSessionLockAdapter` — opening a session data-source-locks EVERY
  *      session layer (writable AND locked; `edit_session_host.ts:985`), so
- *      `isLayerDataSourceLocked` is set membership regardless of writability.
+ *      `isSessionLayer` is set membership regardless of writability.
  *   2. `SaveTracker` — initial per-layer status derivation: writable ⇒ pending,
  *      locked ⇒ skipped("read-only; not saved"); and the save flow only marks /
  *      reports writable layers (incl. the TM-352 unconfirmed-save path).
@@ -60,6 +60,7 @@ import {
   unregisterSaveBackend,
 } from "#src/editing/adapters/save_backend.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
+import { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
 import { SaveTracker } from "#src/editing/ui/session_controls/save_tracker.js";
 
 import { FakeLayerManager } from "#tests/editing/fakes/fake_layer_manager.js";
@@ -106,15 +107,15 @@ describe("locked/writable — NgSessionLockAdapter data-source locking", () => {
 
       // Writable AND locked session layers are data-source-locked.
       for (const l of layers) {
-        expect(adapter.isLayerDataSourceLocked(layerId(l.id))).toBe(true);
+        expect(adapter.isSessionLayer(layerId(l.id))).toBe(true);
       }
       // A layer outside the session is never locked.
-      expect(adapter.isLayerDataSourceLocked(layerId("OUTSIDER"))).toBe(false);
+      expect(adapter.isSessionLayer(layerId("OUTSIDER"))).toBe(false);
 
       // Clearing the session releases every layer.
       adapter.clearActiveSession();
       for (const l of layers) {
-        expect(adapter.isLayerDataSourceLocked(layerId(l.id))).toBe(false);
+        expect(adapter.isSessionLayer(layerId(l.id))).toBe(false);
       }
     });
   }
@@ -365,13 +366,40 @@ describe("locked/writable — NgSaveTarget aggregation across counts", () => {
     );
   }
 
+  /**
+   * Saves clip to the session region, so a target with none installed refuses
+   * every chunk by design. These cases are about outcome AGGREGATION, so give
+   * them a region that covers the whole test chunk.
+   */
+  function saveWithRegion(
+    target: NgSaveTarget,
+    names: readonly string[],
+  ): Promise<SaveResult> {
+    const bounds = new Map(
+      names.map((name) => [
+        `${layerId(name)}|${RESOLUTION}`,
+        { loX: 0, loY: 0, loZ: 0, hiX: 64, hiY: 64, hiZ: 64 },
+      ]),
+    );
+    const regions = new SessionRegionSnapshot(
+      sessionId("test-session"),
+      bounds,
+    );
+    return target.withSessionRegions(regions, () =>
+      target.save(payload(names)),
+    );
+  }
+
   for (const n of [1, 3, 5]) {
     it(`${n} writable layers all succeed → all-succeeded with ${n} outcomes`, async () => {
       registerSaveBackend(OK_SCHEME, okBackend);
       const names = Array.from({ length: n }, (_, i) => `L${i + 1}`);
-      const result = await targetFor(
-        names.map((name) => ({ name, canonicalUrl: `${OK_SCHEME}://x` })),
-      ).save(payload(names));
+      const result = await saveWithRegion(
+        targetFor(
+          names.map((name) => ({ name, canonicalUrl: `${OK_SCHEME}://x` })),
+        ),
+        names,
+      );
       expect(result.overall).toBe("all-succeeded");
       expect(result.outcomes).toHaveLength(n);
     });
@@ -381,12 +409,15 @@ describe("locked/writable — NgSaveTarget aggregation across counts", () => {
     registerSaveBackend(OK_SCHEME, okBackend);
     registerSaveBackend(BAD_SCHEME, badBackend);
     const names = ["L1", "L2", "L3", "L4"];
-    const result = await targetFor([
-      { name: "L1", canonicalUrl: `${OK_SCHEME}://x` },
-      { name: "L2", canonicalUrl: `${BAD_SCHEME}://x` },
-      { name: "L3", canonicalUrl: `${OK_SCHEME}://x` },
-      { name: "L4", canonicalUrl: `${BAD_SCHEME}://x` },
-    ]).save(payload(names));
+    const result = await saveWithRegion(
+      targetFor([
+        { name: "L1", canonicalUrl: `${OK_SCHEME}://x` },
+        { name: "L2", canonicalUrl: `${BAD_SCHEME}://x` },
+        { name: "L3", canonicalUrl: `${OK_SCHEME}://x` },
+        { name: "L4", canonicalUrl: `${BAD_SCHEME}://x` },
+      ]),
+      names,
+    );
     expect(result.overall).toBe("partial");
     expect(result.outcomes.filter((o) => o.status === "failed")).toHaveLength(
       2,
@@ -396,9 +427,12 @@ describe("locked/writable — NgSaveTarget aggregation across counts", () => {
   it("all writable layers fail → all-failed", async () => {
     registerSaveBackend(BAD_SCHEME, badBackend);
     const names = ["L1", "L2", "L3"];
-    const result = await targetFor(
-      names.map((name) => ({ name, canonicalUrl: `${BAD_SCHEME}://x` })),
-    ).save(payload(names));
+    const result = await saveWithRegion(
+      targetFor(
+        names.map((name) => ({ name, canonicalUrl: `${BAD_SCHEME}://x` })),
+      ),
+      names,
+    );
     expect(result.overall).toBe("all-failed");
     expect(result.outcomes).toHaveLength(3);
   });

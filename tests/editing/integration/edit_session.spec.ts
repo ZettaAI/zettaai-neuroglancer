@@ -56,16 +56,16 @@ describe("EditSessionHost — integration (state surface)", () => {
     expect(host.state.value.value).toBeNull();
   });
 
-  it("setActiveSession + clearActiveSession on the lock toggle isLayerDataSourceLocked", () => {
+  it("setActiveSession + clearActiveSession on the lock toggle isSessionLayer", () => {
     const layers = new Set([layerId("L1"), layerId("L2")]);
     host.sessionLock.setActiveSession({
       sessionId: sessionId("dummy"),
       sessionLayerIds: layers,
     });
-    expect(host.sessionLock.isLayerDataSourceLocked(layerId("L1"))).toBe(true);
-    expect(host.sessionLock.isLayerDataSourceLocked(layerId("L3"))).toBe(false);
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(true);
+    expect(host.sessionLock.isSessionLayer(layerId("L3"))).toBe(false);
     host.sessionLock.clearActiveSession();
-    expect(host.sessionLock.isLayerDataSourceLocked(layerId("L1"))).toBe(false);
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(false);
   });
 
   it("state.restoreState with an unresolvable intent auto-clears via failRestore", async () => {
@@ -135,6 +135,11 @@ describe("EditSessionHost — integration (state surface)", () => {
  * which the slice-view tests already exercise but at a different layer of
  * the system. See `docs/edit-session-integration/10-implementation-roadmap.md`
  * Step 27 (manual QA) for the smoke-test coverage that compensates.
+ *
+ * Scope of this deferral: OPENING a session. It does not extend to everything
+ * that needs one. `save_active_owned_region.spec.ts` drives `saveActive`
+ * end-to-end over a fake session and the real save target, because the members
+ * `saveActive` touches are a small subset of what `EditSession.open` builds.
  */
 describe.todo(
   "EditSessionHost — full open/discard cycle (deferred to manual QA)",

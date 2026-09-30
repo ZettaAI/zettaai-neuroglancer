@@ -8,15 +8,18 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import type { EditSession } from "@zettaai/edit-session";
 import { Resolution, layerId } from "@zettaai/edit-session";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import { NgSessionLockAdapter } from "#src/editing/adapters/ng_session_lock.js";
 import {
+  DEFAULT_EXIT_LOCK_REASON,
   EditSessionHost,
   TrackableEditSessionIntent,
   type EditSessionIntent,
 } from "#src/editing/edit_session_host.js";
+import { NullarySignal } from "#src/util/signal.js";
 
 import { createFakeViewer } from "#tests/editing/fakes/fake_viewer.js";
 
@@ -126,6 +129,237 @@ describe("EditSessionHost (no active session)", () => {
       host.ensureMaskReference(layerId("L1"), RES),
     ).resolves.toBeUndefined();
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe("EditSessionHost exit lock", () => {
+  let host: EditSessionHost;
+
+  beforeEach(() => {
+    const viewer = createFakeViewer();
+    // Session teardown walks the managed layers (to lift hover suppression);
+    // an empty list lets the real `discardActive` teardown run end to end.
+    Object.assign(viewer.layerManager, { managedLayers: [] });
+    host = new EditSessionHost(viewer);
+  });
+
+  afterEach(() => {
+    host.dispose();
+  });
+
+  /** Count `exitLockReason.changed` dispatches from here on. */
+  function countLockChanges(): () => number {
+    let dispatches = 0;
+    host.exitLockReason.changed.add(() => dispatches++);
+    return () => dispatches;
+  }
+
+  /**
+   * Publish a fake session the way `openSession` does. `EditSession.open` is
+   * out of reach in node (see `save_active_owned_region.spec.ts`); the teardown
+   * path only reads the dirty set and calls `discard()`.
+   */
+  function activateFakeSession(): EditSession {
+    const session = {
+      dirty: { getDirtyChunks: () => new Set<string>() },
+      discard: vi.fn(async () => {}),
+    } as unknown as EditSession;
+    host.activeSession.value = session;
+    return session;
+  }
+
+  it("is unlocked by default", () => {
+    expect(host.exitLockReason.value).toBeUndefined();
+  });
+
+  it("lockExit sets the reason and notifies once", () => {
+    const dispatches = countLockChanges();
+    host.lockExit("Complete the task to leave the edit session.");
+    expect(host.exitLockReason.value).toBe(
+      "Complete the task to leave the edit session.",
+    );
+    expect(dispatches()).toBe(1);
+  });
+
+  it("unlockExit clears the reason, notifies once, and is a no-op when unlocked", () => {
+    host.lockExit("Locked.");
+    const dispatches = countLockChanges();
+    host.unlockExit();
+    expect(host.exitLockReason.value).toBeUndefined();
+    expect(dispatches()).toBe(1);
+    host.unlockExit();
+    expect(dispatches()).toBe(1);
+  });
+
+  it("falls back to the default reason for a missing or blank reason", () => {
+    host.lockExit();
+    expect(host.exitLockReason.value).toBe(DEFAULT_EXIT_LOCK_REASON);
+    host.unlockExit();
+    host.lockExit("");
+    expect(host.exitLockReason.value).toBe(DEFAULT_EXIT_LOCK_REASON);
+    host.unlockExit();
+    host.lockExit("   ");
+    expect(host.exitLockReason.value).toBe(DEFAULT_EXIT_LOCK_REASON);
+  });
+
+  it("does not notify when locked again with the same reason", () => {
+    host.lockExit("Locked.");
+    const dispatches = countLockChanges();
+    host.lockExit("Locked.");
+    expect(dispatches()).toBe(0);
+    host.lockExit("Locked for another reason.");
+    expect(dispatches()).toBe(1);
+  });
+
+  it("stays out of the serialized viewer state", () => {
+    const intentJson = host.state.toJSON();
+    const preferencesJson = host.editPreferences.toJSON();
+    let stateChanges = 0;
+    host.state.changed.add(() => stateChanges++);
+    host.editPreferences.changed.add(() => stateChanges++);
+
+    host.lockExit("Locked.");
+
+    expect(host.state.toJSON()).toEqual(intentJson);
+    expect(host.editPreferences.toJSON()).toEqual(preferencesJson);
+    expect(stateChanges).toBe(0);
+  });
+
+  it("survives session teardown, so it still applies to a re-opened session", async () => {
+    host.lockExit("Locked.");
+    activateFakeSession();
+
+    await host.discardActive();
+
+    expect(host.activeSession.value).toBeUndefined();
+    expect(host.exitLockReason.value).toBe("Locked.");
+    activateFakeSession();
+    expect(host.exitLockReason.value).toBe("Locked.");
+    await host.discardActive();
+  });
+
+  it("does not gate discardActive, which still closes the session", async () => {
+    host.lockExit("Locked.");
+    const session = activateFakeSession();
+
+    await host.discardActive();
+
+    expect(session.discard).toHaveBeenCalledTimes(1);
+    expect(host.activeSession.value).toBeUndefined();
+  });
+});
+
+describe("EditSessionHost hasUnsavedEdits", () => {
+  let host: EditSessionHost;
+
+  beforeEach(() => {
+    host = new EditSessionHost(createFakeViewer());
+  });
+
+  afterEach(() => {
+    host.activeSession.value = undefined;
+    host.dispose();
+  });
+
+  /** Publish a fake session whose live strokes are dirty or not. */
+  function activateFakeSession(isDirty: boolean): void {
+    host.activeSession.value = {
+      dirty: { isDirty: () => isDirty },
+    } as unknown as EditSession;
+  }
+
+  it("is false with no session and nothing pending", () => {
+    expect(host.hasUnsavedEdits()).toBe(false);
+  });
+
+  it("is false for an open session with no unsaved strokes", () => {
+    activateFakeSession(false);
+    expect(host.hasUnsavedEdits()).toBe(false);
+  });
+
+  it("is true for unsaved strokes in the open session", () => {
+    // Nothing committed or awaiting confirmation: only the live strokes would
+    // be lost by a reload.
+    activateFakeSession(true);
+    expect(host.hasPendingCommittedChanges()).toBe(false);
+    expect(host.hasUnconfirmedSaves()).toBe(false);
+
+    expect(host.hasUnsavedEdits()).toBe(true);
+  });
+
+  it("is true for committed chunks still only in memory, with or without a session", () => {
+    vi.spyOn(host, "hasPendingCommittedChanges").mockReturnValue(true);
+    expect(host.hasUnsavedEdits()).toBe(true);
+    activateFakeSession(false);
+    expect(host.hasUnsavedEdits()).toBe(true);
+  });
+
+  it("is true for saves not yet confirmed durable, with or without a session", () => {
+    vi.spyOn(host, "hasUnconfirmedSaves").mockReturnValue(true);
+    expect(host.hasUnsavedEdits()).toBe(true);
+    activateFakeSession(false);
+    expect(host.hasUnsavedEdits()).toBe(true);
+  });
+});
+
+describe("EditSessionHost restore window", () => {
+  let host: EditSessionHost;
+  let layersChanged: NullarySignal;
+  let layers: Map<string, unknown>;
+
+  /** A layer whose only data source is still loading. */
+  function loadingLayer() {
+    return {
+      layer: {
+        dataSources: [{ loadState: undefined }],
+        dataSourcesChanged: new NullarySignal(),
+      },
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    layersChanged = new NullarySignal();
+    layers = new Map([
+      ["L1", loadingLayer()],
+      ["L2", loadingLayer()],
+    ]);
+    const viewer = createFakeViewer();
+    Object.assign(viewer.layerManager, {
+      layersChanged,
+      managedLayers: [],
+      getLayerByName: (name: string) => layers.get(name),
+    });
+    host = new EditSessionHost(viewer);
+  });
+
+  afterEach(() => {
+    host.dispose();
+    vi.useRealTimers();
+  });
+
+  it("locks the intent's layers while the restore waits for them, and unlocks them when it fails", async () => {
+    host.state.restoreState(sampleIntent());
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Still waiting for L1's data source: no session yet, but the intent's
+    // layers are already session layers for NG's UI.
+    expect(host.state.value.value).not.toBeNull();
+    expect(host.activeSession.value).toBeUndefined();
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(true);
+    expect(host.sessionLock.isSessionLayer(layerId("L2"))).toBe(true);
+    expect(host.sessionLock.isSessionLayer(layerId("outsider"))).toBe(false);
+
+    // Removed anyway (the lock only guards NG's UI): the wait times out and the
+    // restore fails, clearing the intent and the lock.
+    layers.delete("L1");
+    layersChanged.dispatch();
+    await vi.advanceTimersByTimeAsync(30000);
+
+    expect(host.state.value.value).toBeNull();
+    expect(host.sessionLock.restoringLayerIds.value).toBeUndefined();
+    expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(false);
+    expect(host.sessionLock.isSessionLayer(layerId("L2"))).toBe(false);
   });
 });
 

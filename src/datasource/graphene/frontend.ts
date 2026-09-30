@@ -27,6 +27,7 @@ import type {
   AnnotationSource,
   Line,
   Point,
+  PolyLine,
 } from "#src/annotation/index.js";
 import {
   AnnotationType,
@@ -185,7 +186,6 @@ import {
   verifyFiniteFloat,
   verifyFloatArray,
   verifyInt,
-  verifyIntegerArray,
   verifyNonnegativeInt,
   verifyObject,
   verifyObjectProperty,
@@ -1086,43 +1086,27 @@ class FindPathState extends RefCounted implements Trackable {
   }
 
   get path() {
-    const path: Line[] = [];
     const {
       source: { value: source },
       target: { value: target },
       centroids: { value: centroids },
     } = this;
     if (!source || !target || centroids.length === 0) {
-      return path;
+      return undefined;
     }
-    for (let i = 0; i < centroids.length - 1; i++) {
-      const pointA = centroids[i];
-      const pointB = centroids[i + 1];
-      const line: Line = {
-        pointA: vec3.fromValues(pointA[0], pointA[1], pointA[2]),
-        pointB: vec3.fromValues(pointB[0], pointB[1], pointB[2]),
-        id: "",
-        type: AnnotationType.LINE,
-        properties: [],
-      };
-      path.push(line);
-    }
-    const firstLine: Line = {
-      pointA: source.position,
-      pointB: path[0].pointA,
+    return {
       id: "",
-      type: AnnotationType.LINE,
+      type: AnnotationType.POLYLINE,
+      points: [
+        source.position,
+        ...centroids.map((centroid) =>
+          vec3.fromValues(centroid[0], centroid[1], centroid[2]),
+        ),
+        target.position,
+      ],
       properties: [],
-    };
-    const lastLine: Line = {
-      pointA: path[path.length - 1].pointB,
-      pointB: target.position,
-      id: "",
-      type: AnnotationType.LINE,
-      properties: [],
-    };
-
-    return [firstLine, ...path, lastLine];
+      description: "find path result",
+    } satisfies PolyLine;
   }
 
   replaceSegments(oldValues: Uint64Set, newValues: Uint64Set) {
@@ -1393,7 +1377,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     annotationLayerStates.push(redGroup, blueGroup);
 
     if (layer.tool.value instanceof MergeSegmentsPlaceLineTool) {
-      layer.tool.value = undefined;
+      layer.tool.value = undefined; // unset the line tool if it is active when page is loaded
     }
 
     this.mergeAnnotationState = makeColoredAnnotationState(
@@ -1529,10 +1513,8 @@ class GraphConnection extends SegmentationGraphSourceConnection {
           annotationSource.delete(annotationSource.getReference(annotation.id));
         }
       }
-      for (const line of path) {
-        // line.id = ''; // TODO, is it a bug that this is necessary? annotationMap is empty if I
-        // step through it but logging shows it isn't empty
-        annotationSource.add(line);
+      if (path) {
+        annotationSource.add(path);
       }
     };
     this.registerDisposer(findPathState.changed.add(findPathChanged));
@@ -2230,16 +2212,23 @@ class GrapheneGraphSource extends SegmentationGraphSource {
           table,
           l2_path,
         );
-        // many reasons why an l2 id might not have info
-        // l2 cache has a process that takes time for new ids (even hours)
-        // maybe a small fraction have no info
-        // sometime l2 is so small (single voxel), it is ignored by l2
-        // best to just drop those points
+        // The l2 cache always includes an entry for every requested id, but
+        // that entry has no rep_coord_nm when the properties have not been
+        // computed yet. That is common right after an edit: a split creates
+        // new l2 ids and immediately retriggers find path. It also happens for
+        // an l2 so small that the cache ignores it.
+        //
+        // Fall back to the chunk level approximation of the point rather than
+        // dropping it. Because the l2 cache is available we requested
+        // precision_mode=0 above, so centroids is the graph server's rough
+        // coordinate path: one chunk center per l2 id, in order.
+        const roughCentroids = centroids;
         centroids = l2_path
-          .map((id) => {
-            return verifyOptionalObjectProperty(attributes, id, (x) => {
-              return verifyIntegerArray(x["rep_coord_nm"]);
-            });
+          .map((id, i) => {
+            const repCoord = verifyObjectProperty(attributes, id, (x) =>
+              verifyOptionalObjectProperty(x, "rep_coord_nm", verifyFloatArray),
+            );
+            return repCoord ?? roughCentroids[i];
           })
           .filter((x): x is number[] => x !== undefined);
       } catch (e) {
@@ -2538,6 +2527,7 @@ const synchronizeAnnotationSource = (
     );
     if (selection) source.delete(selection);
   });
+
   source.changed.add((x, add) => {
     if (x === null) {
       for (const annotation of annotationSource) {
@@ -2796,7 +2786,6 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
       displayState.baseSegmentHighlighting.value;
     const priorHighlightColor = displayState.highlightColor.value;
     const priorHideSegmentZero = displayState.hideSegmentZero.value;
-
     activation.bindInputEventMap(MULTICUT_SEGMENTS_INPUT_EVENT_MAP);
     activation.registerDisposer(() => {
       resetMulticutDisplay();
@@ -2811,6 +2800,23 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
       displayState.tempSegmentDefaultColor2d.value = undefined;
       displayState.highlightColor.value = undefined;
     };
+    const { segmentSelectionState } = layer.displayState;
+    const updateHighlightColor = () => {
+      const focusSegment = multicutState.focusSegment.value;
+      if (focusSegment === undefined) {
+        displayState.highlightColor.value = undefined;
+        return;
+      }
+      const { value } = segmentSelectionState;
+      if (value === multicutState.focusSegment.value) {
+        displayState.highlightColor.value = multicutState.blueGroup.value
+          ? BLUE_COLOR_HIGHTLIGHT
+          : RED_COLOR_HIGHLIGHT;
+      } else {
+        // set hightlight to off color for all other segments to ignore them
+        displayState.highlightColor.value = MULTICUT_OFF_COLOR;
+      }
+    };
     const updateMulticutDisplay = () => {
       resetMulticutDisplay();
       activeGroupIndicator.classList.toggle(
@@ -2820,10 +2826,8 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
       const focusSegment = multicutState.focusSegment.value;
       if (focusSegment === undefined) return;
       displayState.baseSegmentHighlighting.value = true;
-      displayState.highlightColor.value = multicutState.blueGroup.value
-        ? BLUE_COLOR_HIGHTLIGHT
-        : RED_COLOR_HIGHLIGHT;
       displayState.hideSegmentZero.value = false;
+      updateHighlightColor();
       segmentsState.useTemporaryVisibleSegments.value = true;
       segmentsState.useTemporarySegmentEquivalences.value = true;
       // add focus segment and red/blue segments
@@ -2868,6 +2872,11 @@ class MulticutSegmentsTool extends LayerTool<SegmentationUserLayer> {
       displayState.useTempSegmentStatedColors2d.value = true;
     };
     updateMulticutDisplay();
+    activation.registerDisposer(
+      layer.displayState.segmentSelectionState.changed.add(
+        updateHighlightColor,
+      ),
+    );
     activation.registerDisposer(
       multicutState.changed.add(updateMulticutDisplay),
     );
@@ -3058,15 +3067,27 @@ class MergeSegmentsTool extends LayerTool<SegmentationUserLayer> {
     if (checkSegmentationOld(timestamp, activation)) {
       return;
     }
-    const { merges, autoSubmit } = mergeState;
     const lineTool = new MergeSegmentsPlaceLineTool(
       this.layer,
       mergeAnnotationState,
     );
+    // Switch selected layer to the layer associated with the tool
+    // to enable to place line tool. Swap back when deactivating.
+    const { selectedLayer, selectionState } = this.layer.manager.root;
+    const previousSelectedLayer = selectedLayer.layer;
+    const previousSelectedLayerVisible = selectedLayer.visible;
+    const previousTool = tool.value;
+    selectedLayer.layer = this.layer.managedLayer;
+    selectedLayer.visible = true;
     tool.value = lineTool;
+    const prevousSelectionState = selectionState.toJSON();
     activation.registerDisposer(() => {
-      tool.value = undefined;
+      selectedLayer.layer = previousSelectedLayer;
+      selectedLayer.visible = previousSelectedLayerVisible;
+      tool.value = previousTool;
+      selectionState.restoreState(prevousSelectionState);
     });
+    const { merges, autoSubmit } = mergeState;
     const { body, header } =
       makeToolActivationStatusMessageWithHeader(activation);
     header.textContent = "Merge segments";
@@ -3247,8 +3268,13 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
     const annotationElements = document.createElement("div");
     annotationElements.classList.add("find-path-annotations");
     body.appendChild(annotationElements);
+    annotationElements.addEventListener("mouseleave", () => {
+      this.layer.annotationDisplayState.hoverState.value = undefined;
+    });
     const bindings = getDefaultAnnotationListBindings();
-    this.registerDisposer(new MouseEventBinder(annotationElements, bindings));
+    activation.registerDisposer(
+      new MouseEventBinder(annotationElements, bindings),
+    );
     const updateAnnotationElements = () => {
       removeChildren(annotationElements);
       const maxColumnWidths = [0, 0, 0];
@@ -3270,7 +3296,7 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
           localDimensionIndices,
         );
         for (const [column, width] of elementColumnWidths.entries()) {
-          maxColumnWidths[column] = width;
+          maxColumnWidths[column] = Math.max(maxColumnWidths[column], width);
         }
         annotationElements.appendChild(element);
       }
@@ -3281,7 +3307,9 @@ class FindPathTool extends LayerTool<SegmentationUserLayer> {
         );
       }
     };
-    findPathState.changed.add(updateAnnotationElements);
+    activation.registerDisposer(
+      findPathState.changed.add(updateAnnotationElements),
+    );
     updateAnnotationElements();
     activation.bindInputEventMap(FIND_PATH_INPUT_EVENT_MAP);
     activation.bindAction("submit", (event) => {

@@ -21,6 +21,23 @@ if (!("WebGL2RenderingContext" in globalThis)) {
   });
 }
 
+// jsdom implements no layout, so it ships no `ResizeObserver` either. Components
+// that watch their own box for overflow (`src/widget/react/truncated_label.tsx`)
+// construct one on mount, which would throw during render. A no-op stand-in is
+// enough: every element measures 0 in jsdom, so there is nothing to observe —
+// the overflow-dependent behavior is covered by the browser suites instead.
+if (!("ResizeObserver" in globalThis)) {
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    value: class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+    configurable: true,
+    writable: true,
+  });
+}
+
 for (const name of [
   /*"DOMParser", "XPathResult", "navigator"*/
 ] as const) {

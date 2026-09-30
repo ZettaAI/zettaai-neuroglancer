@@ -20,10 +20,7 @@ import type { ViteUserConfig } from "vitest/config";
 import { defineWorkspace, mergeConfig } from "vitest/config";
 import { getFakeGcsServerBin } from "./build_tools/vitest/build_fake_gcs_server.js";
 import { startFakeNgauthServer } from "./build_tools/vitest/fake_ngauth_server.js";
-import {
-  PYTHON_TEST_TOOLS_PATH,
-  syncPythonTools,
-} from "./build_tools/vitest/python_tools.js";
+import { syncPythonTools } from "./build_tools/vitest/python_tools.js";
 import { startTestDataServer } from "./build_tools/vitest/test_data_server.js";
 
 const fakeNgauthServer = await startFakeNgauthServer();
@@ -41,15 +38,17 @@ const commonDefines: Record<string, string> = {
 const browserDefines = { ...commonDefines };
 const nodeDefines = {
   FAKE_GCS_SERVER_BIN: JSON.stringify(fakeGcsServerBin),
-  PYTHON_TEST_TOOLS_PATH: JSON.stringify(PYTHON_TEST_TOOLS_PATH),
   ...commonDefines,
 };
+
+const srcAlias = { "@": path.resolve(import.meta.dirname, "src") };
 
 function defaultNodeProject(): ViteUserConfig {
   return {
     define: { ...nodeDefines },
+    resolve: { alias: srcAlias },
     test: {
-      environment: "jsdom",
+      environment: "jsdom-patched",
       setupFiles: [
         "./build_tools/vitest/polyfill-browser-globals-in-node.ts",
         "@vitest/web-worker",
@@ -76,6 +75,9 @@ export default defineWorkspace([
       benchmark: {
         include: ["src/**/*.benchmark.ts"],
       },
+      // On Github actions macos runners, s3 fixture can take a long time for
+      // some reason.
+      hookTimeout: 120000,
     },
   }),
   ...KVSTORE_TESTS_WITH_CUSTOM_CONDITIONS.map(({ name, conditions = [] }) =>
@@ -102,6 +104,7 @@ export default defineWorkspace([
   ),
   {
     define: browserDefines,
+    resolve: { alias: srcAlias },
     esbuild: {
       target: "es2022",
     },
@@ -111,6 +114,26 @@ export default defineWorkspace([
         "src/**/*.browser_test.ts",
         "tests/**/*.browser_test.ts",
         "src/*.bundle.js",
+      ],
+      // JSX components reach their runtime through bare specifiers the entry
+      // scan does not follow, so Vite meets one for the first time while a test
+      // is already running, re-optimises, and reloads. Whichever file was being
+      // collected at that moment loses its suite — reported as "failed to find
+      // the current suite" or "No test suite found in file", and only on a
+      // machine whose dependency cache is cold, which on CI is every run.
+      // Both frameworks are listed because this repo has both: preact for the
+      // editing UI, react for the migrated widgets. Both dev and production
+      // runtimes, since which one is imported depends on the mode.
+      // Only the JSX runtimes. Listing react and react-dom here as well
+      // pre-bundles them separately from the copy the component libraries
+      // resolve, and two React instances leave the hook dispatcher null —
+      // "Cannot read properties of null (reading 'useMemo')" from inside
+      // react-dom.
+      include: [
+        "react/jsx-runtime",
+        "react/jsx-dev-runtime",
+        "preact/jsx-runtime",
+        "preact/jsx-dev-runtime",
       ],
     },
     test: {

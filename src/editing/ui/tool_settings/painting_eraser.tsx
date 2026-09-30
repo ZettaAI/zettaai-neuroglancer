@@ -11,34 +11,19 @@
 import type { EditSession } from "@zettaai/edit-session";
 import { useCallback } from "preact/hooks";
 
-import {
-  clampBrushSize,
-  MAX_BRUSH_SIZE,
-  MIN_BRUSH_SIZE,
-  radiusToSize,
-  sizeToRadius,
-} from "#src/editing/brush_size_presets.js";
+import { radiusToSize, sizeToRadius } from "#src/editing/brush_size_presets.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { useEvent } from "#src/editing/ui/interop/use_event.js";
+import { BrushSizeField } from "#src/editing/ui/tool_settings/brush_size_field.js";
 import { PaintingTargetPicker } from "#src/editing/ui/tool_settings/painting_target_picker.js";
 import {
   PARAM_IDS,
-  paramFocusHandlers,
-  rowClass,
   sizeDescriptor,
   useParamFocus,
   useParamSelection,
   usePublishParams,
   useTargetParamDescriptors,
 } from "#src/editing/ui/tool_settings/param_descriptors.js";
-import { ParamInput } from "#src/editing/ui/tool_settings/param_input.js";
-import { ParamLabel } from "#src/editing/ui/tool_settings/param_label.js";
-
-/** Parse a typed size into a valid brush size, or null if empty/invalid. */
-function parseSize(raw: string): number | null {
-  const n = Number(raw);
-  return raw.trim() !== "" && Number.isFinite(n) ? clampBrushSize(n) : null;
-}
 
 /**
  * Eraser panel (TM-294 simplification): Target layer + resolution + Size
@@ -63,11 +48,6 @@ export function PaintingEraser({
   const commitSize = (size: number) =>
     painting.patchState({ radius: sizeToRadius(size) });
 
-  const onSizeSlide = (e: Event) =>
-    commitSize(
-      clampBrushSize((e.currentTarget as HTMLInputElement).valueAsNumber),
-    );
-
   const size = radiusToSize(state.radius);
 
   const selectedId = useParamSelection(host);
@@ -78,35 +58,13 @@ export function PaintingEraser({
   return (
     <div class="neuroglancer-tool-panel neuroglancer-painting-eraser-panel">
       <PaintingTargetPicker host={host} />
-      <div
-        class={rowClass(
-          "neuroglancer-tool-panel-row",
-          PARAM_IDS.size,
-          selectedId,
-        )}
-        {...paramFocusHandlers(selectParam, PARAM_IDS.size)}
-      >
-        <ParamLabel
-          text="Size"
-          hint="Eraser diameter in voxels at the target resolution. Larger sizes clear a wider stroke."
-        />
-        <input
-          type="range"
-          min={MIN_BRUSH_SIZE}
-          max={MAX_BRUSH_SIZE}
-          step={2}
-          value={size}
-          onInput={onSizeSlide}
-        />
-        <ParamInput<number>
-          type="number"
-          min={MIN_BRUSH_SIZE}
-          step={2}
-          value={size}
-          parse={parseSize}
-          onCommit={commitSize}
-        />
-      </div>
+      <BrushSizeField
+        size={size}
+        hint="Eraser diameter in voxels at the target resolution. Larger sizes clear a wider stroke."
+        onCommit={commitSize}
+        highlighted={selectedId === PARAM_IDS.size}
+        onSelect={() => selectParam(PARAM_IDS.size)}
+      />
     </div>
   );
 }

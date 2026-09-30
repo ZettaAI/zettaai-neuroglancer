@@ -41,9 +41,10 @@
 .neuroglancer-tool-button {
   display: inline-flex;
   flex-direction: row;
+  align-items: baseline;
 }
 
-#statusContainer li.neuroglancer-tool-status {
+#neuroglancer-status-container li.neuroglancer-tool-status {
   max-height: 50vh;
 }
 

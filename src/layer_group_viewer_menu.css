@@ -42,9 +42,15 @@
     background var(--nge-transition);
 }
 
-.neuroglancer-layer-group-menu-remove:hover {
+.neuroglancer-layer-group-menu-remove:hover:not(:disabled) {
   border-color: var(--nge-danger);
   background: var(--nge-danger-bg);
+}
+
+.neuroglancer-layer-group-menu-remove:disabled {
+  background: var(--nge-control-bg-inert);
+  color: var(--nge-text-faint);
+  cursor: not-allowed;
 }
 
 .neuroglancer-layer-group-menu-remove:focus-visible {

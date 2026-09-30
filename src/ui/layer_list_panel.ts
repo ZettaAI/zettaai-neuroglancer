@@ -23,8 +23,12 @@ import type {
   ManagedUserLayer,
   TopLevelLayerListSpecification,
 } from "#src/layer/index.js";
-import { deleteLayer } from "#src/layer/index.js";
 import { TrackableBooleanCheckbox } from "#src/trackable_boolean.js";
+import type { WatchableValueInterface } from "#src/trackable_value.js";
+import {
+  bindLayerDeleteIcon,
+  LAYER_LIST_PANEL_HIDE_INSTEAD,
+} from "#src/ui/layer_deletion_confirmation.js";
 import type { DropLayers } from "#src/ui/layer_drag_and_drop.js";
 import {
   registerLayerBarDragLeaveHandler,
@@ -40,6 +44,7 @@ import {
   TrackableSidePanelLocation,
 } from "#src/ui/side_panel_location.js";
 import { animationFrameDebounce } from "#src/util/animation_frame_debounce.js";
+import { createSteppedCssGradient } from "#src/util/color.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { updateChildren } from "#src/util/dom.js";
 import { emptyToUndefined } from "#src/util/json.js";
@@ -106,6 +111,101 @@ export class LayerVisibilityWidget extends RefCounted {
   }
 }
 
+class LayerColorWidget extends RefCounted {
+  element = document.createElement("div");
+  colorIndicator = document.createElement("div");
+  private colorChangeDisposer: () => void = () => {};
+
+  constructor(
+    public panel: LayerListPanel,
+    public layer: ManagedUserLayer,
+    onClick?: () => void,
+  ) {
+    super();
+    const { colorIndicator, element } = this;
+    colorIndicator.className = "neuroglancer-layer-list-panel-color-value";
+    element.className = "neuroglancer-layer-list-panel-color-value-wrapper";
+    element.appendChild(colorIndicator);
+    if (onClick !== undefined) {
+      element.addEventListener("click", onClick);
+    }
+    const updateLayerColorWidget = () => {
+      const colors = this.layer.layerBarColors;
+      const setNoColor = () => {
+        colorIndicator.style.background = "";
+        colorIndicator.style.backgroundColor = "";
+        colorIndicator.dataset.color = "unsupported";
+        this.updateTooltip(
+          "does not support a color legend or has no visible segments",
+        );
+      };
+      if (!this.layer.supportsLayerBarColorSyncOption || colors?.length === 0) {
+        setNoColor();
+        return;
+      }
+      const setRainbow = () => {
+        colorIndicator.dataset.color = "rainbow";
+        this.updateTooltip("is multi-colored or has unknown color");
+      };
+      if (colors === undefined) {
+        setRainbow();
+        return;
+      }
+
+      const setSingleColor = () => {
+        colorIndicator.style.background = "";
+        colorIndicator.style.backgroundColor = colors[0];
+        colorIndicator.dataset.color = "solid";
+        this.updateTooltip(`has a single primary color`);
+      };
+
+      const setMultiColor = () => {
+        colorIndicator.style.backgroundColor = "";
+        colorIndicator.dataset.color = "multi";
+        colorIndicator.style.background = createSteppedCssGradient(
+          colors.reverse(),
+          true /*conic*/,
+        );
+        this.updateTooltip(`has multiple primary colors`);
+      };
+      if (colors.length === 1) setSingleColor();
+      else setMultiColor();
+    };
+
+    const listenForColorChange = () => {
+      if (!this.layer.isReady()) return;
+      this.colorChangeDisposer();
+      this.colorChangeDisposer = layer.observeLayerColor(() => {
+        updateLayerColorWidget();
+      });
+    };
+    this.registerDisposer(this.colorChangeDisposer);
+    this.registerDisposer(
+      this.layer.readyStateChanged.add(listenForColorChange),
+    );
+
+    this.registerDisposer(
+      layer.layerChanged.add(() => {
+        element.dataset.visible = this.layer.visible.toString();
+        updateLayerColorWidget();
+      }),
+    );
+    element.dataset.visible = this.layer.visible.toString();
+    listenForColorChange();
+    updateLayerColorWidget();
+  }
+
+  private updateTooltip(message: string) {
+    const { visible, archived } = this.layer;
+    if (!visible || archived) {
+      const stateMessage = archived ? "archived" : "hidden";
+      this.element.title = `This layer is ${stateMessage}.\nClick to show layer.`;
+    } else {
+      this.element.title = `This visible layer ${message}.\nClick to hide layer.`;
+    }
+  }
+}
+
 function makeSelectedLayerSidePanelCheckboxIcon(layer: ManagedUserLayer) {
   const { selectedLayer } = layer.manager.root;
   const icon = new CheckboxIcon(
@@ -163,29 +263,42 @@ class LayerListItem extends RefCounted {
             changed: layer.layerChanged,
           },
           {
-            enableTitle: "Archive layer (disable and remove from layer groups)",
-            disableTitle:
+            enabledTitle:
+              "Archive layer (disable and remove from layer groups)",
+            disabledTitle:
               "Unarchive layer (enable and add to all layer groups)",
           },
         ),
       ).element,
     );
     element.appendChild(numberElement);
-    element.appendChild(
-      this.registerDisposer(new LayerVisibilityWidget(layer)).element,
-    );
+    const colorIndicator = new LayerColorWidget(panel, layer, () => {
+      this.layer.setVisible(!this.layer.visible);
+    });
+    element.appendChild(colorIndicator.element);
     element.appendChild(new LayerTypeIndicatorWidget(layer).element);
     element.appendChild(layerNameWidget.element);
     element.appendChild(
       this.registerDisposer(makeSelectedLayerSidePanelCheckboxIcon(layer))
         .element,
     );
-    const deleteButton = makeDeleteButton({
-      title: "Delete layer",
-      onClick: () => {
-        deleteLayer(this.layer);
-      },
-    });
+    const visibilityIcon = new LayerVisibilityWidget(layer);
+    visibilityIcon.element.classList.add(
+      "neuroglancer-layer-list-panel-item-visibility",
+    );
+    element.appendChild(visibilityIcon.element);
+    const deleteButton = makeDeleteButton();
+    // Deleting asks first (see `layer_deletion_confirmation.ts`), and a layer
+    // of the active edit session cannot be deleted from here (see
+    // `session_layer_structure_lock.ts`).
+    this.registerDisposer(
+      bindLayerDeleteIcon(
+        deleteButton,
+        layer,
+        "Delete layer",
+        LAYER_LIST_PANEL_HIDE_INSTEAD,
+      ),
+    );
     deleteButton.classList.add("neuroglancer-layer-list-panel-item-delete");
     element.appendChild(deleteButton);
     registerLayerDragHandlers(panel, element, layer, {
@@ -235,11 +348,34 @@ export class LayerListPanel extends SidePanel {
     sidePanelManager: SidePanelManager,
     public manager: TopLevelLayerListSpecification,
     public state: LayerListPanelState,
+    public layerPanelVisibility: WatchableValueInterface<boolean>,
+    public showLayerPanel?: WatchableValueInterface<boolean>,
   ) {
     super(sidePanelManager, state.location);
     const { itemContainer, layerDropZone } = this;
-    const { titleElement } = this.addTitleBar({ title: "" });
+    const { titleElement, titleBar } = this.addTitleBar({ title: "" });
     this.titleElement = titleElement!;
+
+    // Add layer panel toggle button to title bar.
+    if (showLayerPanel !== undefined) {
+      const toggleButton = new CheckboxIcon(this.layerPanelVisibility, {
+        svg: svg_eye,
+        backgroundScheme: "dark",
+        enableTitle: "Show layer panel",
+        disableTitle: "Hide layer panel",
+      });
+      toggleButton.element.style.order = "50"; // Position before close button (order: 100)
+      titleBar.appendChild(toggleButton.element);
+      this.registerDisposer(toggleButton);
+
+      // The toggle is only meaningful while the configuration permits the
+      // panel, so track the configuration rather than sampling it once.
+      const updateToggleVisibility = () => {
+        toggleButton.element.style.display = showLayerPanel.value ? "" : "none";
+      };
+      this.registerDisposer(showLayerPanel.changed.add(updateToggleVisibility));
+      updateToggleVisibility();
+    }
     itemContainer.classList.add("neuroglancer-layer-list-panel-items");
     this.addBody(itemContainer);
     layerDropZone.style.flex = "1";
@@ -302,6 +438,7 @@ export class LayerListPanel extends SidePanel {
         }
         item.element.dataset.selected = (layer === selectedLayer).toString();
         item.element.dataset.archived = layer.archived.toString();
+        item.element.dataset.visible = layer.visible.toString();
         yield item.element;
       }
       for (const [userLayer, item] of items) {

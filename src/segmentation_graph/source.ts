@@ -65,6 +65,13 @@ export abstract class SegmentationGraphSource {
     context: DependentViewContext,
     tab: SegmentationGraphSourceTab,
   ): HTMLDivElement;
+  // Rendered in the segments tab rather than the graph tab, for graph UI that
+  // belongs next to the segment list — a mode that governs which segments are
+  // on screen, say — rather than next to the editing tools.
+  segmentsTabContents?(
+    layer: SegmentationUserLayer,
+    context: DependentViewContext,
+  ): HTMLDivElement;
 }
 
 export interface ComputedSplit {

@@ -37,6 +37,12 @@
   --nge-overlay-border: #3a3a3a;
   --nge-overlay-border-soft: #2a2a2a;
 
+  /* Tooltip bubble. Deliberately the portal's tooltip colors (its
+     `primary.foreground` grey on white) rather than a neuroglancer-only pair,
+     so a tooltip reads the same on both sides of the iframe boundary. */
+  --nge-tooltip-bg: #565656;
+  --nge-tooltip-fg: #ffffff;
+
   /* --- Borders ---------------------------------------------------------- */
   --nge-border: #3a3d43;
   --nge-border-strong: #4a4e55;
@@ -110,13 +116,16 @@
   --nge-control-h-compact: 24px; /* dense topbar row controls */
   --nge-control-h-lg: 32px; /* prominent modal/dialog action buttons */
   --nge-control-w: 120px;
+  /* Slider thumb diameter. Also the width the thumb's travel is inset from each
+     end of the rail, which is what the Size slider's ticks align against. */
+  --nge-slider-thumb: 16px;
   --nge-control-w-narrow: 60px;
   --nge-control-pad-x: 8px;
   --nge-list-max-h: 9rem; /* scrollable tool-panel list cap before it scrolls */
 
   /* --- Typography ------------------------------------------------------- */
-  --nge-font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
+  --nge-font:
+    system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --nge-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --nge-text-size: 12px;
   --nge-text-size-sm: 11px;

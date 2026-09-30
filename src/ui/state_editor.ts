@@ -30,6 +30,7 @@ import { debounce } from "lodash-es";
 import { Overlay } from "#src/overlay.js";
 import "#src/ui/state_editor.css";
 
+import { bigintToStringJsonReplacer } from "#src/util/json.js";
 import { getCachedJson } from "#src/util/trackable.js";
 import type { Viewer } from "#src/viewer.js";
 
@@ -93,7 +94,9 @@ export class StateEditorDialog extends Overlay {
   private applyChanges() {
     if (this.parsedValue !== null) {
       this.viewer.state.reset();
-      this.viewer.state.restoreState(this.parsedValue);
+      this.viewer.state.restoreState(
+        this.viewer.stateUpgrader(this.parsedValue),
+      );
     }
     this.applyButton.disabled = true;
   }
@@ -149,6 +152,10 @@ export class StateEditorDialog extends Overlay {
   }, valueUpdateDelay);
 
   getJson() {
-    return JSON.stringify(getCachedJson(this.viewer.state).value, null, "  ");
+    return JSON.stringify(
+      getCachedJson(this.viewer.state).value,
+      bigintToStringJsonReplacer,
+      "  ",
+    );
   }
 }

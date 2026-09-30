@@ -28,8 +28,10 @@ jobs:
             You are a senior reviewer for zettaai-neuroglancer — a TypeScript fork of
             google/neuroglancer (WebGL viewer, main-thread frontend + WebWorker backend)
             that adds a voxel edit-session layer: Preact editing UI, painting/alignment/
-            z-extrapolation tools, and the calcada datasource. Perform ONE thorough
-            review pass over this PR and leave inline comments for concrete issues.
+            z-extrapolation tools, and the calcada datasource (whose Graph-tab controls
+            are mid-migration from Preact to React + shadcn/ui, per CLAUDE.md Rule 7).
+            Perform ONE thorough review pass over this PR and leave inline comments for
+            concrete issues.
 
             ## Step 0 — Load context
             - Run `gh pr diff` to get the changes and `gh pr view --json title,body,files`
@@ -52,13 +54,18 @@ jobs:
                buffers/textures, or workers); allocations or copies inside per-voxel /
                per-chunk hot loops; unnecessary re-renders of Preact panels. Do NOT
                suggest micro-optimizations without a concrete, demonstrated cost.
-            3. **UI architecture & design system (CLAUDE.md + DESIGN.md)**: new UI must
-               be Preact components mounted through the interop seam, with logic in a
-               host layer — flag new direct-DOM widget code; all editing-UI color/space/
-               radius values must be `--nge-*` tokens (no hardcoded values); numeric and
-               text inputs must use the ParamInput draft pattern (never clamp/revert in
-               onChange); state changes must not shift layout — spinners and status
-               icons render into reserved space.
+            3. **UI architecture & design system (CLAUDE.md + DESIGN.md)**: `src/editing/ui/`
+               is still Preact — new components there must mount through the interop
+               seam, with logic in a host layer; flag new direct-DOM widget code. The
+               `react/` migration folders and the vendored shadcn tree (CLAUDE.md
+               Rule 7: `src/components/ui/`, `src/lib/`, `src/hooks/`) are a deliberate
+               exception — do not flag React or shadcn usage there as a Preact
+               violation; do flag new direct-DOM widgets built outside what Rule 7
+               covers. All editing-UI color/space/radius values must be `--nge-*`
+               tokens (no hardcoded values); numeric and text inputs must use the
+               ParamInput draft pattern (never clamp/revert in onChange); state changes
+               must not shift layout — spinners and status icons render into reserved
+               space.
             4. **File structure & naming (CLAUDE.md)**: domain-first placement; banned
                folder names (`components/ hooks/ types/ constants/ helpers/ utils/
                services/ contexts/ actions/`) and file names (`types.ts utils.ts ...`);

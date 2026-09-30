@@ -1,25 +1,25 @@
-.neuroglancer-graphene-tab .neuroglancer-annotation-toolbox {
+.neuroglancer-calcada-tab .neuroglancer-annotation-toolbox {
   display: none;
 }
 
-.neuroglancer-graphene-tab
+.neuroglancer-calcada-tab
   div[data-color="#ff0000"]
   > .neuroglancer-annotation-position {
   color: red;
 }
 
-.neuroglancer-graphene-tab
+.neuroglancer-calcada-tab
   div[data-color="#0000ff"]
   > .neuroglancer-annotation-position {
   color: #4444ff;
 }
 
-.graphene-tool-status {
+.calcada-tool-status {
   display: flex;
   gap: 10px;
 }
 
-.graphene-multicut > .activeGroupIndicator {
+.calcada-multicut > .activeGroupIndicator {
   padding: 2px;
   margin: auto 0;
   background-color: red;
@@ -27,33 +27,33 @@
   font-weight: 900;
 }
 
-.graphene-multicut > .activeGroupIndicator.blueGroup {
+.calcada-multicut > .activeGroupIndicator.blueGroup {
   background-color: blue;
 }
 
-.graphene-multicut > .activeGroupIndicator::after {
+.calcada-multicut > .activeGroupIndicator::after {
   content: "Red";
 }
 
-.graphene-multicut > .activeGroupIndicator.blueGroup::after {
+.calcada-multicut > .activeGroupIndicator.blueGroup::after {
   content: "Blue";
 }
 
-.graphene-merge-segments-merges {
+.calcada-merge-segments-merges {
   display: flex;
   flex-direction: column;
 }
 
-.graphene-merge-segments-submission {
+.calcada-merge-segments-submission {
   display: flex;
   gap: 10px;
 }
 
-.graphene-tool-status .neuroglancer-icon {
+.calcada-tool-status .neuroglancer-icon {
   height: 100%;
 }
 
-.graphene-merge-segments-status label {
+.calcada-merge-segments-status label {
   display: grid;
   grid-template-columns: min-content min-content;
   white-space: nowrap;
@@ -61,23 +61,22 @@
   align-content: center;
 }
 
-.graphene-merge-segments-point {
+.calcada-merge-segments-point {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.graphene-merge-segments-point
-  .neuroglancer-segment-list-entry-visible-checkbox,
-.graphene-merge-segments-point .neuroglancer-segment-list-entry-copy-container {
+.calcada-merge-segments-point .neuroglancer-segment-list-entry-visible-checkbox,
+.calcada-merge-segments-point .neuroglancer-segment-list-entry-copy-container {
   display: none;
 }
 
-.graphene-find-path > label {
+.calcada-find-path > label {
   display: flex;
 }
 
-.graphene-find-path > label > span {
+.calcada-find-path > label > span {
   display: flex;
   align-content: center;
   flex-wrap: wrap;
@@ -92,58 +91,67 @@
   background-color: black;
 }
 
-.graphene-piece-split {
+.calcada-piece-split {
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
   min-width: 28em;
 }
 
-.graphene-piece-split .piece-split-focus {
+.calcada-piece-split .piece-split-focus {
   font: 13px sans-serif;
   font-weight: 600;
 }
 
-.graphene-piece-split .piece-split-group-row {
+.calcada-piece-split .piece-split-group-row {
   font-weight: 700;
 }
 
-.graphene-piece-split .piece-split-points {
+.calcada-piece-split .piece-split-points {
   display: flex;
   gap: 12px;
   font: 12px monospace;
 }
 
-.graphene-piece-split .piece-split-blue > div:first-child,
-.graphene-piece-split .piece-split-red > div:first-child {
+.calcada-piece-split .piece-split-blue > div:first-child,
+.calcada-piece-split .piece-split-red > div:first-child {
   font-weight: 700;
   margin-bottom: 2px;
 }
 
-.graphene-piece-split .piece-split-point-row {
+.calcada-piece-split .piece-split-point-row {
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
-.graphene-piece-split .piece-split-preview-summary {
+.calcada-piece-split .piece-split-preview-summary {
   font: 12px sans-serif;
   background: rgba(255, 255, 255, 0.05);
   padding: 4px;
   border-radius: 2px;
 }
 
-.graphene-piece-split .piece-split-actions {
+.calcada-piece-split .piece-split-actions {
   display: flex;
   gap: 10px;
 }
 
-.graphene-piece-split .neuroglancer-icon.disabled {
+.calcada-piece-split .piece-split-use-image {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 12px sans-serif;
+  cursor: pointer;
+  user-select: none;
+}
+
+.calcada-piece-split .neuroglancer-icon.disabled {
   opacity: 0.4;
   pointer-events: none;
 }
 
-.graphene-piece-split .piece-split-spinner {
+.calcada-piece-split .piece-split-spinner {
   width: 14px;
   height: 14px;
   align-self: center;
@@ -168,47 +176,651 @@
   filter: grayscale(1);
 }
 
+/* The Branch/Time/Label rows share this grid instead of each being its own
+   independent row: a shared `max-content` label column sizes itself to the
+   widest of the three labels (no hardcoded width), so every control starts
+   flush at the same left edge, and the right-hand padding keeps the row off
+   the panel's edge. `display: contents` on each row hands its label and
+   control straight to this grid as the two cells of one grid row. */
+.neuroglancer-calcada-layer-controls {
+  /* One step for every gap in these rows — label to control, row to row, and
+     between the controls inside a row — so the tab reads as an even grid
+     rather than three independently spaced rows. Only this rule defines it;
+     the blocks below repeat the value as a fallback so one mounted outside
+     this grid (a test harness, a future host) still spaces itself rather
+     than collapsing to no gap at all. */
+  --calcada-gap: 6px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: var(--calcada-gap);
+  padding: 4px 10px 4px 2px;
+}
+
+.neuroglancer-calcada-layer-controls > .neuroglancer-layer-control-container {
+  display: contents;
+}
+
+/* The outer grid's column-gap already spaces label from control; this
+   shared/legacy margin (from `layer_control.css`, meant for the ungridded
+   flex row every other control still uses) would otherwise stack on top of
+   it and widen just this gap relative to the row-to-row gap. */
+.neuroglancer-calcada-layer-controls .neuroglancer-layer-control-control {
+  margin-left: 0;
+}
+
+/* The one control that needs more than a single line. Rather than stacking
+   inside its own cell — which would leave the "Branch" label centred on the
+   whole stack, floating well below the picker it names — it hands its two
+   blocks straight to the outer grid, so the picker keeps the labelled row and
+   the new-branch block gets an unlabelled row of its own beneath it. */
 .neuroglancer-calcada-branch-control {
+  display: contents;
+}
+
+.neuroglancer-calcada-branch-control > * {
+  grid-column: 2;
+  min-width: 0;
+  /* `display: contents` drops the cap `.neuroglancer-layer-control-control`
+     puts on every other row's control; re-apply it here so a wide panel does
+     not stretch the branch blocks past the Time and Label rows. */
+  max-width: 500px;
+}
+
+/* Shared by the Branch row's picker (a grid item, which stretches on its own)
+   and the create form's parent-branch picker (a flex item, which needs telling
+   to): take the spare width so long branch names stay readable, but stay
+   shrinkable so neither one can force its row wider than the panel. */
+.neuroglancer-calcada-branch-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Groups the "New branch" button and diff link with the form they open. One
+   extra gap on top of the grid's own divides the whole block from the branch
+   picker above it: these are actions on the branch, not another row of it. */
+.neuroglancer-calcada-branch-new-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--calcada-gap, 6px);
+  margin-top: var(--calcada-gap, 6px);
+  min-width: 0;
+}
+
+.neuroglancer-calcada-branch-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  gap: var(--calcada-gap, 6px);
+  min-width: 0;
+}
+
+/* Pushed to the far end of the actions row: it reads on the branch as a
+   whole, unlike the "New branch" button that opens the form below it. */
+.neuroglancer-calcada-branch-actions > .calcada-open-diff {
+  margin-inline-start: auto;
+}
+
+.neuroglancer-calcada-branch-create-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--calcada-gap, 6px);
+  /* Without this the form's automatic minimum size is driven by the parent-
+     branch trigger's full (un-ellipsized) label text, so a long branch name
+     rigidifies the form wider than the side panel and pushes it — and the
+     name input — off the right edge of the viewport. */
+  min-width: 0;
+}
+
+/* The "from" picker and the error each take a row of their own, leaving the
+   name input and Create button the row between them: the panel is too narrow
+   to read a branch label and a name field side by side. */
+.neuroglancer-calcada-branch-create-form > .neuroglancer-calcada-branch-select,
+.neuroglancer-calcada-branch-create-form > .branch-create-error {
+  flex-basis: 100%;
+}
+
+.calcada-open-diff {
+  white-space: nowrap;
+}
+
+.neuroglancer-calcada-labeled-timestamp-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Calendar button, time field, and clear button share a row while there's
+   room. The calendar button has no fixed basis so it's the one that wraps to
+   its own line first on a narrow sidebar, leaving the fixed-width time field
+   and clear button together on the line below instead of any of the three
+   overflowing the panel. */
+.neuroglancer-calcada-timestamp-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--calcada-gap, 6px);
   min-width: 0;
   max-width: 100%;
 }
 
-.neuroglancer-calcada-branch-control > select {
-  width: auto;
+.piece-split-debug-pieces {
+  margin-top: 4px;
 }
 
-.neuroglancer-calcada-branch-control > button {
-  flex-basis: 100%;
-  text-align: left;
+.piece-split-piece-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.4;
 }
 
-.neuroglancer-layer-control-container:has(
-    .neuroglancer-calcada-branch-control
-  ) {
-  align-items: flex-start;
+.piece-split-piece-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #888;
+  flex: none;
 }
 
-.neuroglancer-calcada-branch-control .calcada-open-diff {
-  white-space: nowrap;
-  padding: 2px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.05);
-  color: inherit;
-  text-decoration: none;
+.piece-split-piece-eye {
+  margin-left: auto;
+  font-size: 90%;
   cursor: pointer;
-  font-size: inherit;
 }
 
-.neuroglancer-calcada-branch-control .calcada-open-diff:hover {
-  background: rgba(255, 255, 255, 0.12);
+.calcada-debug-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  overflow-y: auto;
 }
 
-.neuroglancer-calcada-labeled-timestamp-control > select {
+.calcada-debug-tab-hint {
+  color: #ccc;
+  margin-bottom: 4px;
+}
+
+/* The mode's own line, where a banner over the viewer used to be. Set apart from
+   the hint below it so a glance at the tab says whether the mode is on. */
+.calcada-debug-tab-mode {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.calcada-debug-piece-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Same rule the Seg. tab applies to its rows, scoped to this list because that
+   one is written against a .neuroglancer-segment-list ancestor we deliberately
+   do not adopt (it brings its own scroll container). A HIDDEN piece's eye shows
+   only while its row is hovered, so the list does not read as a wall of
+   crossed-out eyes; a shown piece keeps its eye on. */
+.calcada-debug-piece-list
+  .neuroglancer-segment-list-entry:not(:hover)
+  .neuroglancer-eye-icon:not(.neuroglancer-visible) {
+  visibility: hidden;
+}
+
+/* The Trace tab. Its controls are shadcn components inside the UI scope, so all
+   this holds is the stacking; colours and spacing come from the tokens. */
+/* Never sideways: a control that outgrows the panel is shrunk or clipped, not
+   scrolled to. */
+.calcada-trace-tab {
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.calcada-trace-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.calcada-trace-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Reads as a mode banner, not a label: the proofreader has to be able to tell
+   at a glance whether arrow keys are answering candidates or panning. */
+.calcada-trace-panel-badge {
+  flex: 1 1 auto;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #b58900;
+  color: #000;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+/* Sits over the panels, where the proofreader is looking. Faded until hovered
+   so it does not cover the meshes it sits on. */
+.calcada-trace-notice-overlay {
+  position: absolute;
+  z-index: 100;
+  max-width: min(320px, calc(100% - 32px));
+}
+
+.calcada-trace-notice {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #b58900;
+  color: #000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.calcada-trace-notice:hover {
+  opacity: 1;
+}
+
+.calcada-trace-notice-mode {
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.2);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.calcada-trace-notice-error {
+  background: #dc322f;
+  color: #fff;
+}
+
+.calcada-trace-notice-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.calcada-trace-notice-detail {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calcada-trace-notice-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: piece-split-spin 0.8s linear infinite;
+}
+
+/* The filter outline: a group is the line down its left edge; the word
+   between rows is the group's operator. */
+.calcada-filter-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* The right padding is the group's own ✕: sitting over the rows, it would
+   take the clicks meant for the first row's ✕ and delete the whole group. */
+.calcada-filter-group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 2px 4px;
+  padding: 2px 16px 2px 8px;
+  border-left: 2px solid #444;
+  min-width: 0;
+}
+
+.calcada-filter-group-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+/* The criterion over the end it applies to, and the bound beside both,
+   centred on them: the criterion gets the whole column instead of sharing a
+   line with four other controls. */
+.calcada-filter-condition {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-condition-what {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.calcada-filter-condition-bound {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.calcada-filter-condition .calcada-filter-side {
+  width: 100%;
+}
+
+.calcada-filter-condition .calcada-filter-field {
+  width: 100%;
+  min-width: 0;
+}
+
+/* One symbol; the chevron would leave it no room. */
+.calcada-filter-condition .calcada-filter-cmp {
+  flex: 0 0 2.4em;
+  width: 2.4em;
+  justify-content: center;
+  padding: 0;
+}
+
+.calcada-filter-condition .calcada-filter-cmp svg {
+  display: none;
+}
+
+.calcada-filter-condition .calcada-filter-cmp [data-slot="select-value"] {
+  justify-content: center;
+}
+
+.calcada-filter-condition .calcada-filter-field,
+.calcada-filter-preset-select {
+  overflow: hidden;
+}
+
+/* Cut short on screen; the trigger's tooltip carries the whole text. */
+.calcada-filter-condition .calcada-filter-field [data-slot="select-value"],
+.calcada-filter-preset-select [data-slot="select-value"] {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* No spinner arrows: in this width they cover the digits. */
+.calcada-filter-condition .calcada-filter-value {
+  flex: 0 0 5em;
+  width: 5em;
+  min-width: 0;
+  padding: 0 6px;
+  appearance: textfield;
+}
+
+.calcada-filter-condition .calcada-filter-value::-webkit-inner-spin-button,
+.calcada-filter-condition .calcada-filter-value::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.calcada-filter-op {
+  align-self: flex-start;
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid #5a4700;
+  border-radius: 3px;
+  background: none;
+  color: #b58900;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.calcada-filter-remove {
+  flex: none;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: #888;
+  cursor: pointer;
+}
+
+.calcada-filter-add {
+  display: flex;
+  gap: 4px;
+}
+
+.calcada-filter-preset-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-filter-preset-row .calcada-filter-preset-select,
+.calcada-filter-preset-row input {
+  flex: 1 1 auto;
+  min-width: 0;
   width: auto;
+}
+
+.calcada-filter-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+/* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
+   the width to show a whole hint. */
+.calcada-trace-panel-status {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* The seed's position on a line of its own, its buttons beneath: beside the
+   buttons the coordinates had room for one number per line. */
+.calcada-trace-panel-seed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-seed-position {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One end of a candidate — its filters and, while tracing, the current piece
+   on that end — set apart from the other end. */
+/* A fieldset is never narrower than its content by default, so one long
+   label in it would widen the whole tab. */
+.calcada-trace-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.calcada-trace-panel-section legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calcada-trace-panel-current {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* The trace edits the graph it runs on, so running it on main is worth
+   saying before the first accept rather than after. */
+.calcada-trace-panel-warning {
+  font-size: 12px;
+  padding: 4px 6px;
+  border-left: 2px solid rgb(230 170 40);
+  background: rgb(230 170 40 / 12%);
+}
+
+.calcada-trace-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-row input,
+.calcada-trace-panel-row button {
+  width: 10em;
+  flex: 0 0 auto;
+}
+
+/* The reviewer picker takes a row's control slot as a whole. The rule above
+   would otherwise reach inside it and make each chip's remove button and the
+   search input 10em wide, which is what pushed the input onto its own line. */
+.calcada-trace-panel-reviewers {
+  width: 10em;
+  flex: 0 0 auto;
+}
+
+.calcada-trace-panel-reviewers input,
+.calcada-trace-panel-reviewers button {
+  width: auto;
+}
+
+/* The chip input's intrinsic width is a browser default wider than the
+   control; it is meant to take whatever the chips leave. The row rule above
+   pins inputs to their own width, so the growth has to be restated here. */
+.calcada-trace-panel-reviewers input {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 3em;
+}
+
+/* An email is one unbreakable word; the chip shortens it instead of pushing
+   the tab sideways. The full address is in the chip's tooltip. */
+.calcada-trace-panel-reviewer {
   max-width: 100%;
+  min-width: 0;
+}
+
+.calcada-trace-panel-reviewer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A checkbox carries its label on the right, so it is not the row's "name on
+   the left, control on the right" layout — laid out as one, space-between threw
+   the text to the far edge and the input rule stretched the box to 10em. */
+.calcada-trace-panel-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-check input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+}
+
+/* The keys the trace owns. Lives here rather than in a status bubble at the
+   bottom of the viewer: the tab is always open, so the bubble only repeated
+   what is already on screen. */
+.calcada-trace-panel-keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.calcada-trace-panel-keys dt {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.calcada-trace-panel-keys dd {
+  margin: 0;
+}
+
+.calcada-trace-panel-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+/* Without a legend "green or red" is a guess. The bar is the scale itself, so
+   it cannot drift from the colours the pieces are painted with. */
+.calcada-trace-panel-legend {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "scale scale" "low high";
+  gap: 2px;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.calcada-trace-panel-legend-scale {
+  grid-area: scale;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, rgb(41 219 61), rgb(255 61 61));
+}
+
+.calcada-trace-panel-legend span:nth-child(3) {
+  text-align: right;
+}
+
+.calcada-trace-panel-navigator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.calcada-trace-panel-navigator-position {
+  min-width: 4em;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: pointer;
+}
+
+.calcada-trace-panel-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }

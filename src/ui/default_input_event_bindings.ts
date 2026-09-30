@@ -48,6 +48,8 @@ export function getDefaultGlobalBindings() {
     map.set("space", "toggle-layout");
     map.set("shift+space", "toggle-layout-alternative");
     map.set("backslash", "toggle-show-statistics");
+    map.set("control+keyp", "open-command-palette");
+    map.set("escape", "deactivate-active-tool");
 
     map.set("alt+arrowup", "select-previous");
     map.set("alt+arrowdown", "select-next");
@@ -61,6 +63,7 @@ export function getDefaultSelectBindings() {
   if (defaultSelectBindings === undefined) {
     defaultSelectBindings = EventActionMap.fromObject({
       "control+mousedown2": "select-position",
+      "shift+control+mousedown2": "unpin-selected-position",
     });
   }
   return defaultSelectBindings;
@@ -73,6 +76,7 @@ export function getDefaultAnnotationListBindings() {
       {
         click0: "pin-annotation",
         mousedown2: "move-to-annotation",
+        "alt+mousedown0": "reorder-annotation",
       },
       { parents: [[getDefaultSelectBindings(), 0]] },
     );
@@ -119,6 +123,8 @@ export function getDefaultRenderedDataPanelBindings() {
         "at:mousedown2": "move-to-mouse-position",
         "at:alt+mousedown0": "move-annotation",
         "at:control+alt+mousedown2": "delete-annotation",
+        enter: "finish-annotation",
+        backspace: "undo-annotation-step",
         "at:touchpinch": "zoom-via-touchpinch",
         "at:touchrotate": "rotate-in-plane-via-touchrotate",
         "at:touchtranslate2": "translate-in-plane-via-touchtranslate",

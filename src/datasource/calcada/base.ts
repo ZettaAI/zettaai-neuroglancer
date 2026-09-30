@@ -31,6 +31,7 @@ import type {
 import { makeSliceViewChunkSpecification } from "#src/sliceview/base.js";
 import type { mat4 } from "#src/util/geom.js";
 import type { FetchOk, HttpError } from "#src/util/http_request.js";
+import { parseUint64 } from "#src/util/json.js";
 
 export const PYCG_APP_VERSION = 1;
 // NOTE: every RPC_ID / shared-object identifier below MUST be calcada-specific.
@@ -41,11 +42,15 @@ export const PYCG_APP_VERSION = 1;
 // classes silently shadow graphene's for ALL layers — which broke graphene
 // segmentation slice coloring (calcada's leaves-less ChunkedGraphLayer stub
 // replaced graphene's real leaves-fetching one, so equivalences never loaded).
-export const GRAPHENE_MESH_NEW_SEGMENT_RPC_ID = "CalcadaMeshSource:NewSegment";
+export const CALCADA_MESH_NEW_SEGMENT_RPC_ID = "CalcadaMeshSource:NewSegment";
 // Force an already-cached root manifest to re-download so a keep-whole piece
 // split (root id unchanged, but its leaves changed) refreshes its 3D mesh.
 export const CALCADA_MESH_REFRESH_SEGMENT_RPC_ID =
   "CalcadaMeshSource:RefreshSegment";
+// Fire the manifest HTTP request for a root likely to be selected next, to
+// warm calcada's server-side root-pieces/frag-location caches ahead of time.
+export const CALCADA_MESH_PREFETCH_SEGMENT_RPC_ID =
+  "CalcadaMeshSource:PrefetchSegment";
 export const CALCADA_BULK_LINK_RPC_ID = "CalcadaChunkedGraphLayer:BulkLink";
 
 // Off-thread decode of a per-piece multilod-draco mesh: parse the manifest,
@@ -105,6 +110,14 @@ export class MeshSourceParameters {
   vertexQuantizationBits: number;
   nBitsForLayerId: number;
   branchId: number;
+  // The mesh's own voxel model-space resolution (nm/voxel per axis) — the
+  // mesh metadata transform's diagonal alone (see meshModelResolution), NOT
+  // the graph's base resolution or any product with it, since a mesh can be
+  // generated at a coarser mip and its transform already carries that grid
+  // in nm. Used to convert manifest piece centers (nm) into model space for
+  // view-priority scoring. Undefined for datasources that can't determine it
+  // (FragmentSpatialIndex then falls back to treating nm as model units).
+  meshModelResolution: [number, number, number] | undefined;
 
   static RPC_ID = "calcada/MeshSource";
 }
@@ -121,7 +134,7 @@ export function isBaseSegmentId(segmentId: bigint, nBitsForLayerId: number) {
   return layerId == 1n;
 }
 
-export function getGrapheneFragmentKey(fragmentId: string) {
+export function getCalcadaFragmentKey(fragmentId: string) {
   const sharded = fragmentId.charAt(0) === "~";
 
   if (sharded) {
@@ -129,6 +142,12 @@ export function getGrapheneFragmentKey(fragmentId: string) {
     return { key: parts[0], fragmentId: parts[1] };
   }
   return { key: fragmentId, fragmentId: fragmentId };
+}
+
+// A calcada fragment id is "{piece_id}:{lod}": each fragment is one piece.
+export function pieceIdOfFragment(fragmentId: string): bigint {
+  const colon = fragmentId.indexOf(":");
+  return parseUint64(colon === -1 ? fragmentId : fragmentId.slice(0, colon));
 }
 
 export const CHUNKED_GRAPH_LAYER_RPC_ID = "CalcadaChunkedGraphLayer";
@@ -186,7 +205,7 @@ export interface ChunkedGraphChunkSource extends SliceViewChunkSource {
   spec: ChunkedGraphChunkSpecification;
 }
 
-export async function parseGrapheneError(e: HttpError) {
+export async function parseCalcadaError(e: HttpError) {
   if (e.response) {
     let msg: string;
     if (e.response.headers.get("content-type") === "application/json") {

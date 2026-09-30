@@ -24,6 +24,9 @@
     "layer": "segmentation",
     "tool": "calcadaPieceSplit"
   },
+  "keyt": "calcada-toggle-zetta-trace",
+  "keyd": "calcada-toggle-debug-mode",
+  "keye": "calcada-toggle-split-detection",
   "keyx": false,
   "control+shift+keyx": "clear-segments",
   "bracketleft": "select-previous",

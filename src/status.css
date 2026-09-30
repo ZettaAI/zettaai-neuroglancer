@@ -23,12 +23,24 @@
   margin: 0px;
   padding: 0px;
   font: 10pt sans-serif;
+  pointer-events: none;
+  /* So a long-lived section can order itself relative to the tool-activation
+     sections instead of landing wherever its creation happened to fall. */
+  display: flex;
+  flex-direction: column;
 }
 
 #neuroglancer-status-container li {
   width: 100vw;
+  /* Keep content clear of the window's rounded bottom-left corner (e.g. the
+     Chrome/macOS window frame), which would otherwise clip the first status /
+     tool message. */
+  box-sizing: border-box;
+  padding-left: 10px;
+  padding-bottom: 5px;
   max-height: 25vh;
   overflow-y: auto;
+  pointer-events: auto;
 }
 
 .neuroglancer-status-header {

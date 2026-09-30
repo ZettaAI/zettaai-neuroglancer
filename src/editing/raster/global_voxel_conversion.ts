@@ -43,3 +43,29 @@ export function globalToTargetVoxel(
   };
   return [axis(0), axis(1), axis(2)];
 }
+
+/**
+ * Inverse of {@link globalToTargetVoxel}: convert a position on a target
+ * scale's voxel grid back into the viewer's global coordinate space.
+ *
+ *     globalPos[i] = targetVoxel[i] * targetVoxelSizeNm[i] / globalScaleNm[i]
+ *
+ * Used to place voxel-aligned geometry (the brush cursor's per-voxel
+ * footprint) in the frame the view/projection matrices consume. Inputs are
+ * per-axis (x, y, z); the input voxel coordinate may be fractional, so a voxel
+ * *corner* is an integer and a voxel *center* is `index + 0.5`. When a global
+ * scale is zero or non-finite the axis is passed through unscaled rather than
+ * producing `NaN` / `Infinity`.
+ */
+export function targetVoxelToGlobal(
+  targetVoxel: readonly [number, number, number],
+  globalScaleNm: readonly [number, number, number],
+  targetVoxelSizeNm: readonly [number, number, number],
+): [number, number, number] {
+  const axis = (i: number): number => {
+    const denom = globalScaleNm[i];
+    if (!Number.isFinite(denom) || denom === 0) return targetVoxel[i];
+    return (targetVoxel[i] * targetVoxelSizeNm[i]) / denom;
+  };
+  return [axis(0), axis(1), axis(2)];
+}

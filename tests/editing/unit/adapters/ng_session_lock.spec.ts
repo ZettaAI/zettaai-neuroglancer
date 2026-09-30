@@ -45,9 +45,8 @@ describe("NgSessionLockAdapter", () => {
     second.release();
   });
 
-  it("setActiveSession toggles activeSession.value and isLayerDataSourceLocked", () => {
+  it("setActiveSession sets activeSession.value", () => {
     expect(lock.activeSession.value).toBeUndefined();
-    expect(lock.isLayerDataSourceLocked(layerId("L1"))).toBe(false);
 
     lock.setActiveSession({
       sessionId: sessionId("s1"),
@@ -55,9 +54,47 @@ describe("NgSessionLockAdapter", () => {
     });
 
     expect(lock.activeSession.value?.sessionId).toBe("s1");
-    expect(lock.isLayerDataSourceLocked(layerId("L1"))).toBe(true);
-    expect(lock.isLayerDataSourceLocked(layerId("L2"))).toBe(true);
-    expect(lock.isLayerDataSourceLocked(layerId("L3"))).toBe(false);
+  });
+
+  it("isSessionLayer covers every session layer and nothing else, with or without a session", () => {
+    expect(lock.isSessionLayer(layerId("writable"))).toBe(false);
+
+    // The config's writable and reference layers alike.
+    lock.setActiveSession({
+      sessionId: sessionId("s1"),
+      sessionLayerIds: new Set([layerId("writable"), layerId("reference")]),
+    });
+
+    expect(lock.isSessionLayer(layerId("writable"))).toBe(true);
+    expect(lock.isSessionLayer(layerId("reference"))).toBe(true);
+    expect(lock.isSessionLayer(layerId("outsider"))).toBe(false);
+
+    lock.clearActiveSession();
+
+    expect(lock.isSessionLayer(layerId("writable"))).toBe(false);
+    expect(lock.isSessionLayer(layerId("reference"))).toBe(false);
+  });
+
+  it("isSessionLayer covers the layers of a session being restored while none is open", () => {
+    lock.restoringLayerIds.value = new Set([layerId("writable")]);
+
+    expect(lock.isSessionLayer(layerId("writable"))).toBe(true);
+    expect(lock.isSessionLayer(layerId("outsider"))).toBe(false);
+
+    lock.restoringLayerIds.value = undefined;
+
+    expect(lock.isSessionLayer(layerId("writable"))).toBe(false);
+  });
+
+  it("isSessionLayer follows the active session over a restore's layers", () => {
+    lock.restoringLayerIds.value = new Set([layerId("restoring")]);
+    lock.setActiveSession({
+      sessionId: sessionId("s1"),
+      sessionLayerIds: new Set([layerId("writable")]),
+    });
+
+    expect(lock.isSessionLayer(layerId("writable"))).toBe(true);
+    expect(lock.isSessionLayer(layerId("restoring"))).toBe(false);
   });
 
   it("clearActiveSession resets activeSession.value", () => {
@@ -68,7 +105,7 @@ describe("NgSessionLockAdapter", () => {
     expect(lock.activeSession.value).not.toBeUndefined();
     lock.clearActiveSession();
     expect(lock.activeSession.value).toBeUndefined();
-    expect(lock.isLayerDataSourceLocked(layerId("L1"))).toBe(false);
+    expect(lock.isSessionLayer(layerId("L1"))).toBe(false);
   });
 
   it("release clears activeSession when sessionId matches the active session", async () => {

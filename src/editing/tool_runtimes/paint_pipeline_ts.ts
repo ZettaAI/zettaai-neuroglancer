@@ -27,6 +27,7 @@
  * masked brush stays on the original `stampShape2DMasked` main-thread path.
  */
 
+import { brushRadiusSquared } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 import { applyMorphologyPipeline } from "#src/editing/tool_runtimes/mask_compute.js";
 import type { PaintPipelineRequest } from "#src/editing/tool_runtimes/paint_pipeline_request.js";
 import { DEFAULT_COVERAGE_THRESHOLD } from "#src/editing/tool_runtimes/paint_types.js";
@@ -68,7 +69,8 @@ export function runPaintPipelineTS(req: PaintPipelineRequest): Uint8Array {
   const pts = req.pathPoints;
   const nPoints = pts.length >> 1;
   const nSegments = Math.max(1, nPoints - 1);
-  const r2 = req.radius * req.radius;
+  // The shape's definition, shared with the worker and the cursor.
+  const radiusSquared = brushRadiusSquared(req.radius);
   const low = req.thresholdLow;
   const high = req.thresholdHigh;
   const coverage = req.coverageThreshold ?? DEFAULT_COVERAGE_THRESHOLD;
@@ -99,7 +101,7 @@ export function runPaintPipelineTS(req: PaintPipelineRequest): Uint8Array {
         const ay = pts[2 * k + 1];
         const bx = nPoints > 1 ? pts[2 * k + 2] : ax;
         const by = nPoints > 1 ? pts[2 * k + 3] : ay;
-        if (segmentDistanceSq(vx, vy, ax, ay, bx, by) <= r2) {
+        if (segmentDistanceSq(vx, vy, ax, ay, bx, by) <= radiusSquared) {
           inShape = true;
           break;
         }

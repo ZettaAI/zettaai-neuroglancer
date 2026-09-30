@@ -28,6 +28,7 @@ import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
 } from "#src/coordinate_transform.js";
+
 import { getDefaultCredentialsManager } from "#src/credentials_provider/default_manager.js";
 import type { CredentialsManager } from "#src/credentials_provider/index.js";
 import { SharedCredentialsManager } from "#src/credentials_provider/shared.js";
@@ -50,6 +51,7 @@ import {
   makeZExtrapPanel,
 } from "#src/editing/ui/interop/tool_panel_mounts.js";
 import { EditingTopbar } from "#src/editing/ui/topbar/editing_topbar.js";
+import { installUnsavedEditsUnloadGuard } from "#src/editing/unsaved_edits_unload_guard.js";
 import {
   HelpPanelState,
   InputEventBindingHelpDialog,
@@ -95,6 +97,8 @@ import {
   observeWatchable,
   TrackableValue,
 } from "#src/trackable_value.js";
+import { CommandCatalog } from "#src/ui/command_catalog.js";
+import { CommandRegistry } from "#src/ui/command_registry.js";
 import {
   LayerArchiveCountWidget,
   LayerListPanel,
@@ -114,11 +118,13 @@ import {
   MultiToolPaletteManager,
   MultiToolPaletteState,
 } from "#src/ui/tool_palette.js";
+import { encodeStateAsFragment } from "#src/ui/url_hash_binding.js";
 import {
   ViewerSettingsPanel,
   ViewerSettingsPanelState,
 } from "#src/ui/viewer_settings.js";
 import { AutomaticallyFocusedElement } from "#src/util/automatic_focus.js";
+import { setClipboard } from "#src/util/clipboard.js";
 import { TrackableRGB } from "#src/util/color.js";
 import type { Borrowed, Owned } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
@@ -129,7 +135,9 @@ import { vec3 } from "#src/util/geom.js";
 import {
   parseFixedLengthArray,
   verifyFinitePositiveFloat,
+  verifyNonnegativeInt,
   verifyObject,
+  verifyOptionalBoolean,
   verifyOptionalObjectProperty,
   verifyString,
 } from "#src/util/json.js";
@@ -150,6 +158,7 @@ import type {
 import { WatchableVisibilityPriority } from "#src/visibility_priority/frontend.js";
 import { AnnotationToolStatusWidget } from "#src/widget/annotation_tool_status.js";
 import { CheckboxIcon } from "#src/widget/checkbox_icon.js";
+import { makeCopyUrlButton } from "#src/widget/copy_button.js";
 import { makeIcon } from "#src/widget/icon.js";
 import {
   MousePositionWidget,
@@ -184,6 +193,7 @@ export const VIEWER_TOP_ROW_CONFIG_OPTIONS = [
   "showLayerSidePanelButton",
   "showLocation",
   "showAnnotationToolStatus",
+  "showCopyUrlButton",
 ] as const;
 
 export const VIEWER_UI_CONTROL_CONFIG_OPTIONS = [
@@ -197,20 +207,30 @@ export const VIEWER_UI_CONFIG_OPTIONS = [
   "showTopBar",
   "showUIControls",
   "showPanelBorders",
+  "showAllDimensionPlotBounds",
+  "pickRadius",
 ] as const;
 
-export type ViewerUIOptions = {
-  [Key in (typeof VIEWER_UI_CONFIG_OPTIONS)[number]]: boolean;
+export type ViewerUIConfiguration = {
+  [Key in (typeof VIEWER_UI_CONFIG_OPTIONS)[number]]: Key extends "pickRadius"
+    ? TrackableValue<number>
+    : TrackableBoolean;
 };
 
-export type ViewerUIConfiguration = {
-  [Key in (typeof VIEWER_UI_CONFIG_OPTIONS)[number]]: TrackableBoolean;
+export type ViewerUIOptions = {
+  [Key in keyof ViewerUIConfiguration]: ViewerUIConfiguration[Key]["value"];
 };
 
 export function makeViewerUIConfiguration(): ViewerUIConfiguration {
-  return Object.fromEntries(
-    VIEWER_UI_CONFIG_OPTIONS.map((key) => [key, new TrackableBoolean(true)]),
-  ) as ViewerUIConfiguration;
+  const config = {} as ViewerUIConfiguration;
+  for (const key of VIEWER_UI_CONFIG_OPTIONS) {
+    if (key === "pickRadius") {
+      (config as any)[key] = new TrackableValue(5, verifyNonnegativeInt);
+    } else {
+      (config as any)[key] = new TrackableBoolean(true);
+    }
+  }
+  return config;
 }
 
 function setViewerUiConfiguration(
@@ -245,6 +265,40 @@ const defaultViewerOptions =
         showLayerDialog: true,
         resetStateWhenEmpty: true,
       };
+
+/**
+ * User overrides for the visibility of individual UI controls, persisted in the
+ * viewer state under the `uiControlVisibility` key.
+ *
+ * Each member is tri-state: `undefined` means "follow the embedder's
+ * `ViewerUIConfiguration` value", and `true`/`false` is an explicit user
+ * choice. The embedder's configuration still wins when it hides a control, so
+ * an override may hide a control the configuration permits but can never
+ * reveal one the configuration disallows.
+ *
+ * Additional `VIEWER_UI_CONTROL_CONFIG_OPTIONS` members belong here as they
+ * become user-toggleable, rather than as new top level state keys.
+ */
+class TrackableUiControlVisibility extends CompoundTrackable {
+  showLayerPanel = new TrackableValue<boolean | undefined>(
+    undefined,
+    verifyOptionalBoolean,
+  );
+
+  constructor() {
+    super();
+    this.add("showLayerPanel", this.showLayerPanel);
+  }
+
+  toJSON(): any {
+    const result = super.toJSON();
+    for (const key in result) {
+      if (result[key] !== undefined) return result;
+    }
+    // Omit the section rather than emitting an empty object in every state.
+    return undefined;
+  }
+}
 
 class TrackableViewerState extends CompoundTrackable {
   constructor(public viewer: Borrowed<Viewer>) {
@@ -305,6 +359,7 @@ class TrackableViewerState extends CompoundTrackable {
     this.add("editSession", viewer.editSessionHost.state);
     this.add("editPreferences", viewer.editSessionHost.editPreferences);
     this.add("alignmentLink", viewer.alignmentLink.state);
+    this.add("uiControlVisibility", viewer.uiControlVisibilityState);
   }
 
   restoreState(obj: any) {
@@ -372,9 +427,15 @@ class TrackableViewerState extends CompoundTrackable {
       viewer.perspectiveViewBackgroundColor,
     );
   }
+
+  reset() {
+    super.reset();
+    this.viewer.sidePanelManager.reset();
+  }
 }
 
 export class Viewer extends RefCounted implements ViewerState {
+  stateUpgrader = (state: any) => state;
   title = new TrackableValue<string | undefined>(undefined, verifyString);
   coordinateSpace = new TrackableCoordinateSpace();
   position = this.registerDisposer(new Position(this.coordinateSpace));
@@ -464,6 +525,9 @@ export class Viewer extends RefCounted implements ViewerState {
   partialViewport = new TrackableWindowedViewport();
   statisticsDisplayState = new StatisticsDisplayState();
   helpPanelState = new HelpPanelState();
+  uiControlVisibilityState = this.registerDisposer(
+    new TrackableUiControlVisibility(),
+  );
   settingsPanelState = new ViewerSettingsPanelState();
   layerSelectedValues = this.registerDisposer(
     new LayerSelectedValues(this.layerManager, this.mouseState),
@@ -502,8 +566,17 @@ export class Viewer extends RefCounted implements ViewerState {
   dataSourceProvider: Borrowed<DataSourceRegistry>;
 
   uiConfiguration: ViewerUIConfiguration;
+  /** Effective layer panel visibility: the configuration and the user override combined. */
+  effectiveShowLayerPanel: WatchableValueInterface<boolean>;
+  /**
+   * Reads `effectiveShowLayerPanel` and writes the user override, for the
+   * toggle in the layer list panel.
+   */
+  layerPanelVisibility: WatchableValueInterface<boolean>;
 
-  private makeUiControlVisibilityState(key: keyof ViewerUIOptions) {
+  private makeUiControlVisibilityState(
+    key: (typeof VIEWER_UI_CONTROL_CONFIG_OPTIONS)[number],
+  ) {
     const showUIControls = this.uiConfiguration.showUIControls;
     const showTopBar = this.uiConfiguration.showTopBar;
     const option = this.uiConfiguration[key];
@@ -600,6 +673,31 @@ export class Viewer extends RefCounted implements ViewerState {
     for (const key of VIEWER_UI_CONTROL_CONFIG_OPTIONS) {
       this.uiControlVisibility[key] = this.makeUiControlVisibilityState(key);
     }
+
+    // Layer the user override on top of `uiControlVisibility.showLayerPanel`,
+    // not on `uiConfiguration.showLayerPanel`: the former also accounts for
+    // `showUIControls`, which `Viewer.screenshot` turns off to capture the data
+    // panels alone. The override may hide the panel within what the
+    // configuration permits, but can never reveal one it disallows.
+    this.effectiveShowLayerPanel = this.registerDisposer(
+      makeDerivedWatchableValue(
+        (configEnabled: boolean, override: boolean | undefined) =>
+          configEnabled && (override ?? true),
+        this.uiControlVisibility.showLayerPanel,
+        this.uiControlVisibilityState.showLayerPanel,
+      ),
+    );
+    const { effectiveShowLayerPanel } = this;
+    const showLayerPanelOverride = this.uiControlVisibilityState.showLayerPanel;
+    this.layerPanelVisibility = {
+      get value() {
+        return effectiveShowLayerPanel.value;
+      },
+      set value(newValue: boolean) {
+        showLayerPanelOverride.value = newValue;
+      },
+      changed: effectiveShowLayerPanel.changed,
+    };
     this.registerDisposer(
       this.uiConfiguration.showPanelBorders.changed.add(() => {
         this.updateShowBorders();
@@ -624,10 +722,9 @@ export class Viewer extends RefCounted implements ViewerState {
     // `chunkManager`, and `display.gl` are all available.
     this.editSessionHost = this.registerDisposer(new EditSessionHost(this));
     // Publish the host through a dedicated `editSessionHost` extension
-    // point on `TopLevelLayerListSpecification` so per-layer UI
-    // (data-source widgets in `layer_data_sources_tab.ts`) can consult
-    // `host.sessionLock.isLayerDataSourceLocked(...)` without taking a
-    // direct Viewer dependency.
+    // point on `TopLevelLayerListSpecification` so per-layer UI (data-source
+    // widgets, and the controls that delete, rename or retype a layer) can
+    // consult `host.sessionLock` without taking a direct Viewer dependency.
     this.layerSpecification.editSessionHost = this.editSessionHost;
 
     this.alignmentLink = this.registerDisposer(new AlignmentLinkSession(this));
@@ -747,6 +844,7 @@ export class Viewer extends RefCounted implements ViewerState {
         {
           velocity: this.velocity,
           getToolBinder: () => this.toolBinder,
+          showAllPlotBounds: this.uiConfiguration.showAllDimensionPlotBounds,
         },
       ),
     );
@@ -923,7 +1021,27 @@ export class Viewer extends RefCounted implements ViewerState {
       );
       topRow.appendChild(button);
     }
-
+    {
+      const button = makeCopyUrlButton({
+        title: "Copy URL to clipboard",
+        onClick: () => {
+          const stateString = encodeStateAsFragment(this.state.toJSON());
+          const url = new URL(window.location.href);
+          url.hash = "#!" + stateString;
+          const result = setClipboard(url.href);
+          StatusMessage.showTemporaryMessage(
+            result ? "URL copied to clipboard" : "Failed to copy URL",
+          );
+        },
+      });
+      this.registerDisposer(
+        new ElementVisibilityFromTrackableBoolean(
+          this.uiControlVisibility.showCopyUrlButton,
+          button,
+        ),
+      );
+      topRow.appendChild(button);
+    }
     {
       const { helpPanelState } = this;
       const button = this.registerDisposer(
@@ -986,43 +1104,25 @@ export class Viewer extends RefCounted implements ViewerState {
       const editingTopbarRightSpacer = document.createElement("div");
       editingTopbarRightSpacer.style.flex = "1 1 0";
       editingTopbarRightSpacer.style.minWidth = "0";
-      // The trailing controls (Save all / tools / Undo-Redo) are rendered
-      // as absolutely-positioned children of `.neuroglancer-editing-topbar`
-      // so they overlay this spacer without contributing to the topbar's
-      // flex width — which keeps the Edit / Exit button's X coordinate
-      // constant between idle and active states. `pointer-events: none`
-      // here so those overlaid controls remain clickable.
+      // The trailing controls (Save all / tools / Undo-Redo) render after the
+      // Edit / Exit button inside `.neuroglancer-editing-topbar`, whose flex
+      // width does not depend on its content, so they can overflow over this
+      // spacer without moving the Edit / Exit button's X coordinate.
+      // `pointer-events: none` here so those overflowing controls remain
+      // clickable.
       editingTopbarRightSpacer.style.pointerEvents = "none";
       const anchor = mousePositionWidget.element.nextSibling;
       topRow.insertBefore(topbarMount, anchor);
       topRow.insertBefore(editingTopbarRightSpacer, anchor);
     }
 
-    {
-      // beforeunload guard: warn the user if they navigate away while
-      // there are in-memory committed patches that have not been saved
-      // to the backend. Modern browsers ignore the custom message and
-      // show their own generic prompt; setting `returnValue` is what
-      // actually triggers it.
-      const handleBeforeUnload = (ev: BeforeUnloadEvent) => {
-        // Warn on in-memory committed patches OR saves that were sent but not
-        // yet confirmed durable by read-back (TM-352) — the user must not lose
-        // unconfirmed work by leaving.
-        if (
-          !this.editSessionHost.hasPendingCommittedChanges() &&
-          !this.editSessionHost.hasUnconfirmedSaves()
-        ) {
-          return;
-        }
-        ev.preventDefault();
-        ev.returnValue =
-          "You have edits that are not confirmed saved. They may be lost if you leave.";
-      };
-      window.addEventListener("beforeunload", handleBeforeUnload);
-      this.registerDisposer(() =>
-        window.removeEventListener("beforeunload", handleBeforeUnload),
-      );
-    }
+    // beforeunload guard: warn the user if they navigate away while there are
+    // edits that are not confirmed saved to the backend: unsaved strokes in the
+    // open session, in-memory committed patches, OR saves that were sent but
+    // not yet confirmed durable by read-back (TM-352).
+    this.registerDisposer(
+      installUnsavedEditsUnloadGuard(window, this.editSessionHost),
+    );
 
     this.registerDisposer(
       new ElementVisibilityFromTrackableBoolean(
@@ -1053,6 +1153,8 @@ export class Viewer extends RefCounted implements ViewerState {
             this.sidePanelManager,
             this.layerSpecification,
             this.layerListPanelState,
+            this.layerPanelVisibility,
+            this.uiControlVisibility.showLayerPanel,
           ),
       }),
     );
@@ -1297,6 +1399,12 @@ export class Viewer extends RefCounted implements ViewerState {
       this.showPerspectiveSliceViews.toggle(),
     );
     this.bindAction("toggle-show-statistics", () => this.showStatistics());
+
+    this.bindAction("deactivate-active-tool", () =>
+      this.globalToolBinder.deactivate(),
+    );
+    this.bindAction("edit-json-state", () => this.editJsonState());
+    this.bindAction("screenshot", () => this.showScreenshotDialog());
   }
 
   toggleHelpPanel() {
@@ -1327,6 +1435,20 @@ export class Viewer extends RefCounted implements ViewerState {
   public globalToolBinder = this.registerDisposer(
     new GlobalToolBinder(this.toolInputEventMapBinder, this.toolPalettes),
   );
+
+  // Binding-independent registry of the viewer's commands. Populated with the
+  // built-in commands during default viewer setup; feature code and embedding
+  // applications may register additional commands against it. It lists the
+  // commands it was told about, not every action that exists - see
+  // docs/concepts/commands.rst.
+  public commandRegistry = this.registerDisposer(new CommandRegistry());
+  private commandCatalog_: CommandCatalog | undefined;
+
+  get commandCatalog(): CommandCatalog {
+    return (this.commandCatalog_ ??= this.registerDisposer(
+      new CommandCatalog(this),
+    ));
+  }
 
   public toolBinder = this.registerDisposer(
     new LocalToolBinder(this, this.globalToolBinder),

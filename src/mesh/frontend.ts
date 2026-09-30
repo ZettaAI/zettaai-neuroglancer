@@ -51,15 +51,17 @@ import type { SegmentationDisplayState3D } from "#src/segmentation_display_state
 import {
   forEachVisibleSegmentToDraw,
   getObjectColor,
+  ghostSegmentDither,
   registerRedrawWhenSegmentationDisplayState3DChanged,
   SegmentationLayerSharedObject,
 } from "#src/segmentation_display_state/frontend.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { makeCachedDerivedWatchableValue } from "#src/trackable_value.js";
+import type { Uint64Map } from "#src/uint64_map.js";
 import type { Borrowed, RefCounted } from "#src/util/disposable.js";
-import type { vec4 } from "#src/util/geom.js";
 import {
-  getFrustrumPlanes,
+  vec4,
+  getFrustumPlanes,
   mat3,
   mat3FromMat4,
   mat4,
@@ -76,6 +78,39 @@ import { registerSharedObjectOwner } from "#src/worker_rpc.js";
 
 const tempMat4 = mat4.create();
 const tempMat3 = mat3.create();
+const tempGhostColor = vec4.create();
+
+// Non-null only while a caller marks segments with alpha-carrying temp colors
+// (calcada trace mode); see ghostSegmentDither for why 3D dithers rather than
+// blends them.
+function ghostSegmentSource(
+  displayState: SegmentationDisplayState3D,
+  renderContext: PerspectiveViewRenderContext,
+) {
+  return renderContext.emitColor &&
+    displayState.useTempSegmentStatedColors2d.value &&
+    displayState.honorTempStatedColorAlpha.value
+    ? displayState.tempSegmentStatedColors2d.value
+    : undefined;
+}
+
+// Applies the ghost treatment to one object: full-brightness color plus the
+// dither fraction that makes it see-through, or the object's ordinary color
+// and no dithering.
+function applyGhostColor(
+  gl: GL,
+  shader: ShaderProgram,
+  meshShaderManager: MeshShaderManager,
+  ghostSegments: Uint64Map,
+  objectId: bigint,
+  color: vec4,
+) {
+  const packed = ghostSegments.get(objectId);
+  const dither =
+    packed === undefined ? 1 : ghostSegmentDither(packed, tempGhostColor);
+  meshShaderManager.setColor(gl, shader, dither < 1 ? tempGhostColor : color);
+  meshShaderManager.setDitherAlpha(gl, shader, dither);
+}
 
 // To validate the octrees and to determine the multiscale fragment responsible for each framebuffer
 // location, set `DEBUG_MULTISCALE_FRAGMENTS=true` and also set `DEBUG_PICKING=true` in
@@ -264,10 +299,15 @@ export class MeshShaderManager {
     if (silhouetteRendering > 0) {
       gl.uniform1f(shader.uniform("uSilhouettePower"), silhouetteRendering);
     }
+    gl.uniform1f(shader.uniform("uDitherAlpha"), 1);
   }
 
   setColor(gl: GL, shader: ShaderProgram, color: vec4) {
     gl.uniform4fv(shader.uniform("uColor"), color);
+  }
+
+  setDitherAlpha(gl: GL, shader: ShaderProgram, alpha: number) {
+    gl.uniform1f(shader.uniform("uDitherAlpha"), alpha);
   }
 
   setPickID(gl: GL, shader: ShaderProgram, pickID: number) {
@@ -368,6 +408,7 @@ export class MeshShaderManager {
         builder.addUniform("highp mat3", "uNormalMatrix");
         builder.addUniform("highp mat4", "uModelViewProjection");
         builder.addUniform("highp uint", "uPickID");
+        builder.addUniform("highp float", "uDitherAlpha");
         if (silhouetteRenderingEnabled) {
           builder.addUniform("highp float", "uSilhouettePower");
         }
@@ -402,7 +443,28 @@ vColor *= pow(1.0 - absCosAngle, uSilhouettePower);
 `;
         }
         builder.setVertexMain(vertexMain);
-        builder.setFragmentMain("emit(vColor, uPickID);");
+        // Screen-door transparency for segments a caller marked translucent
+        // (see ghostSegmentDither): an ordered 4x4 pattern keeps uDitherAlpha
+        // of the pixels and drops the rest, which reads as see-through while
+        // the layer stays in the opaque, depth-sorted pass. uDitherAlpha is 1
+        // for every ordinary segment, and the highest threshold is below 1, so
+        // nothing is ever discarded then.
+        builder.addFragmentCode(`
+const float ditherPattern[16] = float[16](
+   0.0,  8.0,  2.0, 10.0,
+  12.0,  4.0, 14.0,  6.0,
+   3.0, 11.0,  1.0,  9.0,
+  15.0,  7.0, 13.0,  5.0);
+float ditherThreshold() {
+  int x = int(mod(gl_FragCoord.x, 4.0));
+  int y = int(mod(gl_FragCoord.y, 4.0));
+  return (ditherPattern[y * 4 + x] + 0.5) / 16.0;
+}
+`);
+        builder.setFragmentMain(`
+if (uDitherAlpha < ditherThreshold()) discard;
+emit(vColor, uPickID);
+`);
       },
     });
   }
@@ -411,6 +473,8 @@ vColor *= pow(1.0 - absCosAngle, uSilhouettePower);
 export interface MeshDisplayState extends SegmentationDisplayState3D {
   silhouetteRendering: WatchableValueInterface<number>;
 }
+
+const tempStatedColor = vec4.create();
 
 export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRenderLayerAttachmentState> {
   protected meshShaderManager;
@@ -516,6 +580,7 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
       renderContext.emitColor &&
       displayState.highlightColor.value !== undefined &&
       this.source.colorFragmentsBySegment;
+    const ghostSegments = ghostSegmentSource(displayState, renderContext);
     forEachVisibleSegmentToDraw(
       displayState,
       this,
@@ -525,10 +590,27 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
         const key = getObjectKey(objectId);
         const manifestChunk = manifestChunks.get(key);
         ++totalChunks;
-        if (manifestChunk === undefined) return;
+        // An empty manifest is not an answer either: a source can return one
+        // while it is still generating the object's mesh.
+        const fragmentIds = manifestChunk?.fragmentIds.length
+          ? manifestChunk.fragmentIds
+          : (this.source.provisionalFragmentIds(key) ??
+            manifestChunk?.fragmentIds);
+        if (fragmentIds === undefined) return;
         ++presentChunks;
         if (renderContext.emitColor && !colorFragments) {
-          meshShaderManager.setColor(gl, shader, color!);
+          if (ghostSegments !== undefined) {
+            applyGhostColor(
+              gl,
+              shader,
+              meshShaderManager,
+              ghostSegments,
+              objectId,
+              color!,
+            );
+          } else {
+            meshShaderManager.setColor(gl, shader, color!);
+          }
         }
         // Per-fragment picking (opt-in): assign a pick id per fragment so a 3D
         // pick resolves to the fragment's segment (e.g. supervoxel) instead of
@@ -538,9 +620,9 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
         if (renderContext.emitPickID && !pickFragments) {
           meshShaderManager.setPickID(gl, shader, pickIndex!);
         }
-        totalChunks += manifestChunk.fragmentIds.length;
+        totalChunks += fragmentIds.length;
 
-        for (const fragmentId of manifestChunk.fragmentIds) {
+        for (const fragmentId of fragmentIds) {
           const { key: fragmentKey } = this.source.getFragmentKey(
             key,
             fragmentId,
@@ -554,12 +636,45 @@ export class MeshLayer extends PerspectiveViewRenderLayer<ThreeDimensionalRender
               pickFragments || colorFragments
                 ? this.source.getFragmentPickId(fragmentId) || objectId
                 : objectId;
+            if (
+              colorFragments &&
+              this.source.hiddenFragmentSegments.size !== 0 &&
+              this.source.hiddenFragmentSegments.has(fragmentSegment)
+            ) {
+              continue;
+            }
             if (colorFragments) {
-              meshShaderManager.setColor(
-                gl,
-                shader,
-                getObjectColor(displayState, fragmentSegment, objectAlpha),
+              const unstated =
+                displayState.unstatedFragmentsUseSegmentColor.value &&
+                !displayState.tempSegmentStatedColors2d.value.has(
+                  fragmentSegment,
+                );
+              let fragmentColor = getObjectColor(
+                displayState,
+                unstated ? objectId : fragmentSegment,
+                objectAlpha,
               );
+              // Piece-view tools tint pieces via the temporary stated colors;
+              // the 2D renderer honours them, so the mesh must too or the same
+              // piece shows one colour in 2D and a hash colour in 3D. Packed
+              // layout is (a<<24)|(b<<16)|(g<<8)|r, premultiplied like
+              // getObjectColor's output.
+              if (displayState.useTempSegmentStatedColors2d.value) {
+                const packed =
+                  displayState.tempSegmentStatedColors2d.value.get(
+                    fragmentSegment,
+                  );
+                if (packed !== undefined) {
+                  const c = Number(packed);
+                  tempStatedColor[0] = ((c & 0xff) / 255) * objectAlpha;
+                  tempStatedColor[1] = (((c >>> 8) & 0xff) / 255) * objectAlpha;
+                  tempStatedColor[2] =
+                    (((c >>> 16) & 0xff) / 255) * objectAlpha;
+                  tempStatedColor[3] = objectAlpha;
+                  fragmentColor = tempStatedColor;
+                }
+              }
+              meshShaderManager.setColor(gl, shader, fragmentColor);
             }
             if (pickFragments) {
               meshShaderManager.setPickID(
@@ -756,6 +871,15 @@ export class MeshSource extends ChunkSource {
     return { key: `${objectKey}/${fragmentId}`, fragmentId: fragmentId };
   }
 
+  // Fragments to draw for an object whose manifest has not arrived yet. A source
+  // that already knows an object's contents — an edit's response names the
+  // pieces of the root it created — can answer here, so the object is drawn
+  // from fragments already on the GPU instead of vanishing until its manifest
+  // round-trips. Default: none, the object waits for its manifest as before.
+  provisionalFragmentIds(_objectKey: string): string[] | undefined {
+    return undefined;
+  }
+
   // Per-fragment picking opt-in. When true, MeshLayer.draw assigns a distinct
   // pick id per mesh fragment (resolved via getFragmentPickId) instead of one
   // per object, so a 3D mesh pick selects the underlying fragment's segment
@@ -782,6 +906,13 @@ export class MeshSource extends ChunkSource {
   get colorFragmentsBySegment(): boolean {
     return false;
   }
+
+  // Fragment segments a split tool asked to hide while the piece view is
+  // active: thin connections often run INSIDE a neighbouring piece's mesh, so
+  // hiding chosen pieces is the only way to see them. Mutated in place by the
+  // tool; draw skips these fragments only when per-fragment colouring is on,
+  // so normal rendering is never affected.
+  readonly hiddenFragmentSegments = new Set<bigint>();
 }
 
 @registerSharedObjectOwner(FRAGMENT_SOURCE_RPC_ID)
@@ -923,7 +1054,7 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
       modelMatrix,
     );
 
-    const clippingPlanes = getFrustrumPlanes(
+    const clippingPlanes = getFrustumPlanes(
       new Float32Array(24),
       modelViewProjection,
     );
@@ -935,6 +1066,7 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
 
     let totalManifestChunks = 0;
     let presentManifestChunks = 0;
+    const ghostSegments = ghostSegmentSource(displayState, renderContext);
 
     forEachVisibleSegmentToDraw(
       displayState,
@@ -958,7 +1090,18 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
           }
         }
         if (renderContext.emitColor) {
-          meshShaderManager.setColor(gl, shader, color!);
+          if (ghostSegments !== undefined) {
+            applyGhostColor(
+              gl,
+              shader,
+              meshShaderManager,
+              ghostSegments,
+              objectId,
+              color!,
+            );
+          } else {
+            meshShaderManager.setColor(gl, shader, color!);
+          }
         }
         if (renderContext.emitPickID) {
           meshShaderManager.setPickID(gl, shader, pickIndex!);
@@ -1083,7 +1226,7 @@ export class MultiscaleMeshLayer extends PerspectiveViewRenderLayer<ThreeDimensi
       modelMatrix,
     );
 
-    const clippingPlanes = getFrustrumPlanes(
+    const clippingPlanes = getFrustumPlanes(
       new Float32Array(24),
       modelViewProjection,
     );

@@ -22,12 +22,15 @@
 
 import type {
   BoundingBoxVoxels,
+  ChunkSubregion,
+  ChunkVoxelBuffer,
   CommitResult,
   EditSessionAdapters,
   EditSessionConfig,
   LayerId,
   LayerMetadata,
   LayerSelection,
+  ReadonlyChunkVoxelBuffer,
   Resolution as ResolutionType,
   SaveResult,
   SavePayload,
@@ -41,6 +44,7 @@ import {
   InvalidSessionConfigError,
   OverlayKey,
   Resolution,
+  scaleFor,
   SessionPhaseViolationError,
   layerId as toLayerId,
   sessionId as toSessionId,
@@ -96,6 +100,9 @@ import {
   FillCursorProgress,
   type FillProgressState,
 } from "#src/editing/cursor/fill_cursor_progress.js";
+import type { DraftReason, EditDraft } from "#src/editing/draft/edit_draft.js";
+import { draftIdForRegion } from "#src/editing/draft/edit_draft.js";
+import { EditDraftStore } from "#src/editing/draft/edit_draft_store.js";
 import { IdleEditHotkeyBinder } from "#src/editing/idle_edit_hotkey_binder.js";
 import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // PatchMirror is created by step 9 of Phase 1; this file's runtime import
@@ -112,13 +119,35 @@ import "#src/editing/benchmarks/edit_paint_bench.js";
 import { PointerEventBridge } from "#src/editing/pointer_event_bridge.js";
 import { QuickRegionCapture } from "#src/editing/quick_region_capture.js";
 import {
+  mustReloadFromRemote,
+  reloadedOwnedRegion,
+} from "#src/editing/reconcile/owned_region_reload.js";
+import type { SaveConflictPolicy } from "#src/editing/reconcile/save_conflict_refusal.js";
+import {
+  refusesSave,
+  SaveConflictError,
+} from "#src/editing/reconcile/save_conflict_refusal.js";
+import type {
+  RemoteBaselineReaders,
+  StaleBaselineScan,
+} from "#src/editing/reconcile/stale_baseline_scan.js";
+import { scanForStaleBaselines } from "#src/editing/reconcile/stale_baseline_scan.js";
+import { mergeOwnedRegion } from "#src/editing/reconcile/three_way_merge.js";
+import {
   checkLayerCompat,
   regionResolution,
   regionVoxelSizeNm,
 } from "#src/editing/region/edit_target_compat.js";
+import type {
+  ChunkOwnedGeometry,
+  OwnedChunkWrite,
+} from "#src/editing/region/owned_chunk_write.js";
+import { planOwnedWrite } from "#src/editing/region/owned_chunk_write.js";
 import { voxelCenterInBox } from "#src/editing/region/region_geometry.js";
 import { EditRegionPerspectiveOverlay } from "#src/editing/region/region_perspective_overlay.js";
 import { EditRegionSliceOverlay } from "#src/editing/region/region_slice_overlay.js";
+import type { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
+import { captureSessionRegions } from "#src/editing/region/session_region_snapshot.js";
 import { EditSessionHotkeyBinder } from "#src/editing/session_hotkey_binder.js";
 import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
@@ -401,6 +430,55 @@ export interface ActiveRegion {
   readonly hi: readonly [number, number, number];
 }
 
+/** What {@link EditSessionHost.mergeConflicts} did, chunk by chunk. */
+export interface MergeConflictsOutcome {
+  /** Chunks combined: every local edit in them survived. */
+  readonly mergedChunks: number;
+  /**
+   * Chunks given back to the remote because both sides changed the same
+   * voxels. The local edits in them were DROPPED. Non-zero is what makes
+   * "some of your changes were discarded" true, so it is what the save has to
+   * tell the user about afterwards.
+   */
+  readonly reloadedChunks: number;
+  /** Voxels taken from the remote across merged chunks — their work, kept. */
+  readonly acceptedFromRemote: number;
+  /**
+   * Voxels both sides changed differently, across reloaded chunks. The finer
+   * measure behind {@link reloadedChunks}: how small a collision was enough
+   * to cost a whole chunk's work.
+   */
+  readonly unresolved: number;
+}
+
+/** What {@link EditSessionHost.reloadConflictedChunks} replaced. */
+export interface ReloadConflictedOutcome {
+  /** Chunks whose local edits were dropped for the remote's bytes. */
+  readonly reloadedChunks: number;
+  /**
+   * Chunks the remote could not be read for. Their local edits are untouched,
+   * so they are still dirty and still unproven — the save that follows has to
+   * scan rather than assume.
+   */
+  readonly unreadableChunks: number;
+}
+
+/** The owned box as a chunk-local subregion, for `commitWrites`. */
+function ownedSubregion(owned: ChunkOwnedGeometry): ChunkSubregion {
+  const origin = [0, 1, 2].map(
+    (axis) => owned.ownedBox.start[axis] - owned.chunkBox.start[axis],
+  ) as [number, number, number];
+  const size = [0, 1, 2].map(
+    (axis) => owned.ownedBox.end[axis] - owned.ownedBox.start[axis],
+  ) as [number, number, number];
+  return { origin, size };
+}
+
+/** A writable byte view over a chunk slot's buffer, whatever its voxel type. */
+function asWritableBytes(buffer: ChunkVoxelBuffer): Uint8Array {
+  return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+}
+
 /**
  * Progress of the save+verify pipeline (TM-352). See
  * {@link EditSessionHost.saveProgress}.
@@ -441,11 +519,50 @@ const VERIFY_BACKOFF_MS: readonly number[] = [
 ];
 
 /**
+ * Read-backs in flight at once during save verification (TM-455). Each is one
+ * `promiseInvoke` for a distinct chunk — the RPC layer is built for many
+ * concurrent chunk requests — and they go to the storage origin, not the
+ * backend the upload POSTs hit, so the two phases never contend. Matched to
+ * `SAVE_UPLOAD_CONCURRENCY`, which the same reasoning sizes.
+ */
+const VERIFY_CONCURRENCY = 5;
+
+/**
+ * Stands in for a layer whose committed chunks were painted under more than one
+ * edit session, so no single region describes them. Saving such a layer is
+ * refused rather than clipped to whichever session committed last.
+ */
+const REGION_SPANS_SESSIONS = Symbol("committed-region-spans-sessions");
+
+/**
+ * A cheap value that changes whenever the session's dirty set does.
+ *
+ * `DirtyTracker` bumps a per-layer counter on every `markChunkDirty` /
+ * `markChunkRestoredToBaseline`, so comparing this across a window detects any
+ * paint, erase or undo that landed inside it — including one that re-dirties a
+ * chunk already in the set, which a size comparison alone would miss.
+ */
+function dirtyFingerprint(session: EditSession): string {
+  const versions = session.config.layers.map((layer) =>
+    session.dirty.getLayerVersion(layer.layerId),
+  );
+  return `${session.dirty.getDirtyChunks().size}:${versions.join(",")}`;
+}
+
+/**
  * Target on-screen brush diameter, in CSS pixels, used to seed the brush size
  * from the current zoom on first paint-tool activation. Chosen to be clearly
  * visible without dominating the slice; the user adjusts from here with `+`/`-`.
  */
 const TARGET_BRUSH_DIAMETER_PX = 28;
+
+/**
+ * Why leaving the edit session is locked, shown on the disabled Exit-session
+ * button when the embedding host calls `EditSessionHost.lockExit()` without a
+ * reason of its own.
+ */
+export const DEFAULT_EXIT_LOCK_REASON =
+  "The app embedding this viewer has locked leaving the edit session.";
 
 // ---------------------------------------------------------------------------
 // EditSessionHost
@@ -590,12 +707,107 @@ export class EditSessionHost extends RefCounted {
   private saveAbortController: AbortController | undefined;
 
   /**
+   * Opened on first use, not at construction: most sessions never take a
+   * draft, and opening IndexedDB throws in contexts (private windows, denied
+   * storage) where the rest of the editor works fine.
+   */
+  private draftStore: EditDraftStore | undefined;
+
+  /**
+   * The active session's edit region as plain numbers, captured at open.
+   *
+   * Deliberately NOT cleared on teardown: `retryUnconfirmedSaves` and
+   * `saveCommitted` both legitimately run after a session ends and still need
+   * the region their chunks were painted under. A snapshot holds no
+   * `EditSession`, so keeping it leaks nothing and cannot answer for a live
+   * session that has since terminated.
+   */
+  private sessionRegions: SessionRegionSnapshot | undefined;
+
+  /**
+   * The region each layer's COMMITTED chunks were painted under.
+   *
+   * `commitTarget` deliberately outlives its session, but `sessionRegions` is
+   * replaced by the next `openSession`. Clipping one task's committed chunks
+   * to a LATER task's region is silent corruption: where the two regions
+   * overlap it uploads the old session's UNPAINTED baseline over the new
+   * task's voxels and never uploads the old task's paint — all on 200s, with
+   * the layer reported saved and its buffer then discarded. So the region
+   * travels with the committed bytes and dies with them.
+   */
+  private readonly committedRegions = new Map<
+    LayerId,
+    SessionRegionSnapshot | typeof REGION_SPANS_SESSIONS
+  >();
+
+  /**
+   * The region every save clips to. Absent means no session has been opened in
+   * this host, so nothing could legitimately be dirty — failing here beats
+   * writing whole chunks over voxels another task owns.
+   */
+  private requireSessionRegions(): SessionRegionSnapshot {
+    if (this.sessionRegions === undefined) {
+      throw new Error(
+        "No edit region captured: refusing to save without knowing which " +
+          "voxels this task owns",
+      );
+    }
+    return this.sessionRegions;
+  }
+
+  /**
+   * Pair each dirty chunk with the voxels this save owns.
+   *
+   * `NgSaveTarget` plans the library's payload the same way, from the same
+   * region snapshot through the same pure function, so the two derivations
+   * agree chunk for chunk without the host and the library having to hand each
+   * other the same object. Chunks that own nothing are dropped here: they are
+   * not written, so they must not be verified or baselined either.
+   */
+  private async planOwnedWrites(
+    chunks: readonly SavedChunk[],
+  ): Promise<OwnedChunkWrite[]> {
+    const regions = this.requireSessionRegions();
+    // `undefined` records a layer whose metadata could not be resolved, so it
+    // is attempted once rather than once per chunk.
+    const metadataByLayer = new Map<LayerId, LayerMetadata | undefined>();
+    const writes: OwnedChunkWrite[] = [];
+    for (const chunk of chunks) {
+      if (!metadataByLayer.has(chunk.layerId)) {
+        // Per layer, and swallowed deliberately: a layer renamed or removed
+        // mid-session must not abort the save for every OTHER layer. Dropping
+        // its chunks here leaves `NgSaveTarget` to report that layer's own
+        // failed outcome, which is what happened before this pre-pass existed.
+        try {
+          metadataByLayer.set(
+            chunk.layerId,
+            await this.layerMetadataSource.resolve(chunk.layerId),
+          );
+        } catch {
+          metadataByLayer.set(chunk.layerId, undefined);
+        }
+      }
+      const metadata = metadataByLayer.get(chunk.layerId);
+      if (metadata === undefined) continue;
+      const plan = planOwnedWrite(
+        chunk,
+        metadata,
+        scaleFor(metadata, chunk.resolution),
+        regions.boundsFor(chunk.layerId, chunk.resolution),
+      );
+      if ("write" in plan) writes.push(plan.write);
+    }
+    return writes;
+  }
+
+  /**
    * Reactive flag: whether a save started by `saveActive()` is currently in
    * flight. The topbar's Save button drives its loading state from this, and
    * the Exit-session button disables itself while it is `true` so a save can't
-   * be interrupted by leaving the session. Set `true` for the duration of
-   * `saveActive()` and reset in its `finally` (covers success, failure, and
-   * cancellation alike).
+   * be interrupted by leaving the session. It also disables while
+   * `exitLockReason` is set, and then shows the lock reason instead of the
+   * saving one. Set `true` for the duration of `saveActive()` and reset in its
+   * `finally` (covers success, failure, and cancellation alike).
    */
   readonly saveInProgress = new WatchableValue<boolean>(false);
 
@@ -617,7 +829,7 @@ export class EditSessionHost extends RefCounted {
    * session exit — the user must never leave believing data is saved when it is
    * not — and `retryUnconfirmedSaves()` can re-send them (TM-352).
    */
-  private readonly unconfirmedChunks = new Map<string, SavedChunk>();
+  private readonly unconfirmedChunks = new Map<string, OwnedChunkWrite>();
 
   /** True while any saved chunk is still unconfirmed (in-flight or failed). */
   hasUnconfirmedSaves(): boolean {
@@ -646,7 +858,7 @@ export class EditSessionHost extends RefCounted {
    * saved-baseline snapshot is dropped (TM-352, see
    * {@link reconcileSavedChunksWithBackend}). Cleared on teardown.
    */
-  private readonly verifiedSavedChunks = new Map<string, SavedChunk>();
+  private readonly verifiedSavedChunks = new Map<string, OwnedChunkWrite>();
 
   // -- Adapters (constructed once, reused across sessions) ------------------
   readonly logger: NgLogger;
@@ -701,6 +913,20 @@ export class EditSessionHost extends RefCounted {
   readonly backendAuthExpired = new WatchableValue<boolean>(
     isBackendAuthExpired(),
   );
+
+  /**
+   * Why the embedding host (the portal) has locked leaving the edit session
+   * through NG's own UI, or `undefined` while exit is unlocked — the default,
+   * so standalone NG behaves as it always has. While it is set, the topbar
+   * Exit-session button disables itself and shows this text as its tooltip.
+   * Written only through `lockExit()` / `unlockExit()`.
+   *
+   * Host-owned runtime state: NOT part of `state` / `editPreferences`, so it is
+   * never serialized into the ngState URL; NOT reset on session teardown, so it
+   * outlives a discard followed by a re-open; gone on page reload, so the
+   * embedding host re-applies it per document, like `configureBackend()`.
+   */
+  readonly exitLockReason = new WatchableValue<string | undefined>(undefined);
 
   /**
    * Shared HTTP client for the Zetta backend, used by tool compute backends.
@@ -1052,6 +1278,9 @@ export class EditSessionHost extends RefCounted {
       // and the failure handler clears the intent — wiping the URL state
       // we'd just persisted. The user only sees the bug on the next reload.
       this.activeSession.value = session;
+      // Freeze the edit region now, while the session is guaranteed ACTIVE.
+      // Every save clips to this, including the ones that run after exit.
+      this.sessionRegions = captureSessionRegions(session);
       // Fresh session: the brush size will be re-seeded from the zoom on the
       // first paint-tool activation.
       this.brushSizeAutoSized = false;
@@ -1440,6 +1669,40 @@ export class EditSessionHost extends RefCounted {
     let result: CommitResult;
     try {
       result = await session.commit();
+      // Pin the region these chunks were painted under, before any later
+      // `openSession` can replace `sessionRegions`.
+      //
+      // `commitTarget` survives `openSession`, so a layer committed under one
+      // session and committed AGAIN under the next holds chunks from both while
+      // a single region can describe only one of them. Overwriting the pin
+      // there would silently clip the older session's chunks to the newer
+      // session's region — the exact corruption this pinning exists to prevent.
+      // There is no correct single answer, so record the ambiguity and let
+      // `saveCommitted` refuse.
+      //
+      // Only THIS session's layers, though. `pendingLayerIds()` returns every
+      // layer in the store, including ones an earlier session committed and
+      // this one never selected; those keep the pin they already have. Marking
+      // them ambiguous would strand work whose region is known perfectly well,
+      // and the only way out would be `resetLayer`, which discards it.
+      const regions = this.sessionRegions;
+      if (regions !== undefined) {
+        const sessionLayers = new Set(
+          session.config.layers.map((layer) => layer.layerId),
+        );
+        for (const committedLayer of this.commitTarget.pendingLayerIds()) {
+          if (!sessionLayers.has(committedLayer)) continue;
+          const pinned = this.committedRegions.get(committedLayer);
+          const spansSessions =
+            pinned !== undefined &&
+            (pinned === REGION_SPANS_SESSIONS ||
+              pinned.sessionId !== regions.sessionId);
+          this.committedRegions.set(
+            committedLayer,
+            spansSessions ? REGION_SPANS_SESSIONS : regions,
+          );
+        }
+      }
     } finally {
       // Commit = client-side in-memory persist. Keep the painted patches
       // visible on the canvas (they live in the per-layer LocalPatchStore /
@@ -1461,6 +1724,7 @@ export class EditSessionHost extends RefCounted {
   async saveActive(
     layerIds?: readonly LayerId[],
     signal?: AbortSignal,
+    conflictPolicy: SaveConflictPolicy = "refuse",
   ): Promise<SaveResult> {
     const session = this.activeSession.value;
     if (session === undefined) {
@@ -1484,12 +1748,64 @@ export class EditSessionHost extends RefCounted {
       this.saveProgress.value = { kind: "writing" };
       const layerFilter =
         layerIds !== undefined ? new Set<LayerId>(layerIds) : undefined;
-      const snapshot: SavedChunk[] = await collectDirtyChunks(
-        session.overlay,
-        layerFilter,
+      // The host and the library collect the dirty set separately — this
+      // snapshot for verification, `session.save()`'s own for the write — and
+      // the owned box is only guaranteed identical because nothing can mutate
+      // the overlay between them: every mutation source is a macrotask, and
+      // this window awaits only already-resolved promises. That is an
+      // invariant, not a mechanism, so measure it rather than trust it.
+      const dirtyBefore = dirtyFingerprint(session);
+      const snapshot: OwnedChunkWrite[] = await this.planOwnedWrites(
+        await collectDirtyChunks(session.overlay, layerFilter),
       );
-      // 2. Write to the backend.
-      const result = await session.save(layerIds, controller.signal);
+      // 2. Write to the backend. The library builds the payload and calls the
+      //    save target itself, so the region is installed around the call
+      //    rather than passed in; `withSessionRegions` clears it unconditionally.
+      if (dirtyFingerprint(session) !== dirtyBefore) {
+        // Something edited the overlay while the save was being planned, so the
+        // library is about to collect a different set of chunks than the one
+        // verification will check. Refuse rather than report a durability that
+        // was measured against different bytes; the paint stays dirty and the
+        // user can save again.
+        throw new Error(
+          "the edit overlay changed while the save was being prepared: " +
+            "refusing to verify a save against a different set of chunks",
+        );
+      }
+      // 2a. Refuse to clobber work that landed after this session read the
+      //     region. Runs on the same `snapshot` the write and the verifier
+      //     use, so the owned sub-box compared is the one written — and before
+      //     `session.save()`, because a refused save must leave the overlay,
+      //     dirty flags and undo history untouched.
+      //
+      //     This is REAL NETWORK I/O inside the window property 2 of
+      //     `owned_chunk_write.ts` requires to stay microtask-only, which is
+      //     why the fingerprint is re-checked below rather than only above.
+      //     The check above cannot cover this: it ran before the scan existed.
+      if (conflictPolicy === "refuse") {
+        const scan = await scanForStaleBaselines(
+          snapshot,
+          this.staleBaselineReaders(session),
+          controller.signal,
+        );
+        if (refusesSave(scan)) throw new SaveConflictError(scan);
+        // The scan takes one fresh read per dirty chunk, so the user has had
+        // seconds in which to keep painting. Anything that landed in that time
+        // is in the overlay but NOT in `snapshot`: the library would collect it
+        // and write it, while this save verifies a different set and never
+        // scanned the new chunks for conflicts at all. Refuse instead — the
+        // paint stays dirty and the next save covers all of it.
+        if (dirtyFingerprint(session) !== dirtyBefore) {
+          throw new Error(
+            "the edit overlay changed while the save was being checked for " +
+              "conflicts: refusing to write chunks that were never checked",
+          );
+        }
+      }
+      const regions = this.requireSessionRegions();
+      const result = await this.saveTarget.withSessionRegions(regions, () =>
+        session.save(layerIds, controller.signal),
+      );
       // 3. Retain the client's own copy of every saved chunk and mark it
       //    unconfirmed until read-back proves it durable. Scope to layers the
       //    write reported as succeeded.
@@ -1520,8 +1836,427 @@ export class EditSessionHost extends RefCounted {
       if (this.saveAbortController === controller) {
         this.saveAbortController = undefined;
         this.saveInProgress.value = false;
+        // A throw before `verifySavedChunks` never reaches the code that
+        // resolves progress, so the topbar would sit on "Still saving your
+        // changes…" forever while the tracker already reported failure.
+        if (this.saveProgress.value.kind === "writing") {
+          this.saveProgress.value = { kind: "idle" };
+        }
       }
     }
+  }
+
+  /**
+   * The id under which this session's unsaved paint is filed.
+   *
+   * Derived from the work, not the session, so a tab that reopens the same
+   * region after a crash computes the same id. Note the bbox is expressed in
+   * the session's chosen resolution, so opening the same physical region at a
+   * different resolution is a different draft — which is the wanted answer,
+   * since the chunks would not line up anyway.
+   */
+  private draftIdForSession(session: EditSession): string {
+    const scopes = session.config.layers.flatMap((layer) =>
+      layer.selectedResolutions.map((resolution) => ({
+        layerId: String(layer.layerId),
+        resolution: String(resolution),
+      })),
+    );
+    const bbox = session.config.region.bbox;
+    return draftIdForRegion(
+      scopes,
+      [bbox[0], bbox[1], bbox[2]],
+      [bbox[3], bbox[4], bbox[5]],
+    );
+  }
+
+  private async drafts(): Promise<EditDraftStore> {
+    this.draftStore ??= await EditDraftStore.open();
+    return this.draftStore;
+  }
+
+  /**
+   * Write this session's unsaved paint somewhere it survives the tab.
+   *
+   * Rejects rather than resolving quietly when storage is unavailable: the
+   * caller is about to do something irreversible on the strength of this, so
+   * "the net is not there" has to reach it.
+   */
+  async snapshotDraft(reason: DraftReason): Promise<EditDraft> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to snapshot");
+    }
+    const dirty = await collectDirtyChunks(session.overlay);
+    const draft: EditDraft = {
+      draftId: this.draftIdForSession(session),
+      savedAt: Date.now(),
+      reason,
+      scopes: session.config.layers.flatMap((layer) =>
+        layer.selectedResolutions.map(
+          (resolution) => `${String(layer.layerId)}|${String(resolution)}`,
+        ),
+      ),
+      chunks: dirty.map((chunk) => ({
+        layerId: String(chunk.layerId),
+        resolution: String(chunk.resolution),
+        voxelSizeNm: Resolution.toVoxelSize(chunk.resolution),
+        chunkId: String(chunk.chunkId),
+        // Copied: the overlay buffer keeps being painted into after this.
+        bytes: new Uint8Array(asWritableBytes(chunk.bytes.asView())),
+      })),
+    };
+    await (await this.drafts()).put(draft);
+    return draft;
+  }
+
+  /** The draft filed for the region this session is editing, if any. */
+  async findDraftForActiveSession(): Promise<EditDraft | undefined> {
+    const session = this.activeSession.value;
+    if (session === undefined) return undefined;
+    return (await this.drafts()).get(this.draftIdForSession(session));
+  }
+
+  /** Discard the draft for this session's region. */
+  async discardDraftForActiveSession(): Promise<void> {
+    const session = this.activeSession.value;
+    if (session === undefined) return;
+    await (await this.drafts()).delete(this.draftIdForSession(session));
+  }
+
+  /**
+   * Paint a draft's chunks back into the active session, as one undo step.
+   *
+   * Goes through the write protocol for the same reason the merge does: bytes
+   * that reach only the backend leave the overlay disagreeing with storage.
+   * Restoring is deliberately a whole-chunk overwrite of the drafted chunks —
+   * the draft IS the state the user wants back, not a delta to reconcile.
+   */
+  async restoreDraft(draft: EditDraft): Promise<number> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to restore into");
+    }
+    const edit = session.beginEdit({
+      description: "Restore unsaved paint",
+      tag: "draft.restore",
+    });
+    let restored = 0;
+    try {
+      for (const chunk of draft.chunks) {
+        const layer = toLayerId(chunk.layerId);
+        const resolution = Resolution.from(chunk.voxelSizeNm);
+        const metadata = await this.layerMetadataSource.resolve(layer);
+        const scale = scaleFor(metadata, resolution);
+        if (scale === undefined) continue;
+        const slot = await edit.beginWrite({
+          layerId: layer,
+          resolution,
+          chunkId: chunk.chunkId,
+        });
+        asWritableBytes(slot.data).set(chunk.bytes);
+        edit.commitWrites(slot, {
+          origin: [0, 0, 0],
+          size: scale.chunkDataSize,
+        });
+        restored++;
+      }
+    } catch (error) {
+      await edit.discard();
+      throw error;
+    }
+    if (restored === 0) await edit.discard();
+    else edit.record();
+    return restored;
+  }
+
+  /**
+   * Fold the remote's changes into the overlay for every chunk a scan found
+   * diverged, as ONE undo step.
+   *
+   * Applied through `session.beginEdit()` rather than written straight to the
+   * backend, and that is the whole design. The library re-baselines a layer it
+   * is told succeeded from the OVERLAY's bytes, so merged bytes that reached
+   * only the backend would leave the overlay holding the un-merged version,
+   * the next save would push it back over the merge, and the merge would be
+   * undone by the act of saving again. Going through the write protocol also
+   * buys undo for free: a merge the user dislikes is Ctrl+Z.
+   *
+   * A chunk both sides changed in the same place cannot be combined at all.
+   * Those are RELOADED instead: the owned box goes back to what storage
+   * holds and the local edits in it are dropped. That is the one case here
+   * that destroys the user's work, which is why the outcome counts it
+   * separately and the caller is expected to say so.
+   *
+   * Nothing durable is advanced to unblock the save that follows — see the
+   * comment in the apply loop for why that was tried and reverted. The save
+   * instead carries a policy scoped to itself alone.
+   *
+   * Chunks the scan could not compare are skipped: with no baseline there is
+   * no third input, so there is nothing to merge them from.
+   */
+  async mergeConflicts(
+    scan: StaleBaselineScan,
+    signal?: AbortSignal,
+  ): Promise<MergeConflictsOutcome> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to merge into");
+    }
+    const readers = this.staleBaselineReaders(session);
+
+    // Every network read happens BEFORE the edit is opened. The session allows
+    // exactly one live `Edit` at a time, so holding one across per-chunk reads
+    // would make any brush stroke during the merge throw `ConcurrentEditError`
+    // — the tool's `beginEdit` would be refused for as long as the reads take.
+    const prepared: {
+      readonly write: OwnedChunkWrite;
+      readonly remote: ReadonlyChunkVoxelBuffer;
+      readonly baseline: ReadonlyChunkVoxelBuffer;
+    }[] = [];
+    for (const { write } of scan.diverged) {
+      if (signal?.aborted === true) {
+        throw new Error("the merge was cancelled before anything was changed");
+      }
+      const remote = await readers.readRemote(write, signal);
+      const baseline = await readers.readRetainedBaseline(write, signal);
+      // ALL OR NOTHING, and this must stay a throw rather than a skip. The
+      // save that follows a reconcile carries `"just-merged"` and skips the
+      // scan, on the promise that the payload now incorporates the remote.
+      // Silently dropping a chunk here breaks exactly that promise: it would
+      // still hold this session's pre-merge bytes, and the unscanned save
+      // would post them over the colleague's newer ones with no dialog and no
+      // way back. Every chunk in `scan.diverged` was readable and had a
+      // baseline moments ago, so failing here is a fresh transient fault —
+      // worth a retry, never worth a silent overwrite. Thrown before the edit
+      // is opened, so nothing has been touched.
+      if (remote === undefined || baseline === undefined) {
+        throw new Error(
+          `couldn't re-read ${write.layerId} chunk ${write.chunkId} to merge ` +
+            "it, so nothing was combined",
+        );
+      }
+      prepared.push({ write, remote, baseline });
+    }
+    if (prepared.length === 0) {
+      return {
+        mergedChunks: 0,
+        reloadedChunks: 0,
+        acceptedFromRemote: 0,
+        unresolved: 0,
+      };
+    }
+
+    // From here the only await is `beginWrite`, which materializes a chunk the
+    // session already pinned and dirtied — an overlay hit, not a fetch.
+    const edit = session.beginEdit({
+      description: "Merge concurrent edits",
+      tag: "reconcile.merge",
+    });
+    let acceptedFromRemote = 0;
+    let unresolved = 0;
+    let mergedChunks = 0;
+    let reloadedChunks = 0;
+    try {
+      for (const { write, remote, baseline } of prepared) {
+        const slot = await edit.beginWrite({
+          layerId: write.layerId,
+          resolution: write.resolution,
+          chunkId: write.chunkId,
+        });
+        const merge = mergeOwnedRegion(
+          baseline.asView(),
+          slot.data,
+          remote.asView(),
+          write.owned,
+        );
+        // Any colliding voxel costs the whole owned box: it goes back to the
+        // remote and the local edits in it are dropped. The merged buffer is
+        // discarded in that case — one chunk-sized allocation wasted on a
+        // path that has just done network reads, and the merge is precisely
+        // what detected the collision.
+        const reload = mustReloadFromRemote(merge);
+        asWritableBytes(slot.data).set(
+          reload
+            ? reloadedOwnedRegion(slot.data, remote.asView(), write.owned)
+            : merge.merged,
+        );
+        edit.commitWrites(slot, ownedSubregion(write.owned));
+
+        // NOTHING DURABLE IS ADVANCED HERE. An earlier version recorded
+        // `remote` as the retained baseline, reasoning that the overlay now
+        // agreed with it. That is true only while the merge stands — and the
+        // merge is an undo entry, so it need not. Undo rolled the overlay back
+        // to the pre-merge bytes while the baseline kept claiming we had
+        // reconciled, and the next scan then compared remote against itself,
+        // said "unchanged", and let the save POST our stale bytes over the
+        // colleague's work with no dialog: the exact silent overwrite this
+        // feature exists to prevent, reachable by pressing Ctrl+Z.
+        //
+        // The save that follows a merge instead carries the `"just-merged"`
+        // policy, which is scoped to that one save. Every later save scans
+        // from the original baseline, so an undone merge simply raises the
+        // conflict again.
+        if (reload) {
+          reloadedChunks++;
+          unresolved += merge.unresolved;
+        } else {
+          mergedChunks++;
+          acceptedFromRemote += merge.acceptedFromRemote;
+        }
+      }
+    } catch (error) {
+      await edit.discard();
+      throw error;
+    }
+    edit.record();
+    return { mergedChunks, reloadedChunks, acceptedFromRemote, unresolved };
+  }
+
+  /**
+   * Give every chunk a scan flagged back to the remote, dropping the local
+   * edits in their owned boxes, as ONE undo step.
+   *
+   * This is the dialog's Reload, and the same operation the automatic path
+   * applies to a chunk it cannot combine. It differs from a merge in what it
+   * needs: only the remote's bytes, never a baseline. That is why it covers
+   * chunks the scan could NOT compare as well as the ones it found diverged —
+   * an unprovable chunk has no third input to merge from, but it can still be
+   * given back wholesale. Before this existed, a refusal made entirely of
+   * unprovable chunks left the user a choice between overwriting a colleague's
+   * work and never saving.
+   *
+   * A chunk whose remote cannot be read is left exactly as it was and counted,
+   * rather than failing the whole reload: one unreachable chunk is one chunk
+   * not reloaded, and the save that follows still scans, so it is caught
+   * rather than written blind.
+   *
+   * Nothing durable is advanced, for the same reason the merge advances
+   * nothing: this is an undo entry, so the next save must still scan from the
+   * baseline this session actually observed.
+   */
+  async reloadConflictedChunks(
+    scan: StaleBaselineScan,
+    signal?: AbortSignal,
+  ): Promise<ReloadConflictedOutcome> {
+    const session = this.activeSession.value;
+    if (session === undefined) {
+      throw new Error("No active session to reload into");
+    }
+    const readers = this.staleBaselineReaders(session);
+
+    // Every read happens BEFORE the edit is opened: the session allows one
+    // live `Edit`, so holding one across per-chunk reads would make any brush
+    // stroke during the reload throw `ConcurrentEditError`.
+    const prepared: {
+      readonly write: OwnedChunkWrite;
+      readonly remote: ReadonlyChunkVoxelBuffer;
+    }[] = [];
+    let unreadableChunks = 0;
+    for (const { write } of [...scan.diverged, ...scan.uncomparable]) {
+      if (signal?.aborted === true) break;
+      const remote = await readers.readRemote(write, signal);
+      if (remote === undefined) {
+        unreadableChunks++;
+        continue;
+      }
+      prepared.push({ write, remote });
+    }
+    if (prepared.length === 0) {
+      return { reloadedChunks: 0, unreadableChunks };
+    }
+
+    const edit = session.beginEdit({
+      description: "Reload from storage",
+      tag: "reconcile.reload",
+    });
+    let reloadedChunks = 0;
+    try {
+      for (const { write, remote } of prepared) {
+        const slot = await edit.beginWrite({
+          layerId: write.layerId,
+          resolution: write.resolution,
+          chunkId: write.chunkId,
+        });
+        asWritableBytes(slot.data).set(
+          reloadedOwnedRegion(slot.data, remote.asView(), write.owned),
+        );
+        edit.commitWrites(slot, ownedSubregion(write.owned));
+        reloadedChunks++;
+      }
+    } catch (error) {
+      await edit.discard();
+      throw error;
+    }
+    edit.record();
+    return { reloadedChunks, unreadableChunks };
+  }
+
+  /**
+   * The two reads the stale-baseline scan compares.
+   *
+   * `readRetainedBaseline` prefers the client's saved copy over the session's
+   * opening baseline, and the order matters: after a mid-session save, what
+   * this session last observed as remote truth is what it last wrote, not what
+   * it opened with. Comparing against the opening baseline instead would report
+   * our own earlier save as somebody else's change, on every chunk, from the
+   * second save onwards.
+   *
+   * Returning `undefined` when neither is retained is deliberate — the scan
+   * records that as unprovable rather than assuming the region is untouched.
+   */
+  private staleBaselineReaders(session: EditSession): RemoteBaselineReaders {
+    return {
+      readRemote: (write, signal) =>
+        this.chunkSource.readFreshDecoded(
+          write.layerId,
+          write.resolution,
+          write.chunkCoord,
+          signal,
+        ),
+      readRetainedBaseline: async (write) => {
+        const chunkKey = `${write.layerId}|${write.resolution}|${write.chunkId}`;
+        // An UNCONFIRMED save's bytes were only attempted. `saveActive` records
+        // them the moment the write is acked — before read-back proves the
+        // backend actually holds them — so for a chunk still in this map they
+        // are not "what we last observed remotely" at all.
+        //
+        // The merge kernel decides `mineChanged` as `mine != baseline`, so a
+        // baseline of attempted bytes makes every voxel of that attempt look
+        // untouched by us and hands it to the remote. A chunk re-dirtied after
+        // an unconfirmed save would lose ALL of that save's paint back to the
+        // pristine value, reported as zero unresolved conflicts — and with the
+        // follow-up `"just-merged"` save skipping the scan, persisted.
+        //
+        // We genuinely do not know what the backend holds for these, which is
+        // what `uncomparable` means. It withholds Merge and routes the user to
+        // Overwrite (with a draft) or Keep editing, both of which keep the
+        // paint.
+        if (this.unconfirmedChunks.has(chunkKey)) return undefined;
+        const saved = this.chunkSource.getSavedBytes(
+          write.layerId,
+          write.resolution,
+          write.chunkId,
+        );
+        if (saved !== undefined) return saved;
+        // Saved AND verified earlier this session, but the bounded byte cache
+        // dropped it. The session-open baseline is NOT what we last observed
+        // remotely — our own earlier save superseded it — so comparing against
+        // it would report our own work as somebody else's change, and a merge
+        // from it would treat voxels we have since erased as "untouched by us"
+        // and take the remote's older label back. Report unprovable instead.
+        if (this.verifiedSavedChunks.has(chunkKey)) {
+          return undefined;
+        }
+        return session.overlay
+          .baselineRefOf({
+            layerId: write.layerId,
+            resolution: write.resolution,
+            chunkId: write.chunkId,
+          })
+          ?.retain();
+      },
+    };
   }
 
   /**
@@ -1533,7 +2268,7 @@ export class EditSessionHost extends RefCounted {
    * user keeps their (client-retained) copy.
    */
   private async verifySavedChunks(
-    chunks: readonly SavedChunk[],
+    chunks: readonly OwnedChunkWrite[],
     signal: AbortSignal,
   ): Promise<void> {
     const total = chunks.length;
@@ -1543,29 +2278,43 @@ export class EditSessionHost extends RefCounted {
     }
     let confirmed = 0;
     this.saveProgress.value = { kind: "verifying", confirmed, total };
-    for (const c of chunks) {
-      const ok = await this.verifyOneSavedChunk(c, signal, (attempt) => {
-        // The first read-back didn't confirm (the request succeeded, the data
-        // just isn't verified) — surface that we're re-checking, NOT that the
-        // connection is slow.
-        this.saveProgress.value = {
-          kind: "reverifying",
-          confirmed,
-          total,
-          attempt,
-        };
-      });
-      if (ok) {
-        const key = `${c.layerId}|${c.resolution}|${c.chunkId}`;
-        this.unconfirmedChunks.delete(key);
-        // Track the verified chunk so exit can evict its stale datasource cache
-        // entry (TM-352) — the backend provably holds these bytes.
-        this.verifiedSavedChunks.set(key, c);
-        confirmed += 1;
+    // Bounded worker pool over a shared cursor (TM-455): one read-back per chunk
+    // is pure round-trip latency, and serially that dominates a large save. JS is
+    // single-threaded, so `confirmed` and the Map mutations only interleave at
+    // `await` points. Concurrent chunks may interleave their `reverifying`
+    // reports — the counts stay correct, only the reported attempt jitters.
+    let nextChunk = 0;
+    const verifyWorker = async (): Promise<void> => {
+      while (nextChunk < total) {
+        const c = chunks[nextChunk++];
+        const ok = await this.verifyOneSavedChunk(c, signal, (attempt) => {
+          // The first read-back didn't confirm (the request succeeded, the data
+          // just isn't verified) — surface that we're re-checking, NOT that the
+          // connection is slow.
+          this.saveProgress.value = {
+            kind: "reverifying",
+            confirmed,
+            total,
+            attempt,
+          };
+        });
+        if (ok) {
+          const key = `${c.layerId}|${c.resolution}|${c.chunkId}`;
+          this.unconfirmedChunks.delete(key);
+          // Track the verified chunk so exit can evict its stale datasource cache
+          // entry (TM-352) — the backend provably holds these bytes.
+          this.verifiedSavedChunks.set(key, c);
+          confirmed += 1;
+        }
+        // Back to the in-progress state for the next chunk's first attempt.
+        this.saveProgress.value = { kind: "verifying", confirmed, total };
       }
-      // Back to the in-progress state for the next chunk's first attempt.
-      this.saveProgress.value = { kind: "verifying", confirmed, total };
-    }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(VERIFY_CONCURRENCY, total) }, () =>
+        verifyWorker(),
+      ),
+    );
     const unconfirmed = total - confirmed;
     this.saveProgress.value =
       unconfirmed === 0
@@ -1580,7 +2329,7 @@ export class EditSessionHost extends RefCounted {
    * a false positive. The spinner stays up across the retries.
    */
   private async verifyOneSavedChunk(
-    chunk: SavedChunk,
+    chunk: OwnedChunkWrite,
     signal: AbortSignal,
     onRetry: (attempt: number) => void,
   ): Promise<boolean> {
@@ -1590,8 +2339,8 @@ export class EditSessionHost extends RefCounted {
         const ok = await this.chunkSource.confirmChunkPersisted(
           chunk.layerId,
           chunk.resolution,
-          chunk.chunkId,
           chunk.chunkCoord,
+          chunk.owned,
           signal,
         );
         if (ok) return true;
@@ -1665,7 +2414,10 @@ export class EditSessionHost extends RefCounted {
             ) ?? c.bytes,
         })),
       };
-      await this.saveTarget.save(payload, controller.signal);
+      await this.saveTarget.withSessionRegions(
+        this.requireSessionRegions(),
+        () => this.saveTarget.save(payload, controller.signal),
+      );
       await this.verifySavedChunks(chunks, controller.signal);
     } finally {
       if (signal !== undefined) {
@@ -1674,6 +2426,12 @@ export class EditSessionHost extends RefCounted {
       if (this.saveAbortController === controller) {
         this.saveAbortController = undefined;
         this.saveInProgress.value = false;
+        // A throw before `verifySavedChunks` never reaches the code that
+        // resolves progress, so the topbar would sit on "Still saving your
+        // changes…" forever while the tracker already reported failure.
+        if (this.saveProgress.value.kind === "writing") {
+          this.saveProgress.value = { kind: "idle" };
+        }
       }
     }
   }
@@ -1736,6 +2494,42 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
+   * Lock leaving the edit session through NG's own UI, reachable via
+   * `window.viewer.editSessionHost`. The embedding host (the portal) calls this
+   * while a task must keep the tracer in the session; the topbar Exit-session
+   * button then stays disabled with `reason` as its tooltip. A blank or missing
+   * `reason` falls back to `DEFAULT_EXIT_LOCK_REASON`; a later call replaces
+   * the reason, and repeating the current one notifies nobody.
+   *
+   * Only NG's UI is gated: `discardActive()`, `commitActive()`, `saveActive()`
+   * and `saveCommitted()` stay callable, so the host can save and close the
+   * session itself. The lock is runtime state that outlives session teardown
+   * but not a page reload (see `exitLockReason`), so apply it per document and
+   * feature-detect it, since older builds lack it:
+   *
+   *   const host = window.viewer.editSessionHost;
+   *   if (typeof host.lockExit === "function") {
+   *     host.lockExit("Complete the task to leave the edit session.");
+   *   }
+   *   // ...later, when the task no longer needs the lock:
+   *   host.unlockExit();
+   */
+  lockExit(reason?: string): void {
+    this.exitLockReason.value =
+      typeof reason === "string" && reason.trim() !== ""
+        ? reason
+        : DEFAULT_EXIT_LOCK_REASON;
+  }
+
+  /**
+   * Undo `lockExit()`, re-enabling the topbar Exit-session button. No-op while
+   * exit is not locked.
+   */
+  unlockExit(): void {
+    this.exitLockReason.value = undefined;
+  }
+
+  /**
    * Dev-only logout for the build-time Google-login backend (TM-349). Clears
    * NG's cached id_token, best-effort revokes the grant at Google, and forces
    * the account chooser on the next login. Reachable from the console as
@@ -1774,6 +2568,10 @@ export class EditSessionHost extends RefCounted {
    */
   resetLayer(layerId: LayerId): void {
     this.commitTarget.clearLayer(layerId);
+    // The pin dies with the bytes it describes. An in-flight `saveCommitted`
+    // already holds its own reference, so this cannot pull the region out from
+    // under a save that is running against it.
+    this.committedRegions.delete(layerId);
     const entry = this.perLayer.get(layerId);
     if (entry === undefined) return;
     if (entry.mirror !== undefined) {
@@ -1813,6 +2611,7 @@ export class EditSessionHost extends RefCounted {
     // Make sure NgCommitTarget is fully empty even for layers whose
     // perLayer entry was already gone.
     this.commitTarget.clearAll();
+    this.committedRegions.clear();
   }
 
   /**
@@ -1852,7 +2651,24 @@ export class EditSessionHost extends RefCounted {
       };
       let layerResult: SaveResult;
       try {
-        layerResult = await this.saveTarget.save(payload);
+        // The region THESE chunks were painted under — not whichever session
+        // happens to be open now.
+        const regions = this.committedRegions.get(layerId);
+        if (regions === undefined) {
+          throw new Error(
+            `no committed edit region for ${layerId}: refusing to clip its ` +
+              "committed chunks to a different session's region",
+          );
+        }
+        if (regions === REGION_SPANS_SESSIONS) {
+          throw new Error(
+            `${layerId} has committed chunks from more than one edit session; ` +
+              "save them before starting another session on this layer",
+          );
+        }
+        layerResult = await this.saveTarget.withSessionRegions(regions, () =>
+          this.saveTarget.save(payload),
+        );
       } catch (err) {
         outcomes.push({
           status: "failed",
@@ -1867,9 +2683,12 @@ export class EditSessionHost extends RefCounted {
         continue;
       }
       for (const o of layerResult.outcomes) outcomes.push(o);
-      // `NgSaveTarget.save` (used above) read-back-verifies each chunk before
-      // reporting `succeeded` (TM-352), so a success here is confirmed durable.
-      // Clear the committed buffer + render machinery for any succeeded layer.
+      // NOTE: `succeeded` here is a WRITE ACK, not confirmed durability.
+      // `NgSaveTarget.saveOneLayer` says so itself, and read-back verification
+      // runs only in `saveActive` and `retryUnconfirmedSaves` — never here. So
+      // `resetLayer` below drops the client's only copy on the strength of that
+      // ack. Whether this path should verify is a separate question; the
+      // comment previously claimed it already did.
       for (const o of layerResult.outcomes) {
         if (o.status === "succeeded") this.resetLayer(o.layerId);
       }
@@ -1879,11 +2698,26 @@ export class EditSessionHost extends RefCounted {
 
   /**
    * True iff there's at least one committed chunk pending in memory that
-   * the user has not yet saved to the backend. Used to drive the
-   * `beforeunload` warning.
+   * the user has not yet saved to the backend. Part of `hasUnsavedEdits()`.
    */
   hasPendingCommittedChanges(): boolean {
     return this.commitTarget.accepted.size > 0;
+  }
+
+  /**
+   * True while leaving would lose edits: strokes in the open session that are
+   * not saved yet, committed chunks still only in memory
+   * (`hasPendingCommittedChanges()`), or saves not yet confirmed durable
+   * (`hasUnconfirmedSaves()`, TM-352). Drives the `beforeunload` warning, so a
+   * reload or tab close does not silently drop paint, and the Exit-session
+   * confirmation.
+   */
+  hasUnsavedEdits(): boolean {
+    return (
+      this.activeSession.value?.dirty.isDirty() === true ||
+      this.hasPendingCommittedChanges() ||
+      this.hasUnconfirmedSaves()
+    );
   }
 
   // -- Per-layer accessors --------------------------------------------------
@@ -2085,9 +2919,18 @@ export class EditSessionHost extends RefCounted {
   async tryRestoreFromState(): Promise<void> {
     if (this.restoreInFlight !== undefined) return this.restoreInFlight;
     if (this.activeSession.value !== undefined) return;
-    if (this.state.value.value === null) return;
+    const intent = this.state.value.value;
+    if (intent === null) return;
+    // Lock the intent's layers in NG's UI while the restore waits for them
+    // (see `session_layer_structure_lock.ts`): deleting or renaming one now
+    // would fail the restore and clear the intent. Cleared when the attempt
+    // ends; on success the active session already holds the lock.
+    this.sessionLock.restoringLayerIds.value = new Set(
+      intent.layers.map((l) => l.layerId),
+    );
     const attempt = this.runRestoreAttempt().finally(() => {
       this.restoreInFlight = undefined;
+      this.sessionLock.restoringLayerIds.value = undefined;
     });
     this.restoreInFlight = attempt;
     return attempt;
@@ -2168,6 +3011,7 @@ export class EditSessionHost extends RefCounted {
     this.teardownHotkeyBinder();
     this.teardownPerLayer();
     this.commitTarget.clearAll();
+    this.committedRegions.clear();
     super.disposed();
   }
 
@@ -3185,6 +4029,19 @@ export class EditSessionHost extends RefCounted {
     }
     const prev = this.editPreferences.value.value ?? {};
     this.editPreferences.value.value = { ...prev, resolutions };
+  }
+
+  /**
+   * Turn automatic conflict reconciling on or off, persisting it into the
+   * cross-session `editPreferences` block so it rides along in a shared link.
+   *
+   * Public because the topbar toggle is the only way a tracer can reach it —
+   * unlike `tooling`, there is no live state object behind this to mirror, so
+   * it is written on the spot rather than through the debounced persist.
+   */
+  setAutomerge(enabled: boolean): void {
+    const prev = this.editPreferences.value.value ?? {};
+    this.editPreferences.value.value = { ...prev, automerge: enabled };
   }
 
   private handleOpenFailure(err: unknown): void {

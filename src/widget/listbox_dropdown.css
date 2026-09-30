@@ -1,0 +1,175 @@
+/**
+ * @license
+ * Copyright 2026 Calcada AI / Zetta AI
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ */
+
+/*
+ * Values resolve against the --nge-* design tokens in editing_theme.css, which
+ * listbox_dropdown.tsx imports as a side effect so the widget carries its own
+ * theming into non-editing hosts (layer controls, panels) too.
+ */
+
+.neuroglancer-listbox-dropdown {
+  display: block;
+  width: 100%;
+}
+
+.neuroglancer-listbox-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  background-color: var(--nge-overlay-bg-elev, #232323);
+  color: var(--nge-text, #e5e7eb);
+  border: 1px solid var(--nge-overlay-border, #3a3a3a);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.neuroglancer-listbox-dropdown-trigger:hover:not(:disabled) {
+  border-color: var(--nge-accent, #3b82f6);
+}
+
+.neuroglancer-listbox-dropdown-trigger:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.neuroglancer-listbox-dropdown-trigger:focus-visible {
+  outline: 2px solid var(--nge-accent, #3b82f6);
+  outline-offset: 1px;
+}
+
+.neuroglancer-listbox-dropdown-summary {
+  flex: 1 1 auto;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.neuroglancer-listbox-dropdown-caret {
+  flex: 0 0 auto;
+  /* Lucide SVG inherits `color` via stroke="currentColor"; `block` removes the
+     inline-svg baseline gap so it sits centered against the summary text. */
+  display: block;
+  color: var(--nge-text-faint, #8b929c);
+}
+
+.neuroglancer-listbox-dropdown-panel {
+  /*
+   * Portaled out of its container and positioned with `fixed` so the panel
+   * escapes any `overflow: hidden` clipping. top/left/min-width are set inline
+   * from the trigger's rect; z-index sits above the edit-session modal frame
+   * (backdrop is z-index 200). The portal host is not the widget's own parent,
+   * so set the font cascade explicitly here.
+   */
+  position: fixed;
+  background-color: var(--nge-overlay-bg, #1a1a1a);
+  color: var(--nge-text, #e5e7eb);
+  border: 1px solid var(--nge-overlay-border, #3a3a3a);
+  border-radius: 4px;
+  padding: 4px 0;
+  z-index: 300;
+  font-family: sans-serif;
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  /* Cap the popup height and scroll internally so a long option list (e.g. many
+     bounding-box annotations in the Region picker, or a long branch list) stays
+     reachable instead of running off-screen. `updateRect` tightens `max-height`
+     inline to the real space below/above the trigger; this is the fallback
+     ceiling. `none` stops wheel-scroll at the panel edge from chaining to the
+     host page AND suppresses the macOS elastic rubber-band, which would
+     otherwise open a gap between the list and the trigger when overscrolled
+     past its top. */
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: none;
+}
+
+.neuroglancer-listbox-dropdown-search {
+  /* Sticky rather than a flex header: the panel itself stays the single scroll
+     container (as in the unfiltered case), so a long list can't squash the
+     option rows. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: block;
+  width: calc(100% - 12px);
+  margin: 0 6px 6px;
+  padding: 5px 8px;
+  box-sizing: border-box;
+  background-color: var(--nge-overlay-bg-elev, #232323);
+  color: var(--nge-text, #e5e7eb);
+  border: 1px solid var(--nge-overlay-border, #3a3a3a);
+  border-radius: 4px;
+  font: inherit;
+}
+
+.neuroglancer-listbox-dropdown-search:focus {
+  outline: none;
+  border-color: var(--nge-accent, #3b82f6);
+}
+
+.neuroglancer-listbox-dropdown-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  color: var(--nge-text, #e5e7eb);
+  outline: none;
+}
+
+.neuroglancer-listbox-dropdown-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* A flex item's default min-width is `auto` (its content's intrinsic
+     width), which overrides `overflow: hidden` and defeats ellipsis — this
+     lets the label actually shrink below its text width instead of forcing
+     the row (and the panel) wider or hard-clipping with no indication. */
+  min-width: 0;
+}
+
+/* Hover, the roving keyboard cursor, and the search-mode cursor share one
+   highlight — `:focus` because the active option is programmatically focused as
+   the arrow keys move it, and `-active` because focus stays in the search box
+   while filtering. */
+.neuroglancer-listbox-dropdown-option:hover,
+.neuroglancer-listbox-dropdown-option:focus,
+.neuroglancer-listbox-dropdown-option-active {
+  background-color: var(--nge-overlay-bg-elev, #232323);
+}
+
+.neuroglancer-listbox-dropdown-option-disabled,
+.neuroglancer-listbox-dropdown-option-disabled:hover {
+  cursor: default;
+  color: var(--nge-text-faint, #8b929c);
+  background-color: transparent;
+}
+
+/* Fixed-width leading slot for the selected-row check; kept (empty) on the
+   other rows so every label stays aligned to the same left edge. */
+.neuroglancer-listbox-dropdown-check {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--nge-accent, #3b82f6);
+}
+
+.neuroglancer-listbox-dropdown-check svg {
+  display: block;
+}

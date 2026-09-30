@@ -17,12 +17,22 @@
  * Follows the edit-session UI conventions (Preact + `--nge-*` tokens).
  */
 
+import { useCallback } from "preact/hooks";
+
 import { AlignmentLinkMenuSection } from "#src/alignment_link/ui/alignment_link_menu.js";
 import { useAlignmentLinkStatus } from "#src/alignment_link/ui/interop/use_alignment_link_status.js";
+import {
+  LAYER_GROUP_SESSION_LOCK_REASON,
+  layerGroupHoldsOnlyCopyOfSessionLayer,
+  onSessionLayersChanged,
+} from "#src/editing/adapters/session_layer_structure_lock.js";
 import { mountComponent } from "#src/editing/ui/interop/component_mount.js";
+import { useEvent } from "#src/editing/ui/interop/use_event.js";
+import { useSignal } from "#src/editing/ui/interop/use_signal.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import type { LayerGroupViewer } from "#src/layer_group_viewer.js";
 import type { ContextMenu } from "#src/ui/context_menu.js";
+import { confirmLayerGroupRemoval } from "#src/ui/layer_deletion_confirmation.js";
 import type { Disposer } from "#src/util/disposable.js";
 import type { TrackableEnum } from "#src/util/trackable_enum.js";
 
@@ -68,6 +78,48 @@ function NavigationLinkRow({
         ))}
       </select>
     </label>
+  );
+}
+
+/**
+ * Removing a layer group deletes the layers no other group shows, so the
+ * button asks first, naming them (see `layer_deletion_confirmation.ts`), and
+ * removes the group straight away when it deletes none. While one of them
+ * belongs to the active edit session the button is disabled with the reason
+ * (see `session_layer_structure_lock.ts`), and re-enabled when the session
+ * ends or the layer is shown elsewhere.
+ */
+function RemoveLayerGroupButton({ viewer }: { viewer: LayerGroupViewer }) {
+  const { layerSpecification } = viewer;
+  const { layerManager, root } = layerSpecification;
+  useSignal(layerManager.layersChanged);
+  useSignal(layerSpecification.rootLayers.layersChanged);
+  useEvent(
+    useCallback(
+      (handler: () => void) => onSessionLayersChanged(root, handler),
+      [root],
+    ),
+  );
+  const lockReason = layerGroupHoldsOnlyCopyOfSessionLayer(layerManager)
+    ? LAYER_GROUP_SESSION_LOCK_REASON
+    : undefined;
+  return (
+    <button
+      type="button"
+      class="neuroglancer-layer-group-menu-remove"
+      disabled={lockReason !== undefined}
+      title={lockReason}
+      onClick={() => {
+        if (layerGroupHoldsOnlyCopyOfSessionLayer(layerManager)) return;
+        if (!confirmLayerGroupRemoval(layerManager)) return;
+        // A session that locked one of those layers while the prompt was up
+        // wins.
+        if (layerGroupHoldsOnlyCopyOfSessionLayer(layerManager)) return;
+        layerManager.clear();
+      }}
+    >
+      Remove layer group
+    </button>
   );
 }
 
@@ -133,15 +185,7 @@ export function LayerGroupViewerMenu({ viewer }: { viewer: LayerGroupViewer }) {
 
   return (
     <div class="neuroglancer-layer-group-menu">
-      <button
-        type="button"
-        class="neuroglancer-layer-group-menu-remove"
-        onClick={() => {
-          viewer.layerSpecification.layerManager.clear();
-        }}
-      >
-        Remove layer group
-      </button>
+      <RemoveLayerGroupButton viewer={viewer} />
       {rows.map(({ label, model, disabledReason }) => (
         <NavigationLinkRow
           key={label}

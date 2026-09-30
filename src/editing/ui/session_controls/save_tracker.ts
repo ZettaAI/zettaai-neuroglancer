@@ -15,12 +15,28 @@ import type {
   SaveResult,
 } from "@zettaai/edit-session";
 
-import type { EditSessionHost } from "#src/editing/edit_session_host.js";
+import type {
+  EditSessionHost,
+  MergeConflictsOutcome,
+} from "#src/editing/edit_session_host.js";
+import type {
+  SaveConflictError,
+  SaveConflictPolicy,
+} from "#src/editing/reconcile/save_conflict_refusal.js";
+import { isSaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
+import { automergeEnabled } from "#src/editing/tooling/edit_preferences.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 export type SaveAllState =
   | { kind: "idle"; lastSavedAt?: number }
   | { kind: "saving"; controller: AbortController }
+  /**
+   * Reconciling a refused save against the remote, before the save that
+   * follows it. Its own state because the reconcile is network I/O the user
+   * can paint through, and reporting `idle` across it let a second Save start
+   * from the pre-reconcile overlay.
+   */
+  | { kind: "reconciling" }
   | { kind: "done-success"; savedAt: number }
   | { kind: "done-partial"; failedLayers: readonly string[] };
 
@@ -38,6 +54,12 @@ export class SaveTracker {
   private layerStatuses_: Map<string, PerLayerSaveStatus>;
   private saveStartedAt_ = 0;
   private autoClearTimer_: ReturnType<typeof setTimeout> | undefined;
+  private conflict_: SaveConflictError | undefined;
+  /**
+   * Chunks the last save gave back to the remote, discarding local edits.
+   * Read once the save settles, to tell the user what reconciling cost them.
+   */
+  private reloadedChunks_ = 0;
 
   constructor(host: EditSessionHost, session: EditSession) {
     this.layerStatuses_ = initializeLayerStatuses(host, session);
@@ -83,22 +105,304 @@ export class SaveTracker {
     return body;
   }
 
-  async startSave(host: EditSessionHost, session: EditSession): Promise<void> {
-    if (this.state_.kind === "saving") return;
+  /**
+   * The conflict the last save stopped on, or `undefined`. Set only when a
+   * save was refused because the remote moved; cleared by answering it.
+   */
+  pendingConflict(): SaveConflictError | undefined {
+    return this.conflict_;
+  }
+
+  /**
+   * How many chunks the last save reconciled by DROPPING local edits, zero if
+   * none. A count rather than a sentence: the wording belongs with the rest of
+   * the annotator-facing copy, not in the state machine.
+   */
+  reloadedChunkCount(): number {
+    return this.reloadedChunks_;
+  }
+
+  /**
+   * Leave the conflict unanswered: keep the paint, save nothing.
+   *
+   * The safe default, and the action Escape and the backdrop resolve to. The
+   * region stays dirty, so the user can keep editing and try again — by which
+   * point a merge (or a colleague finishing) may make the conflict moot.
+   */
+  dismissConflict(): void {
+    if (this.conflict_ === undefined) return;
+    this.conflict_ = undefined;
+    this.changed.dispatch();
+  }
+
+  /**
+   * Answer the conflict by writing anyway, replacing whatever landed after
+   * this session read the region.
+   *
+   * Irreversible: painting layers carry no object versioning, so the bytes
+   * this replaces cannot be recovered. Only ever reached from an explicit
+   * confirmation.
+   */
+  async overwriteConflict(
+    host: EditSessionHost,
+    session: EditSession,
+  ): Promise<void> {
+    if (this.conflict_ === undefined) return;
+    // Take the recoverable copy BEFORE the irreversible write, and let a
+    // failure to take it stop the write. The user agreed to overwrite with a
+    // safety net; proceeding without one silently would be answering a
+    // question they were not asked. The conflict stays pending so the dialog
+    // is still there to try again or back out.
+    try {
+      await host.snapshotDraft("before-overwrite");
+    } catch (error) {
+      this.applyGlobalFailure(
+        "Couldn't save a local copy of your work first, so nothing was " +
+          "overwritten. " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      this.changed.dispatch();
+      return;
+    }
+    this.conflict_ = undefined;
+    // Dispatch before the save, not after it: `startSave` returns without
+    // dispatching when another save is already in flight, which would leave
+    // the dialog rendered against a conflict that no longer exists and every
+    // one of its buttons a no-op.
+    this.changed.dispatch();
+    await this.startSave(host, session, "overwrite");
+  }
+
+  /**
+   * Answer the conflict by reconciling the overlay against the remote, then
+   * saving the result.
+   *
+   * "Reconcile" rather than "merge" because it is not all one thing: chunks
+   * the two sides changed in different places are combined and keep every
+   * local edit, while a chunk they both changed in the SAME place cannot be
+   * combined and is given back to the remote whole — the local edits in it
+   * are dropped. {@link reloadedChunkCount} is how many, and the caller is
+   * expected to tell the user.
+   *
+   * The save that follows carries `"just-merged"` and skips the scan, because
+   * the payload it sends already incorporates the remote it reconciled
+   * against — a scan would only re-report the divergence just resolved.
+   *
+   * Nothing durable is advanced to make that true, which is the point: undoing
+   * the reconcile leaves no residue, so the NEXT save scans from the original
+   * baseline and refuses exactly as it did before. The narrow window between
+   * the reconcile and this save is covered by the read-back verification every
+   * save ends in.
+   */
+  async mergeConflict(
+    host: EditSessionHost,
+    session: EditSession,
+  ): Promise<MergeConflictsOutcome | undefined> {
+    const conflict = this.conflict_;
+    if (conflict === undefined) return undefined;
+    return this.reconcileAndSave(host, session, conflict);
+  }
+
+  /**
+   * Reconcile against the remote and save the result.
+   *
+   * Takes the conflict as an argument rather than reading `conflict_`, which
+   * is what lets the automatic path run it WITHOUT ever publishing the
+   * conflict — see {@link startSave}. On failure it publishes the conflict:
+   * an automerge that could not complete has to become the dialog, never
+   * silence.
+   */
+  private async reconcileAndSave(
+    host: EditSessionHost,
+    session: EditSession,
+    conflict: SaveConflictError,
+  ): Promise<MergeConflictsOutcome | undefined> {
+    let outcome: MergeConflictsOutcome;
+    // Claimed before the first await, so there is no window in which a second
+    // Save can start from the pre-reconcile overlay.
+    this.state_ = { kind: "reconciling" };
+    this.changed.dispatch();
+    try {
+      outcome = await host.mergeConflicts(conflict.scan);
+    } catch (error) {
+      // The conflict is cleared only once the merge has actually happened.
+      // Clearing first would close the dialog on a merge that then threw,
+      // leaving the user with dirty paint, no conflict shown, and a Save
+      // button that just raises the same conflict again with no explanation.
+      this.conflict_ = conflict;
+      // `applyGlobalFailure` leaves a terminal state, so the reconciling claim
+      // is released by it rather than needing a reset here.
+      this.applyGlobalFailure(
+        "Couldn't combine the other changes, so nothing was saved. " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      this.changed.dispatch();
+      return undefined;
+    }
+    this.conflict_ = undefined;
+    // Released so the save below can claim `saving`; nothing can slip in
+    // between, because there is no await between here and `startSave`.
+    this.state_ = { kind: "idle" };
+    this.changed.dispatch();
+    // Scoped to this one save: the payload already incorporates the remote, so
+    // a scan would only re-report the divergence the merge just resolved. Any
+    // LATER save scans normally — which is what makes undoing a merge safe.
+    await this.startSave(host, session, "just-merged");
+    this.recordDiscard(outcome.reloadedChunks);
+    return outcome;
+  }
+
+  /**
+   * Publish what reconciling cost, but only once the save it paid for has
+   * actually landed.
+   *
+   * Assigned after the save, not before, because `startSave` resets the count.
+   * Gated on the save having SUCCEEDED because the message says "everything
+   * else was saved" — after a failed save, or one that never ran because
+   * another was in flight, that sentence is false and the discard is not the
+   * headline: the failure is, and it has its own report.
+   *
+   * Added rather than assigned because a follow-up save can itself refuse and
+   * reconcile again; two rounds of discarded work are two rounds, and the user
+   * should be told about both.
+   */
+  private recordDiscard(chunks: number): void {
+    if (chunks === 0) return;
+    if (this.state_.kind !== "done-success") return;
+    this.reloadedChunks_ += chunks;
+    this.changed.dispatch();
+  }
+
+  /**
+   * Answer the conflict by taking the remote's version of every chunk it
+   * names, dropping the local edits in them, then saving what is left.
+   *
+   * Unlike a merge this needs no baseline, so it also covers the chunks the
+   * scan could not prove — which is the point: a refusal made entirely of
+   * unprovable chunks otherwise leaves the user choosing between overwriting
+   * a colleague and never saving.
+   *
+   * The save that follows is an ORDINARY scanning one, not `"just-merged"`.
+   * After a reload the remote already holds what those chunks would write, so
+   * the scan calls them `already-applied` and lets the rest of the work
+   * through — while a chunk whose remote could NOT be read still carries our
+   * stale bytes and is still caught. Skipping the scan here would write
+   * exactly those blind.
+   */
+  async reloadConflict(
+    host: EditSessionHost,
+    session: EditSession,
+  ): Promise<void> {
+    const conflict = this.conflict_;
+    if (conflict === undefined) return;
+    let reloaded: number;
+    this.state_ = { kind: "reconciling" };
+    this.changed.dispatch();
+    try {
+      reloaded = (await host.reloadConflictedChunks(conflict.scan))
+        .reloadedChunks;
+    } catch (error) {
+      // Same reasoning as the reconcile path: the conflict stays pending so
+      // the dialog is still there rather than leaving dirty paint with no
+      // explanation for why Save keeps refusing.
+      this.applyGlobalFailure(
+        "Couldn't load the other changes, so nothing was saved. " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      this.changed.dispatch();
+      return;
+    }
+    this.conflict_ = undefined;
+    this.state_ = { kind: "idle" };
+    this.changed.dispatch();
+    await this.startSave(host, session, "refuse");
+    this.recordDiscard(reloaded);
+  }
+
+  /**
+   * Whether this conflict may be answered without asking.
+   *
+   * Only when automerge is on AND every conflicting chunk can actually be
+   * reconciled. A chunk the scan could not prove has no baseline, so there is
+   * no third input to merge from — reconciling "as much as possible" and
+   * writing the rest would quietly overwrite exactly the chunks we were least
+   * sure about. Those fall back to asking, which is the one case where Save
+   * still raises the dialog with automerge on.
+   *
+   * Note this deliberately does NOT auto-reload the unprovable ones, even
+   * though {@link reloadConflict} could. `uncomparable` is not evidence of a
+   * conflict — the likeliest state of a chunk whose baseline was evicted is
+   * that nobody touched it — so discarding an hour of tracing over our own
+   * bookkeeping is not a trade to make on the user's behalf. Offered as a
+   * button, yes; taken automatically, no.
+   */
+  private shouldReconcileAutomatically(
+    host: EditSessionHost,
+    conflict: SaveConflictError,
+  ): boolean {
+    if (!automergeEnabled(host.editPreferences.value.value)) {
+      return false;
+    }
+    return (
+      conflict.scan.uncomparable.length === 0 &&
+      conflict.scan.diverged.length > 0
+    );
+  }
+
+  async startSave(
+    host: EditSessionHost,
+    session: EditSession,
+    conflictPolicy: SaveConflictPolicy = "refuse",
+  ): Promise<void> {
+    if (this.state_.kind === "saving" || this.state_.kind === "reconciling") {
+      return;
+    }
     if (!session.dirty.isDirty()) return;
 
     const controller = new AbortController();
     this.state_ = { kind: "saving", controller };
     this.saveStartedAt_ = Date.now();
+    this.reloadedChunks_ = 0;
     this.markAllWritablePending();
     this.changed.dispatch();
 
     let result: SaveResult | undefined;
     let thrownError: unknown;
     try {
-      result = await host.saveActive(undefined, controller.signal);
+      result = await host.saveActive(
+        undefined,
+        controller.signal,
+        conflictPolicy,
+      );
     } catch (err) {
       thrownError = err;
+    }
+
+    if (isSaveConflictError(thrownError)) {
+      // Not a failure: nothing was attempted and nothing was lost. The save
+      // stops and waits on a decision, so the state goes back to idle rather
+      // than painting the layers red — the paint is still dirty and still
+      // saveable once the user answers.
+      //
+      // DECIDE BEFORE PUBLISHING. The dialog is open exactly while
+      // `pendingConflict()` is set, so assigning the conflict and dispatching
+      // before asking whether to answer it automatically made the dialog mount
+      // and unmount within a couple of frames — a pop-up that appears and
+      // vanishes, which reads as a glitch rather than as an answer. The
+      // invariant that replaces it: never dispatch with `conflict_` set until
+      // it is known the user has to be asked.
+      if (this.shouldReconcileAutomatically(host, thrownError)) {
+        // `reconcileAndSave` claims `reconciling` synchronously, so the Save
+        // button keeps its spinner instead of flicking to idle and back.
+        await this.reconcileAndSave(host, session, thrownError);
+        return;
+      }
+      this.state_ = { kind: "idle" };
+      this.conflict_ = thrownError;
+      // Per-layer statuses are left as `startSave` set them (pending): the
+      // refused save touched nothing, so there is no per-layer outcome to show.
+      this.changed.dispatch();
+      return;
     }
 
     if (thrownError !== undefined) {

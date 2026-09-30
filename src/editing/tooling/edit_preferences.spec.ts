@@ -14,6 +14,7 @@ import { describe, it, expect } from "vitest";
 
 import type { PaintingSharedState } from "#src/editing/tool_runtimes/painting_tools.js";
 import {
+  automergeEnabled,
   parseEditPreferences,
   validateRememberedResolutions,
 } from "#src/editing/tooling/edit_preferences.js";
@@ -79,6 +80,46 @@ describe("edit_preferences", () => {
       },
     });
     expect(parsed?.resolutions).toEqual({ target: [RES_HI] });
+  });
+
+  describe("automerge", () => {
+    it("round-trips through JSON like the URL hash would", () => {
+      expect(parseEditPreferences(roundTrip({ automerge: false }))).toEqual({
+        automerge: false,
+      });
+    });
+
+    /**
+     * The default is on and nothing writes the field until the user opts out,
+     * so `false` is the only value that ever reaches the URL — and the only
+     * one whose loss would silently change how saves behave.
+     */
+    it("survives on its own, with no other preferences set", () => {
+      expect(parseEditPreferences({ automerge: false })).toEqual({
+        automerge: false,
+      });
+    });
+
+    it("drops a non-boolean rather than coercing it", () => {
+      expect(parseEditPreferences({ automerge: "yes" })).toBeNull();
+      expect(parseEditPreferences({ automerge: 0 })).toBeNull();
+    });
+
+    it("keeps unrelated preferences when the value is malformed", () => {
+      expect(
+        parseEditPreferences({
+          automerge: "yes",
+          resolutions: { target: [RES_HI] },
+        }),
+      ).toEqual({ resolutions: { target: [RES_HI] } });
+    });
+
+    it("reconciles without asking unless the user opted out", () => {
+      expect(automergeEnabled(null)).toBe(true);
+      expect(automergeEnabled({})).toBe(true);
+      expect(automergeEnabled({ automerge: false })).toBe(false);
+      expect(automergeEnabled({ automerge: true })).toBe(true);
+    });
   });
 
   describe("validateRememberedResolutions", () => {
