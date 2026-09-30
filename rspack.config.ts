@@ -125,7 +125,7 @@ export default defineConfig((env, args) => {
       port: 3008,
       // Cross-origin isolation headers (COOP/COEP require-corp) for
       // SharedArrayBuffer are set by the dev `serve` command in
-      // `build_tools/cli.ts` and by `vercel.json` in production (TM-324) — the
+      // `build_tools/cli.ts` and by `nginx.conf` in production (TM-324) — the
       // single source of truth — so they are intentionally not duplicated here.
       // The portal proxies this dev server under its own origin (see
       // `rewrites()` in the portal's next.config.js) so the iframe stays
