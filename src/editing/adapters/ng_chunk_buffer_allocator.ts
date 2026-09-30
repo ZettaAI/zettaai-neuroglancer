@@ -20,7 +20,7 @@
  * shared region.
  *
  * `SharedArrayBuffer` requires cross-origin isolation (COOP/COEP — configured in
- * `vercel.json` and `build_tools/cli.ts`). When that is unavailable (e.g. a
+ * `nginx.conf` and `build_tools/cli.ts`). When that is unavailable (e.g. a
  * non-isolated context), we fall back to a plain `ArrayBuffer`: identical
  * behavior, just not shareable with workers.
  */

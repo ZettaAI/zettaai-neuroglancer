@@ -212,9 +212,9 @@ function parseArgs() {
             devServer: {
               port: argv.port === 0 ? "auto" : argv.port,
               host: argv.host,
-              // TODO: Enable this when we have implemented new Auth flow for calcada datasouorce, also update ./vercel.json
+              // TODO: Enable this when we have implemented new Auth flow for calcada datasouorce, also update nginx.conf
               // Cross-origin isolation (TM-324): required for SharedArrayBuffer
-              // / self.crossOriginIsolated. Mirrors the production vercel.json
+              // / self.crossOriginIsolated. Mirrors the production nginx.conf
               // and the portal's next.config headers so local dev matches the
               // deployed embedding.
               // headers: {
