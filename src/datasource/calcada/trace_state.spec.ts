@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { sameFilter } from "#src/datasource/calcada/candidate_filter_text.js";
 import { minCandidateVoxels } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   TRACE_SPHERE_RADIUS_DEFAULT_NM,
@@ -119,7 +120,7 @@ describe("ZettaTraceState filter", () => {
     state.filterPresetId.value = "17";
     const restored = new ZettaTraceState();
     restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
-    expect(restored.filter.value).toEqual(state.filter.value);
+    expect(sameFilter(restored.filter.value, state.filter.value)).toBe(true);
     expect(restored.filterPresetId.value).toBe("17");
   });
 
@@ -127,19 +128,21 @@ describe("ZettaTraceState filter", () => {
     const state = new ZettaTraceState();
     state.filter.value = {
       kind: "group",
-      op: "or",
+      op: "any",
       children: [
         {
-          kind: "condition",
-          field: { side: "candidate", measure: "voxels" },
-          cmp: ">=",
+          kind: "cond",
+          field: "size",
+          op: ">=",
           value: 500,
+          target: "candidate",
         },
         {
-          kind: "condition",
-          field: { side: "candidate", measure: "voxels" },
-          cmp: ">=",
+          kind: "cond",
+          field: "size",
+          op: ">=",
           value: 300,
+          target: "candidate",
         },
       ],
     };
@@ -149,9 +152,64 @@ describe("ZettaTraceState filter", () => {
     expect(state.minPieceVoxels.value).toBe(300);
   });
 
+  it("migrates a v1 linked filter and writes it back as v2", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({
+      filter: {
+        v: 1,
+        root: {
+          kind: "group",
+          op: "and",
+          children: [
+            {
+              kind: "condition",
+              field: { side: "candidate", measure: "share", class: "axon" },
+              cmp: ">=",
+              value: 0.8,
+            },
+          ],
+        },
+      },
+    });
+    expect(state.filter.value).toMatchObject({
+      kind: "group",
+      op: "all",
+      children: [
+        {
+          kind: "cond",
+          field: "axon",
+          op: ">=",
+          value: 80,
+          target: "candidate",
+        },
+      ],
+    });
+    const json = state.toJSON() as { filter: { v: number } };
+    expect(json.filter.v).toBe(2);
+  });
+
   it("ignores a malformed linked filter", () => {
     const state = new ZettaTraceState();
-    state.restoreState({ filter: { v: 1, root: { kind: "nope" } } });
+    state.restoreState({ filter: { v: 2, root: { kind: "nope" } } });
     expect(state.filter.value.children).toEqual([]);
+  });
+});
+
+describe("ZettaTraceState filter editor", () => {
+  it("is closed by default and round-trips where it is and whether it is open", () => {
+    const state = new ZettaTraceState();
+    expect(state.filterEditor.visible).toBe(false);
+    expect((state.toJSON() as Record<string, unknown>).filterEditor).toBe(
+      undefined,
+    );
+    state.filterEditor.value = {
+      ...state.filterEditor.value,
+      visible: true,
+      size: 480,
+    };
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.filterEditor.visible).toBe(true);
+    expect(restored.filterEditor.value.size).toBe(480);
   });
 });

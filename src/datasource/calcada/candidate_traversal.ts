@@ -90,6 +90,26 @@ export function nextEntry(
   return pool.find((entry) => isOpen(entry, decided, shown));
 }
 
+/**
+ * The next candidate the filter passes, or "waiting" when an earlier one is
+ * still undecided — true, false, or undefined until the piece graph arrives.
+ * Skipping it would break stack order; showing it could show what the filter
+ * excludes.
+ */
+export function nextDecidedEntry(
+  pool: readonly PoolEntry[],
+  decided: ReadonlySet<bigint>,
+  verdict: (candidate: EdgeCandidate) => boolean | undefined,
+): PoolEntry | "waiting" | undefined {
+  const entry = nextEntry(
+    pool,
+    decided,
+    (candidate) => verdict(candidate) !== false,
+  );
+  if (entry === undefined) return undefined;
+  return verdict(entry.candidate) === undefined ? "waiting" : entry;
+}
+
 export function remainingCount(
   pool: readonly PoolEntry[],
   decided: ReadonlySet<bigint>,

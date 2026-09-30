@@ -12,7 +12,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import "#src/datasource/calcada/calcada.css";
 
+import { printFilter } from "#src/datasource/calcada/candidate_filter_text.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
+import { libraryWith } from "#src/datasource/calcada/filter_library_fixture.js";
 import type { TracePanelConnection } from "#src/datasource/calcada/react/trace_panel.js";
 import { CalcadaTracePanel } from "#src/datasource/calcada/react/trace_panel.js";
 import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
@@ -36,7 +38,13 @@ const noClasses = {
   other: 0,
 };
 
-function makeConnection(rejectedBy: string[] = []): TracePanelConnection {
+async function makeConnection(
+  rejectedBy: string[] = [],
+): Promise<TracePanelConnection> {
+  const { library } = await libraryWith({
+    axons: "both axon >= 30%",
+    dendrites: "both dendrite > 80%",
+  });
   const zettaTraceState = new ZettaTraceState();
   zettaTraceState.active.value = true;
   zettaTraceState.sphereCenter.value = Float32Array.of(149532, 124617, 7226);
@@ -45,13 +53,14 @@ function makeConnection(rejectedBy: string[] = []): TracePanelConnection {
   // the filter section.
   zettaTraceState.filter.value = {
     kind: "group",
-    op: "and",
+    op: "all",
     children: [
       {
-        kind: "condition",
-        field: { side: "candidate", measure: "share", class: "vasculature" },
-        cmp: ">=",
-        value: 0.8,
+        kind: "cond",
+        field: "vasculature",
+        op: ">=",
+        value: 80,
+        target: "candidate",
       },
     ],
   };
@@ -100,29 +109,7 @@ function makeConnection(rejectedBy: string[] = []): TracePanelConnection {
       undoLast: async () => {},
     },
     listCandidateReviewers: async () => [],
-    filterPresets: {
-      list: async () => [
-        {
-          id: "1",
-          name: "axons",
-          tree: { kind: "group", op: "and", children: [] },
-          updatedAt: "",
-        },
-      ],
-      create: async (name) => ({
-        id: "2",
-        name,
-        tree: undefined,
-        updatedAt: "",
-      }),
-      update: async (id) => ({
-        id,
-        name: "axons",
-        tree: undefined,
-        updatedAt: "",
-      }),
-      remove: async () => {},
-    },
+    filterLibrary: library,
   };
 }
 
@@ -145,20 +132,106 @@ async function mountPanel(connection: TracePanelConnection) {
   });
 }
 
+async function button(label: string) {
+  return vi.waitFor(() => {
+    const found = [...tab.querySelectorAll<HTMLButtonElement>("button")].find(
+      (candidate) => candidate.textContent?.trim() === label,
+    );
+    expect(found).toBeDefined();
+    return found!;
+  });
+}
+
 // Wide enough to read its "anyone" placeholder.
 const REVIEWER_INPUT_MIN_WIDTH_PX = 40;
 
 describe("CalcadaTracePanel", () => {
-  it("shows the preset bar and the filter editor", async () => {
-    await mountPanel(makeConnection());
-    await vi.waitFor(() => {
-      expect(tab.querySelector(".calcada-filter-preset-bar")).not.toBe(null);
-      expect(tab.querySelector(".calcada-filter-tree")).not.toBe(null);
+  it("picks a saved filter for Trace from the dropdown", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    const trigger = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLElement>(
+        ".calcada-trace-filter-select",
+      );
+      expect(found).not.toBe(null);
+      return found!;
     });
+    trigger.click();
+    const labels = await vi.waitFor(() => {
+      const found = [...document.querySelectorAll('[role="option"]')].map(
+        (item) => item.textContent?.trim(),
+      );
+      expect(found.length).toBeGreaterThan(0);
+      return found;
+    });
+    // "(from link)" names the current filter; it is not a choice.
+    expect(labels).toEqual(["— none —", "axons", "dendrites"]);
+    const { zettaTraceState } = connection.state;
+    [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((item) => item.textContent?.trim() === "dendrites")!
+      .click();
+    await vi.waitFor(() =>
+      expect(zettaTraceState.filterPresetId.value).toBe(
+        connection.filterLibrary.presetId("dendrites"),
+      ),
+    );
+    expect(printFilter(zettaTraceState.filter.value)).toBe(
+      "both dendrite > 80%",
+    );
+    // As in the prototype, the editor follows the Trace choice.
+    expect(connection.filterLibrary.current).toBe("dendrites");
+  });
+
+  it("opens and closes the filter editor", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    const edit = await button("Edit ▸");
+    edit.click();
+    await vi.waitFor(() =>
+      expect(connection.state.zettaTraceState.filterEditor.visible).toBe(true),
+    );
+    (await button("Close editor")).click();
+    await vi.waitFor(() =>
+      expect(connection.state.zettaTraceState.filterEditor.visible).toBe(false),
+    );
+  });
+
+  it("says Trace uses the saved version while the filter has edits", async () => {
+    const connection = await makeConnection();
+    const { filterLibrary: library } = connection;
+    connection.state.zettaTraceState.filterPresetId.value =
+      library.presetId("axons");
+    library.select("axons");
+    library.edit((root) => ({ ...root, children: [] }), "removing a row");
+    await mountPanel(connection);
+    await vi.waitFor(() =>
+      expect(tab.textContent).toContain("using the saved version"),
+    );
+  });
+
+  it("shows a filter with no preset behind it as from the link", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    await vi.waitFor(() =>
+      expect(
+        tab.querySelector(".calcada-trace-filter-select")?.textContent,
+      ).toContain("(from link)"),
+    );
+  });
+
+  it("shows a linked filter it does not have as from the link", async () => {
+    const connection = await makeConnection();
+    connection.state.zettaTraceState.filterPresetId.value = "someone-elses";
+    await mountPanel(connection);
+    await vi.waitFor(() =>
+      expect(
+        tab.querySelector(".calcada-trace-filter-select")?.textContent,
+      ).toContain("(from link)"),
+    );
   });
 
   it("shows the reviewer picker's placeholder when nobody is picked", async () => {
-    await mountPanel(makeConnection());
+    await mountPanel(await makeConnection());
     const input = tab.querySelector<HTMLInputElement>(
       ".calcada-trace-panel-reviewers input",
     )!;
@@ -169,7 +242,9 @@ describe("CalcadaTracePanel", () => {
   });
 
   it("fits the side panel without scrolling sideways", async () => {
-    await mountPanel(makeConnection(["a.very.long.reviewer.name@zetta.ai"]));
+    await mountPanel(
+      await makeConnection(["a.very.long.reviewer.name@zetta.ai"]),
+    );
     const tabRight = tab.getBoundingClientRect().right;
     const overflowing = [...tab.querySelectorAll<HTMLElement>("*")]
       .filter((element) => element.getBoundingClientRect().right > tabRight + 1)

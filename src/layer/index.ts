@@ -2142,6 +2142,12 @@ export class TopLevelLayerListSpecification extends LayerListSpecification {
    * an editing-module dependency cycle at the layer layer.
    */
   editSessionHost: unknown = undefined;
+  /**
+   * The viewer's side panel manager, assigned by the `Viewer` like
+   * `editSessionHost`, for layers that open a panel of their own (the calcada
+   * filter editor). Untyped to keep the layer module free of UI imports.
+   */
+  sidePanelManager: unknown = undefined;
 
   constructor(
     public display: DisplayContext,
