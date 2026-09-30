@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { subjectPasses } from "#src/datasource/calcada/candidate_filter_tree.js";
+import {
+  NO_GRAPH,
+  subjectPasses,
+} from "#src/datasource/calcada/candidate_filter_tree.js";
 import type {
   PieceClasses,
   PieceOverview,
 } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePiece,
+  edgeCandidateSubject,
   flaggedPieceCount,
   heatColor,
   pieceOverviewSubject,
@@ -126,21 +130,22 @@ describe("pieceOverviewSubject", () => {
   it("judges the candidate's size by the best partner's", () => {
     const tree = {
       kind: "group" as const,
-      op: "or" as const,
+      op: "any" as const,
       children: [
         {
-          kind: "condition" as const,
-          field: { side: "candidate" as const, measure: "voxels" as const },
-          cmp: ">=" as const,
+          kind: "cond" as const,
+          field: "size" as const,
+          op: ">=" as const,
           value: 5000,
+          target: "candidate" as const,
         },
       ],
     };
     const small = pieceOverviewSubject(piece({ bestPartnerVoxels: 50 }));
     const big = pieceOverviewSubject(piece({ bestPartnerVoxels: 6000 }));
     const known = { seed: true, candidate: true };
-    expect(subjectPasses(small, tree, known)).toBe(false);
-    expect(subjectPasses(big, tree, known)).toBe(true);
+    expect(subjectPasses(small, tree, known, NO_GRAPH)).toBe(false);
+    expect(subjectPasses(big, tree, known, NO_GRAPH)).toBe(true);
   });
 
   it("lets a detection row pass a tree through subjectPasses", () => {
@@ -155,22 +160,51 @@ describe("pieceOverviewSubject", () => {
     );
     const tree = {
       kind: "group" as const,
-      op: "and" as const,
+      op: "all" as const,
       children: [
         {
-          kind: "condition" as const,
-          field: {
-            side: "candidate" as const,
-            measure: "share" as const,
-            class: "axon" as const,
-          },
-          cmp: ">=" as const,
-          value: 0.8,
+          kind: "cond" as const,
+          field: "axon" as const,
+          op: ">=" as const,
+          value: 80,
+          target: "candidate" as const,
         },
       ],
     };
-    expect(subjectPasses(subject, tree, { seed: true, candidate: true })).toBe(
-      true,
+    expect(
+      subjectPasses(subject, tree, { seed: true, candidate: true }, NO_GRAPH),
+    ).toBe(true);
+  });
+
+  it("names the piece and its best partner", () => {
+    const subject = pieceOverviewSubject(
+      piece({ pieceId: 7n, bestPartnerPiece: 9n }),
     );
+    expect(subject.seed.pieceId).toBe(7n);
+    expect(subject.candidate.pieceId).toBe(9n);
+  });
+});
+
+describe("edgeCandidateSubject", () => {
+  it("names the seed's piece and the partner's", () => {
+    const subject = edgeCandidateSubject({
+      lineId: 1n,
+      score: 0.5,
+      selfPieceId: 3n,
+      partnerPieceId: 4n,
+      partnerRootId: 40n,
+      pointA: new Float32Array(3),
+      pointB: new Float32Array(3),
+      nInterfaces: 1,
+      modelDecision: "",
+      partnerVoxels: 10,
+      partnerClasses: noClasses,
+      partnerHasInfo: false,
+      selfVoxels: 20,
+      selfClasses: noClasses,
+      selfHasInfo: false,
+    });
+    expect(subject.seed.pieceId).toBe(3n);
+    expect(subject.candidate.pieceId).toBe(4n);
   });
 });

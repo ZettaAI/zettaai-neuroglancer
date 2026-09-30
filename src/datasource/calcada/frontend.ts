@@ -68,17 +68,20 @@ import {
   BRANCH_PICKER_TITLE,
   MAIN_BRANCH_ID,
 } from "#src/datasource/calcada/branch_picker_logic.js";
+import type {
+  GraphFacts,
+  Verdict,
+} from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   semanticsKnown,
   subjectPasses,
+  subjectVerdict,
 } from "#src/datasource/calcada/candidate_filter_tree.js";
-import type {
-  PieceClasses,
-  PieceOverview,
-} from "#src/datasource/calcada/candidate_heat.js";
+import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describePiece,
   edgeCandidateSubject,
+  parseClassCounts,
   partnersWithSemantics,
   pieceOverviewSubject,
   rankFlaggedPieces,
@@ -89,6 +92,7 @@ import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
+  nextDecidedEntry,
   nextEntry,
   prependChildren,
   refreshEntries,
@@ -104,6 +108,11 @@ import {
   debugEdgeLines,
   mergeDebugGraphs,
 } from "#src/datasource/calcada/debug_graph.js";
+import { registerFilterEditorPanel } from "#src/datasource/calcada/filter_editor_panel.js";
+import {
+  browserDraftStore,
+  FilterLibrary,
+} from "#src/datasource/calcada/filter_library.js";
 import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
@@ -113,6 +122,7 @@ import {
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
+import { PieceGraphContextCache } from "#src/datasource/calcada/piece_graph_context.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
   CalcadaLabeledTimestampPicker,
@@ -151,6 +161,7 @@ import {
 import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_perspective_overlay.js";
 import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
+import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
 import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
@@ -267,6 +278,7 @@ import {
   PlaceLineTool,
 } from "#src/ui/annotations.js";
 import { getDefaultAnnotationListBindings } from "#src/ui/default_input_event_bindings.js";
+import { SidePanelManager } from "#src/ui/side_panel.js";
 import type { Tool } from "#src/ui/tool.js";
 import {
   LayerTool,
@@ -2691,20 +2703,6 @@ class CalcadaDebugSession extends RefCounted {
 
 // The server walks history per root; it refuses more than this at once.
 const LATEST_ROOTS_BATCH = 200;
-/** A semantic breakdown as the server sends it; absent classes count zero. */
-function parseClassCounts(raw: any): PieceClasses {
-  return {
-    perikaryon: Number(raw?.perikaryon ?? 0),
-    dendrite: Number(raw?.dendrite ?? 0),
-    axon: Number(raw?.axon ?? 0),
-    glia: Number(raw?.glia ?? 0),
-    vasculature: Number(raw?.vasculature ?? 0),
-    nucleus: Number(raw?.nucleus ?? 0),
-    ecs: Number(raw?.ecs ?? 0),
-    other: Number(raw?.other ?? 0),
-  };
-}
-
 /** Whether a candidate is bound to any of these pieces, on either end. */
 function namesAny(candidate: EdgeCandidate, pieces: ReadonlySet<bigint>) {
   return (
@@ -2724,6 +2722,18 @@ const FILTER_INPUT_DEBOUNCE_MS = 400;
  * candidate list with it. The keys are bound for as long as the mode is on,
  * over whatever tool happens to be active.
  */
+const GRAPH_TRUNCATED_MESSAGE_MS = 6000;
+const FILTER_DRAFTS_STORAGE_KEY = "calcada-filter-drafts";
+
+/** Neighbour counts from a cut-short graph can only be too low; say so. */
+function warnIfGraphTruncated(pieceGraph: PieceGraphContextCache) {
+  if (!pieceGraph.truncated) return;
+  StatusMessage.showTemporaryMessage(
+    "The piece graph was cut short — neighbour conditions saw only part of it",
+    GRAPH_TRUNCATED_MESSAGE_MS,
+  );
+}
+
 class ZettaTraceSession extends RefCounted {
   // The panel reads these; it re-renders on `changed`.
   readonly changed = new NullarySignal();
@@ -2757,6 +2767,11 @@ class ZettaTraceSession extends RefCounted {
   // Re-seeding while a fetch is in flight would otherwise let the older
   // response land last and repopulate the list for the previous segment.
   private fetchToken = 0;
+  private graphToken = 0;
+  private graphFailed = false;
+  // The candidate last put on screen, so one that comes back after waiting on
+  // the graph does not move the camera again.
+  private shownLineId: bigint | undefined;
   private annotationIds: string[] = [];
   // Guards against re-requesting the same partner's candidates every time the
   // panel re-renders the current one.
@@ -2841,7 +2856,10 @@ class ZettaTraceSession extends RefCounted {
     // not a refetch: loosening one brings back what it skipped, in stack order.
     const repickOnFilterChange = this.registerCancellable(
       debounce(() => {
-        if (state.active.value && !this.busy) this.showCurrent();
+        if (state.active.value && !this.busy) {
+          this.showCurrent();
+          void this.refreshGraphContext();
+        }
       }, FILTER_INPUT_DEBOUNCE_MS),
     );
     for (const signal of state.candidateFilterSignals) {
@@ -3274,13 +3292,34 @@ class ZettaTraceSession extends RefCounted {
    * were working; following the queue to its next candidate there is exactly
    * the teleport a cut in debug mode used to cause.
    */
-  private showCurrent({ moveCamera = true }: { moveCamera?: boolean } = {}) {
+  private showCurrent({
+    moveCamera = true,
+    keepCameraOnSame = false,
+  }: { moveCamera?: boolean; keepCameraOnSame?: boolean } = {}) {
     this.clearAnnotation();
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     this.dimmed.clear();
-    const shown = this.shownCandidates();
-    const entry = nextEntry(this.pool, this.decided, shown);
+    const verdict = this.candidateVerdicts();
+    const shown = (candidate: EdgeCandidate) => verdict(candidate) === true;
+    const pick = nextDecidedEntry(this.pool, this.decided, verdict);
+    // The view is left as it is: after an edit it is the proofreader's, and
+    // the candidate it waits on is usually the one already on screen.
+    if (pick === "waiting") {
+      this.current = undefined;
+      this.remaining = remainingCount(this.pool, this.decided, shown);
+      if (this.graphFailed) {
+        this.setFailure(
+          "Could not load the piece graph — neighbour and bond conditions hide every candidate",
+        );
+      } else {
+        this.setProgress("Loading graph…");
+      }
+      return;
+    }
+    const entry = pick;
+    const previousLineId = this.shownLineId;
+    this.shownLineId = entry?.candidate.lineId;
     // Never trust the root a queued candidate was fetched with. Roots are
     // replaced by every merge and every split, while the piece survives both,
     // so the root is resolved from the piece at the moment of showing it.
@@ -3376,6 +3415,9 @@ class ZettaTraceSession extends RefCounted {
     // a calcada layer. Position.value ignores an array whose length does not
     // match the coordinate space rank, so on a higher-rank space this simply
     // does not move rather than moving somewhere wrong.
+    if (keepCameraOnSame && candidate.lineId === previousLineId) {
+      moveCamera = false;
+    }
     if (moveCamera && this.state.centreOnCandidate.value) {
       this.layer.manager.root.globalPosition.value =
         Float32Array.from(midpoint);
@@ -3529,6 +3571,37 @@ class ZettaTraceSession extends RefCounted {
     this.pool = seedPool(fetched);
     this.warnIfSphereWasIgnored(fetched);
     this.showCurrent({ moveCamera });
+    void this.refreshGraphContext();
+  }
+
+  /**
+   * Fetch the piece graph the filter's neighbour and bond conditions read,
+   * for every piece in the queue. A candidate on screen was decided without
+   * it, so only a trace waiting on the graph picks again.
+   */
+  private async refreshGraphContext() {
+    const { pieceGraph } = this.connection;
+    const token = ++this.graphToken;
+    this.graphFailed = false;
+    try {
+      const filled = await pieceGraph.fill((graph) => {
+        const verdict = this.candidateVerdicts(graph);
+        for (const { candidate } of this.pool) verdict(candidate);
+      });
+      if (!filled) return;
+      warnIfGraphTruncated(pieceGraph);
+    } catch (e) {
+      if (token !== this.graphToken) return;
+      this.graphFailed = true;
+      StatusMessage.showTemporaryMessage(
+        `Could not load the piece graph: ${e}`,
+        GRAPH_TRUNCATED_MESSAGE_MS,
+      );
+    }
+    const waiting = this.current === undefined;
+    if (token === this.graphToken && waiting && this.state.active.value) {
+      if (!this.busy) this.showCurrent({ keepCameraOnSame: true });
+    }
   }
 
   /**
@@ -3656,6 +3729,7 @@ class ZettaTraceSession extends RefCounted {
     );
     this.showCurrent();
     this.setBusy(false);
+    void this.refreshGraphContext();
   }
 
   /**
@@ -3756,12 +3830,19 @@ class ZettaTraceSession extends RefCounted {
    * can answer: a side none of them has semantics for is not filtered.
    */
   private shownCandidates(): (candidate: EdgeCandidate) => boolean {
+    const verdict = this.candidateVerdicts();
+    return (candidate) => verdict(candidate) === true;
+  }
+
+  private candidateVerdicts(
+    graph: GraphFacts = this.connection.pieceGraph,
+  ): (candidate: EdgeCandidate) => Verdict {
     const tree = this.state.filter.value;
     const known = semanticsKnown(
       this.pool.map((entry) => edgeCandidateSubject(entry.candidate)),
     );
     return (candidate) =>
-      subjectPasses(edgeCandidateSubject(candidate), tree, known);
+      subjectVerdict(edgeCandidateSubject(candidate), tree, known, graph);
   }
 
   /** The candidate partner's current root, or the one it was fetched with. */
@@ -3822,6 +3903,8 @@ class ZettaTraceSession extends RefCounted {
    */
   private async onGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
     if (this.bindings === undefined || this.busy) return;
+    // A graph answer landing mid-refresh would re-pick against a cleared cache.
+    ++this.graphToken;
     for (const id of oldRoots) {
       if (!newRoots.has(id)) this.retired.add(id);
     }
@@ -3837,6 +3920,7 @@ class ZettaTraceSession extends RefCounted {
       piecesBefore.set(root, new Set(segmentEquivalences.setElements(root)));
     }
     await this.refreshFromSeedPiece(oldRoots, newRoots, carved, piecesBefore);
+    void this.refreshGraphContext();
   }
 
   /**
@@ -3883,6 +3967,7 @@ class ZettaTraceSession extends RefCounted {
       // against here.
       await this.refreshFromSeedPiece(new Uint64Set());
       this.setBusy(false);
+      void this.refreshGraphContext();
     }
   }
 
@@ -4193,7 +4278,10 @@ class CandidateOverviewSession extends RefCounted {
     );
     // The threshold is the trace's, shared on purpose. Every filter works on
     // scores already fetched, so moving one is a repaint rather than a query.
-    const repaint = () => this.repaint();
+    const repaint = () => {
+      this.repaint();
+      void this.refreshGraphContext();
+    };
     for (const signal of connection.state.zettaTraceState
       .candidateFilterSignals) {
       this.registerDisposer(signal.changed.add(repaint));
@@ -4297,7 +4385,11 @@ class CandidateOverviewSession extends RefCounted {
    */
   onGraphEdited(oldRoots: Uint64Set) {
     const { targetRoot } = this;
-    if (targetRoot === undefined || !oldRoots.has(targetRoot)) return;
+    if (targetRoot === undefined) return;
+    if (!oldRoots.has(targetRoot)) {
+      void this.refreshGraphContext();
+      return;
+    }
     this.targetRoot = undefined;
     void this.sync();
   }
@@ -4312,10 +4404,36 @@ class CandidateOverviewSession extends RefCounted {
 
   // A side none of the scored pieces has semantics for is not filtered by
   // class, or naming a class on such a graph would hide every piece.
-  private get passes(): (piece: PieceOverview) => boolean {
+  private passesOn(
+    graph: GraphFacts = this.connection.pieceGraph,
+  ): (piece: PieceOverview) => boolean {
     const tree = this.connection.state.zettaTraceState.filter.value;
     const known = semanticsKnown(this.pieces.map(pieceOverviewSubject));
-    return (piece) => subjectPasses(pieceOverviewSubject(piece), tree, known);
+    return (piece) =>
+      subjectPasses(pieceOverviewSubject(piece), tree, known, graph);
+  }
+
+  /** Fetch the piece graph the filter reads around every scored piece. */
+  private async refreshGraphContext() {
+    const { pieceGraph } = this.connection;
+    const token = this.fetchToken;
+    try {
+      const filled = await pieceGraph.fill((graph) => {
+        const passes = this.passesOn(graph);
+        // A piece with no candidate is painted as fine without asking.
+        for (const piece of this.pieces) {
+          if (piece.candidateCount > 0) passes(piece);
+        }
+      });
+      if (!filled) return;
+      warnIfGraphTruncated(pieceGraph);
+    } catch (e) {
+      if (token === this.fetchToken) {
+        this.setStatus(`Could not load the piece graph: ${e}`);
+      }
+      return;
+    }
+    if (token === this.fetchToken) this.repaint();
   }
 
   private enter() {
@@ -4431,6 +4549,7 @@ class CandidateOverviewSession extends RefCounted {
     // The camera stays where the seed was placed: the list starts on the
     // strongest piece, but going to it is the proofreader's call.
     this.repaint();
+    void this.refreshGraphContext();
   }
 
   /**
@@ -4471,7 +4590,7 @@ class CandidateOverviewSession extends RefCounted {
   }
 
   private paint(targetRoot: bigint) {
-    const colors = splitErrorColors(this.pieces, this.passes);
+    const colors = splitErrorColors(this.pieces, this.passesOn());
     this.connection.setOverviewPieceColors(colors);
 
     const { displayState, segmentsState } = this;
@@ -4500,7 +4619,7 @@ class CandidateOverviewSession extends RefCounted {
   // loosening a filter does not throw the proofreader back to the top.
   private rerank() {
     const focused = this.ranked[this.focusIndex]?.pieceId;
-    this.ranked = rankFlaggedPieces(this.pieces, this.passes);
+    this.ranked = rankFlaggedPieces(this.pieces, this.passesOn());
     const kept = this.ranked.findIndex((piece) => piece.pieceId === focused);
     // Nothing chosen yet stays that way; a piece the filter now hides hands
     // its place to the next one down.
@@ -4599,6 +4718,18 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public traceSession!: ZettaTraceSession;
   public overviewSession!: CandidateOverviewSession;
   public debugSession!: CalcadaDebugSession;
+  // Piece ids are branch-local, so the cache is only good for the branch it
+  // was filled on.
+  private pieceGraphBranch = 0;
+  private readonly pieceGraphCache = new PieceGraphContextCache(
+    (pieces, hops, partSizes) =>
+      this.graph.graphServer.fetchPieceGraphContext(
+        pieces,
+        hops,
+        partSizes,
+        this.pieceGraphBranch,
+      ),
+  );
 
   // Debug piece view shared between the piece-split tool (which enters/leaves
   // debug mode) and the layer's "Debug" tab (which lists the pieces and drives
@@ -5097,6 +5228,22 @@ void main() {
     this.overviewSession = this.registerDisposer(
       new CandidateOverviewSession(this, layer, state.overviewState),
     );
+    const { sidePanelManager } = layer.manager.root;
+    if (sidePanelManager instanceof SidePanelManager) {
+      this.registerDisposer(
+        registerFilterEditorPanel(
+          sidePanelManager,
+          state.zettaTraceState,
+          graph.filterLibrary,
+        ),
+      );
+    }
+    this.registerDisposer(
+      followSavedTraceFilter(state.zettaTraceState, graph.filterLibrary),
+    );
+    graph.filterLibrary.load().catch((e: unknown) => {
+      console.warn("[calcada] could not load the filter library", e);
+    });
 
     // Debug is a mode, not a tool: it is meant to sit alongside whatever the
     // proofreader is holding. Its key is bound as a plain action rather than
@@ -5465,7 +5612,18 @@ void main() {
     return taken;
   }
 
+  /** The piece graph around filtered pieces, on the branch in view. */
+  get pieceGraph(): PieceGraphContextCache {
+    const branchId = this.graph.branchId.value;
+    if (branchId !== this.pieceGraphBranch) {
+      this.pieceGraphCache.clear();
+      this.pieceGraphBranch = branchId;
+    }
+    return this.pieceGraphCache;
+  }
+
   notifyGraphEdited(oldRoots: Uint64Set, newRoots: Uint64Set) {
+    this.pieceGraphCache.clear();
     this.state.replaceSegments(oldRoots, newRoots);
     this.overviewSession.onGraphEdited(oldRoots);
   }
@@ -5623,6 +5781,10 @@ void main() {
       segmentsState.selectedSegments.add(root);
       segmentsState.visibleSegments.add(root);
     }
+    this.pieceGraphCache.clear();
+    const superseded = new Uint64Set();
+    superseded.add(supersededRoots);
+    this.overviewSession.onGraphEdited(superseded);
     const restored = restoredRoots.filter((r) => r !== 0n);
     // Restored roots keep the same id as before the edit, so force their cached
     // 3D meshes to re-download (their leaves reverted to the original pieces).
@@ -5761,8 +5923,8 @@ void main() {
     );
   }
 
-  get filterPresets() {
-    return this.graph.filterPresets;
+  get filterLibrary() {
+    return this.graph.filterLibrary;
   }
 
   /**
@@ -6724,6 +6886,25 @@ class CalcadaGraphServerInterface {
     return (jsonResp.reviewers ?? []).map(String);
   }
 
+  async fetchPieceGraphContext(
+    pieces: bigint[],
+    hops: number,
+    partSizes: number[],
+    branchId: number,
+  ): Promise<unknown> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(`${baseUrl}/piece_graph_context`, {
+      method: "POST",
+      body: JSON.stringify({
+        branch_id: branchId,
+        piece_ids: pieces.map(String),
+        hops,
+        part_max_voxels: partSizes,
+      }),
+    });
+    return response.json();
+  }
+
   async fetchCandidateOverview(
     rootId: bigint,
     opts: {
@@ -7143,7 +7324,7 @@ export interface CalcadaBranch {
 
 export class CalcadaGraphSource extends SegmentationGraphSource {
   public graphServer: CalcadaGraphServerInterface;
-  public filterPresets: FilterPresetsClient;
+  public filterLibrary: FilterLibrary;
   private l2CacheAvailable: boolean | undefined = undefined;
   private httpSource: HttpSource;
   private meshingHttpSource: HttpSource;
@@ -7168,7 +7349,15 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
       url,
     );
     this.graphServer = new CalcadaGraphServerInterface(this.httpSource);
-    this.filterPresets = new FilterPresetsClient(this.httpSource);
+    const filterPresets = new FilterPresetsClient(this.httpSource);
+    // Presets are the user's across every graph on this server, so their
+    // drafts are too.
+    this.filterLibrary = new FilterLibrary(
+      filterPresets,
+      browserDraftStore(
+        `${FILTER_DRAFTS_STORAGE_KEY}:${new URL(this.httpSource.baseUrl).origin}`,
+      ),
+    );
     this.meshingHttpSource = getHttpSource(
       chunkSource.sharedKvStoreContext.kvStoreContext,
       info.app!.meshingUrl,

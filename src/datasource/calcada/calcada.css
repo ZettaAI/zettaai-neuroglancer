@@ -463,169 +463,6 @@
   animation: piece-split-spin 0.8s linear infinite;
 }
 
-/* The filter outline: a group is the line down its left edge; the word
-   between rows is the group's operator. */
-.calcada-filter-tree {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-/* The right padding is the group's own ✕: sitting over the rows, it would
-   take the clicks meant for the first row's ✕ and delete the whole group. */
-.calcada-filter-group {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 2px 0 2px 4px;
-  padding: 2px 16px 2px 8px;
-  border-left: 2px solid #444;
-  min-width: 0;
-}
-
-.calcada-filter-group-remove {
-  position: absolute;
-  top: 0;
-  right: 0;
-}
-
-/* The criterion over the end it applies to, and the bound beside both,
-   centred on them: the criterion gets the whole column instead of sharing a
-   line with four other controls. */
-.calcada-filter-condition {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-
-.calcada-filter-condition-what {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.calcada-filter-condition-bound {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 4px;
-}
-
-.calcada-filter-condition .calcada-filter-side {
-  width: 100%;
-}
-
-.calcada-filter-condition .calcada-filter-field {
-  width: 100%;
-  min-width: 0;
-}
-
-/* One symbol; the chevron would leave it no room. */
-.calcada-filter-condition .calcada-filter-cmp {
-  flex: 0 0 2.4em;
-  width: 2.4em;
-  justify-content: center;
-  padding: 0;
-}
-
-.calcada-filter-condition .calcada-filter-cmp svg {
-  display: none;
-}
-
-.calcada-filter-condition .calcada-filter-cmp [data-slot="select-value"] {
-  justify-content: center;
-}
-
-.calcada-filter-condition .calcada-filter-field,
-.calcada-filter-preset-select {
-  overflow: hidden;
-}
-
-/* Cut short on screen; the trigger's tooltip carries the whole text. */
-.calcada-filter-condition .calcada-filter-field [data-slot="select-value"],
-.calcada-filter-preset-select [data-slot="select-value"] {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* No spinner arrows: in this width they cover the digits. */
-.calcada-filter-condition .calcada-filter-value {
-  flex: 0 0 5em;
-  width: 5em;
-  min-width: 0;
-  padding: 0 6px;
-  appearance: textfield;
-}
-
-.calcada-filter-condition .calcada-filter-value::-webkit-inner-spin-button,
-.calcada-filter-condition .calcada-filter-value::-webkit-outer-spin-button {
-  appearance: none;
-  margin: 0;
-}
-
-.calcada-filter-op {
-  align-self: flex-start;
-  margin-left: 2px;
-  padding: 0 5px;
-  border: 1px solid #5a4700;
-  border-radius: 3px;
-  background: none;
-  color: #b58900;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-}
-
-.calcada-filter-remove {
-  flex: none;
-  padding: 0 2px;
-  border: none;
-  background: none;
-  color: #888;
-  cursor: pointer;
-}
-
-.calcada-filter-add {
-  display: flex;
-  gap: 4px;
-}
-
-.calcada-filter-preset-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.calcada-filter-preset-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-
-.calcada-filter-preset-row .calcada-filter-preset-select,
-.calcada-filter-preset-row input {
-  flex: 1 1 auto;
-  min-width: 0;
-  width: auto;
-}
-
-.calcada-filter-preset-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-}
-
 /* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
    the width to show a whole hint. */
 .calcada-trace-panel-status {
@@ -823,4 +660,801 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* The Trace tab's filter box: which saved filter Trace applies. */
+.calcada-trace-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-trace-filter-select {
+  width: 100%;
+  min-width: 0;
+}
+
+.calcada-trace-filter-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+
+/* Filter editor column: Sergiy's prototype v11, its values kept. */
+.calcada-filter-editor {
+  --cfe-panel: #0b0b0c;
+  --cfe-line: #2a2a2c;
+  --cfe-ctrl: #1a1a1b;
+  --cfe-ctrl-line: #4a4a4d;
+  --cfe-text: #e8e8e8;
+  --cfe-muted: #9c9ca3;
+  --cfe-accent: #2f63d6;
+  --cfe-accent-soft: #1d2c4d;
+  --cfe-accent-line: #4f7bd9;
+  --cfe-gold-bg: #2b2410;
+  --cfe-gold-line: #b8912a;
+  --cfe-gold-text: #f1d58a;
+  --cfe-tree: #34466a;
+  --cfe-tree-neighbors: #5a4fa8;
+  --cfe-warn: #ffb36b;
+  --cfe-warn-line: #a0522d;
+  --cfe-ok: #8fc9ff;
+  --cfe-code-bg: #111113;
+  --cfe-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cfe-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  background: var(--cfe-panel);
+  color: var(--cfe-text);
+  font-family: var(--cfe-sans);
+  font-size: 13px;
+}
+
+.calcada-filter-editor *,
+.calcada-filter-editor *::before,
+.calcada-filter-editor *::after {
+  box-sizing: border-box;
+}
+
+.calcada-filter-editor :is(button, select, input, textarea) {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--cfe-text);
+}
+
+.calcada-filter-editor :is(button, select, input, textarea):focus-visible {
+  outline: 2px solid var(--cfe-accent-line);
+  outline-offset: 1px;
+}
+
+.calcada-filter-editor-head,
+.calcada-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--cfe-line);
+}
+
+.calcada-filter-editor-title {
+  margin-right: 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.calcada-filter-push {
+  margin-left: auto;
+}
+
+.calcada-filter-bar-right {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* Controls */
+.calcada-filter-choice,
+.calcada-filter-number,
+.calcada-filter-button,
+.calcada-filter-library-select,
+.calcada-filter-name-input {
+  height: 24px;
+  border: 1px solid var(--cfe-ctrl-line);
+  border-radius: 4px;
+  background: var(--cfe-ctrl);
+}
+
+.calcada-filter-choice,
+.calcada-filter-library-select {
+  max-width: 100%;
+  padding: 0 6px;
+}
+
+.calcada-filter-library-select {
+  min-width: 210px;
+  font-weight: 600;
+}
+
+.calcada-filter-name-input {
+  width: 260px;
+  max-width: 100%;
+  padding: 0 8px;
+}
+
+.calcada-filter-number {
+  width: 70px;
+  padding: 0 8px;
+  font-family: var(--cfe-mono);
+}
+
+.calcada-filter-number.short {
+  width: 46px;
+}
+
+.calcada-filter-number.bad {
+  border-color: var(--cfe-warn);
+  color: var(--cfe-warn);
+}
+
+.calcada-filter-button {
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.calcada-filter-button:hover:not([disabled]) {
+  border-color: #808088;
+}
+
+.calcada-filter-button.primary {
+  border-color: var(--cfe-accent);
+  background: var(--cfe-accent);
+  color: #fff;
+}
+
+.calcada-filter-button.danger {
+  border-color: var(--cfe-warn-line);
+  color: var(--cfe-warn);
+}
+
+.calcada-filter-button[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.calcada-filter-link {
+  padding: 4px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #9fb6d9;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.calcada-filter-editor .calcada-filter-link {
+  color: #9fb6d9;
+  font-size: 12px;
+}
+
+.calcada-filter-link:hover {
+  background: #15181f;
+  color: #d4e3ff;
+}
+
+.calcada-filter-link[disabled] {
+  opacity: 0.4;
+  cursor: default;
+  background: none;
+}
+
+.calcada-filter-icon {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #8a8a92;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.calcada-filter-editor .calcada-filter-icon {
+  color: #8a8a92;
+  font-size: 15px;
+}
+
+.calcada-filter-icon:hover:not([disabled]) {
+  background: #1c1c20;
+  color: #fff;
+}
+
+.calcada-filter-editor .calcada-filter-close {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--cfe-ctrl-line);
+  border-radius: 4px;
+  background: var(--cfe-ctrl);
+  color: var(--cfe-text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.calcada-filter-editor .calcada-filter-close:hover {
+  border-color: #808088;
+  background: #26262a;
+  color: #fff;
+}
+
+.calcada-filter-editor .calcada-filter-toggle {
+  color: #a0a0a8;
+  font-size: 11px;
+}
+
+.calcada-filter-toggle-space {
+  flex: 0 0 auto;
+  width: 26px;
+}
+
+/* Status and messages */
+.calcada-filter-status {
+  min-width: 64px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.calcada-filter-status.dirty,
+.calcada-filter-warning {
+  color: var(--cfe-warn);
+}
+
+.calcada-filter-status.clean,
+.calcada-filter-muted {
+  color: var(--cfe-muted);
+  font-size: 12px;
+}
+
+.calcada-filter-badge {
+  padding: 1px 8px;
+  border: 1px solid #3d5a8f;
+  border-radius: 10px;
+  color: var(--cfe-ok);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.calcada-filter-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 18px 0;
+  padding: 8px 10px;
+  border: 1px solid #6b4020;
+  border-radius: 6px;
+  background: #1f150c;
+}
+
+.calcada-filter-confirm span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.calcada-filter-stale {
+  padding: 6px 10px;
+  border: 1px solid #6b4020;
+  border-radius: 6px;
+  background: #1f150c;
+  color: var(--cfe-warn);
+  font-size: 12px;
+}
+
+.calcada-filter-editor > .calcada-filter-stale {
+  margin: 12px 18px 0;
+}
+
+.calcada-filter-flash {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  z-index: 10;
+  max-width: calc(100% - 32px);
+  padding: 8px 14px;
+  border: 1px solid var(--cfe-accent-line);
+  border-radius: 8px;
+  background: var(--cfe-accent-soft);
+  color: #fff;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+/* Menus */
+.calcada-filter-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.calcada-filter-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: 4px;
+  border: 1px solid #33405e;
+  border-radius: 6px;
+  background: #151820;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.calcada-filter-bar-right .calcada-filter-menu {
+  right: 0;
+  left: auto;
+  min-width: 140px;
+}
+
+.calcada-filter-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #e6e6ea;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.calcada-filter-menu button:hover,
+.calcada-filter-menu button:focus-visible {
+  background: #22314f;
+  outline: none;
+}
+
+.calcada-filter-menu button.danger {
+  color: var(--cfe-warn);
+}
+
+/* Sections */
+.calcada-filter-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px 18px 16px;
+}
+
+.calcada-filter-section + .calcada-filter-section {
+  border-top: 1px solid var(--cfe-line);
+}
+
+.calcada-filter-section-head,
+.calcada-filter-root {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+}
+
+.calcada-filter-root {
+  gap: 8px;
+  margin: 0 0 6px;
+  color: #cfcfd4;
+}
+
+.calcada-filter-section-title {
+  color: var(--cfe-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+/* The tree */
+.calcada-filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--cfe-tree);
+}
+
+.calcada-filter-group.top {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: none;
+}
+
+.calcada-filter-group.targeted {
+  border-left-color: rgba(184, 145, 42, 0.6);
+}
+
+.calcada-filter-group.neighbors {
+  border-left-color: var(--cfe-tree-neighbors);
+}
+
+.calcada-filter-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 1px 2px;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.calcada-filter-row:hover,
+.calcada-filter-row:focus-within {
+  background: #111318;
+}
+
+.calcada-filter-row.fresh {
+  animation: calcada-filter-fresh 1.4s ease-out;
+}
+
+@keyframes calcada-filter-fresh {
+  from {
+    background: rgba(79, 123, 217, 0.32);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.calcada-filter-row.new {
+  box-shadow: inset 3px 0 0 #6f9bff;
+}
+
+.calcada-filter-row-controls {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.calcada-filter-row-tail {
+  display: flex;
+  flex: 0 0 auto;
+  margin-left: auto;
+  opacity: 0.45;
+}
+
+.calcada-filter-row:hover .calcada-filter-row-tail,
+.calcada-filter-row:focus-within .calcada-filter-row-tail {
+  opacity: 1;
+}
+
+.calcada-filter-handle {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #55555c;
+  font-size: 14px;
+  line-height: 28px;
+  text-align: center;
+  cursor: grab;
+  user-select: none;
+}
+
+.calcada-filter-handle:hover {
+  color: #bbb;
+}
+
+.calcada-filter-inline {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.calcada-filter-choice.calcada-filter-target {
+  border-color: var(--cfe-gold-line);
+  background: var(--cfe-gold-bg);
+  color: var(--cfe-gold-text);
+  font-weight: 500;
+}
+
+.calcada-filter-choice.calcada-filter-target.each {
+  border-color: var(--cfe-ctrl-line);
+  background: var(--cfe-ctrl);
+  color: var(--cfe-muted);
+  font-weight: 400;
+}
+
+.calcada-filter-choice.changed,
+.calcada-filter-number.changed {
+  box-shadow: inset 3px 0 0 #6f9bff;
+}
+
+.calcada-filter-unit {
+  min-width: 14px;
+  color: var(--cfe-muted);
+  font-size: 12px;
+}
+
+.calcada-filter-neighbor-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 78px;
+  height: 24px;
+  padding: 0 4px 0 0;
+  color: #a79cf0;
+  font-size: 12px;
+}
+
+.calcada-filter-row-controls .calcada-filter-muted {
+  color: #cfcfd4;
+  font-size: 13px;
+}
+
+.calcada-filter-group-note {
+  color: var(--cfe-muted);
+  font-size: 12px;
+}
+
+.calcada-filter-hint {
+  padding: 0 0 6px 50px;
+  color: var(--cfe-warn);
+  font-size: 12px;
+}
+
+.calcada-filter-summary {
+  padding: 0 0 6px 50px;
+  color: var(--cfe-muted);
+  font-family: var(--cfe-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.calcada-filter-group.neighbors > .calcada-filter-muted {
+  padding: 4px 0 2px 42px;
+}
+
+.calcada-filter-dropzone {
+  height: 10px;
+  margin: 0 0 0 20px;
+  border: 1px dashed transparent;
+  border-radius: 4px;
+}
+
+.calcada-filter-dropzone.over {
+  border-color: var(--cfe-accent-line);
+  background: rgba(79, 123, 217, 0.18);
+}
+
+/* The text box: a transparent textarea over its own highlighted copy. */
+.calcada-filter-code {
+  position: relative;
+  min-width: 0;
+  border-radius: 6px;
+  background: var(--cfe-code-bg);
+}
+
+.calcada-filter-code pre,
+.calcada-filter-code textarea {
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #2e2e32;
+  border-radius: 6px;
+  font-family: var(--cfe-mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  letter-spacing: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  tab-size: 2;
+}
+
+.calcada-filter-code pre {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-color: transparent;
+  color: #d8d8dc;
+  pointer-events: none;
+}
+
+.calcada-filter-code textarea {
+  position: relative;
+  display: block;
+  min-height: 40px;
+  overflow: hidden;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
+}
+
+.calcada-filter-code textarea:focus {
+  border-color: var(--cfe-accent-line);
+  outline: none;
+}
+
+.calcada-filter-code textarea::selection {
+  background: rgba(79, 123, 217, 0.45);
+  color: transparent;
+}
+
+.calcada-filter-code.error textarea {
+  border-color: var(--cfe-warn-line);
+}
+
+.calcada-filter-token.keyword {
+  color: #c7a7ff;
+}
+
+.calcada-filter-token.target {
+  color: var(--cfe-gold-text);
+}
+
+.calcada-filter-token.field {
+  color: #8fd3c7;
+}
+
+.calcada-filter-token.number {
+  color: #ffcf8a;
+}
+
+.calcada-filter-token.neighbor {
+  color: #a9b8ff;
+}
+
+.calcada-filter-token.operator {
+  color: #e6e6e6;
+}
+
+.calcada-filter-token.paren {
+  color: #8a8a92;
+}
+
+.calcada-filter-token.comment {
+  color: #6d6d74;
+  font-style: italic;
+}
+
+.calcada-filter-token.error {
+  text-decoration: underline wavy var(--cfe-warn);
+  text-underline-offset: 3px;
+}
+
+.calcada-filter-parse {
+  font-family: var(--cfe-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.calcada-filter-parse:empty {
+  display: none;
+}
+
+.calcada-filter-parse.ok {
+  color: var(--cfe-muted);
+}
+
+.calcada-filter-parse.bad {
+  color: var(--cfe-warn);
+}
+
+.calcada-filter-text-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.calcada-filter-text-body[hidden] {
+  display: none;
+}
+
+.calcada-filter-help {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 20px;
+  margin-bottom: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--cfe-line);
+  border-radius: 6px;
+  background: #0f0f11;
+  font-size: 12px;
+}
+
+.calcada-filter-help > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.calcada-filter-help > div:first-child {
+  display: block;
+  grid-column: 1 / -1;
+  color: var(--cfe-muted);
+  line-height: 1.55;
+}
+
+.calcada-filter-help i {
+  color: #d8d8dc;
+  font-style: normal;
+}
+
+.calcada-filter-help code {
+  color: #d8d8dc;
+  font-family: var(--cfe-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.calcada-filter-help span {
+  color: var(--cfe-muted);
+}
+
+.calcada-filter-rename .calcada-filter-muted:first-child {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* Narrow columns, as the prototype narrows them. */
+@container (max-width: 640px) {
+  .calcada-filter-help {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .calcada-filter-group {
+    margin-left: 4px;
+    padding-left: 8px;
+  }
+  .calcada-filter-hint,
+  .calcada-filter-summary {
+    padding-left: 8px;
+  }
+  .calcada-filter-neighbor-label {
+    min-width: 0;
+    padding: 0 2px;
+  }
+  .calcada-filter-number {
+    width: 60px;
+  }
+  .calcada-filter-number.short {
+    width: 40px;
+  }
+  .calcada-filter-bar-right {
+    margin-left: 0;
+  }
+}
+
+.calcada-filter-editor-panel {
+  container-type: inline-size;
+  height: 100%;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
+  nextDecidedEntry,
   nextEntry,
   prependChildren,
   prunePool,
@@ -179,5 +180,43 @@ describe("refreshEntries", () => {
     expect(lineIds(next)).toEqual([2, 1]);
     expect(next[1].candidate.partnerPieceId).toBe(77n);
     expect(next[1].depth).toBe(0);
+  });
+});
+
+describe("nextDecidedEntry", () => {
+  const pool = seedPool([
+    candidate(1, 0.9),
+    candidate(2, 0.8),
+    candidate(3, 0.7),
+  ]);
+  const verdicts =
+    (byLine: Record<number, boolean | undefined>) => (c: EdgeCandidate) =>
+      byLine[Number(c.lineId)];
+
+  it("skips what the filter fails and takes what it passes", () => {
+    const pick = nextDecidedEntry(
+      pool,
+      new Set(),
+      verdicts({ 1: false, 2: true, 3: true }),
+    );
+    expect(pick).toMatchObject({ candidate: { lineId: 2n } });
+  });
+
+  it("waits at the first candidate the filter cannot decide yet", () => {
+    const pick = nextDecidedEntry(
+      pool,
+      new Set(),
+      verdicts({ 1: false, 2: undefined, 3: true }),
+    );
+    expect(pick).toBe("waiting");
+  });
+
+  it("is undefined when nothing is left", () => {
+    const pick = nextDecidedEntry(
+      pool,
+      new Set([3n]),
+      verdicts({ 1: false, 2: false }),
+    );
+    expect(pick).toBeUndefined();
   });
 });
