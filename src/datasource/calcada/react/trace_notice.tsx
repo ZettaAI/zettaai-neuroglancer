@@ -16,7 +16,7 @@
  * one that has run dry.
  */
 
-import { useSignalRerender } from "#src/datasource/calcada/react/trace_panel.js";
+import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { NullarySignal } from "#src/util/signal.js";
 

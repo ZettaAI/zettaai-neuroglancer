@@ -8,20 +8,23 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import type {
-  FilterGroup,
-  LegacyFilter,
-} from "#src/datasource/calcada/candidate_filter_tree.js";
+import type { GroupNode } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   emptyFilterTree,
-  legacyFilterTree,
   minCandidateVoxels,
-  parseFilterTree,
+  parseFilterDocument,
   serializeFilterTree,
+  withNodeIds,
 } from "#src/datasource/calcada/candidate_filter_tree.js";
+import type { LegacyFilter } from "#src/datasource/calcada/candidate_filter_v1.js";
+import { legacyFilterTree } from "#src/datasource/calcada/candidate_filter_v1.js";
 import type { SemanticClass } from "#src/datasource/calcada/candidate_heat.js";
 import { SEMANTIC_CLASSES } from "#src/datasource/calcada/candidate_heat.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import {
+  DEFAULT_SIDE_PANEL_LOCATION,
+  TrackableSidePanelLocation,
+} from "#src/ui/side_panel_location.js";
 import type { Uint64Set } from "#src/uint64_set.js";
 import { RefCounted } from "#src/util/disposable.js";
 import {
@@ -52,6 +55,18 @@ const TRACE_SPHERE_CENTER_KEY = "sphereCenter";
 
 const TRACE_FILTER_KEY = "filter";
 const TRACE_FILTER_PRESET_KEY = "filterPreset";
+const TRACE_FILTER_EDITOR_KEY = "filterEditor";
+export const FILTER_EDITOR_WIDTH_PX = 1280;
+export const FILTER_EDITOR_MIN_WIDTH_PX = 320;
+const DEFAULT_FILTER_EDITOR_LOCATION = {
+  ...DEFAULT_SIDE_PANEL_LOCATION,
+  side: "right" as const,
+  // Its own column beside the layer panel (column 0), not stacked under it.
+  col: 1,
+  size: FILTER_EDITOR_WIDTH_PX,
+  minSize: FILTER_EDITOR_MIN_WIDTH_PX,
+  visible: false,
+};
 
 const TRACE_ACTIVE_KEY = "active";
 const TRACE_SEED_KEY = "seedRoot";
@@ -70,6 +85,10 @@ const TRACE_TARGET_FRACTION_KEY = "targetMinFraction";
 const CLASS_FRACTION_DEFAULT = 0.8;
 // Server-side alias for the authenticated user.
 export const TRACE_CURRENT_USER = "me";
+
+function emptyToUndefined(json: object) {
+  return Object.keys(json).length > 0 ? json : undefined;
+}
 
 function parseClass(value: unknown): SemanticClass {
   const name = verifyString(value) as SemanticClass;
@@ -120,10 +139,12 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   seedRoot = new WatchableValue<bigint | undefined>(undefined);
   // The candidate filter, shared by the trace and split error detection so the
   // pieces painted as likely errors are the ones the trace will offer.
-  filter = new WatchableValue<FilterGroup>(emptyFilterTree());
+  filter = new WatchableValue<GroupNode>(emptyFilterTree());
   // The saved preset the filter was loaded from, if any. Only its owner's list
   // knows it; anyone else opening the link sees the same tree, unnamed.
   filterPresetId = new WatchableValue<string | undefined>(undefined);
+  // Where the filter editor column sits, and whether it is open.
+  filterEditor = new TrackableSidePanelLocation(DEFAULT_FILTER_EDITOR_LOCATION);
   // The one part of the filter the server applies: the smallest candidate it
   // can pass, so debris does not crowd the rest out of the fetch limit.
   // Derived from `filter`, never set or saved on its own.
@@ -163,6 +184,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     );
     this.registerDisposer(this.filter.changed.add(reemit));
     this.registerDisposer(this.filterPresetId.changed.add(reemit));
+    this.registerDisposer(this.filterEditor.changed.add(reemit));
   }
 
   /** Every filter change hides or shows queued entries without a refetch. */
@@ -216,6 +238,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
           ? serializeFilterTree(this.filter.value)
           : undefined,
       [TRACE_FILTER_PRESET_KEY]: this.filterPresetId.value,
+      [TRACE_FILTER_EDITOR_KEY]: emptyToUndefined(this.filterEditor.toJSON()),
       [TRACE_SCOPE_KEY]: this.scope.value,
       [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
       [TRACE_SPHERE_CENTER_KEY]: this.sphereCenter.value
@@ -244,19 +267,21 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       x,
       TRACE_FILTER_KEY,
       (value) => {
-        const tree = parseFilterTree(value);
+        const tree = parseFilterDocument(value);
         if (tree === undefined) {
           console.warn("[calcada] ignoring a malformed trace filter", value);
         }
         return tree;
       },
     );
-    this.filter.value = linked ?? legacyFilterTree(readLegacyFilter(x));
+    this.filter.value =
+      linked ?? withNodeIds(legacyFilterTree(readLegacyFilter(x)));
     this.filterPresetId.value = verifyOptionalObjectProperty(
       x,
       TRACE_FILTER_PRESET_KEY,
       verifyString,
     );
+    this.filterEditor.restoreState(x?.[TRACE_FILTER_EDITOR_KEY]);
     verifyOptionalObjectProperty(x, TRACE_SCOPE_KEY, (value) => {
       this.scope.value =
         verifyString(value) === "segment" ? "segment" : "sphere";
