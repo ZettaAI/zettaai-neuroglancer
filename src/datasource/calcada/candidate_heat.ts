@@ -58,6 +58,20 @@ export interface PieceClasses {
   other: number;
 }
 
+/** A semantic breakdown as the server sends it; absent classes count zero. */
+export function parseClassCounts(raw: any): PieceClasses {
+  return {
+    perikaryon: Number(raw?.perikaryon ?? 0),
+    dendrite: Number(raw?.dendrite ?? 0),
+    axon: Number(raw?.axon ?? 0),
+    glia: Number(raw?.glia ?? 0),
+    vasculature: Number(raw?.vasculature ?? 0),
+    nucleus: Number(raw?.nucleus ?? 0),
+    ecs: Number(raw?.ecs ?? 0),
+    other: Number(raw?.other ?? 0),
+  };
+}
+
 export interface PieceOverview {
   pieceId: bigint;
   bestScore: number;
@@ -111,11 +125,13 @@ export function pieceOverviewSubject(piece: PieceOverview): FilterSubject {
   return {
     score: piece.bestScore,
     seed: {
+      pieceId: piece.pieceId,
       voxels: piece.voxelCount,
       classes: piece.classes,
       hasInfo: piece.hasInfo,
     },
     candidate: {
+      pieceId: piece.bestPartnerPiece,
       voxels: piece.bestPartnerVoxels,
       classes: piece.partnerClasses,
       hasInfo: piece.partnerHasInfo,
@@ -127,11 +143,13 @@ export function edgeCandidateSubject(candidate: EdgeCandidate): FilterSubject {
   return {
     score: candidate.score,
     seed: {
+      pieceId: candidate.selfPieceId,
       voxels: candidate.selfVoxels,
       classes: candidate.selfClasses,
       hasInfo: candidate.selfHasInfo,
     },
     candidate: {
+      pieceId: candidate.partnerPieceId,
       voxels: candidate.partnerVoxels,
       classes: candidate.partnerClasses,
       hasInfo: candidate.partnerHasInfo,

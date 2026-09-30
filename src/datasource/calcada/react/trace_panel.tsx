@@ -9,7 +9,7 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { Fragment, useCallback, useEffect, useReducer, useState } from "react";
+import { Fragment, useCallback } from "react";
 
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { describePiece } from "#src/datasource/calcada/candidate_heat.js";
@@ -18,14 +18,10 @@ import type {
   SplitDetectionFocus,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
-import type {
-  FilterPreset,
-  FilterPresetsClient,
-} from "#src/datasource/calcada/filter_presets.js";
+import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
 import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
-import { FilterPresetBar } from "#src/datasource/calcada/react/filter_preset_bar.js";
-import { FilterTreeEditor } from "#src/datasource/calcada/react/filter_tree_editor.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
+import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import type {
   TraceScope,
   ZettaTraceState,
@@ -34,6 +30,7 @@ import {
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
+import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { NullarySignal } from "#src/util/signal.js";
@@ -81,27 +78,96 @@ export interface TracePanelConnection {
     undoLast(): Promise<void>;
   };
   listCandidateReviewers(): Promise<string[]>;
-  readonly filterPresets: Pick<
-    FilterPresetsClient,
-    "list" | "create" | "update" | "remove"
-  >;
+  readonly filterLibrary: FilterLibrary;
 }
 
+const NO_FILTER = "none";
+const FROM_LINK = "link";
+
 /**
- * The trace session reports through a bare signal rather than a watchable: its
- * status, candidate and busy flag are plain fields that change together. A
- * snapshot of them would have to be rebuilt on every read for
- * `useSyncExternalStore`, which cannot cache it, so the signal drives a
- * re-render and the fields are read during it.
+ * Which saved filter Trace applies — always its saved version — and the way
+ * into the editor column. A link can name someone else's filter; its tree
+ * still applies, shown as coming from the link.
  */
-export function useSignalRerender(signal: NullarySignal) {
-  const [, rerender] = useReducer((tick: number) => tick + 1, 0);
-  useEffect(() => {
-    const unsubscribe = signal.add(rerender);
-    return () => {
-      unsubscribe();
-    };
-  }, [signal, rerender]);
+function TraceFilterPicker({
+  library,
+  state,
+}: {
+  library: FilterLibrary;
+  state: ZettaTraceState;
+}) {
+  useSignalRerender(library.changed);
+  const presetId = useWatchable(state.filterPresetId);
+  const editorOpen = useWatchable(state.filterEditor.watchableVisible);
+  const filter = useWatchable(state.filter);
+  const chosen = presetId === undefined ? undefined : library.nameOf(presetId);
+  // A tree with no filter of the user's behind it (someone else's preset, an
+  // older link) still applies; say where it came from rather than "none".
+  const fromLink =
+    chosen === undefined &&
+    (presetId !== undefined || filter.children.length > 0);
+  const value = chosen ?? (fromLink ? FROM_LINK : NO_FILTER);
+  // "(from link)" is shown, never offered: an item that vanishes as the
+  // user picks another makes the select report a change to "none".
+  const options: [string, string][] = [
+    [NO_FILTER, "— none —"],
+    ...library.names.map((name): [string, string] => [name, name]),
+  ];
+  const shown = fromLink
+    ? "(from link)"
+    : (options.find(([key]) => key === value)?.[1] ?? "");
+  const usingSaved = chosen !== undefined && library.isDirty(chosen);
+  return (
+    <div className="calcada-trace-filter">
+      <Select
+        value={value}
+        onValueChange={(next) => {
+          const name = next === NO_FILTER ? undefined : (next as string);
+          chooseTraceFilter(state, library, name);
+          // The editor opens on what Trace uses; the other way round, a
+          // filter opened in the editor reaches Trace only by "Use in Trace".
+          if (name !== undefined) library.select(name);
+        }}
+      >
+        <SelectTrigger
+          size="sm"
+          className="calcada-trace-filter-select"
+          aria-label="Candidate filter"
+          title={chosen ?? (fromLink ? "From the link" : "No filter")}
+        >
+          <SelectValue>{shown}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([key, text]) => (
+            <SelectItem key={key} value={key}>
+              {text}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <div className="calcada-trace-filter-row">
+        <Button
+          size="xs"
+          variant="outline"
+          aria-expanded={editorOpen}
+          onClick={() => {
+            if (!editorOpen && chosen !== undefined) library.select(chosen);
+            state.filterEditor.visible = !editorOpen;
+          }}
+        >
+          {editorOpen ? "Close editor" : "Edit ▸"}
+        </Button>
+        {usingSaved && (
+          <span
+            className="calcada-filter-warning"
+            title="This filter has unsaved edits in the editor; Trace uses the saved version."
+          >
+            using the saved version
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 const SCOPE_LABELS: ReadonlyArray<[TraceScope, string]> = [
@@ -227,20 +293,6 @@ export function CalcadaTracePanel({
     () => connection.listCandidateReviewers(),
     [connection],
   );
-  const filterTree = useWatchable(traceState.filter);
-  const presetId = useWatchable(traceState.filterPresetId);
-  const [presets, setPresets] = useState<FilterPreset[]>([]);
-  // Stable, or the effect below would refetch the list on every render.
-  const reloadPresets = useCallback(async () => {
-    try {
-      setPresets(await connection.filterPresets.list());
-    } catch {
-      setPresets([]);
-    }
-  }, [connection]);
-  useEffect(() => {
-    void reloadPresets();
-  }, [reloadPresets]);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const overviewActive = useWatchable(overviewState.active);
@@ -372,26 +424,9 @@ export function CalcadaTracePanel({
           pieces painted as likely errors are the ones the trace will offer. */}
       <fieldset className="calcada-trace-panel-section">
         <legend>Candidate filter</legend>
-        <FilterPresetBar
-          presets={presets}
-          store={connection.filterPresets}
-          tree={filterTree}
-          selectedId={presetId}
-          onSelect={(preset) => {
-            traceState.filterPresetId.value = preset?.id;
-            if (preset?.tree !== undefined)
-              traceState.filter.value = preset.tree;
-          }}
-          onChanged={(selectId) => {
-            traceState.filterPresetId.value = selectId;
-            void reloadPresets();
-          }}
-        />
-        <FilterTreeEditor
-          tree={filterTree}
-          onChange={(next) => {
-            traceState.filter.value = next;
-          }}
+        <TraceFilterPicker
+          library={connection.filterLibrary}
+          state={traceState}
         />
         {tracing && traceSession.current !== undefined && (
           <>

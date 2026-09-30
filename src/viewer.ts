@@ -1145,6 +1145,7 @@ export class Viewer extends RefCounted implements ViewerState {
     this.sidePanelManager = this.registerDisposer(
       new SidePanelManager(this.display, this.layout.element, this.visibility),
     );
+    this.layerSpecification.sidePanelManager = this.sidePanelManager;
     this.registerDisposer(
       this.sidePanelManager.registerPanel({
         location: this.layerListPanelState.location,

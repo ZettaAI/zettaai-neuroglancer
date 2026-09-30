@@ -15,9 +15,9 @@
  */
 
 import type { HttpSource } from "#src/datasource/calcada/base.js";
-import type { FilterGroup } from "#src/datasource/calcada/candidate_filter_tree.js";
+import type { GroupNode } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
-  parseFilterTree,
+  parseFilterDocument,
   serializeFilterTree,
 } from "#src/datasource/calcada/candidate_filter_tree.js";
 import { HttpError } from "#src/util/http_request.js";
@@ -28,7 +28,7 @@ export interface FilterPreset {
   id: string;
   name: string;
   /** Undefined when this client cannot use the stored filter. */
-  tree: FilterGroup | undefined;
+  tree: GroupNode | undefined;
   updatedAt: string;
 }
 
@@ -46,7 +46,7 @@ function parsePreset(value: unknown): FilterPreset | undefined {
   return {
     id: item.id,
     name: item.name,
-    tree: parseFilterTree(item.filter),
+    tree: parseFilterDocument(item.filter),
     updatedAt: typeof item.updated_at === "string" ? item.updated_at : "",
   };
 }
@@ -93,7 +93,7 @@ export class FilterPresetsClient {
     return parseFilterPresets(await response.json());
   }
 
-  async create(name: string, tree: FilterGroup): Promise<FilterPreset> {
+  async create(name: string, tree: GroupNode): Promise<FilterPreset> {
     const response = await this.send(
       this.url,
       "POST",
@@ -105,7 +105,7 @@ export class FilterPresetsClient {
 
   async update(
     id: string,
-    change: { name?: string; tree?: FilterGroup },
+    change: { name?: string; tree?: GroupNode },
   ): Promise<FilterPreset> {
     const body = {
       name: change.name,
