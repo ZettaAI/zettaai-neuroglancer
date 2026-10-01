@@ -123,6 +123,10 @@ import {
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
 import { PieceGraphContextCache } from "#src/datasource/calcada/piece_graph_context.js";
+import {
+  PointPlacement,
+  viewerPanelKind,
+} from "#src/datasource/calcada/point_placement.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
   CalcadaLabeledTimestampPicker,
@@ -146,6 +150,8 @@ import {
   componentsWithCarvedParents,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
+import type { SplitErrorPoint } from "#src/datasource/calcada/split_error_points.js";
+import { splitErrorPoints } from "#src/datasource/calcada/split_error_points.js";
 import type { SplitStepUndo } from "#src/datasource/calcada/split_steps.js";
 import {
   panelStages,
@@ -4205,6 +4211,13 @@ const SPLIT_DETECTION_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowright": { action: "split-detection-next" },
   "at:control+mousedown0": { action: "split-detection-place-seed" },
 });
+// While the segment is being picked a plain click picks it: a click, not a
+// press, so a drag still pans the view.
+const SPLIT_DETECTION_PICK_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:click0": { action: "split-detection-pick" },
+});
+const PICK_SEGMENT_MESSAGE =
+  "Click a segment in a 2D view to choose the segment to check";
 
 class CandidateOverviewSession extends RefCounted {
   readonly changed = new NullarySignal();
@@ -4222,6 +4235,7 @@ class CandidateOverviewSession extends RefCounted {
   private ranked: PieceOverview[] = [];
   private focusIndex = -1;
   private bindings: RefCounted | undefined;
+  private pickBindings: RefCounted | undefined;
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -4254,6 +4268,8 @@ class CandidateOverviewSession extends RefCounted {
       }),
     );
     this.registerDisposer(() => this.bindings?.dispose());
+    this.registerDisposer(() => this.stopPicking());
+    this.registerDisposer(state.display.changed.add(() => this.repaint()));
     this.registerDisposer(
       connection.state.calcadaDebugState.active.changed.add(() => {
         if (connection.state.calcadaDebugState.active.value) {
@@ -4377,6 +4393,7 @@ class CandidateOverviewSession extends RefCounted {
   clearSeed() {
     this.state.seedPiece.value = undefined;
     this.state.seedPoint.value = undefined;
+    this.pickSegment();
   }
 
   /**
@@ -4448,14 +4465,53 @@ class CandidateOverviewSession extends RefCounted {
         },
       );
     }
+    // Nothing to show until a segment is picked: say so where the user looks.
+    if (this.state.seedPiece.value === undefined) this.pickSegment();
     void this.sync();
   }
 
   private exit() {
     this.bindings?.dispose();
     this.bindings = undefined;
+    this.stopPicking();
     this.forget();
     this.setStatus("");
+  }
+
+  get picking(): boolean {
+    return this.pickBindings !== undefined;
+  }
+
+  /**
+   * Choose the segment to check with a click in 2D. Escape before one is
+   * picked turns detection off if there is no segment yet, or keeps the one
+   * there was.
+   */
+  pickSegment() {
+    if (!this.state.active.value || this.picking) return;
+    this.pickBindings = bindModeInputs(
+      this.layer,
+      SPLIT_DETECTION_PICK_INPUT_EVENT_MAP,
+      { "split-detection-pick": () => this.placeSeed() },
+    );
+    this.connection.pointPlacement.begin({
+      message: PICK_SEGMENT_MESSAGE,
+      onCancel: () => {
+        this.stopPicking();
+        if (this.state.seedPiece.value === undefined) {
+          this.state.active.value = false;
+        }
+      },
+    });
+    this.changed.dispatch();
+  }
+
+  private stopPicking() {
+    if (this.pickBindings === undefined) return;
+    this.pickBindings.dispose();
+    this.pickBindings = undefined;
+    this.connection.pointPlacement.end();
+    this.changed.dispatch();
   }
 
   private forget() {
@@ -4466,6 +4522,7 @@ class CandidateOverviewSession extends RefCounted {
     this.ranked = [];
     this.focusIndex = -1;
     this.clearColors();
+    this.connection.setSplitErrorPoints([]);
   }
 
   private setStatus(text: string) {
@@ -4496,6 +4553,7 @@ class CandidateOverviewSession extends RefCounted {
       position.length >= 3
         ? Float32Array.of(position[0], position[1], position[2])
         : undefined;
+    this.stopPicking();
     this.state.seedPiece.value = pieceId;
   }
 
@@ -4509,9 +4567,7 @@ class CandidateOverviewSession extends RefCounted {
     const seedPiece = this.state.seedPiece.value;
     if (seedPiece === undefined) {
       this.forget();
-      this.setStatus(
-        "Ctrl+click a segment in a 2D view to choose the segment to check",
-      );
+      this.setStatus(PICK_SEGMENT_MESSAGE);
       return;
     }
     if (this.targetRoot !== undefined) {
@@ -4563,13 +4619,17 @@ class CandidateOverviewSession extends RefCounted {
   private repaint() {
     const { targetRoot } = this;
     if (!this.state.active.value || targetRoot === undefined) return;
+    const asPoints = this.state.display.value === "points";
     this.repainting = true;
     try {
-      this.paint(targetRoot);
+      if (asPoints) this.clearColors();
+      else this.paint(targetRoot);
     } finally {
       this.repainting = false;
     }
     this.rerank();
+    if (asPoints) void this.drawPoints();
+    else this.connection.setSplitErrorPoints([]);
     this.setStatus(
       `${this.ranked.length.toLocaleString()} of ` +
         `${this.pieces.length.toLocaleString()} pieces flagged · ` +
@@ -4641,6 +4701,7 @@ class CandidateOverviewSession extends RefCounted {
           : total - 1
         : (this.focusIndex + direction + total) % total;
     this.changed.dispatch();
+    if (this.state.display.value === "points") void this.drawPoints();
     this.showFocus();
   }
 
@@ -4684,6 +4745,29 @@ class CandidateOverviewSession extends RefCounted {
       .catch(() => new Map<bigint, PieceSphere>());
   }
 
+  // Positions come with the mesh manifest, after the scores: the points
+  // follow when they arrive.
+  private async drawPoints() {
+    const token = this.fetchToken;
+    const spheres = await this.spheres;
+    if (
+      token !== this.fetchToken ||
+      !this.state.active.value ||
+      this.state.display.value !== "points"
+    ) {
+      return;
+    }
+    const { coordinateSpace } = this.layer.manager.root;
+    this.connection.setSplitErrorPoints(
+      splitErrorPoints(
+        this.ranked,
+        this.ranked[this.focusIndex]?.pieceId,
+        spheres,
+        (nanometres) => nanometresToGlobal(nanometres, coordinateSpace.value),
+      ),
+    );
+  }
+
   private async sphereOf(pieceId: bigint): Promise<PieceSphere | undefined> {
     return (await this.spheres).get(pieceId);
   }
@@ -4718,6 +4802,8 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public traceSession!: ZettaTraceSession;
   public overviewSession!: CandidateOverviewSession;
   public debugSession!: CalcadaDebugSession;
+  public splitErrorAnnotationState!: AnnotationLayerState;
+  public pointPlacement!: PointPlacement;
   // Piece ids are branch-local, so the cache is only good for the branch it
   // was filled on.
   private pieceGraphBranch = 0;
@@ -4913,6 +4999,28 @@ void main() {
   setColor(vec4(prop_${DEBUG_EDGE_COLOR_PROPERTY}(), 1.0));
 }
 `;
+    this.splitErrorAnnotationState = makeColoredAnnotationState(
+      layer,
+      loadedSubsource,
+      "calcadaSplitErrors",
+      RED_COLOR,
+      [
+        {
+          type: "float32",
+          identifier: SPLIT_POINT_SCORE_PROPERTY,
+          description: undefined,
+          default: 0,
+        },
+        {
+          type: "uint8",
+          identifier: SPLIT_POINT_FOCUS_PROPERTY,
+          description: undefined,
+          default: 0,
+        },
+      ],
+    );
+    this.splitErrorAnnotationState.displayState.shader.value =
+      SPLIT_POINT_SHADER;
     // Its own source, not the merge one. Anything added to the merge source is
     // turned into a pending merge submission by the childAdded handler below,
     // so borrowing it would both queue phantom merges and leave the lines
@@ -5224,6 +5332,9 @@ void main() {
     );
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
+    );
+    this.pointPlacement = this.registerDisposer(
+      new PointPlacement(layer.manager.root.display, viewerPanelKind),
     );
     this.overviewSession = this.registerDisposer(
       new CandidateOverviewSession(this, layer, state.overviewState),
@@ -6154,6 +6265,19 @@ void main() {
 
   clearDebugEdges() {
     (this.debugEdgeAnnotationState.source as AnnotationSource).clear();
+  }
+
+  setSplitErrorPoints(points: readonly SplitErrorPoint[]) {
+    const source = this.splitErrorAnnotationState.source as AnnotationSource;
+    source.clear();
+    for (const { position, score, focused } of points) {
+      source.add({
+        id: "",
+        type: AnnotationType.POINT,
+        point: position,
+        properties: [score, focused ? 1 : 0],
+      });
+    }
   }
 
   async submitMulticut(annotationToNanometers: Float64Array): Promise<boolean> {
@@ -7925,6 +8049,20 @@ const CALCADA_FIND_PATH_TOOL_ID = "calcadaFindPath";
 const CALCADA_PIECE_SPLIT_TOOL_ID = "calcadaPieceSplit";
 const CALCADA_ZETTA_TRACE_TOOL_ID = "calcadaZettaTrace";
 const DEBUG_EDGE_COLOR_PROPERTY = "color";
+const SPLIT_POINT_SCORE_PROPERTY = "score";
+const SPLIT_POINT_FOCUS_PROPERTY = "focused";
+// Pale for a weak candidate, deep red for a strong one; the piece ← / → are
+// on is drawn a little larger.
+const SPLIT_POINT_SHADER = `
+void main() {
+  float score = clamp(prop_${SPLIT_POINT_SCORE_PROPERTY}(), 0.0, 1.0);
+  bool focused = prop_${SPLIT_POINT_FOCUS_PROPERTY}() > 0u;
+  setColor(vec4(mix(vec3(1.0, 0.7, 0.7), vec3(0.9, 0.05, 0.05), score), 1.0));
+  setPointMarkerSize(focused ? 13.0 : 9.0);
+  setPointMarkerBorderWidth(1.0);
+  setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
+}
+`;
 // Bound straight to a key like the debug toggle: both are modes that must
 // survive the proofreader picking up a tool.
 const CALCADA_TRACE_TOGGLE_ACTION = "calcada-toggle-zetta-trace";

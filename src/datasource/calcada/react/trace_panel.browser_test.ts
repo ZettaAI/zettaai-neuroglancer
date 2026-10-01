@@ -94,6 +94,10 @@ async function makeConnection(
       nextPiece: () => {},
       showFocus: () => {},
       clearSeed: () => {},
+      picking: false,
+      pickSegment: () => {
+        picks++;
+      },
     },
     traceSession: {
       changed: new NullarySignal(),
@@ -142,6 +146,8 @@ async function button(label: string) {
   });
 }
 
+let picks = 0;
+
 // Wide enough to read its "anyone" placeholder.
 const REVIEWER_INPUT_MIN_WIDTH_PX = 40;
 
@@ -180,6 +186,37 @@ describe("CalcadaTracePanel", () => {
     );
     // As in the prototype, the editor follows the Trace choice.
     expect(connection.filterLibrary.current).toBe("dendrites");
+  });
+
+  it("offers to pick the segment again", async () => {
+    await mountPanel(await makeConnection());
+    picks = 0;
+    (await button("Pick segment")).click();
+    expect(picks).toBe(1);
+  });
+
+  it("switches between coloured pieces and red points", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    const select = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLElement>(
+        ".calcada-trace-panel-split-display",
+      );
+      expect(found).not.toBe(null);
+      return found!;
+    });
+    select.click();
+    const option = await vi.waitFor(() => {
+      const found = [
+        ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ].find((item) => item.textContent?.trim() === "Red points");
+      expect(found).toBeDefined();
+      return found!;
+    });
+    option.click();
+    await vi.waitFor(() =>
+      expect(connection.state.overviewState.display.value).toBe("points"),
+    );
   });
 
   it("opens and closes the filter editor", async () => {
