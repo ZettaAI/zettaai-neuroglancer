@@ -56,6 +56,22 @@ const TRACE_SPHERE_CENTER_KEY = "sphereCenter";
 const TRACE_FILTER_KEY = "filter";
 const TRACE_FILTER_PRESET_KEY = "filterPreset";
 const TRACE_FILTER_EDITOR_KEY = "filterEditor";
+const TRACE_SCORE_RANGE_KEY = "scoreRange";
+
+/** Lower and upper score a candidate may have, both ends included. */
+export type ScoreRange = readonly [number, number];
+export const FULL_SCORE_RANGE: ScoreRange = [0, 1];
+
+export function withinScoreRange(score: number, [low, high]: ScoreRange) {
+  return score >= low && score <= high;
+}
+
+function parseScoreRange(value: unknown): ScoreRange {
+  const [a, b] = parseFixedLengthArray([0, 0], value, verifyFiniteFloat);
+  const clamp = (bound: number) =>
+    Math.min(FULL_SCORE_RANGE[1], Math.max(FULL_SCORE_RANGE[0], bound));
+  return [clamp(Math.min(a, b)), clamp(Math.max(a, b))];
+}
 export const FILTER_EDITOR_WIDTH_PX = 1280;
 export const FILTER_EDITOR_MIN_WIDTH_PX = 320;
 const DEFAULT_FILTER_EDITOR_LOCATION = {
@@ -143,6 +159,9 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // The saved preset the filter was loaded from, if any. Only its owner's list
   // knows it; anyone else opening the link sees the same tree, unnamed.
   filterPresetId = new WatchableValue<string | undefined>(undefined);
+  // Applied with the filter, kept apart from it: a range is tuned per sitting,
+  // a filter is saved.
+  scoreRange = new WatchableValue<ScoreRange>(FULL_SCORE_RANGE);
   // Where the filter editor column sits, and whether it is open.
   filterEditor = new TrackableSidePanelLocation(DEFAULT_FILTER_EDITOR_LOCATION);
   // The one part of the filter the server applies: the smallest candidate it
@@ -184,12 +203,13 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     );
     this.registerDisposer(this.filter.changed.add(reemit));
     this.registerDisposer(this.filterPresetId.changed.add(reemit));
+    this.registerDisposer(this.scoreRange.changed.add(reemit));
     this.registerDisposer(this.filterEditor.changed.add(reemit));
   }
 
   /** Every filter change hides or shows queued entries without a refetch. */
   get candidateFilterSignals() {
-    return [this.filter];
+    return [this.filter, this.scoreRange];
   }
 
   /**
@@ -238,6 +258,11 @@ export class ZettaTraceState extends RefCounted implements Trackable {
           ? serializeFilterTree(this.filter.value)
           : undefined,
       [TRACE_FILTER_PRESET_KEY]: this.filterPresetId.value,
+      [TRACE_SCORE_RANGE_KEY]:
+        this.scoreRange.value[0] === FULL_SCORE_RANGE[0] &&
+        this.scoreRange.value[1] === FULL_SCORE_RANGE[1]
+          ? undefined
+          : [...this.scoreRange.value],
       [TRACE_FILTER_EDITOR_KEY]: emptyToUndefined(this.filterEditor.toJSON()),
       [TRACE_SCOPE_KEY]: this.scope.value,
       [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
@@ -282,6 +307,9 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       verifyString,
     );
     this.filterEditor.restoreState(x?.[TRACE_FILTER_EDITOR_KEY]);
+    this.scoreRange.value =
+      verifyOptionalObjectProperty(x, TRACE_SCORE_RANGE_KEY, parseScoreRange) ??
+      FULL_SCORE_RANGE;
     verifyOptionalObjectProperty(x, TRACE_SCOPE_KEY, (value) => {
       this.scope.value =
         verifyString(value) === "segment" ? "segment" : "sphere";

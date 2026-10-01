@@ -189,6 +189,7 @@
     "#src/datasource/calcada/react/rejected_by_picker.js": "./src/datasource/calcada/react/rejected_by_picker.tsx",
     "#src/datasource/calcada/react/trace_panel.js": "./src/datasource/calcada/react/trace_panel.tsx",
     "#src/datasource/calcada/react/trace_notice.js": "./src/datasource/calcada/react/trace_notice.tsx",
+    "#src/datasource/calcada/react/score_range_slider.js": "./src/datasource/calcada/react/score_range_slider.tsx",
     "#src/datasource/calcada/react/point_placement_notice.js": "./src/datasource/calcada/react/point_placement_notice.tsx",
     "#src/datasource/calcada/react/filter_number_input.js": "./src/datasource/calcada/react/filter_number_input.tsx",
     "#src/datasource/calcada/react/filter_editor.js": "./src/datasource/calcada/react/filter_editor.tsx",

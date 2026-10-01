@@ -10,11 +10,11 @@
 
 /**
  * @file Split error detection drawn as red points on a segment left in its
- * own colour: one point per flagged piece, at the piece's centre.
+ * own colour: one point per flagged piece, where calcada places it — its
+ * representative voxel, inside the piece, or its bbox centre.
  */
 
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
-import type { PieceSphere } from "#src/datasource/calcada/piece_centers.js";
 
 export interface SplitErrorPoint {
   pieceId: bigint;
@@ -27,17 +27,13 @@ export interface SplitErrorPoint {
 export function splitErrorPoints(
   flagged: readonly PieceOverview[],
   focusedPiece: bigint | undefined,
-  spheres: ReadonlyMap<bigint, PieceSphere>,
-  toViewer: (nanometres: readonly number[]) => Float32Array | undefined,
 ): SplitErrorPoint[] {
   const points: SplitErrorPoint[] = [];
   for (const piece of flagged) {
-    const sphere = spheres.get(piece.pieceId);
-    const position = sphere && toViewer(sphere.center);
-    if (position === undefined) continue;
+    if (piece.center === undefined) continue;
     points.push({
       pieceId: piece.pieceId,
-      position,
+      position: Float32Array.from(piece.center),
       score: piece.bestScore,
       focused: piece.pieceId === focusedPiece,
     });
