@@ -87,7 +87,8 @@ export interface PieceOverview {
   candidateCount: number;
   voxelCount: number;
   classes: PieceClasses;
-  hasInfo: boolean;
+  hasInfo: boolean /** Where to show it, in viewer coordinates; only for a piece with candidates. */;
+  center?: [number, number, number];
 }
 
 // The shared packer, not a local one: the mesh reads these as (a<<24)|(b<<16)|
