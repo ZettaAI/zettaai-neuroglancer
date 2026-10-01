@@ -3,6 +3,7 @@ import { sameFilter } from "#src/datasource/calcada/candidate_filter_text.js";
 import { minCandidateVoxels } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   TRACE_SPHERE_RADIUS_DEFAULT_NM,
+  withinScoreRange,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 
@@ -211,5 +212,41 @@ describe("ZettaTraceState filter editor", () => {
     restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
     expect(restored.filterEditor.visible).toBe(true);
     expect(restored.filterEditor.value.size).toBe(480);
+  });
+});
+
+describe("ZettaTraceState score range", () => {
+  it("lets every score through by default and round-trips a narrowed range", () => {
+    const state = new ZettaTraceState();
+    expect(state.scoreRange.value).toEqual([0, 1]);
+    expect((state.toJSON() as Record<string, unknown>).scoreRange).toBe(
+      undefined,
+    );
+    state.scoreRange.value = [0.3, 0.85];
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.scoreRange.value).toEqual([0.3, 0.85]);
+  });
+
+  it("is one of the filters that hide queued candidates", () => {
+    const state = new ZettaTraceState();
+    expect(state.candidateFilterSignals).toContain(state.scoreRange);
+  });
+
+  it("keeps a restored range inside 0–1 and in order", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ scoreRange: [0.9, 0.2] });
+    expect(state.scoreRange.value).toEqual([0.2, 0.9]);
+    state.restoreState({ scoreRange: [-1, 3] });
+    expect(state.scoreRange.value).toEqual([0, 1]);
+  });
+});
+
+describe("withinScoreRange", () => {
+  it("includes both ends", () => {
+    expect(withinScoreRange(0.3, [0.3, 0.85])).toBe(true);
+    expect(withinScoreRange(0.85, [0.3, 0.85])).toBe(true);
+    expect(withinScoreRange(0.29, [0.3, 0.85])).toBe(false);
+    expect(withinScoreRange(0.9, [0.3, 0.85])).toBe(false);
   });
 });

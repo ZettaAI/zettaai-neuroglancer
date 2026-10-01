@@ -170,7 +170,10 @@ import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sph
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
-import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
+import {
+  withinScoreRange,
+  ZettaTraceState,
+} from "#src/datasource/calcada/trace_state.js";
 import { CalcadaTraceTab } from "#src/datasource/calcada/trace_tab.js";
 import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
 import type {
@@ -3844,11 +3847,14 @@ class ZettaTraceSession extends RefCounted {
     graph: GraphFacts = this.connection.pieceGraph,
   ): (candidate: EdgeCandidate) => Verdict {
     const tree = this.state.filter.value;
+    const range = this.state.scoreRange.value;
     const known = semanticsKnown(
       this.pool.map((entry) => edgeCandidateSubject(entry.candidate)),
     );
     return (candidate) =>
-      subjectVerdict(edgeCandidateSubject(candidate), tree, known, graph);
+      withinScoreRange(candidate.score, range)
+        ? subjectVerdict(edgeCandidateSubject(candidate), tree, known, graph)
+        : false;
   }
 
   /** The candidate partner's current root, or the one it was fetched with. */
@@ -4424,9 +4430,12 @@ class CandidateOverviewSession extends RefCounted {
   private passesOn(
     graph: GraphFacts = this.connection.pieceGraph,
   ): (piece: PieceOverview) => boolean {
-    const tree = this.connection.state.zettaTraceState.filter.value;
+    const { filter, scoreRange } = this.connection.state.zettaTraceState;
+    const tree = filter.value;
+    const range = scoreRange.value;
     const known = semanticsKnown(this.pieces.map(pieceOverviewSubject));
     return (piece) =>
+      withinScoreRange(piece.bestScore, range) &&
       subjectPasses(pieceOverviewSubject(piece), tree, known, graph);
   }
 

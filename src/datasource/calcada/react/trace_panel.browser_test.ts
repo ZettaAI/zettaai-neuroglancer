@@ -8,6 +8,7 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import { userEvent } from "@vitest/browser/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import "#src/datasource/calcada/calcada.css";
@@ -217,6 +218,38 @@ describe("CalcadaTracePanel", () => {
     await vi.waitFor(() =>
       expect(connection.state.overviewState.display.value).toBe("points"),
     );
+  });
+
+  it("narrows the score range from a slider beside the filter", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    const range = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLElement>(
+        ".calcada-trace-score-range",
+      );
+      expect(found).not.toBe(null);
+      return found!;
+    });
+    expect(range.textContent).toContain("0.00 – 1.00");
+    const thumbs = range.querySelectorAll<HTMLInputElement>(
+      'input[type="range"]',
+    );
+    expect(thumbs).toHaveLength(2);
+    thumbs[1].focus();
+    await userEvent.keyboard("{ArrowLeft}");
+    await vi.waitFor(() =>
+      expect(connection.state.zettaTraceState.scoreRange.value[1]).toBeCloseTo(
+        0.99,
+      ),
+    );
+    thumbs[0].focus();
+    await userEvent.keyboard("{ArrowRight}");
+    await vi.waitFor(() =>
+      expect(connection.state.zettaTraceState.scoreRange.value[0]).toBeCloseTo(
+        0.01,
+      ),
+    );
+    await vi.waitFor(() => expect(range.textContent).toContain("0.01 – 0.99"));
   });
 
   it("opens and closes the filter editor", async () => {

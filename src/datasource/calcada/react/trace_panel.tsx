@@ -22,6 +22,7 @@ import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js
 import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
 import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
+import { ScoreRangeSlider } from "#src/datasource/calcada/react/score_range_slider.js";
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import type {
   TraceScope,
@@ -149,6 +150,7 @@ function TraceFilterPicker({
           ))}
         </SelectContent>
       </Select>
+      <ScoreRangeSlider range={state.scoreRange} />
       <div className="calcada-trace-filter-row">
         <Button
           size="xs"
