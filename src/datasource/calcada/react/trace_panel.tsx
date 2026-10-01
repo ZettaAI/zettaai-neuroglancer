@@ -16,6 +16,7 @@ import { describePiece } from "#src/datasource/calcada/candidate_heat.js";
 import type {
   CalcadaOverviewState,
   SplitDetectionFocus,
+  SplitErrorDisplay,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
@@ -63,6 +64,9 @@ export interface TracePanelConnection {
     nextPiece(): void;
     showFocus(): void;
     clearSeed(): void;
+    /** A click in 2D is about to pick the segment. */
+    readonly picking: boolean;
+    pickSegment(): void;
   };
   readonly traceSession: {
     readonly changed: NullarySignal;
@@ -206,15 +210,53 @@ function clampRadius(radiusNm: number): number {
  * One flagged piece at a time, strongest first, so a proofreader is taken to
  * each likely split instead of hunting for red on a whole segment.
  */
+const SPLIT_DISPLAY_LABELS: ReadonlyArray<[SplitErrorDisplay, string]> = [
+  ["pieces", "Coloured pieces"],
+  ["points", "Red points"],
+];
+
 function SplitDetectionNavigator({
   session,
+  state,
 }: {
   session: TracePanelConnection["overviewSession"];
+  state: CalcadaOverviewState;
 }) {
   const { focus } = session;
+  const display = useWatchable(state.display);
   return (
     <>
-      <div className="calcada-trace-panel-status">{session.status}</div>
+      <div className="calcada-trace-panel-row">
+        <span>Show flagged pieces as</span>
+        <Select
+          value={display}
+          onValueChange={(value) => {
+            state.display.value = value as SplitErrorDisplay;
+          }}
+        >
+          <SelectTrigger
+            size="sm"
+            className="calcada-trace-panel-split-display"
+            aria-label="Show flagged pieces as"
+          >
+            <SelectValue>
+              {SPLIT_DISPLAY_LABELS.find(([key]) => key === display)?.[1]}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {SPLIT_DISPLAY_LABELS.map(([key, label]) => (
+              <SelectItem key={key} value={key}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div
+        className={`calcada-trace-panel-status${session.picking ? " calcada-trace-panel-picking" : ""}`}
+      >
+        {session.status}
+      </div>
       {focus !== undefined && (
         <div className="calcada-trace-panel-navigator">
           <Button
@@ -254,18 +296,28 @@ function SplitDetectionNavigator({
           })}
         </div>
       )}
-      {session.hasSeed && (
-        <div className="calcada-trace-panel-buttons">
+      <div className="calcada-trace-panel-buttons">
+        {!session.picking && (
           <Button
             size="xs"
             variant="outline"
-            title="Forget the segment; Ctrl+click another in a 2D view"
+            title="Click a segment in a 2D view to check it"
+            onClick={() => session.pickSegment()}
+          >
+            Pick segment
+          </Button>
+        )}
+        {session.hasSeed && (
+          <Button
+            size="xs"
+            variant="outline"
+            title="Forget the segment"
             onClick={() => session.clearSeed()}
           >
             Clear segment
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </>
   );
 }
@@ -489,7 +541,10 @@ export function CalcadaTracePanel({
         </div>
 
         {overviewActive && (
-          <SplitDetectionNavigator session={connection.overviewSession} />
+          <SplitDetectionNavigator
+            session={connection.overviewSession}
+            state={overviewState}
+          />
         )}
       </div>
 

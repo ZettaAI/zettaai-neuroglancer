@@ -45,6 +45,11 @@ export interface SplitDetectionFocus {
 const OVERVIEW_ACTIVE_KEY = "active";
 const OVERVIEW_SEED_PIECE_KEY = "seedPiece";
 const OVERVIEW_SEED_POINT_KEY = "seedPoint";
+const OVERVIEW_DISPLAY_KEY = "show";
+
+/** Flagged pieces recoloured, or marked with red points on a segment left as it is. */
+export type SplitErrorDisplay = "pieces" | "points";
+const DEFAULT_DISPLAY: SplitErrorDisplay = "pieces";
 
 export class CalcadaOverviewState extends RefCounted implements Trackable {
   readonly changed = new NullarySignal();
@@ -53,6 +58,7 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
   seedPiece = new WatchableValue<bigint | undefined>(undefined);
   // Where the segment was picked, in global coordinates: the way back to it.
   seedPoint = new WatchableValue<Float32Array | undefined>(undefined);
+  display = new WatchableValue<SplitErrorDisplay>(DEFAULT_DISPLAY);
 
   constructor() {
     super();
@@ -60,6 +66,7 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
     this.registerDisposer(this.active.changed.add(reemit));
     this.registerDisposer(this.seedPiece.changed.add(reemit));
     this.registerDisposer(this.seedPoint.changed.add(reemit));
+    this.registerDisposer(this.display.changed.add(reemit));
   }
 
   reset() {
@@ -77,6 +84,8 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
       [OVERVIEW_SEED_POINT_KEY]: seedPoint.value
         ? Array.from(seedPoint.value)
         : undefined,
+      [OVERVIEW_DISPLAY_KEY]:
+        this.display.value === DEFAULT_DISPLAY ? undefined : this.display.value,
     };
   }
 
@@ -93,6 +102,11 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
       OVERVIEW_SEED_PIECE_KEY,
       (value) => BigInt(verifyString(value)),
     );
+    this.display.value =
+      verifyOptionalObjectProperty(x, OVERVIEW_DISPLAY_KEY, verifyString) ===
+      "points"
+        ? "points"
+        : DEFAULT_DISPLAY;
     this.seedPoint.value = verifyOptionalObjectProperty(
       x,
       OVERVIEW_SEED_POINT_KEY,

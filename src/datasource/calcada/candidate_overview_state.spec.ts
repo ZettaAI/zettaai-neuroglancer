@@ -18,3 +18,22 @@ describe("CalcadaOverviewState", () => {
     expect(new CalcadaOverviewState().toJSON()).toBeUndefined();
   });
 });
+
+describe("how flagged pieces are shown", () => {
+  it("colours pieces by default and round-trips red points", () => {
+    const state = new CalcadaOverviewState();
+    expect(state.display.value).toBe("pieces");
+    state.active.value = true;
+    expect(JSON.stringify(state.toJSON())).not.toContain("show");
+    state.display.value = "points";
+    const restored = new CalcadaOverviewState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.display.value).toBe("points");
+  });
+
+  it("ignores a way of showing it does not know", () => {
+    const state = new CalcadaOverviewState();
+    state.restoreState({ active: true, show: "sparkles" });
+    expect(state.display.value).toBe("pieces");
+  });
+});
