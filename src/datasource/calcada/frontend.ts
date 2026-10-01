@@ -4628,7 +4628,7 @@ class CandidateOverviewSession extends RefCounted {
       this.repainting = false;
     }
     this.rerank();
-    if (asPoints) void this.drawPoints();
+    if (asPoints) this.drawPoints();
     else this.connection.setSplitErrorPoints([]);
     this.setStatus(
       `${this.ranked.length.toLocaleString()} of ` +
@@ -4701,21 +4701,35 @@ class CandidateOverviewSession extends RefCounted {
           : total - 1
         : (this.focusIndex + direction + total) % total;
     this.changed.dispatch();
-    if (this.state.display.value === "points") void this.drawPoints();
+    if (this.state.display.value === "points") this.drawPoints();
     this.showFocus();
   }
 
   private async goToPiece(piece: PieceOverview) {
+    const { coordinateSpace, globalPosition } = this.layer.manager.root;
+    // Calcada's own placement is inside the piece and needs no mesh: go there
+    // at once. The mesh's bounding sphere still sets the zoom.
+    if (piece.center !== undefined) {
+      globalPosition.value = Float32Array.from(piece.center);
+    }
     const sphere = await this.sphereOf(piece.pieceId);
     if (this.ranked[this.focusIndex] !== piece) return;
-    const { coordinateSpace } = this.layer.manager.root;
-    const center =
-      sphere && nanometresToGlobal(sphere.center, coordinateSpace.value);
-    if (sphere === undefined || center === undefined) {
-      StatusMessage.showTemporaryMessage(
-        "This piece's position is not known yet — its mesh has not loaded.",
-        4000,
-      );
+    if (piece.center === undefined) {
+      const center =
+        sphere && nanometresToGlobal(sphere.center, coordinateSpace.value);
+      if (center === undefined) {
+        StatusMessage.showTemporaryMessage(
+          "This piece's position is not known yet — its mesh has not loaded.",
+          4000,
+        );
+        return;
+      }
+      globalPosition.value = center;
+    }
+    if (
+      sphere === undefined ||
+      !this.connection.state.zettaTraceState.zoomOnCandidate.value
+    ) {
       return;
     }
     const [x, y, z] = sphere.center;
@@ -4727,14 +4741,9 @@ class CandidateOverviewSession extends RefCounted {
       [x + sphere.radiusNm, y, z],
       coordinateSpace.value,
     );
-    this.layer.manager.root.globalPosition.value = center;
     // The trace's zoom setting, shared: a proofreader who keeps their own 3D
     // scale while tracing wants to keep it here too.
-    if (
-      this.connection.state.zettaTraceState.zoomOnCandidate.value &&
-      edgeA !== undefined &&
-      edgeB !== undefined
-    ) {
+    if (edgeA !== undefined && edgeB !== undefined) {
       framePerspective(this.layer, edgeA, edgeB);
     }
   }
@@ -4745,26 +4754,12 @@ class CandidateOverviewSession extends RefCounted {
       .catch(() => new Map<bigint, PieceSphere>());
   }
 
-  // Positions come with the mesh manifest, after the scores: the points
-  // follow when they arrive.
-  private async drawPoints() {
-    const token = this.fetchToken;
-    const spheres = await this.spheres;
-    if (
-      token !== this.fetchToken ||
-      !this.state.active.value ||
-      this.state.display.value !== "points"
-    ) {
+  private drawPoints() {
+    if (!this.state.active.value || this.state.display.value !== "points") {
       return;
     }
-    const { coordinateSpace } = this.layer.manager.root;
     this.connection.setSplitErrorPoints(
-      splitErrorPoints(
-        this.ranked,
-        this.ranked[this.focusIndex]?.pieceId,
-        spheres,
-        (nanometres) => nanometresToGlobal(nanometres, coordinateSpace.value),
-      ),
+      splitErrorPoints(this.ranked, this.ranked[this.focusIndex]?.pieceId),
     );
   }
 
@@ -7071,6 +7066,13 @@ class CalcadaGraphServerInterface {
         voxelCount: Number(piece.voxel_count),
         classes: parseClassCounts(piece.classes),
         hasInfo: piece.has_info === true,
+        center: Array.isArray(piece.center)
+          ? [
+              Number(piece.center[0]),
+              Number(piece.center[1]),
+              Number(piece.center[2]),
+            ]
+          : undefined,
       }),
     );
   }
