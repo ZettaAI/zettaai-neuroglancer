@@ -16,7 +16,7 @@ const classes = {
 const piece = (
   pieceId: bigint,
   bestScore: number,
-  center?: [number, number, number],
+  contact?: [number, number, number],
 ): PieceOverview => ({
   pieceId,
   bestScore,
@@ -29,11 +29,11 @@ const piece = (
   voxelCount: 100,
   classes,
   hasInfo: false,
-  center,
+  contact,
 });
 
 describe("splitErrorPoints", () => {
-  it("puts a point on each flagged piece where the server placed it", () => {
+  it("puts a point where each flagged piece touches its best candidate", () => {
     const points = splitErrorPoints(
       [piece(1n, 0.9, [10, 0, 0]), piece(2n, 0.5, [20, 0, 0]), piece(3n, 0.4)],
       2n,
