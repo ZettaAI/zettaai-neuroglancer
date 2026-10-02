@@ -10,8 +10,7 @@
 
 /**
  * @file Split error detection drawn as red points on a segment left in its
- * own colour: one point per flagged piece, where calcada places it — its
- * representative voxel, inside the piece, or its bbox centre.
+ * own colour: one point per flagged piece, where its best candidate touches it.
  */
 
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
@@ -30,10 +29,10 @@ export function splitErrorPoints(
 ): SplitErrorPoint[] {
   const points: SplitErrorPoint[] = [];
   for (const piece of flagged) {
-    if (piece.center === undefined) continue;
+    if (piece.contact === undefined) continue;
     points.push({
       pieceId: piece.pieceId,
-      position: Float32Array.from(piece.center),
+      position: Float32Array.from(piece.contact),
       score: piece.bestScore,
       focused: piece.pieceId === focusedPiece,
     });

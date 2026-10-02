@@ -79,9 +79,10 @@ import {
 } from "#src/datasource/calcada/candidate_filter_tree.js";
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
-  describePiece,
+  describeCandidateSides,
   edgeCandidateSubject,
   parseClassCounts,
+  parseOverviewPoint,
   partnersWithSemantics,
   pieceOverviewSubject,
   rankFlaggedPieces,
@@ -127,6 +128,7 @@ import {
   PointPlacement,
   viewerPanelKind,
 } from "#src/datasource/calcada/point_placement.js";
+import { ProofreadSegment } from "#src/datasource/calcada/proofread_segment.js";
 import { CalcadaBranchPicker } from "#src/datasource/calcada/react/branch_picker.js";
 import {
   CalcadaLabeledTimestampPicker,
@@ -1245,6 +1247,7 @@ const ZETTA_TRACE_JSON_KEY = "zettaTrace";
 const CALCADA_DEBUG_JSON_KEY = "debug";
 const CALCADA_TRACE_TAB_ID = "calcada-trace";
 const CALCADA_OVERVIEW_JSON_KEY = "candidateOverview";
+const PROOFREAD_SEGMENT_JSON_KEY = "proofreadSegment";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 
 // Debugging more than a handful of segments at once is N whole-segment queries,
@@ -1564,6 +1567,7 @@ class CalcadaState extends RefCounted implements Trackable {
   public zettaTraceState = new ZettaTraceState();
   public calcadaDebugState = new CalcadaDebugState();
   public overviewState = new CalcadaOverviewState();
+  public proofreadSegment = new ProofreadSegment();
   public branchId = new TrackableValue<number>(0, (x) =>
     typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : 0,
   );
@@ -1595,6 +1599,9 @@ class CalcadaState extends RefCounted implements Trackable {
     );
     this.registerDisposer(
       this.overviewState.changed.add(() => this.changed.dispatch()),
+    );
+    this.registerDisposer(
+      this.proofreadSegment.changed.add(() => this.changed.dispatch()),
     );
     this.registerDisposer(
       this.zettaTraceState.changed.add(() => {
@@ -1635,6 +1642,7 @@ class CalcadaState extends RefCounted implements Trackable {
       [ZETTA_TRACE_JSON_KEY]: this.zettaTraceState.toJSON(),
       [CALCADA_DEBUG_JSON_KEY]: this.calcadaDebugState.toJSON(),
       [CALCADA_OVERVIEW_JSON_KEY]: this.overviewState.toJSON(),
+      [PROOFREAD_SEGMENT_JSON_KEY]: this.proofreadSegment.toJSON(),
       [CALCADA_BRANCH_JSON_KEY]: this.branchId.toJSON(),
     };
   }
@@ -1654,6 +1662,9 @@ class CalcadaState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, CALCADA_DEBUG_JSON_KEY, (value) => {
       this.calcadaDebugState.restoreState(value);
+    });
+    verifyOptionalObjectProperty(x, PROOFREAD_SEGMENT_JSON_KEY, (value) => {
+      this.proofreadSegment.restoreState(value);
     });
     verifyOptionalObjectProperty(x, CALCADA_OVERVIEW_JSON_KEY, (value) => {
       this.overviewState.restoreState(value);
@@ -2273,6 +2284,15 @@ function bindModeInputs(
   return bindings;
 }
 
+const TRACE_IDLE_STATUS = "Press T to start a trace";
+const PICK_SEGMENT_MESSAGE = "Click the segment to proofread in a 2D view";
+const SPHERE_OFF_SEGMENT_MESSAGE = "Place the sphere on the selected segment.";
+const SEGMENT_NOT_FOUND_MESSAGE =
+  "The selected segment is not on this branch — select it again.";
+const NO_SEGMENT_STATUS = "No segment selected";
+const SEGMENT_PICK_IN_2D_MESSAGE = "Select the segment in a 2D view.";
+const MESSAGE_DURATION_MS = 4000;
+
 const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
@@ -2746,7 +2766,7 @@ function warnIfGraphTruncated(pieceGraph: PieceGraphContextCache) {
 class ZettaTraceSession extends RefCounted {
   // The panel reads these; it re-renders on `changed`.
   readonly changed = new NullarySignal();
-  status = "Press T, then Ctrl+click a mesh to seed the trace";
+  status = TRACE_IDLE_STATUS;
   // What the viewer overlay announces; unset while a candidate is on screen.
   notice: TraceNotice | undefined;
   current: EdgeCandidate | undefined;
@@ -2801,8 +2821,13 @@ class ZettaTraceSession extends RefCounted {
     private connection: GraphConnection,
     private layer: SegmentationUserLayer,
     private state: ZettaTraceState,
+    private segmentSession: ProofreadSegmentSession,
   ) {
     super();
+    // A trace belongs to the segment it started on.
+    this.registerDisposer(
+      segmentSession.segment.piece.changed.add(() => this.clearSeed()),
+    );
     this.registerDisposer(
       state.active.changed.add(() => {
         if (state.active.value) {
@@ -2927,7 +2952,7 @@ class ZettaTraceSession extends RefCounted {
       {
         "trace-radius-increase": () => resize(1),
         "trace-radius-decrease": () => resize(-1),
-        "trace-place-sphere": () => this.placeSphere(),
+        "trace-place-sphere": () => void this.placeSphere(),
         // Cancels the aim, not the trace: a live session has to survive a
         // stray T in the middle of a review, because exit() restores the
         // segment snapshot and drops the seed.
@@ -2936,24 +2961,83 @@ class ZettaTraceSession extends RefCounted {
     );
   }
 
+  /** T: put the sights down, or start a trace on the selected segment. */
+  toggleAim() {
+    if (this.state.aiming.value) {
+      this.state.aiming.value = false;
+      return;
+    }
+    this.start();
+  }
+
   /**
-   * Pin the sphere where the cursor is and seed from what is under it.
-   *
-   * Order matters: `active` goes on before the seed, because `setSeed` fetches
-   * candidates and that fetch has to see the centre already placed.
+   * Without a segment, select one first. The whole segment needs no sphere;
+   * otherwise the sights go up for it.
    */
-  private placeSphere() {
-    const position =
-      this.layer.manager.root.layerSelectedValues.mouseState.unsnappedPosition;
+  start() {
+    const { segmentSession } = this;
+    if (segmentSession.piece === undefined) {
+      segmentSession.pick();
+      return;
+    }
+    if (this.state.scope.value === "segment") {
+      void this.startOnSegment();
+      return;
+    }
+    this.state.aiming.value = true;
+  }
+
+  private async startOnSegment() {
+    const root = await this.segmentRoot();
+    if (root === undefined) return;
+    this.state.sphereCenter.value = undefined;
+    this.seedOnSegment(root);
+  }
+
+  /**
+   * Pin the sphere where the cursor is, if that is on the selected segment.
+   * The seed stays the segment's own piece, not the one under the sphere: an
+   * edit that cuts the sphere's piece off must not take the trace with it.
+   */
+  private async placeSphere() {
+    const { mouseState } = this.layer.manager.root.layerSelectedValues;
+    const position = mouseState.unsnappedPosition;
     if (position === undefined || position.length < 3) return;
-    this.state.sphereCenter.value = Float32Array.of(
-      position[0],
-      position[1],
-      position[2],
-    );
+    const center = Float32Array.of(position[0], position[1], position[2]);
+    const underCursor = this.layer.displayState.segmentSelectionState.value;
+    const root = await this.segmentRoot();
+    if (root === undefined) return;
+    if (underCursor !== root) {
+      StatusMessage.showTemporaryMessage(
+        SPHERE_OFF_SEGMENT_MESSAGE,
+        MESSAGE_DURATION_MS,
+      );
+      return;
+    }
+    this.state.sphereCenter.value = center;
     this.state.aiming.value = false;
+    this.seedOnSegment(root);
+  }
+
+  private async segmentRoot(): Promise<bigint | undefined> {
+    try {
+      const root = await this.segmentSession.root();
+      if (root !== undefined) return root;
+    } catch {
+      // Reported below, like a segment that is not on this branch.
+    }
+    StatusMessage.showTemporaryMessage(
+      SEGMENT_NOT_FOUND_MESSAGE,
+      MESSAGE_DURATION_MS,
+    );
+    return undefined;
+  }
+
+  // `active` goes on before the seed: `setSeed` fetches candidates, and that
+  // fetch has to see the sphere already placed.
+  private seedOnSegment(root: bigint) {
     if (!this.state.active.value) this.state.active.value = true;
-    this.seedFromMouse();
+    this.setSeed(root, this.segmentSession.piece);
   }
 
   enter() {
@@ -3033,7 +3117,7 @@ class ZettaTraceSession extends RefCounted {
     if (this.state.seedRoot.value !== undefined) {
       void this.loadCandidates();
     } else {
-      this.setStatus("Press T, then Ctrl+click a mesh to seed the trace");
+      this.setStatus(TRACE_IDLE_STATUS);
     }
   }
 
@@ -3107,30 +3191,6 @@ class ZettaTraceSession extends RefCounted {
     for (const id of this.annotationIds.splice(0)) {
       source.delete(source.getReference(id));
     }
-  }
-
-  private seedFromMouse() {
-    // Read the pick directly rather than through maybeGetSelection: showOnly has
-    // reduced visibleSegments to the seed and the candidate, so that helper's
-    // visibility gate would reject every third segment — exactly the ones a
-    // proofreader re-seeds onto after reaching a dead end.
-    const {
-      segmentSelectionState: { value, baseValue },
-    } = this.layer.displayState;
-    if (!value || !baseValue) return;
-    // No "already the seed" shortcut: the sphere has just moved, so the same
-    // segment is a different question and its candidates must be refetched.
-    this.setSeed(value, baseValue);
-  }
-
-  /**
-   * Move the view to the seed. A depth-first walk can end up far from where it
-   * started, and the seed is the one place worth going back to.
-   */
-  goToSeed() {
-    const center = this.state.sphereCenter.value;
-    if (center === undefined) return;
-    this.layer.manager.root.globalPosition.value = Float32Array.from(center);
   }
 
   /** Drop the seed. No seed is the same thing as no trace. */
@@ -3450,13 +3510,7 @@ class ZettaTraceSession extends RefCounted {
       {
         kind: "candidate",
         title: `${score} · ${left}`,
-        details: [
-          describePiece({
-            voxels: candidate.partnerVoxels,
-            classes: candidate.partnerClasses,
-            hasInfo: candidate.partnerHasInfo,
-          }),
-        ],
+        details: describeCandidateSides(candidate),
       },
     );
   }
@@ -4209,21 +4263,119 @@ class ZettaTraceSession extends RefCounted {
  * at where the work is only pays off if you can then pick up a tool and go
  * there, and a tool activation would tear this down at that exact moment.
  */
-// Held only while split error detection is on. Ctrl like the trace's sphere,
-// so a plain click stays a click; the seed is taken from a 2D view only
-// (the handler refuses 3D), where the voxel under the cursor is unambiguous.
+// Held only while split error detection is on.
 const SPLIT_DETECTION_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "split-detection-previous" },
   "at:arrowright": { action: "split-detection-next" },
-  "at:control+mousedown0": { action: "split-detection-place-seed" },
 });
-// While the segment is being picked a plain click picks it: a click, not a
-// press, so a drag still pans the view.
-const SPLIT_DETECTION_PICK_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:click0": { action: "split-detection-pick" },
+// While the segment is being selected a plain click selects it: a click, not
+// a press, so a drag still pans the view.
+const PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP = EventActionMap.fromObject({
+  "at:click0": { action: "proofread-segment-pick" },
 });
-const PICK_SEGMENT_MESSAGE =
-  "Click a segment in a 2D view to choose the segment to check";
+
+/**
+ * Selecting the segment being proofread, with a click in 2D: in 3D the pick
+ * is whatever mesh face is nearest, which after a cut can be a piece of a
+ * segment that no longer contains the one the proofreader meant.
+ */
+class ProofreadSegmentSession extends RefCounted {
+  readonly changed = new NullarySignal();
+  private pickBindings: RefCounted | undefined;
+
+  constructor(
+    private connection: GraphConnection,
+    private layer: SegmentationUserLayer,
+    readonly segment: ProofreadSegment,
+  ) {
+    super();
+    this.registerDisposer(() => this.stopPicking());
+    this.registerDisposer(segment.changed.add(() => this.changed.dispatch()));
+  }
+
+  get piece(): bigint | undefined {
+    return this.segment.piece.value;
+  }
+
+  get picking(): boolean {
+    return this.pickBindings !== undefined;
+  }
+
+  /** Escape leaves without a segment chosen, and `onCancel` says so. */
+  pick(onCancel?: () => void) {
+    if (this.picking) return;
+    this.pickBindings = bindModeInputs(
+      this.layer,
+      PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP,
+      { "proofread-segment-pick": () => this.selectUnderCursor() },
+    );
+    this.connection.pointPlacement.begin({
+      message: PICK_SEGMENT_MESSAGE,
+      onCancel: () => {
+        this.stopPicking();
+        onCancel?.();
+      },
+    });
+    this.changed.dispatch();
+  }
+
+  goTo() {
+    const point = this.segment.point.value;
+    if (point === undefined) return;
+    this.layer.manager.root.globalPosition.value = Float32Array.from(point);
+  }
+
+  clear() {
+    this.stopPicking();
+    this.segment.clear();
+  }
+
+  /** The segment's root on the current branch, if it has one there. */
+  async root(): Promise<bigint | undefined> {
+    const piece = this.piece;
+    if (piece === undefined) return undefined;
+    const known =
+      this.layer.displayState.segmentationGroupState.value.segmentEquivalences.get(
+        piece,
+      );
+    if (known !== piece) return known;
+    const { graph } = this.connection;
+    return graph.graphServer.getRoot(piece, 0, graph.branchId.value);
+  }
+
+  private stopPicking() {
+    if (this.pickBindings === undefined) return;
+    this.pickBindings.dispose();
+    this.pickBindings = undefined;
+    this.connection.pointPlacement.end();
+    this.changed.dispatch();
+  }
+
+  private selectUnderCursor() {
+    const { mouseState } = this.layer.manager.root.layerSelectedValues;
+    if (mouseState.pickedRenderLayer instanceof PerspectiveViewRenderLayer) {
+      StatusMessage.showTemporaryMessage(
+        SEGMENT_PICK_IN_2D_MESSAGE,
+        MESSAGE_DURATION_MS,
+      );
+      return;
+    }
+    const { value: rootId, baseValue: pieceId } =
+      this.layer.displayState.segmentSelectionState;
+    if (!rootId || !pieceId) return;
+    const position = mouseState.unsnappedPosition;
+    this.layer.displayState.segmentationGroupState.value.visibleSegments.add(
+      rootId,
+    );
+    this.stopPicking();
+    this.segment.select(
+      pieceId,
+      position.length >= 3
+        ? Float32Array.of(position[0], position[1], position[2])
+        : undefined,
+    );
+  }
+}
 
 class CandidateOverviewSession extends RefCounted {
   readonly changed = new NullarySignal();
@@ -4241,7 +4393,6 @@ class CandidateOverviewSession extends RefCounted {
   private ranked: PieceOverview[] = [];
   private focusIndex = -1;
   private bindings: RefCounted | undefined;
-  private pickBindings: RefCounted | undefined;
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -4254,6 +4405,7 @@ class CandidateOverviewSession extends RefCounted {
     private connection: GraphConnection,
     private layer: SegmentationUserLayer,
     private state: CalcadaOverviewState,
+    private segmentSession: ProofreadSegmentSession,
   ) {
     super();
     this.registerDisposer(
@@ -4274,7 +4426,6 @@ class CandidateOverviewSession extends RefCounted {
       }),
     );
     this.registerDisposer(() => this.bindings?.dispose());
-    this.registerDisposer(() => this.stopPicking());
     this.registerDisposer(state.display.changed.add(() => this.repaint()));
     this.registerDisposer(
       connection.state.calcadaDebugState.active.changed.add(() => {
@@ -4293,7 +4444,7 @@ class CandidateOverviewSession extends RefCounted {
       }),
     );
     this.registerDisposer(
-      state.seedPiece.changed.add(() => {
+      segmentSession.segment.piece.changed.add(() => {
         this.forget();
         void this.sync();
       }),
@@ -4378,10 +4529,6 @@ class CandidateOverviewSession extends RefCounted {
     return { index: this.focusIndex, total, piece };
   }
 
-  get hasSeed() {
-    return this.state.seedPiece.value !== undefined;
-  }
-
   previousPiece() {
     this.step(-1);
   }
@@ -4394,12 +4541,6 @@ class CandidateOverviewSession extends RefCounted {
   showFocus() {
     const piece = this.ranked[this.focusIndex];
     if (piece !== undefined) void this.goToPiece(piece);
-  }
-
-  clearSeed() {
-    this.state.seedPiece.value = undefined;
-    this.state.seedPoint.value = undefined;
-    this.pickSegment();
   }
 
   /**
@@ -4470,57 +4611,25 @@ class CandidateOverviewSession extends RefCounted {
         {
           "split-detection-previous": () => this.previousPiece(),
           "split-detection-next": () => this.nextPiece(),
-          "split-detection-place-seed": () => this.placeSeed(),
         },
       );
     }
-    // Nothing to show until a segment is picked: say so where the user looks.
-    if (this.state.seedPiece.value === undefined) this.pickSegment();
+    // Nothing to show until a segment is selected: ask for one where the user
+    // looks, and give up on detection if they decline.
+    const { segmentSession, state } = this;
+    if (segmentSession.piece === undefined) {
+      segmentSession.pick(() => {
+        if (segmentSession.piece === undefined) state.active.value = false;
+      });
+    }
     void this.sync();
   }
 
   private exit() {
     this.bindings?.dispose();
     this.bindings = undefined;
-    this.stopPicking();
     this.forget();
     this.setStatus("");
-  }
-
-  get picking(): boolean {
-    return this.pickBindings !== undefined;
-  }
-
-  /**
-   * Choose the segment to check with a click in 2D. Escape before one is
-   * picked turns detection off if there is no segment yet, or keeps the one
-   * there was.
-   */
-  pickSegment() {
-    if (!this.state.active.value || this.picking) return;
-    this.pickBindings = bindModeInputs(
-      this.layer,
-      SPLIT_DETECTION_PICK_INPUT_EVENT_MAP,
-      { "split-detection-pick": () => this.placeSeed() },
-    );
-    this.connection.pointPlacement.begin({
-      message: PICK_SEGMENT_MESSAGE,
-      onCancel: () => {
-        this.stopPicking();
-        if (this.state.seedPiece.value === undefined) {
-          this.state.active.value = false;
-        }
-      },
-    });
-    this.changed.dispatch();
-  }
-
-  private stopPicking() {
-    if (this.pickBindings === undefined) return;
-    this.pickBindings.dispose();
-    this.pickBindings = undefined;
-    this.connection.pointPlacement.end();
-    this.changed.dispatch();
   }
 
   private forget() {
@@ -4540,43 +4649,16 @@ class CandidateOverviewSession extends RefCounted {
   }
 
   /**
-   * Take the segment under the cursor. 2D only: in 3D the pick is whatever
-   * mesh face is nearest, which after a cut can be a piece of a segment that
-   * no longer contains the one the proofreader meant.
-   */
-  private placeSeed() {
-    const { mouseState } = this.layer.manager.root.layerSelectedValues;
-    if (mouseState.pickedRenderLayer instanceof PerspectiveViewRenderLayer) {
-      StatusMessage.showTemporaryMessage(
-        "Pick the segment for split error detection in a 2D view.",
-        4000,
-      );
-      return;
-    }
-    const { value: rootId, baseValue: pieceId } =
-      this.displayState.segmentSelectionState;
-    if (!rootId || !pieceId) return;
-    const position = mouseState.unsnappedPosition;
-    this.segmentsState.visibleSegments.add(rootId);
-    this.state.seedPoint.value =
-      position.length >= 3
-        ? Float32Array.of(position[0], position[1], position[2])
-        : undefined;
-    this.stopPicking();
-    this.state.seedPiece.value = pieceId;
-  }
-
-  /**
    * Score the seed's segment. A whole-segment query takes seconds, so a
    * segment already scored is not asked about again until its root changes or
    * a filter the server applies does.
    */
   private async sync() {
     if (!this.state.active.value) return;
-    const seedPiece = this.state.seedPiece.value;
+    const seedPiece = this.segmentSession.piece;
     if (seedPiece === undefined) {
       this.forget();
-      this.setStatus(PICK_SEGMENT_MESSAGE);
+      this.setStatus(NO_SEGMENT_STATUS);
       return;
     }
     if (this.targetRoot !== undefined) {
@@ -4716,14 +4798,14 @@ class CandidateOverviewSession extends RefCounted {
 
   private async goToPiece(piece: PieceOverview) {
     const { coordinateSpace, globalPosition } = this.layer.manager.root;
-    // Calcada's own placement is inside the piece and needs no mesh: go there
-    // at once. The mesh's bounding sphere still sets the zoom.
-    if (piece.center !== undefined) {
-      globalPosition.value = Float32Array.from(piece.center);
+    // The contact needs no mesh: go there at once. The mesh's bounding sphere
+    // still sets the zoom.
+    if (piece.contact !== undefined) {
+      globalPosition.value = Float32Array.from(piece.contact);
     }
     const sphere = await this.sphereOf(piece.pieceId);
     if (this.ranked[this.focusIndex] !== piece) return;
-    if (piece.center === undefined) {
+    if (piece.contact === undefined) {
       const center =
         sphere && nanometresToGlobal(sphere.center, coordinateSpace.value);
       if (center === undefined) {
@@ -4805,6 +4887,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public traceAnnotationState!: AnnotationLayerState;
   public traceSession!: ZettaTraceSession;
   public overviewSession!: CandidateOverviewSession;
+  public segmentSession!: ProofreadSegmentSession;
   public debugSession!: CalcadaDebugSession;
   public splitErrorAnnotationState!: AnnotationLayerState;
   public pointPlacement!: PointPlacement;
@@ -5309,8 +5392,16 @@ void main() {
     this.registerDisposer(state.changed.add(updateEditTimestampLock));
     updateEditTimestampLock();
 
+    this.segmentSession = this.registerDisposer(
+      new ProofreadSegmentSession(this, layer, state.proofreadSegment),
+    );
     this.traceSession = this.registerDisposer(
-      new ZettaTraceSession(this, layer, state.zettaTraceState),
+      new ZettaTraceSession(
+        this,
+        layer,
+        state.zettaTraceState,
+        this.segmentSession,
+      ),
     );
     this.registerDisposer(
       new TraceNoticeOverlay(layer.manager.root.display, {
@@ -5341,7 +5432,12 @@ void main() {
       new PointPlacement(layer.manager.root.display, viewerPanelKind),
     );
     this.overviewSession = this.registerDisposer(
-      new CandidateOverviewSession(this, layer, state.overviewState),
+      new CandidateOverviewSession(
+        this,
+        layer,
+        state.overviewState,
+        this.segmentSession,
+      ),
     );
     const { sidePanelManager } = layer.manager.root;
     if (sidePanelManager instanceof SidePanelManager) {
@@ -5394,7 +5490,7 @@ void main() {
             return;
           }
         }
-        aiming.value = !aiming.value;
+        this.traceSession.toggleAim();
       }),
     );
     // Detection lives in the Trace tab, so on main — where the tab shows only
@@ -7075,13 +7171,8 @@ class CalcadaGraphServerInterface {
         voxelCount: Number(piece.voxel_count),
         classes: parseClassCounts(piece.classes),
         hasInfo: piece.has_info === true,
-        center: Array.isArray(piece.center)
-          ? [
-              Number(piece.center[0]),
-              Number(piece.center[1]),
-              Number(piece.center[2]),
-            ]
-          : undefined,
+        contact: parseOverviewPoint(piece.point_a),
+        partnerContact: parseOverviewPoint(piece.point_b),
       }),
     );
   }
@@ -10326,8 +10417,7 @@ class ZettaTraceTool extends LayerTool<SegmentationUserLayer> {
     if (checkSegmentationOld(segmentsState.timestamp, activation)) {
       return;
     }
-    const { zettaTraceState } = graphConnection.state;
-    zettaTraceState.aiming.value = !zettaTraceState.aiming.value;
+    graphConnection.traceSession.toggleAim();
     // The mode owns its own keys and panel from here, so the activation has
     // nothing left to hold: releasing it lets the next tool take the slot
     // without ending the trace.
