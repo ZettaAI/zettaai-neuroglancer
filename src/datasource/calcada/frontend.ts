@@ -2285,7 +2285,7 @@ function bindModeInputs(
 }
 
 const TRACE_IDLE_STATUS = "Press T to start a trace";
-const PICK_SEGMENT_MESSAGE = "Click the segment to proofread in a 2D view";
+const PICK_SEGMENT_MESSAGE = "Ctrl+click the segment to proofread in a 2D view";
 const SPHERE_OFF_SEGMENT_MESSAGE = "Place the sphere on the selected segment.";
 const SEGMENT_NOT_FOUND_MESSAGE =
   "The selected segment is not on this branch — select it again.";
@@ -4268,10 +4268,9 @@ const SPLIT_DETECTION_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "split-detection-previous" },
   "at:arrowright": { action: "split-detection-next" },
 });
-// While the segment is being selected a plain click selects it: a click, not
-// a press, so a drag still pans the view.
+// Ctrl like the trace's sphere, so a plain click stays a click.
 const PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:click0": { action: "proofread-segment-pick" },
+  "at:control+mousedown0": { action: "proofread-segment-pick" },
 });
 
 /**
@@ -4304,6 +4303,8 @@ class ProofreadSegmentSession extends RefCounted {
   /** Escape leaves without a segment chosen, and `onCancel` says so. */
   pick(onCancel?: () => void) {
     if (this.picking) return;
+    // The sphere is placed with the same Ctrl+click.
+    this.connection.state.zettaTraceState.aiming.value = false;
     this.pickBindings = bindModeInputs(
       this.layer,
       PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP,
