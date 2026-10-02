@@ -463,25 +463,15 @@
   animation: piece-split-spin 0.8s linear infinite;
 }
 
-/* Wraps rather than ellipsising: unlike the one-line mode panel, the tab has
-   the width to show a whole hint. */
-.calcada-trace-panel-status {
+/* One line, always there: text that came and went, or wrapped to a second
+   line, moved every control beneath it. The whole text is in the tooltip. */
+.calcada-trace-panel-status,
+.calcada-trace-panel-current {
   font-size: 12px;
   opacity: 0.85;
-}
-
-/* The seed's position on a line of its own, its buttons beneath: beside the
-   buttons the coordinates had room for one number per line. */
-.calcada-trace-panel-seed {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.calcada-trace-panel-seed-position {
+  overflow: hidden;
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
 }
 
 /* One end of a candidate — its filters and, while tracing, the current piece
@@ -503,11 +493,6 @@
   padding: 0 4px;
   font-size: 12px;
   font-weight: 600;
-}
-
-.calcada-trace-panel-current {
-  font-size: 12px;
-  opacity: 0.85;
 }
 
 /* The trace edits the graph it runs on, so running it on main is worth
@@ -605,14 +590,9 @@
   margin: 0;
 }
 
-.calcada-trace-panel-overview {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 6px 8px 8px;
-  border: 1px solid #444;
-  border-radius: 4px;
+.calcada-trace-panel-keys-section summary {
+  font-size: 12px;
+  cursor: pointer;
 }
 
 /* Without a legend "green or red" is a guess. The bar is the scale itself, so
