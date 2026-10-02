@@ -15,33 +15,13 @@
 
 import type { CoordinateSpace } from "#src/coordinate_transform.js";
 import { nanometresPerGlobalUnit } from "#src/datasource/calcada/global_nanometres.js";
-import {
-  TRACE_SPHERE_RADIUS_MAX_NM,
-  TRACE_SPHERE_RADIUS_MIN_NM,
-} from "#src/datasource/calcada/trace_state.js";
 import type { mat4 } from "#src/util/geom.js";
 import { vec3, vec4 } from "#src/util/geom.js";
-
-const RADIUS_STEP_FACTOR = 1.25;
 
 const SPHERE_STACKS = 16;
 const SPHERE_SECTORS = 32;
 // Every grid quad is two triangles of three vertices.
 export const SPHERE_TRIANGLE_VERTEX_COUNT = SPHERE_STACKS * SPHERE_SECTORS * 6;
-
-export function stepTraceSphereRadiusNm(
-  radiusNm: number,
-  direction: 1 | -1,
-): number {
-  const next =
-    direction === 1
-      ? radiusNm * RADIUS_STEP_FACTOR
-      : radiusNm / RADIUS_STEP_FACTOR;
-  return Math.min(
-    TRACE_SPHERE_RADIUS_MAX_NM,
-    Math.max(TRACE_SPHERE_RADIUS_MIN_NM, next),
-  );
-}
 
 /**
  * Semi-axes of a ball of radius `radiusNm` expressed in global coordinates.

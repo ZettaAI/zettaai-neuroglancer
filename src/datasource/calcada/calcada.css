@@ -704,13 +704,19 @@
   box-sizing: border-box;
 }
 
-.calcada-filter-editor :is(button, select, input, textarea) {
+.calcada-filter-editor button,
+.calcada-filter-editor select,
+.calcada-filter-editor input,
+.calcada-filter-editor textarea {
   font-family: inherit;
   font-size: 13px;
   color: var(--cfe-text);
 }
 
-.calcada-filter-editor :is(button, select, input, textarea):focus-visible {
+.calcada-filter-editor button:focus-visible,
+.calcada-filter-editor select:focus-visible,
+.calcada-filter-editor input:focus-visible,
+.calcada-filter-editor textarea:focus-visible {
   outline: 2px solid var(--cfe-accent-line);
   outline-offset: 1px;
 }
