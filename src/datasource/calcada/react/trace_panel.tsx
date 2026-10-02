@@ -192,6 +192,7 @@ const SCOPE_LABELS: ReadonlyArray<[TraceScope, string]> = [
  */
 const KEY_HINTS: ReadonlyArray<[string, string]> = [
   ["T", "start a trace"],
+  ["Ctrl+click in 2D", "select the segment, after Select"],
   ["Ctrl+click", "place the sphere"],
   ["+ / −", "resize the sphere while placing"],
   ["→", "accept and merge"],
@@ -237,7 +238,11 @@ function SegmentSection({
       <legend>Segment</legend>
       <StatusLine
         text={
-          picking ? "Click it in a 2D view" : chosen ? `Piece ${piece}` : "None"
+          picking
+            ? "Ctrl+click it in a 2D view"
+            : chosen
+              ? `Piece ${piece}`
+              : "None"
         }
         picking={picking}
       />
@@ -245,7 +250,7 @@ function SegmentSection({
         <Button
           size="xs"
           variant="outline"
-          title="Click the segment to proofread in a 2D view"
+          title="Ctrl+click the segment to proofread in a 2D view"
           onClick={() => session.pick()}
         >
           Select

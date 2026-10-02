@@ -44,6 +44,7 @@ interface PanelSetup {
   /** Tracing, with detection on and a piece in focus; idle otherwise. */
   busy?: boolean;
   hasSegment?: boolean;
+  picking?: boolean;
 }
 
 let calls: string[] = [];
@@ -52,6 +53,7 @@ async function makeConnection({
   rejectedBy = [],
   busy = true,
   hasSegment = true,
+  picking = false,
 }: PanelSetup = {}): Promise<TracePanelConnection> {
   const { library } = await libraryWith({
     axons: "both axon >= 30%",
@@ -86,7 +88,7 @@ async function makeConnection({
     segmentSession: {
       changed: new NullarySignal(),
       piece: hasSegment ? 72057594037927937n : undefined,
-      picking: false,
+      picking,
       pick: record("pick"),
       goTo: record("goTo"),
       clear: record("clear"),
@@ -237,6 +239,13 @@ describe("CalcadaTracePanel", () => {
     // Both still start: each asks for the segment first.
     expect((await button("Start")).disabled).toBe(false);
     expect((await button("Detect split errors")).disabled).toBe(false);
+  });
+
+  it("says to Ctrl+click while the segment is being selected", async () => {
+    await mountPanel(await makeConnection({ picking: true }));
+    expect(
+      tab.querySelector(".calcada-trace-panel-segment")?.textContent,
+    ).toContain("Ctrl+click it in a 2D view");
   });
 
   it("detects split errors with a button and clears them with another", async () => {
