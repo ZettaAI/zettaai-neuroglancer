@@ -42,6 +42,7 @@ import {
   shaderCodeWithLineDirective,
 } from "#src/webgl/dynamic_shader.js";
 import type { ShaderBuilder, ShaderProgram } from "#src/webgl/shader.js";
+import { glsl_string } from "#src/webgl/shader_lib.js";
 import type {
   ShaderControlsBuilderState,
   ShaderControlState,
@@ -152,6 +153,7 @@ void emitIntensity(float value) {
   builder.addFragmentCode(helpers);
   builder.addFragmentCode(glsl_COLORMAPS);
   addControlsToBuilder(shaderBuilderState, builder);
+  builder.addFragmentCode(glsl_string);
   builder.setFragmentMainFunction(userMain);
 }
 
@@ -274,7 +276,7 @@ export class ImageRenderLayer extends SliceViewVolumeRenderLayer<ImageShaderPara
       gl,
       shader,
       this.shaderControlState,
-      parameters.builderState.parseResult.controls,
+      parameters.builderState.parseResult,
     );
     // Bbox-dim uniforms are bound only when the bbox-dim shader path was
     // compiled (`editBboxActive === true`). Otherwise the uniforms don't

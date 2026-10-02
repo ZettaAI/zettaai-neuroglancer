@@ -1,7 +1,6 @@
 # Deployment
 
-The bundle is served by Cloud Run in `zetta-research` / `us-east1`. Vercel still builds
-`dev` and `main`, but only so its old hosts redirect to the aliases below.
+The bundle is served by Cloud Run in `zetta-research` / `us-east1`.
 
 | Branch | Cloud Run service     | URL                                        |
 | ------ | --------------------- | ------------------------------------------ |
@@ -22,8 +21,7 @@ or the console instead of a commit, and so previews inherit them. A change only 
 effect on the next deploy.
 
 Current values: `neuroglancer` carries `NEUROGLANCER_ZETTA_BACKEND_URL` and
-`NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP`; `neuroglancer-dev` and previews carry neither,
-which is what the Vercel `dev` environment did.
+`NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP`; `neuroglancer-dev` and previews carry neither.
 
 ## PR previews
 
@@ -71,5 +69,5 @@ Google sign-in derives its redirect from the page's own origin.
 
 ## Re-enabling cross-origin isolation
 
-COOP/COEP are commented out in three places that must move together: `nginx.conf`,
-`vercel.json`, and the dev server in `build_tools/cli.ts`.
+COOP/COEP are commented out in two places that must move together: `nginx.conf` and
+the dev server in `build_tools/cli.ts`.

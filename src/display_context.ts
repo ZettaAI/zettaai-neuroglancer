@@ -194,22 +194,36 @@ export abstract class RenderedPanel extends RefCounted {
         // Assume this is a `display: contents;` element.
         continue;
       }
-      clippedLeft = Math.max(
+      const newClippedLeft = Math.max(
         clippedLeft,
         (rect.left - canvasLeft) * screenToCanvasPixelScaleX,
       );
-      clippedTop = Math.max(
+      const newClippedTop = Math.max(
         clippedTop,
         (rect.top - canvasTop) * screenToCanvasPixelScaleY,
       );
-      clippedRight = Math.min(
+      const newClippedRight = Math.min(
         clippedRight,
         (rect.right - canvasLeft) * screenToCanvasPixelScaleX,
       );
-      clippedBottom = Math.min(
+      const newClippedBottom = Math.min(
         clippedBottom,
         (rect.bottom - canvasTop) * screenToCanvasPixelScaleY,
       );
+      if (newClippedLeft !== clippedLeft || newClippedRight !== clippedRight) {
+        const overflowX = getComputedStyle(parent).overflowX;
+        if (overflowX === "hidden" || overflowX === "clip") {
+          clippedLeft = newClippedLeft;
+          clippedRight = newClippedRight;
+        }
+      }
+      if (newClippedTop !== clippedTop || newClippedBottom !== clippedBottom) {
+        const overflowY = getComputedStyle(parent).overflowY;
+        if (overflowY === "hidden" || overflowY === "clip") {
+          clippedTop = newClippedTop;
+          clippedBottom = newClippedBottom;
+        }
+      }
     }
     clippedTop = this.canvasRelativeClippedTop = Math.round(
       Math.max(clippedTop, 0),
@@ -422,6 +436,7 @@ export class DisplayContext extends RefCounted implements FrameNumberCounter {
   updateFinished = new NullarySignal();
   continuousCameraMotionStarted = new NullarySignal();
   continuousCameraMotionFinished = new NullarySignal();
+  multiChannelSetupFinished = new NullarySignal();
   changed = this.updateFinished;
   panels = new Set<RenderedPanel>();
   canvasRect: DOMRect | undefined;
@@ -533,6 +548,16 @@ export class DisplayContext extends RefCounted implements FrameNumberCounter {
     canvas.style.zIndex = "0";
     resizeObserver.observe(canvas);
     container.appendChild(canvas);
+    // Additionally monitor for scroll events.  This catches cases not handled
+    // by the IntersectionObserver.
+    this.registerEventListener(
+      container,
+      "scroll",
+      () => {
+        this.resizeCallback();
+      },
+      { capture: true, passive: true },
+    );
     this.registerEventListener(
       canvas,
       "webglcontextlost",
@@ -679,7 +704,7 @@ export class DisplayContext extends RefCounted implements FrameNumberCounter {
     this.framerateMonitor.grabAnyFinishedQueryResults(gl);
   }
 
-  getDepthArray(): Float32Array {
+  getDepthArray(): Float32Array<ArrayBuffer> {
     const { width, height } = this.canvas;
     const depthArray = new Float32Array(width * height);
     for (const panel of this.panels) {
