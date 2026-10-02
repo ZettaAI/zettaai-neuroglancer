@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { sameFilter } from "#src/datasource/calcada/candidate_filter_text.js";
 import { minCandidateVoxels } from "#src/datasource/calcada/candidate_filter_tree.js";
+import type { ScoreRange } from "#src/datasource/calcada/trace_state.js";
 import {
+  stepScoreRangeLow,
   TRACE_SPHERE_RADIUS_DEFAULT_NM,
   withinScoreRange,
   ZettaTraceState,
@@ -248,5 +250,41 @@ describe("withinScoreRange", () => {
     expect(withinScoreRange(0.85, [0.3, 0.85])).toBe(true);
     expect(withinScoreRange(0.29, [0.3, 0.85])).toBe(false);
     expect(withinScoreRange(0.9, [0.3, 0.85])).toBe(false);
+  });
+});
+
+describe("stepScoreRangeLow", () => {
+  it("moves the lowest score by 0.05 and keeps the highest", () => {
+    expect(stepScoreRangeLow([0.3, 0.9], 1)).toEqual([0.35, 0.9]);
+    expect(stepScoreRangeLow([0.3, 0.9], -1)).toEqual([0.25, 0.9]);
+  });
+
+  it("lands on round steps rather than drifting", () => {
+    let range: ScoreRange = [0, 1];
+    for (let i = 0; i < 7; i++) range = stepScoreRangeLow(range, 1);
+    expect(range[0]).toBe(0.35);
+  });
+
+  it("stops at zero and at the highest score", () => {
+    expect(stepScoreRangeLow([0, 1], -1)).toEqual([0, 1]);
+    expect(stepScoreRangeLow([0.78, 0.8], 1)).toEqual([0.8, 0.8]);
+  });
+});
+
+describe("ZettaTraceState.stepPlusMinus", () => {
+  it("steps the lowest score", () => {
+    const state = new ZettaTraceState();
+    state.stepPlusMinus(1);
+    expect(state.scoreRange.value).toEqual([0.05, 1]);
+  });
+
+  it("resizes the sphere instead while aiming", () => {
+    const state = new ZettaTraceState();
+    state.aiming.value = true;
+    state.stepPlusMinus(1);
+    expect(state.scoreRange.value).toEqual([0, 1]);
+    expect(state.sphereRadiusNm.value).toBeGreaterThan(
+      TRACE_SPHERE_RADIUS_DEFAULT_NM,
+    );
   });
 });

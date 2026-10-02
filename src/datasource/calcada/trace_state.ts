@@ -48,6 +48,21 @@ export type TraceScope = "sphere" | "segment";
 export const TRACE_SPHERE_RADIUS_DEFAULT_NM = 2000;
 export const TRACE_SPHERE_RADIUS_MIN_NM = 100;
 export const TRACE_SPHERE_RADIUS_MAX_NM = 50000;
+const RADIUS_STEP_FACTOR = 1.25;
+
+export function stepTraceSphereRadiusNm(
+  radiusNm: number,
+  direction: 1 | -1,
+): number {
+  const next =
+    direction === 1
+      ? radiusNm * RADIUS_STEP_FACTOR
+      : radiusNm / RADIUS_STEP_FACTOR;
+  return Math.min(
+    TRACE_SPHERE_RADIUS_MAX_NM,
+    Math.max(TRACE_SPHERE_RADIUS_MIN_NM, next),
+  );
+}
 
 const TRACE_SCOPE_KEY = "scope";
 const TRACE_SPHERE_RADIUS_KEY = "sphereRadiusNm";
@@ -64,6 +79,22 @@ export const FULL_SCORE_RANGE: ScoreRange = [0, 1];
 
 export function withinScoreRange(score: number, [low, high]: ScoreRange) {
   return score >= low && score <= high;
+}
+
+// The + / − step while tracing: twenty stops between 0 and 1.
+const SCORE_STEPS_PER_UNIT = 20;
+
+/**
+ * Raise or lower the lowest score by one step, onto a whole step so repeated
+ * presses do not drift, and never past zero or the highest score.
+ */
+export function stepScoreRangeLow(
+  [low, high]: ScoreRange,
+  direction: 1 | -1,
+): ScoreRange {
+  const stepped =
+    (Math.round(low * SCORE_STEPS_PER_UNIT) + direction) / SCORE_STEPS_PER_UNIT;
+  return [Math.min(high, Math.max(FULL_SCORE_RANGE[0], stepped)), high];
 }
 
 function parseScoreRange(value: unknown): ScoreRange {
@@ -210,6 +241,22 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   /** Every filter change hides or shows queued entries without a refetch. */
   get candidateFilterSignals() {
     return [this.filter, this.scoreRange];
+  }
+
+  /**
+   * What + / − do: resize the sphere while aiming, otherwise move the lowest
+   * score. Routed here from every key map for the reason given at
+   * cancelInnermost: only one of the bound maps gets the press.
+   */
+  stepPlusMinus(direction: 1 | -1) {
+    if (this.aiming.value) {
+      this.sphereRadiusNm.value = stepTraceSphereRadiusNm(
+        this.sphereRadiusNm.value,
+        direction,
+      );
+      return;
+    }
+    this.scoreRange.value = stepScoreRangeLow(this.scoreRange.value, direction);
   }
 
   /**
