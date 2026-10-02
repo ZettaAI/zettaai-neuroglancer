@@ -116,9 +116,22 @@ function packed(red: number, green: number, blue: number): bigint {
  * where nothing is missing, so it reads as fine; a strong candidate is a
  * continuation the segment is probably lacking, which is a split error.
  */
+type Rgb = readonly [number, number, number];
+const HEAT_FINE: Rgb = [0.16, 0.86, 0.24];
+const HEAT_SPLIT: Rgb = [1, 0.24, 0.24];
+
 export function heatColor(bestScore: number): bigint {
   const t = Math.max(0, Math.min(1, bestScore));
-  return packed(0.16 + t * 0.84, 0.86 - t * 0.62, 0.24);
+  const [red, green, blue] = HEAT_FINE.map(
+    (fine, i) => fine + t * (HEAT_SPLIT[i] - fine),
+  );
+  return packed(red, green, blue);
+}
+
+/** The same scale in GLSL, over a score already clamped to [0, 1]. */
+export function heatColorGlsl(score: string): string {
+  const vec = (rgb: Rgb) => `vec3(${rgb.join(", ")})`;
+  return `mix(${vec(HEAT_FINE)}, ${vec(HEAT_SPLIT)}, ${score})`;
 }
 
 export function classTotal(classes: PieceClasses): number {

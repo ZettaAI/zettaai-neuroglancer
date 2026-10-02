@@ -81,6 +81,7 @@ import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import {
   describeCandidateSides,
   edgeCandidateSubject,
+  heatColorGlsl,
   parseClassCounts,
   parseOverviewPoint,
   partnersWithSemantics,
@@ -5502,7 +5503,11 @@ void main() {
         CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
         () => {
           const { active } = state.overviewState;
+          const { zettaTraceState } = state;
           this.traceSession.revealTraceTab();
+          if (zettaTraceState.active.value || zettaTraceState.aiming.value) {
+            return;
+          }
           if (!active.value && this.graph.branchId.value === MAIN_BRANCH_ID) {
             return;
           }
@@ -8160,7 +8165,7 @@ const SPLIT_POINT_SHADER = `
 void main() {
   float score = clamp(prop_${SPLIT_POINT_SCORE_PROPERTY}(), 0.0, 1.0);
   bool focused = prop_${SPLIT_POINT_FOCUS_PROPERTY}() > 0u;
-  setColor(vec4(mix(vec3(1.0, 0.7, 0.7), vec3(0.9, 0.05, 0.05), score), 1.0));
+  setColor(vec4(${heatColorGlsl("score")}, 1.0));
   setPointMarkerSize(focused ? 13.0 : 9.0);
   setPointMarkerBorderWidth(1.0);
   setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
