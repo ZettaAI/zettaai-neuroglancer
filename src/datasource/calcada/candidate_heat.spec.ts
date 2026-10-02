@@ -13,6 +13,7 @@ import {
   edgeCandidateSubject,
   flaggedPieceCount,
   heatColor,
+  heatColorGlsl,
   pieceOverviewSubject,
   rankFlaggedPieces,
   splitErrorColors,
@@ -58,6 +59,14 @@ describe("heatColor", () => {
   it("clamps scores outside the scale", () => {
     expect(heatColor(-5)).toBe(heatColor(0));
     expect(heatColor(5)).toBe(heatColor(1));
+  });
+});
+
+describe("heatColorGlsl", () => {
+  it("is the same scale as heatColor, for a shader", () => {
+    expect(heatColorGlsl("score")).toBe(
+      "mix(vec3(0.16, 0.86, 0.24), vec3(1, 0.24, 0.24), score)",
+    );
   });
 });
 

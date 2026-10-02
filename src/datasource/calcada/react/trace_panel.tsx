@@ -435,14 +435,16 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
 function SplitDetectionSection({
   session,
   state,
+  traceState,
 }: {
   session: TracePanelConnection["overviewSession"];
   state: CalcadaOverviewState;
+  traceState: ZettaTraceState;
 }) {
   const active = useWatchable(state.active);
-  // Recoloured pieces are reachable from a link only; their colours need the
-  // scale beside them.
-  const coloured = useWatchable(state.display) === "pieces";
+  const traceActive = useWatchable(traceState.active);
+  const aiming = useWatchable(traceState.aiming);
+  const tracing = traceActive || aiming;
   const focus = active ? session.focus : undefined;
   const piece = focus?.piece;
   return (
@@ -452,7 +454,7 @@ function SplitDetectionSection({
         <Button
           size="xs"
           variant="outline"
-          disabled={active}
+          disabled={active || tracing}
           title="Mark likely split errors on the segment (E)"
           onClick={() => {
             state.active.value = true;
@@ -463,7 +465,7 @@ function SplitDetectionSection({
         <Button
           size="xs"
           variant="outline"
-          disabled={!active}
+          disabled={!active || tracing}
           title="Remove the marks (E)"
           onClick={() => {
             state.active.value = false;
@@ -473,13 +475,11 @@ function SplitDetectionSection({
         </Button>
       </div>
       <StatusLine text={active ? session.status : ""} />
-      {coloured && (
-        <div className="calcada-trace-panel-legend">
-          <span className="calcada-trace-panel-legend-scale" />
-          <span>likely fine</span>
-          <span>likely split</span>
-        </div>
-      )}
+      <div className="calcada-trace-panel-legend">
+        <span className="calcada-trace-panel-legend-scale" />
+        <span>likely fine</span>
+        <span>likely split</span>
+      </div>
       <div className="calcada-trace-panel-navigator">
         <Button
           size="xs"
@@ -585,6 +585,7 @@ export function CalcadaTracePanel({
       <SplitDetectionSection
         session={connection.overviewSession}
         state={connection.state.overviewState}
+        traceState={traceState}
       />
 
       <details className="calcada-trace-panel-keys-section">

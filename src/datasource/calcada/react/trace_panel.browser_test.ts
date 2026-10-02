@@ -258,6 +258,35 @@ describe("CalcadaTracePanel", () => {
     await vi.waitFor(() => expect(active.value).toBe(false));
   });
 
+  it("offers no split detection while a trace is running or aiming", async () => {
+    const connection = await makeConnection({ busy: false });
+    await mountPanel(connection);
+    const detection = ".calcada-trace-panel-detection";
+    expect((await button("Detect split errors", detection)).disabled).toBe(
+      false,
+    );
+    connection.state.zettaTraceState.aiming.value = true;
+    await vi.waitFor(async () => {
+      expect((await button("Detect split errors", detection)).disabled).toBe(
+        true,
+      );
+    });
+    connection.state.zettaTraceState.aiming.value = false;
+    connection.state.zettaTraceState.active.value = true;
+    connection.state.overviewState.active.value = true;
+    await vi.waitFor(async () => {
+      expect((await button("Detect split errors", detection)).disabled).toBe(
+        true,
+      );
+      expect((await button("Clear", detection)).disabled).toBe(true);
+    });
+  });
+
+  it("shows the green-to-red scale the points are coloured with", async () => {
+    await mountPanel(await makeConnection());
+    expect(tab.querySelector(".calcada-trace-panel-legend")).not.toBe(null);
+  });
+
   it("offers no choice of how flagged pieces are shown", async () => {
     await mountPanel(await makeConnection());
     expect(tab.querySelector(".calcada-trace-panel-split-display")).toBe(null);
