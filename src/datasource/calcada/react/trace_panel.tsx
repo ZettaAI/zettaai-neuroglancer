@@ -190,17 +190,21 @@ const SCOPE_LABELS: ReadonlyArray<[TraceScope, string]> = [
  * frontend.ts; the tab is the only place these are spelled out for a human
  * now, so a binding changed there has to be changed here too.
  */
+// The binding is the physical US "/?" key, so it is named both ways.
+const SPLIT_DETECTION_KEY = "? (Shift+/)";
+
 const KEY_HINTS: ReadonlyArray<[string, string]> = [
   ["T", "start a trace"],
   ["Ctrl+click in 2D", "select the segment, after Select"],
   ["Ctrl+click", "place the sphere"],
   ["+ / −", "resize the sphere while placing"],
+  ["+ / −", "raise / lower the lowest score"],
   ["→", "accept and merge"],
   ["←", "reject"],
   ["↓", "skip for now"],
   ["Ctrl+Z", "undo the last edit"],
   ["Esc", "put the seed down, then leave"],
-  ["E", "split error detection on / off"],
+  [SPLIT_DETECTION_KEY, "split error detection on / off"],
   ["← / →", "previous / next flagged piece"],
 ];
 
@@ -455,7 +459,7 @@ function SplitDetectionSection({
           size="xs"
           variant="outline"
           disabled={active || tracing}
-          title="Mark likely split errors on the segment (E)"
+          title={`Mark likely split errors on the segment (${SPLIT_DETECTION_KEY})`}
           onClick={() => {
             state.active.value = true;
           }}
@@ -466,7 +470,7 @@ function SplitDetectionSection({
           size="xs"
           variant="outline"
           disabled={!active || tracing}
-          title="Remove the marks (E)"
+          title={`Remove the marks (${SPLIT_DETECTION_KEY})`}
           onClick={() => {
             state.active.value = false;
           }}
@@ -592,7 +596,7 @@ export function CalcadaTracePanel({
         <summary>Keys</summary>
         <dl className="calcada-trace-panel-keys">
           {KEY_HINTS.map(([keys, meaning]) => (
-            <Fragment key={keys}>
+            <Fragment key={`${keys} ${meaning}`}>
               <dt>{keys}</dt>
               <dd>{meaning}</dd>
             </Fragment>

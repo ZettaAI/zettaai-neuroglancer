@@ -16,6 +16,7 @@ import "#src/datasource/calcada/calcada.css";
 import { printFilter } from "#src/datasource/calcada/candidate_filter_text.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import { libraryWith } from "#src/datasource/calcada/filter_library_fixture.js";
+import { FilterEditor } from "#src/datasource/calcada/react/filter_editor.js";
 import type { TracePanelConnection } from "#src/datasource/calcada/react/trace_panel.js";
 import { CalcadaTracePanel } from "#src/datasource/calcada/react/trace_panel.js";
 import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
@@ -218,6 +219,49 @@ describe("CalcadaTracePanel", () => {
     );
     // As in the prototype, the editor follows the Trace choice.
     expect(connection.filterLibrary.current).toBe("dendrites");
+  });
+
+  it("shows the filter chosen for Trace in the open editor", async () => {
+    const connection = await makeConnection();
+    const { filterLibrary: library } = connection;
+    const { zettaTraceState } = connection.state;
+    library.select("dendrites");
+    const editor = document.createElement("div");
+    document.body.appendChild(editor);
+    const unmountEditor = mountComponent(editor, FilterEditor, {
+      library,
+      state: zettaTraceState,
+    });
+    try {
+      await mountPanel(connection);
+      for (const [name, text] of [
+        ["axons", "axon >= 30%"],
+        ["dendrites", "dendrite > 80%"],
+      ]) {
+        tab.querySelector<HTMLElement>(".calcada-trace-filter-select")!.click();
+        const option = await vi.waitFor(() => {
+          const found = [
+            ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ].find((item) => item.textContent?.trim() === name);
+          expect(found).toBeDefined();
+          return found!;
+        });
+        option.click();
+        await vi.waitFor(() => {
+          expect(
+            editor.querySelector(".calcada-filter-library-select")?.textContent,
+          ).toContain(name);
+          expect(
+            editor.querySelector<HTMLTextAreaElement>(
+              ".calcada-filter-code textarea",
+            )?.value,
+          ).toContain(text);
+        });
+      }
+    } finally {
+      invokeDisposer(unmountEditor);
+      editor.remove();
+    }
   });
 
   it("selects, goes to and clears the segment being proofread", async () => {

@@ -145,6 +145,7 @@ import {
   TRACE_CANDIDATE_COLOR_PACKED,
   TRACE_CANDIDATE_DIM_COLOR_PACKED,
   TRACE_SEED_COLOR_PACKED,
+  TRACE_SEED_RGB,
   TRACE_SEED_DIM_COLOR_PACKED,
 } from "#src/datasource/calcada/role_colors.js";
 import {
@@ -163,13 +164,13 @@ import {
   stageEnabled,
 } from "#src/datasource/calcada/split_steps.js";
 import {
-  stepTraceSphereRadiusNm,
   traceSphereSemiAxes,
   pointInsideSphere,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_geometry.js";
 import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_perspective_overlay.js";
 import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
+import { rootsKeptOnExit } from "#src/datasource/calcada/trace_exit_view.js";
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
@@ -2263,7 +2264,7 @@ function framePerspective(
 function bindModeInputs(
   layer: SegmentationUserLayer,
   inputEventMap: EventActionMap,
-  handlers: Record<string, () => void>,
+  handlers: Record<string, (event: ActionEvent<unknown>) => void>,
 ): RefCounted {
   const bindings = new RefCounted();
   layer.toolBinder.globalBinder.inputEventMapBinder(inputEventMap, bindings);
@@ -2278,7 +2279,7 @@ function bindModeInputs(
     bindings.registerDisposer(
       registerActionListener(window, action, (event: ActionEvent<unknown>) => {
         event.stopPropagation();
-        handler();
+        handler(event);
       }),
     );
   }
@@ -2294,6 +2295,43 @@ const NO_SEGMENT_STATUS = "No segment selected";
 const SEGMENT_PICK_IN_2D_MESSAGE = "Select the segment in a 2D view.";
 const MESSAGE_DURATION_MS = 4000;
 
+// + / − in every trace and detection map, each map with actions of its own,
+// all ending in stepPlusMinus. Two maps can be bound at once (aiming over a
+// trace, or with detection on) and each has a document binder, so one press
+// can arrive more than once; the press itself, the action's detail, is what
+// is counted. The keys are the brush's own (config/custom-keybinds.json,
+// editSession.sizeIncrease / sizeDecrease), deliberately rather than a second
+// vocabulary for the gesture.
+function plusMinusBindings(mode: string) {
+  const plus = { action: `${mode}-plus` };
+  const minus = { action: `${mode}-minus` };
+  return {
+    "at:equal": plus,
+    "at:shift+equal": plus,
+    "at:numpadadd": plus,
+    "at:minus": minus,
+    "at:numpadsubtract": minus,
+  };
+}
+
+const steppedPresses = new WeakSet<object>();
+
+function plusMinusHandlers(mode: string, state: ZettaTraceState) {
+  const step = (direction: 1 | -1) => (event: ActionEvent<unknown>) => {
+    const press = event.detail;
+    if (typeof press === "object" && press !== null) {
+      if (steppedPresses.has(press)) return;
+      steppedPresses.add(press);
+    }
+    state.stepPlusMinus(direction);
+  };
+  return { [`${mode}-plus`]: step(1), [`${mode}-minus`]: step(-1) };
+}
+
+const TRACE_KEYS_MODE = "trace";
+const AIM_KEYS_MODE = "trace-aim";
+const SPLIT_DETECTION_KEYS_MODE = "split-detection";
+
 const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
@@ -2304,23 +2342,15 @@ const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:control+keyz": { action: "trace-undo" },
   "at:meta+keyz": { action: "trace-undo" },
   "at:escape": { action: "exit-trace" },
+  ...plusMinusBindings(TRACE_KEYS_MODE),
 });
 
 // Held only while the sights are up. The placing click is bound HERE and
 // nowhere else on purpose: during a trace a click has to stay an ordinary
 // click, because a proofreader checking a candidate selects neighbouring
 // segments to look at, and that must not move the trace.
-//
-// The size keys are the brush's own (config/custom-keybinds.json,
-// editSession.sizeIncrease / sizeDecrease), deliberately rather than a second
-// vocabulary for the same gesture. They cannot collide: these live only for the
-// length of the aim, and "at:" outranks the panel bindings.
 const CALCADA_TRACE_AIM_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:equal": { action: "trace-radius-increase" },
-  "at:shift+equal": { action: "trace-radius-increase" },
-  "at:numpadadd": { action: "trace-radius-increase" },
-  "at:minus": { action: "trace-radius-decrease" },
-  "at:numpadsubtract": { action: "trace-radius-decrease" },
+  ...plusMinusBindings(AIM_KEYS_MODE),
   // Ctrl, not a plain click: in the 3D panel a bare drag orbits the camera, and
   // aiming is exactly when you want to keep turning the view to find the spot.
   "at:control+mousedown0": { action: "trace-place-sphere" },
@@ -2941,18 +2971,11 @@ class ZettaTraceSession extends RefCounted {
   private bindAiming() {
     if (this.aimBindings !== undefined) return;
     this.revealTraceTab();
-    const resize = (direction: 1 | -1) => {
-      this.state.sphereRadiusNm.value = stepTraceSphereRadiusNm(
-        this.state.sphereRadiusNm.value,
-        direction,
-      );
-    };
     this.aimBindings = bindModeInputs(
       this.layer,
       CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
       {
-        "trace-radius-increase": () => resize(1),
-        "trace-radius-decrease": () => resize(-1),
+        ...plusMinusHandlers(AIM_KEYS_MODE, this.state),
         "trace-place-sphere": () => void this.placeSphere(),
         // Cancels the aim, not the trace: a live session has to survive a
         // stray T in the middle of a review, because exit() restores the
@@ -3062,6 +3085,7 @@ class ZettaTraceSession extends RefCounted {
       "skip-candidate": () => this.skip(),
       "trace-undo": () => void this.undoLast(),
       "exit-trace": () => this.state.cancelInnermost(),
+      ...plusMinusHandlers(TRACE_KEYS_MODE, this.state),
     });
     this.bindings = bindings;
 
@@ -3136,7 +3160,11 @@ class ZettaTraceSession extends RefCounted {
 
   exit() {
     if (this.bindings === undefined) return;
-    const candidateRoot = this.current?.partnerRootId;
+    const exitRoots = {
+      retired: this.retired,
+      candidateRoot: this.current?.partnerRootId,
+      seedRoot: this.state.seedRoot.value,
+    };
     this.bindings.dispose();
     this.bindings = undefined;
     this.clearAnnotation();
@@ -3159,26 +3187,16 @@ class ZettaTraceSession extends RefCounted {
     this.clearRoleColors();
 
     // Leaving keeps what the review built rather than rewinding to the entry
-    // snapshot: the merged seed stays, and so does any segment pulled up for
-    // context. Two things go: the candidate still under review, which was never
-    // accepted, and every root this session's edits retired — those ids are
-    // gone from the graph and restoring them would show segments that no longer
-    // exist beside the one that replaced them.
+    // snapshot; see rootsKeptOnExit for what goes.
     const { segmentsState } = this;
-    const keep = (ids: Iterable<bigint>) => {
-      const out = new Set<bigint>(ids);
-      for (const id of this.retired) out.delete(id);
-      if (candidateRoot !== undefined) out.delete(candidateRoot);
-      return out;
-    };
-    const visible = keep([
-      ...this.savedVisible,
-      ...segmentsState.visibleSegments,
-    ]);
-    const selected = keep([
-      ...this.savedSelected,
-      ...segmentsState.selectedSegments,
-    ]);
+    const visible = rootsKeptOnExit(
+      [...this.savedVisible, ...segmentsState.visibleSegments],
+      exitRoots,
+    );
+    const selected = rootsKeptOnExit(
+      [...this.savedSelected, ...segmentsState.selectedSegments],
+      exitRoots,
+    );
     segmentsState.visibleSegments.clear();
     segmentsState.selectedSegments.clear();
     for (const id of selected) segmentsState.selectedSegments.add(id);
@@ -4268,6 +4286,7 @@ class ZettaTraceSession extends RefCounted {
 const SPLIT_DETECTION_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "split-detection-previous" },
   "at:arrowright": { action: "split-detection-next" },
+  ...plusMinusBindings(SPLIT_DETECTION_KEYS_MODE),
 });
 // Ctrl like the trace's sphere, so a plain click stays a click.
 const PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP = EventActionMap.fromObject({
@@ -4291,6 +4310,9 @@ class ProofreadSegmentSession extends RefCounted {
     super();
     this.registerDisposer(() => this.stopPicking());
     this.registerDisposer(segment.changed.add(() => this.changed.dispatch()));
+    const showPoint = () => connection.setSegmentPoint(segment.point.value);
+    this.registerDisposer(segment.point.changed.add(showPoint));
+    showPoint();
   }
 
   get piece(): bigint | undefined {
@@ -4395,6 +4417,7 @@ class CandidateOverviewSession extends RefCounted {
   private ranked: PieceOverview[] = [];
   private focusIndex = -1;
   private bindings: RefCounted | undefined;
+  private resumeAfterTrace = false;
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -4437,11 +4460,20 @@ class CandidateOverviewSession extends RefCounted {
       }),
     );
     // Starting a trace is choosing to look at one candidate, which is the
-    // opposite of surveying a whole segment for where to start.
+    // opposite of surveying a whole segment for where to start. Detection that
+    // was on comes back when the trace ends, scored afresh: the trace's merges
+    // changed the segment.
     this.registerDisposer(
       connection.state.zettaTraceState.active.changed.add(() => {
         if (connection.state.zettaTraceState.active.value) {
+          this.resumeAfterTrace = state.active.value;
           state.active.value = false;
+          return;
+        }
+        if (!this.resumeAfterTrace) return;
+        this.resumeAfterTrace = false;
+        if (connection.graph.branchId.value !== MAIN_BRANCH_ID) {
+          state.active.value = true;
         }
       }),
     );
@@ -4613,6 +4645,10 @@ class CandidateOverviewSession extends RefCounted {
         {
           "split-detection-previous": () => this.previousPiece(),
           "split-detection-next": () => this.nextPiece(),
+          ...plusMinusHandlers(
+            SPLIT_DETECTION_KEYS_MODE,
+            this.connection.state.zettaTraceState,
+          ),
         },
       );
     }
@@ -4892,6 +4928,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public segmentSession!: ProofreadSegmentSession;
   public debugSession!: CalcadaDebugSession;
   public splitErrorAnnotationState!: AnnotationLayerState;
+  public segmentPointAnnotationState!: AnnotationLayerState;
   public pointPlacement!: PointPlacement;
   // Piece ids are branch-local, so the cache is only good for the branch it
   // was filled on.
@@ -5110,6 +5147,14 @@ void main() {
     );
     this.splitErrorAnnotationState.displayState.shader.value =
       SPLIT_POINT_SHADER;
+    this.segmentPointAnnotationState = makeColoredAnnotationState(
+      layer,
+      loadedSubsource,
+      "calcadaProofreadSegment",
+      WHITE_COLOR,
+    );
+    this.segmentPointAnnotationState.displayState.shader.value =
+      SEGMENT_POINT_SHADER;
     // Its own source, not the merge one. Anything added to the merge source is
     // turned into a pending merge submission by the childAdded handler below,
     // so borrowing it would both queue phantom merges and leave the lines
@@ -6371,6 +6416,14 @@ void main() {
 
   clearDebugEdges() {
     (this.debugEdgeAnnotationState.source as AnnotationSource).clear();
+  }
+
+  /** Where the proofread segment was selected, or nothing. */
+  setSegmentPoint(point: Float32Array | undefined) {
+    const source = this.segmentPointAnnotationState.source as AnnotationSource;
+    source.clear();
+    if (point === undefined) return;
+    source.add({ id: "", type: AnnotationType.POINT, point, properties: [] });
   }
 
   setSplitErrorPoints(points: readonly SplitErrorPoint[]) {
@@ -8161,6 +8214,15 @@ const SPLIT_POINT_SCORE_PROPERTY = "score";
 const SPLIT_POINT_FOCUS_PROPERTY = "focused";
 // Pale for a weak candidate, deep red for a strong one; the piece ← / → are
 // on is drawn a little larger.
+// Blue, the trace seed's colour, apart from the score-coloured split points.
+const SEGMENT_POINT_SHADER = `
+void main() {
+  setColor(vec4(${Array.from(TRACE_SEED_RGB.subarray(0, 3)).join(", ")}, 1.0));
+  setPointMarkerSize(12.0);
+  setPointMarkerBorderWidth(1.0);
+  setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
+}
+`;
 const SPLIT_POINT_SHADER = `
 void main() {
   float score = clamp(prop_${SPLIT_POINT_SCORE_PROPERTY}(), 0.0, 1.0);
