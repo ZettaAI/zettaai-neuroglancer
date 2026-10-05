@@ -16,7 +16,6 @@ import { describePiece } from "#src/datasource/calcada/candidate_heat.js";
 import type {
   CalcadaOverviewState,
   SplitDetectionFocus,
-  SplitErrorDisplay,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
@@ -56,18 +55,23 @@ export interface TracePanelConnection {
     readonly zettaTraceState: ZettaTraceState;
     readonly overviewState: CalcadaOverviewState;
   };
+  /** The segment being proofread, which Trace and detection both work on. */
+  readonly segmentSession: {
+    readonly changed: NullarySignal;
+    readonly piece: bigint | undefined;
+    /** A click in 2D is about to select it. */
+    readonly picking: boolean;
+    pick(): void;
+    goTo(): void;
+    clear(): void;
+  };
   readonly overviewSession: {
     readonly changed: NullarySignal;
     readonly status: string;
     readonly focus: SplitDetectionFocus | undefined;
-    readonly hasSeed: boolean;
     previousPiece(): void;
     nextPiece(): void;
     showFocus(): void;
-    clearSeed(): void;
-    /** A click in 2D is about to pick the segment. */
-    readonly picking: boolean;
-    pickSegment(): void;
   };
   readonly traceSession: {
     readonly changed: NullarySignal;
@@ -77,8 +81,7 @@ export interface TracePanelConnection {
     reject(): void;
     canUndo(): boolean;
     skip(): void;
-    goToSeed(): void;
-    clearSeed(): void;
+    start(): void;
     accept(): Promise<void>;
     undoLast(): Promise<void>;
   };
@@ -187,19 +190,26 @@ const SCOPE_LABELS: ReadonlyArray<[TraceScope, string]> = [
  * frontend.ts; the tab is the only place these are spelled out for a human
  * now, so a binding changed there has to be changed here too.
  */
+// The binding is the physical US "/?" key, so it is named both ways.
+const SPLIT_DETECTION_KEY = "? (Shift+/)";
+
 const KEY_HINTS: ReadonlyArray<[string, string]> = [
-  ["T", "place a seed"],
-  ["Ctrl+click", "put it on the mesh under the cursor"],
+  ["T", "start a trace"],
+  ["Ctrl+click in 2D", "select the segment, after Select"],
+  ["Ctrl+click", "place the sphere"],
   ["+ / −", "resize the sphere while placing"],
+  ["+ / −", "raise / lower the lowest score"],
   ["→", "accept and merge"],
   ["←", "reject"],
   ["↓", "skip for now"],
   ["Ctrl+Z", "undo the last edit"],
   ["Esc", "put the seed down, then leave"],
-  ["E", "split error detection on / off"],
-  ["Ctrl+click in 2D", "choose the segment to check"],
-  ["← / →", "previous / next flagged piece, by score"],
+  [SPLIT_DETECTION_KEY, "split error detection on / off"],
+  ["← / →", "previous / next flagged piece"],
 ];
+
+const NO_VALUE = "—";
+const SCORE_DIGITS = 2;
 
 function clampRadius(radiusNm: number): number {
   return Math.min(
@@ -208,172 +218,97 @@ function clampRadius(radiusNm: number): number {
   );
 }
 
-/**
- * One flagged piece at a time, strongest first, so a proofreader is taken to
- * each likely split instead of hunting for red on a whole segment.
- */
-const SPLIT_DISPLAY_LABELS: ReadonlyArray<[SplitErrorDisplay, string]> = [
-  ["pieces", "Coloured pieces"],
-  ["points", "Red points"],
-];
-
-function SplitDetectionNavigator({
-  session,
-  state,
-}: {
-  session: TracePanelConnection["overviewSession"];
-  state: CalcadaOverviewState;
-}) {
-  const { focus } = session;
-  const display = useWatchable(state.display);
+/** One line that never wraps: a longer text is cut, and whole in its tooltip. */
+function StatusLine({ text, picking }: { text: string; picking?: boolean }) {
   return (
-    <>
-      <div className="calcada-trace-panel-row">
-        <span>Show flagged pieces as</span>
-        <Select
-          value={display}
-          onValueChange={(value) => {
-            state.display.value = value as SplitErrorDisplay;
-          }}
-        >
-          <SelectTrigger
-            size="sm"
-            className="calcada-trace-panel-split-display"
-            aria-label="Show flagged pieces as"
-          >
-            <SelectValue>
-              {SPLIT_DISPLAY_LABELS.find(([key]) => key === display)?.[1]}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {SPLIT_DISPLAY_LABELS.map(([key, label]) => (
-              <SelectItem key={key} value={key}>
-                {label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <div
-        className={`calcada-trace-panel-status${session.picking ? " calcada-trace-panel-picking" : ""}`}
-      >
-        {session.status}
-      </div>
-      {focus !== undefined && (
-        <div className="calcada-trace-panel-navigator">
-          <Button
-            size="xs"
-            variant="outline"
-            title="Previous flagged piece (left arrow)"
-            onClick={() => session.previousPiece()}
-          >
-            ‹
-          </Button>
-          <button
-            type="button"
-            className="calcada-trace-panel-navigator-position"
-            title="Go back to this piece"
-            disabled={focus.index === undefined}
-            onClick={() => session.showFocus()}
-          >
-            {focus.index === undefined ? "–" : focus.index + 1} / {focus.total}
-          </button>
-          <Button
-            size="xs"
-            variant="outline"
-            title="Next flagged piece (right arrow)"
-            onClick={() => session.nextPiece()}
-          >
-            ›
-          </Button>
-        </div>
-      )}
-      {focus?.piece !== undefined && (
-        <div className="calcada-trace-panel-current">
-          score {focus.piece.bestScore.toFixed(2)} ·{" "}
-          {describePiece({
-            voxels: focus.piece.voxelCount,
-            classes: focus.piece.classes,
-            hasInfo: focus.piece.hasInfo,
-          })}
-        </div>
-      )}
-      <div className="calcada-trace-panel-buttons">
-        {!session.picking && (
-          <Button
-            size="xs"
-            variant="outline"
-            title="Click a segment in a 2D view to check it"
-            onClick={() => session.pickSegment()}
-          >
-            Pick segment
-          </Button>
-        )}
-        {session.hasSeed && (
-          <Button
-            size="xs"
-            variant="outline"
-            title="Forget the segment"
-            onClick={() => session.clearSeed()}
-          >
-            Clear segment
-          </Button>
-        )}
-      </div>
-    </>
+    <div
+      className={`calcada-trace-panel-status${picking ? " calcada-trace-panel-picking" : ""}`}
+      title={text}
+    >
+      {text || NO_VALUE}
+    </div>
   );
 }
 
-export function CalcadaTracePanel({
-  connection,
+function SegmentSection({
+  session,
 }: {
-  connection: TracePanelConnection;
+  session: TracePanelConnection["segmentSession"];
 }) {
-  const traceState = connection.state.zettaTraceState;
-  const overviewState = connection.state.overviewState;
-  const { traceSession } = connection;
-  useSignalRerender(traceSession.changed);
-  useSignalRerender(connection.overviewSession.changed);
-
-  const aiming = useWatchable(traceState.aiming);
-  const scope = useWatchable(traceState.scope);
-  const tracing = useWatchable(traceState.active);
-  const branchId = useWatchable(connection.graph.branchId);
-  const radiusNm = useWatchable(traceState.sphereRadiusNm);
-  const seedCenter = useWatchable(traceState.sphereCenter);
-  const rejectedBy = useWatchable(traceState.rejectedBy);
-  // Stable, or the picker's fetch-on-mount would refire on every render.
-  const loadReviewers = useCallback(
-    () => connection.listCandidateReviewers(),
-    [connection],
+  const { piece, picking } = session;
+  const chosen = piece !== undefined;
+  return (
+    <fieldset className="calcada-trace-panel-section calcada-trace-panel-segment">
+      <legend>Segment</legend>
+      <StatusLine
+        text={
+          picking
+            ? "Ctrl+click it in a 2D view"
+            : chosen
+              ? `Piece ${piece}`
+              : "None"
+        }
+        picking={picking}
+      />
+      <div className="calcada-trace-panel-buttons">
+        <Button
+          size="xs"
+          variant="outline"
+          title="Ctrl+click the segment to proofread in a 2D view"
+          onClick={() => session.pick()}
+        >
+          Select
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!chosen}
+          title="Back to where the segment was selected"
+          onClick={() => session.goTo()}
+        >
+          Go to
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!chosen}
+          title="Forget the segment"
+          onClick={() => session.clear()}
+        >
+          Clear
+        </Button>
+      </div>
+    </fieldset>
   );
+}
+
+function TraceSection({ connection }: { connection: TracePanelConnection }) {
+  const traceState = connection.state.zettaTraceState;
+  const { traceSession } = connection;
+  const aiming = useWatchable(traceState.aiming);
+  const tracing = useWatchable(traceState.active);
+  const scope = useWatchable(traceState.scope);
+  const radiusNm = useWatchable(traceState.sphereRadiusNm);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
-  const overviewActive = useWatchable(overviewState.active);
-
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
-
-  // A trace merges into the branch it runs on, so on main there is nothing to
-  // configure — only the way out.
-  if (branchId === MAIN_BRANCH_ID) {
-    return (
-      <div className="calcada-trace-panel">
-        <div className="calcada-trace-panel-warning">
-          Trace works on a branch only: every accept merges into the branch it
-          runs on. Switch to a branch, or create one, with the Branch control —
-          the segments you have selected come with you.
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="calcada-trace-panel">
+    <fieldset className="calcada-trace-panel-section">
+      <legend>Trace</legend>
       <div className="calcada-trace-panel-header">
         <span className="calcada-trace-panel-badge">
-          {aiming ? "Aiming" : tracing ? "Tracing" : "Trace"}
+          {aiming ? "Aiming" : tracing ? "Tracing" : "Idle"}
         </span>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={tracing || aiming}
+          title="Start a trace on the segment (T)"
+          onClick={() => traceSession.start()}
+        >
+          Start
+        </Button>
         <Button
           size="xs"
           variant="ghost"
@@ -387,17 +322,18 @@ export function CalcadaTracePanel({
           Exit
         </Button>
       </div>
-
-      <div className="calcada-trace-panel-status">
-        {aiming
-          ? "Point at a mesh and Ctrl+click to place the sphere. + / − resize it."
-          : tracing
-            ? traceSession.status
-            : "Press T, then click a mesh to start a trace."}
-      </div>
+      <StatusLine
+        text={
+          aiming
+            ? "Ctrl+click on the segment to place the sphere"
+            : tracing
+              ? traceSession.status
+              : ""
+        }
+      />
 
       <label className="calcada-trace-panel-row">
-        Seed scope
+        Scope
         <Select
           value={scope}
           onValueChange={(next) => {
@@ -416,36 +352,6 @@ export function CalcadaTracePanel({
           </SelectContent>
         </Select>
       </label>
-
-      {seedCenter !== undefined && (
-        <div className="calcada-trace-panel-seed">
-          <span className="calcada-trace-panel-seed-position">
-            Seed at{" "}
-            {Array.from(seedCenter)
-              .map((value) => Math.round(value))
-              .join(", ")}
-          </span>
-          <span className="calcada-trace-panel-buttons">
-            <Button
-              size="xs"
-              variant="outline"
-              title="Move the view back to the seed"
-              onClick={() => traceSession.goToSeed()}
-            >
-              Go to
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              title="Drop the seed and end the trace"
-              onClick={() => traceSession.clearSeed()}
-            >
-              Clear
-            </Button>
-          </span>
-        </div>
-      )}
-
       <label className="calcada-trace-panel-row">
         Sphere radius, nm
         <FilterNumberInput
@@ -460,49 +366,6 @@ export function CalcadaTracePanel({
           }}
         />
       </label>
-
-      {/* Proofreaders disagree, so whose rejections count is a setting rather
-          than a rule. Nothing selected means anyone's. */}
-      <div className="calcada-trace-panel-row">
-        Skip rejected by
-        <RejectedByPicker
-          value={rejectedBy}
-          onChange={(users) => {
-            traceState.rejectedBy.value = users;
-          }}
-          loadReviewers={loadReviewers}
-        />
-      </div>
-
-      {/* The filter both the trace and split error detection apply, so the
-          pieces painted as likely errors are the ones the trace will offer. */}
-      <fieldset className="calcada-trace-panel-section">
-        <legend>Candidate filter</legend>
-        <TraceFilterPicker
-          library={connection.filterLibrary}
-          state={traceState}
-        />
-        {tracing && traceSession.current !== undefined && (
-          <>
-            <div className="calcada-trace-panel-current">
-              Seed piece:{" "}
-              {describePiece({
-                voxels: traceSession.current.selfVoxels,
-                classes: traceSession.current.selfClasses,
-                hasInfo: traceSession.current.selfHasInfo,
-              })}
-            </div>
-            <div className="calcada-trace-panel-current">
-              Candidate:{" "}
-              {describePiece({
-                voxels: traceSession.current.partnerVoxels,
-                classes: traceSession.current.partnerClasses,
-                hasInfo: traceSession.current.partnerHasInfo,
-              })}
-            </div>
-          </>
-        )}
-      </fieldset>
 
       <label className="calcada-trace-panel-check">
         <input
@@ -524,40 +387,6 @@ export function CalcadaTracePanel({
         />
         Zoom the 3D view to each candidate
       </label>
-
-      <div className="calcada-trace-panel-overview">
-        <label className="calcada-trace-panel-check">
-          <input
-            type="checkbox"
-            checked={overviewActive}
-            onChange={(event) => {
-              overviewState.active.value = event.target.checked;
-            }}
-          />
-          Split error detection
-        </label>
-        <div className="calcada-trace-panel-legend">
-          <span className="calcada-trace-panel-legend-scale" />
-          <span>likely fine</span>
-          <span>likely split</span>
-        </div>
-
-        {overviewActive && (
-          <SplitDetectionNavigator
-            session={connection.overviewSession}
-            state={overviewState}
-          />
-        )}
-      </div>
-
-      <dl className="calcada-trace-panel-keys">
-        {KEY_HINTS.map(([keys, meaning]) => (
-          <Fragment key={keys}>
-            <dt>{keys}</dt>
-            <dd>{meaning}</dd>
-          </Fragment>
-        ))}
-      </dl>
 
       <div className="calcada-trace-panel-buttons">
         <Button
@@ -599,6 +428,181 @@ export function CalcadaTracePanel({
           Undo
         </Button>
       </div>
+    </fieldset>
+  );
+}
+
+/**
+ * One flagged piece at a time, strongest first, so a proofreader is taken to
+ * each likely split instead of hunting for red on a whole segment.
+ */
+function SplitDetectionSection({
+  session,
+  state,
+  traceState,
+}: {
+  session: TracePanelConnection["overviewSession"];
+  state: CalcadaOverviewState;
+  traceState: ZettaTraceState;
+}) {
+  const active = useWatchable(state.active);
+  const traceActive = useWatchable(traceState.active);
+  const aiming = useWatchable(traceState.aiming);
+  const tracing = traceActive || aiming;
+  const focus = active ? session.focus : undefined;
+  const piece = focus?.piece;
+  return (
+    <fieldset className="calcada-trace-panel-section calcada-trace-panel-detection">
+      <legend>Split error detection</legend>
+      <div className="calcada-trace-panel-buttons">
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={active || tracing}
+          title={`Mark likely split errors on the segment (${SPLIT_DETECTION_KEY})`}
+          onClick={() => {
+            state.active.value = true;
+          }}
+        >
+          Detect split errors
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!active || tracing}
+          title={`Remove the marks (${SPLIT_DETECTION_KEY})`}
+          onClick={() => {
+            state.active.value = false;
+          }}
+        >
+          Clear
+        </Button>
+      </div>
+      <StatusLine text={active ? session.status : ""} />
+      <div className="calcada-trace-panel-legend">
+        <span className="calcada-trace-panel-legend-scale" />
+        <span>likely fine</span>
+        <span>likely split</span>
+      </div>
+      <div className="calcada-trace-panel-navigator">
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={focus === undefined}
+          title="Previous flagged piece (left arrow)"
+          onClick={() => session.previousPiece()}
+        >
+          ‹
+        </Button>
+        <button
+          type="button"
+          className="calcada-trace-panel-navigator-position"
+          title="Go back to this piece"
+          disabled={focus?.index === undefined}
+          onClick={() => session.showFocus()}
+        >
+          {focus?.index === undefined ? NO_VALUE : focus.index + 1} /{" "}
+          {focus?.total ?? NO_VALUE}
+        </button>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={focus === undefined}
+          title="Next flagged piece (right arrow)"
+          onClick={() => session.nextPiece()}
+        >
+          ›
+        </Button>
+      </div>
+      <div className="calcada-trace-panel-current">
+        {piece === undefined
+          ? NO_VALUE
+          : `score ${piece.bestScore.toFixed(SCORE_DIGITS)} · ${describePiece({
+              voxels: piece.voxelCount,
+              classes: piece.classes,
+              hasInfo: piece.hasInfo,
+            })}`}
+      </div>
+    </fieldset>
+  );
+}
+
+export function CalcadaTracePanel({
+  connection,
+}: {
+  connection: TracePanelConnection;
+}) {
+  const traceState = connection.state.zettaTraceState;
+  useSignalRerender(connection.traceSession.changed);
+  useSignalRerender(connection.overviewSession.changed);
+  useSignalRerender(connection.segmentSession.changed);
+
+  const branchId = useWatchable(connection.graph.branchId);
+  const rejectedBy = useWatchable(traceState.rejectedBy);
+  // Stable, or the picker's fetch-on-mount would refire on every render.
+  const loadReviewers = useCallback(
+    () => connection.listCandidateReviewers(),
+    [connection],
+  );
+
+  // A trace merges into the branch it runs on, so on main there is nothing to
+  // configure — only the way out.
+  if (branchId === MAIN_BRANCH_ID) {
+    return (
+      <div className="calcada-trace-panel">
+        <div className="calcada-trace-panel-warning">
+          Trace works on a branch only: every accept merges into the branch it
+          runs on. Switch to a branch, or create one, with the Branch control —
+          the segments you have selected come with you.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="calcada-trace-panel">
+      <SegmentSection session={connection.segmentSession} />
+      <TraceSection connection={connection} />
+
+      {/* The filter both the trace and split error detection apply, so the
+          pieces flagged as likely errors are the ones the trace will offer. */}
+      <fieldset className="calcada-trace-panel-section">
+        <legend>Candidate filter</legend>
+        <TraceFilterPicker
+          library={connection.filterLibrary}
+          state={traceState}
+        />
+        {/* Proofreaders disagree, so whose rejections count is a setting
+            rather than a rule. Nothing selected means anyone's. */}
+        <div className="calcada-trace-panel-row">
+          Skip rejected by
+          <RejectedByPicker
+            value={rejectedBy}
+            onChange={(users) => {
+              traceState.rejectedBy.value = users;
+            }}
+            loadReviewers={loadReviewers}
+          />
+        </div>
+      </fieldset>
+
+      <SplitDetectionSection
+        session={connection.overviewSession}
+        state={connection.state.overviewState}
+        traceState={traceState}
+      />
+
+      <details className="calcada-trace-panel-keys-section">
+        <summary>Keys</summary>
+        <dl className="calcada-trace-panel-keys">
+          {KEY_HINTS.map(([keys, meaning]) => (
+            <Fragment key={`${keys} ${meaning}`}>
+              <dt>{keys}</dt>
+              <dd>{meaning}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      </details>
     </div>
   );
 }

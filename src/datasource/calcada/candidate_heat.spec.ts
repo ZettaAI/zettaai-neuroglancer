@@ -8,10 +8,12 @@ import type {
   PieceOverview,
 } from "#src/datasource/calcada/candidate_heat.js";
 import {
+  describeCandidateSides,
   describePiece,
   edgeCandidateSubject,
   flaggedPieceCount,
   heatColor,
+  heatColorGlsl,
   pieceOverviewSubject,
   rankFlaggedPieces,
   splitErrorColors,
@@ -57,6 +59,14 @@ describe("heatColor", () => {
   it("clamps scores outside the scale", () => {
     expect(heatColor(-5)).toBe(heatColor(0));
     expect(heatColor(5)).toBe(heatColor(1));
+  });
+});
+
+describe("heatColorGlsl", () => {
+  it("is the same scale as heatColor, for a shader", () => {
+    expect(heatColorGlsl("score")).toBe(
+      "mix(vec3(0.16, 0.86, 0.24), vec3(1, 0.24, 0.24), score)",
+    );
   });
 });
 
@@ -206,5 +216,29 @@ describe("edgeCandidateSubject", () => {
     });
     expect(subject.seed.pieceId).toBe(3n);
     expect(subject.candidate.pieceId).toBe(4n);
+  });
+});
+
+describe("describeCandidateSides", () => {
+  it("describes the seed's piece and then the candidate's", () => {
+    expect(
+      describeCandidateSides({
+        lineId: 1n,
+        score: 0.5,
+        selfPieceId: 3n,
+        partnerPieceId: 4n,
+        partnerRootId: 40n,
+        pointA: new Float32Array(3),
+        pointB: new Float32Array(3),
+        nInterfaces: 1,
+        modelDecision: "",
+        partnerVoxels: 10,
+        partnerClasses: { ...noClasses, glia: 1 },
+        partnerHasInfo: true,
+        selfVoxels: 20,
+        selfClasses: noClasses,
+        selfHasInfo: false,
+      }),
+    ).toEqual(["Seed: 20 vx · no semantics", "Candidate: 10 vx · glia 100%"]);
   });
 });

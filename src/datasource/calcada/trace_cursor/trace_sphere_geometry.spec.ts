@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   SPHERE_TRIANGLE_VERTEX_COUNT,
   buildUnitSphereTriangles,
-  stepTraceSphereRadiusNm,
   traceSphereSemiAxes,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_geometry.js";
 import {
+  stepTraceSphereRadiusNm,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";

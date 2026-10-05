@@ -16,6 +16,7 @@ import "#src/datasource/calcada/calcada.css";
 import { printFilter } from "#src/datasource/calcada/candidate_filter_text.js";
 import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
 import { libraryWith } from "#src/datasource/calcada/filter_library_fixture.js";
+import { FilterEditor } from "#src/datasource/calcada/react/filter_editor.js";
 import type { TracePanelConnection } from "#src/datasource/calcada/react/trace_panel.js";
 import { CalcadaTracePanel } from "#src/datasource/calcada/react/trace_panel.js";
 import { ZettaTraceState } from "#src/datasource/calcada/trace_state.js";
@@ -39,16 +40,28 @@ const noClasses = {
   other: 0,
 };
 
-async function makeConnection(
-  rejectedBy: string[] = [],
-): Promise<TracePanelConnection> {
+interface PanelSetup {
+  rejectedBy?: string[];
+  /** Tracing, with detection on and a piece in focus; idle otherwise. */
+  busy?: boolean;
+  hasSegment?: boolean;
+  picking?: boolean;
+}
+
+let calls: string[] = [];
+
+async function makeConnection({
+  rejectedBy = [],
+  busy = true,
+  hasSegment = true,
+  picking = false,
+}: PanelSetup = {}): Promise<TracePanelConnection> {
   const { library } = await libraryWith({
     axons: "both axon >= 30%",
     dendrites: "both dendrite > 80%",
   });
   const zettaTraceState = new ZettaTraceState();
-  zettaTraceState.active.value = true;
-  zettaTraceState.sphereCenter.value = Float32Array.of(149532, 124617, 7226);
+  zettaTraceState.active.value = busy;
   zettaTraceState.rejectedBy.value = rejectedBy;
   // The longest field label there is, which must shorten rather than widen
   // the filter section.
@@ -66,50 +79,58 @@ async function makeConnection(
     ],
   };
   const overviewState = new CalcadaOverviewState();
-  overviewState.active.value = true;
+  overviewState.active.value = busy;
+  const record = (name: string) => () => {
+    calls.push(name);
+  };
   return {
     graph: { branchId: new WatchableValue(1) },
     state: { zettaTraceState, overviewState },
+    segmentSession: {
+      changed: new NullarySignal(),
+      piece: hasSegment ? 72057594037927937n : undefined,
+      picking,
+      pick: record("pick"),
+      goTo: record("goTo"),
+      clear: record("clear"),
+    },
     overviewSession: {
       changed: new NullarySignal(),
-      status: "12 of 1,234 pieces flagged · 800 candidates with semantics",
-      focus: {
-        index: 2,
-        total: 12,
-        piece: {
-          pieceId: 1n,
-          bestScore: 0.87,
-          bestPartnerPiece: 2n,
-          bestPartnerRoot: 3n,
-          bestPartnerVoxels: 2125,
-          partnerClasses: noClasses,
-          partnerHasInfo: false,
-          candidateCount: 3,
-          voxelCount: 227946,
-          classes: { ...noClasses, dendrite: 96, axon: 2, glia: 1 },
-          hasInfo: true,
-        },
-      },
-      hasSeed: true,
+      status: busy
+        ? "12 of 1,234 pieces flagged · 800 candidates with semantics"
+        : "",
+      focus: busy
+        ? {
+            index: 2,
+            total: 12,
+            piece: {
+              pieceId: 1n,
+              bestScore: 0.87,
+              bestPartnerPiece: 2n,
+              bestPartnerRoot: 3n,
+              bestPartnerVoxels: 2125,
+              partnerClasses: noClasses,
+              partnerHasInfo: false,
+              candidateCount: 3,
+              voxelCount: 227946,
+              classes: { ...noClasses, dendrite: 96, axon: 2, glia: 1 },
+              hasInfo: true,
+            },
+          }
+        : undefined,
       previousPiece: () => {},
       nextPiece: () => {},
       showFocus: () => {},
-      clearSeed: () => {},
-      picking: false,
-      pickSegment: () => {
-        picks++;
-      },
     },
     traceSession: {
       changed: new NullarySignal(),
-      status: "score 0.93 · 1 interface(s) · depth 0 · 7 left",
+      status: busy ? "score 0.93 · 1 interface(s) · depth 0 · 7 left" : "",
       current: undefined,
       isBusy: false,
       reject: () => {},
       canUndo: () => false,
       skip: () => {},
-      goToSeed: () => {},
-      clearSeed: () => {},
+      start: record("start"),
       accept: async () => {},
       undoLast: async () => {},
     },
@@ -137,17 +158,28 @@ async function mountPanel(connection: TracePanelConnection) {
   });
 }
 
-async function button(label: string) {
+async function button(label: string, within = ".calcada-trace-panel") {
   return vi.waitFor(() => {
-    const found = [...tab.querySelectorAll<HTMLButtonElement>("button")].find(
-      (candidate) => candidate.textContent?.trim() === label,
-    );
+    const found = [
+      ...tab.querySelectorAll<HTMLButtonElement>(`${within} button`),
+    ].find((candidate) => candidate.textContent?.trim() === label);
     expect(found).toBeDefined();
     return found!;
   });
 }
 
-let picks = 0;
+function layout() {
+  const panel = tab.querySelector<HTMLElement>(".calcada-trace-panel")!;
+  return {
+    height: panel.getBoundingClientRect().height,
+    // The navigator's position is a count, and counts change.
+    buttons: [
+      ...panel.querySelectorAll(
+        "button:not(.calcada-trace-panel-navigator-position)",
+      ),
+    ].map((found) => found.textContent?.trim()),
+  };
+}
 
 // Wide enough to read its "anyone" placeholder.
 const REVIEWER_INPUT_MIN_WIDTH_PX = 40;
@@ -189,35 +221,144 @@ describe("CalcadaTracePanel", () => {
     expect(connection.filterLibrary.current).toBe("dendrites");
   });
 
-  it("offers to pick the segment again", async () => {
-    await mountPanel(await makeConnection());
-    picks = 0;
-    (await button("Pick segment")).click();
-    expect(picks).toBe(1);
+  it("shows the filter chosen for Trace in the open editor", async () => {
+    const connection = await makeConnection();
+    const { filterLibrary: library } = connection;
+    const { zettaTraceState } = connection.state;
+    library.select("dendrites");
+    const editor = document.createElement("div");
+    document.body.appendChild(editor);
+    const unmountEditor = mountComponent(editor, FilterEditor, {
+      library,
+      state: zettaTraceState,
+    });
+    try {
+      await mountPanel(connection);
+      for (const [name, text] of [
+        ["axons", "axon >= 30%"],
+        ["dendrites", "dendrite > 80%"],
+      ]) {
+        tab.querySelector<HTMLElement>(".calcada-trace-filter-select")!.click();
+        const option = await vi.waitFor(() => {
+          const found = [
+            ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ].find((item) => item.textContent?.trim() === name);
+          expect(found).toBeDefined();
+          return found!;
+        });
+        option.click();
+        await vi.waitFor(() => {
+          expect(
+            editor.querySelector(".calcada-filter-library-select")?.textContent,
+          ).toContain(name);
+          expect(
+            editor.querySelector<HTMLTextAreaElement>(
+              ".calcada-filter-code textarea",
+            )?.value,
+          ).toContain(text);
+        });
+      }
+    } finally {
+      invokeDisposer(unmountEditor);
+      editor.remove();
+    }
   });
 
-  it("switches between coloured pieces and red points", async () => {
-    const connection = await makeConnection();
+  it("selects, goes to and clears the segment being proofread", async () => {
+    await mountPanel(await makeConnection());
+    calls = [];
+    const segment = ".calcada-trace-panel-segment";
+    (await button("Select", segment)).click();
+    (await button("Go to", segment)).click();
+    (await button("Clear", segment)).click();
+    expect(calls).toEqual(["pick", "goTo", "clear"]);
+  });
+
+  it("says no segment is selected, and offers nothing to go to or clear", async () => {
+    await mountPanel(await makeConnection({ busy: false, hasSegment: false }));
+    const segment = ".calcada-trace-panel-segment";
+    expect(tab.querySelector(segment)?.textContent).toContain("None");
+    expect((await button("Go to", segment)).disabled).toBe(true);
+    expect((await button("Clear", segment)).disabled).toBe(true);
+    // Both still start: each asks for the segment first.
+    expect((await button("Start")).disabled).toBe(false);
+    expect((await button("Detect split errors")).disabled).toBe(false);
+  });
+
+  it("says to Ctrl+click while the segment is being selected", async () => {
+    await mountPanel(await makeConnection({ picking: true }));
+    expect(
+      tab.querySelector(".calcada-trace-panel-segment")?.textContent,
+    ).toContain("Ctrl+click it in a 2D view");
+  });
+
+  it("detects split errors with a button and clears them with another", async () => {
+    const connection = await makeConnection({ busy: false });
     await mountPanel(connection);
-    const select = await vi.waitFor(() => {
-      const found = tab.querySelector<HTMLElement>(
-        ".calcada-trace-panel-split-display",
-      );
-      expect(found).not.toBe(null);
-      return found!;
-    });
-    select.click();
-    const option = await vi.waitFor(() => {
-      const found = [
-        ...document.querySelectorAll<HTMLElement>('[role="option"]'),
-      ].find((item) => item.textContent?.trim() === "Red points");
-      expect(found).toBeDefined();
-      return found!;
-    });
-    option.click();
-    await vi.waitFor(() =>
-      expect(connection.state.overviewState.display.value).toBe("points"),
+    const { active } = connection.state.overviewState;
+    (await button("Detect split errors")).click();
+    await vi.waitFor(() => expect(active.value).toBe(true));
+    (await button("Clear", ".calcada-trace-panel-detection")).click();
+    await vi.waitFor(() => expect(active.value).toBe(false));
+  });
+
+  it("offers no split detection while a trace is running or aiming", async () => {
+    const connection = await makeConnection({ busy: false });
+    await mountPanel(connection);
+    const detection = ".calcada-trace-panel-detection";
+    expect((await button("Detect split errors", detection)).disabled).toBe(
+      false,
     );
+    connection.state.zettaTraceState.aiming.value = true;
+    await vi.waitFor(async () => {
+      expect((await button("Detect split errors", detection)).disabled).toBe(
+        true,
+      );
+    });
+    connection.state.zettaTraceState.aiming.value = false;
+    connection.state.zettaTraceState.active.value = true;
+    connection.state.overviewState.active.value = true;
+    await vi.waitFor(async () => {
+      expect((await button("Detect split errors", detection)).disabled).toBe(
+        true,
+      );
+      expect((await button("Clear", detection)).disabled).toBe(true);
+    });
+  });
+
+  it("shows the green-to-red scale the points are coloured with", async () => {
+    await mountPanel(await makeConnection());
+    expect(tab.querySelector(".calcada-trace-panel-legend")).not.toBe(null);
+  });
+
+  it("offers no choice of how flagged pieces are shown", async () => {
+    await mountPanel(await makeConnection());
+    expect(tab.querySelector(".calcada-trace-panel-split-display")).toBe(null);
+    expect(tab.textContent).not.toContain("Show flagged pieces as");
+  });
+
+  it("leaves describing the candidate to the banner over the views", async () => {
+    await mountPanel(await makeConnection());
+    expect(tab.textContent).not.toContain("Seed piece:");
+    expect(tab.textContent).not.toContain("Candidate:");
+  });
+
+  it("starts a trace from the tab", async () => {
+    await mountPanel(await makeConnection({ busy: false }));
+    calls = [];
+    (await button("Start")).click();
+    expect(calls).toEqual(["start"]);
+  });
+
+  it("keeps the same layout whether idle or busy", async () => {
+    await mountPanel(await makeConnection({ busy: false }));
+    const idle = layout();
+    invokeDisposer(disposer);
+    tab.remove();
+    await mountPanel(await makeConnection());
+    const busy = layout();
+    expect(busy.buttons).toEqual(idle.buttons);
+    expect(busy.height).toBe(idle.height);
   });
 
   it("narrows the score range from a slider beside the filter", async () => {
@@ -313,7 +454,9 @@ describe("CalcadaTracePanel", () => {
 
   it("fits the side panel without scrolling sideways", async () => {
     await mountPanel(
-      await makeConnection(["a.very.long.reviewer.name@zetta.ai"]),
+      await makeConnection({
+        rejectedBy: ["a.very.long.reviewer.name@zetta.ai"],
+      }),
     );
     const tabRight = tab.getBoundingClientRect().right;
     const overflowing = [...tab.querySelectorAll<HTMLElement>("*")]

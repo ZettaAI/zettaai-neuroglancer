@@ -72,6 +72,14 @@ export function parseClassCounts(raw: any): PieceClasses {
   };
 }
 
+/** A contact point as the server sends it; absent when the piece has none. */
+export function parseOverviewPoint(
+  raw: unknown,
+): [number, number, number] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return [Number(raw[0]), Number(raw[1]), Number(raw[2])];
+}
+
 export interface PieceOverview {
   pieceId: bigint;
   bestScore: number;
@@ -87,8 +95,13 @@ export interface PieceOverview {
   candidateCount: number;
   voxelCount: number;
   classes: PieceClasses;
-  hasInfo: boolean /** Where to show it, in viewer coordinates; only for a piece with candidates. */;
-  center?: [number, number, number];
+  hasInfo: boolean;
+  /**
+   * Where the best candidate touches this piece, and the partner, in viewer
+   * coordinates; only for a piece with candidates.
+   */
+  contact?: [number, number, number];
+  partnerContact?: [number, number, number];
 }
 
 // The shared packer, not a local one: the mesh reads these as (a<<24)|(b<<16)|
@@ -103,9 +116,22 @@ function packed(red: number, green: number, blue: number): bigint {
  * where nothing is missing, so it reads as fine; a strong candidate is a
  * continuation the segment is probably lacking, which is a split error.
  */
+type Rgb = readonly [number, number, number];
+const HEAT_FINE: Rgb = [0.16, 0.86, 0.24];
+const HEAT_SPLIT: Rgb = [1, 0.24, 0.24];
+
 export function heatColor(bestScore: number): bigint {
   const t = Math.max(0, Math.min(1, bestScore));
-  return packed(0.16 + t * 0.84, 0.86 - t * 0.62, 0.24);
+  const [red, green, blue] = HEAT_FINE.map(
+    (fine, i) => fine + t * (HEAT_SPLIT[i] - fine),
+  );
+  return packed(red, green, blue);
+}
+
+/** The same scale in GLSL, over a score already clamped to [0, 1]. */
+export function heatColorGlsl(score: string): string {
+  const vec = (rgb: Rgb) => `vec3(${rgb.join(", ")})`;
+  return `mix(${vec(HEAT_FINE)}, ${vec(HEAT_SPLIT)}, ${score})`;
 }
 
 export function classTotal(classes: PieceClasses): number {
@@ -251,4 +277,19 @@ export function describePiece(piece: {
     .sort((a, b) => b.percent - a.percent)
     .map(({ name, percent }) => `${name} ${Math.round(percent)}%`);
   return [size, ...shares].join(" · ");
+}
+
+/** Both ends of a candidate, the seed's piece first. */
+export function describeCandidateSides(candidate: EdgeCandidate): string[] {
+  const seed = describePiece({
+    voxels: candidate.selfVoxels,
+    classes: candidate.selfClasses,
+    hasInfo: candidate.selfHasInfo,
+  });
+  const partner = describePiece({
+    voxels: candidate.partnerVoxels,
+    classes: candidate.partnerClasses,
+    hasInfo: candidate.partnerHasInfo,
+  });
+  return [`Seed: ${seed}`, `Candidate: ${partner}`];
 }
