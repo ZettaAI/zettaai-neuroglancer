@@ -89,8 +89,8 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
 }
 
 /**
- * What the detection key does. From a running trace it goes straight to
- * detection: the trace is put down and detection comes on.
+ * Whether detection is on after its key is pressed. A running trace keeps the
+ * key; main has no detection to turn on.
  */
 export function toggleSplitDetection({
   tracing,
@@ -100,10 +100,10 @@ export function toggleSplitDetection({
   tracing: boolean;
   active: boolean;
   onMain: boolean;
-}): { exitTrace: boolean; active: boolean } {
-  if (tracing) return { exitTrace: true, active: true };
-  if (!active && onMain) return { exitTrace: false, active: false };
-  return { exitTrace: false, active: !active };
+}): boolean {
+  if (tracing) return active;
+  if (!active && onMain) return false;
+  return !active;
 }
 
 export const SCORING_SEGMENT_STATUS = "Scoring the segment…";

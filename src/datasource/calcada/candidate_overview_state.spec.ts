@@ -43,22 +43,22 @@ describe("toggleSplitDetection", () => {
   it("switches detection on and off outside a trace", () => {
     expect(
       toggleSplitDetection({ tracing: false, active: false, onMain: false }),
-    ).toEqual({ exitTrace: false, active: true });
+    ).toBe(true);
     expect(
       toggleSplitDetection({ tracing: false, active: true, onMain: false }),
-    ).toEqual({ exitTrace: false, active: false });
+    ).toBe(false);
   });
 
-  it("leaves a running trace for detection", () => {
+  it("leaves a running trace alone", () => {
     expect(
       toggleSplitDetection({ tracing: true, active: false, onMain: false }),
-    ).toEqual({ exitTrace: true, active: true });
+    ).toBe(false);
   });
 
   it("does not start detection on main", () => {
     expect(
       toggleSplitDetection({ tracing: false, active: false, onMain: true }),
-    ).toEqual({ exitTrace: false, active: false });
+    ).toBe(false);
   });
 });
 

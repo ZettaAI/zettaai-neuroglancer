@@ -5560,17 +5560,12 @@ void main() {
           const { active } = state.overviewState;
           const { zettaTraceState } = state;
           this.traceSession.revealTraceTab();
-          const next = toggleSplitDetection({
+          active.value = toggleSplitDetection({
             tracing:
               zettaTraceState.active.value || zettaTraceState.aiming.value,
             active: active.value,
             onMain: this.graph.branchId.value === MAIN_BRANCH_ID,
           });
-          if (next.exitTrace) {
-            zettaTraceState.aiming.value = false;
-            zettaTraceState.active.value = false;
-          }
-          active.value = next.active;
         },
       ),
     );
