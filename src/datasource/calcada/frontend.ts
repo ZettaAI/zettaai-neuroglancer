@@ -90,7 +90,12 @@ import {
   splitErrorColors,
 } from "#src/datasource/calcada/candidate_heat.js";
 import type { SplitDetectionFocus } from "#src/datasource/calcada/candidate_overview_state.js";
-import { CalcadaOverviewState } from "#src/datasource/calcada/candidate_overview_state.js";
+import {
+  CalcadaOverviewState,
+  SCORING_SEGMENT_STATUS,
+  splitDetectionStatus,
+  toggleSplitDetection,
+} from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
@@ -4418,6 +4423,8 @@ class CandidateOverviewSession extends RefCounted {
   private focusIndex = -1;
   private bindings: RefCounted | undefined;
   private resumeAfterTrace = false;
+  // The filter's piece graph is still loading: the count is not final yet.
+  private graphPending = false;
   // The colour map is shared with the debug overlay, so clearing it on the way
   // out would wipe whatever took our place. Only what we painted is ours to
   // erase; relying on which listener happens to run first would work today and
@@ -4485,10 +4492,7 @@ class CandidateOverviewSession extends RefCounted {
     );
     // The threshold is the trace's, shared on purpose. Every filter works on
     // scores already fetched, so moving one is a repaint rather than a query.
-    const repaint = () => {
-      this.repaint();
-      void this.refreshGraphContext();
-    };
+    const repaint = () => void this.refreshGraphContext();
     for (const signal of connection.state.zettaTraceState
       .candidateFilterSignals) {
       this.registerDisposer(signal.changed.add(repaint));
@@ -4618,6 +4622,8 @@ class CandidateOverviewSession extends RefCounted {
   private async refreshGraphContext() {
     const { pieceGraph } = this.connection;
     const token = this.fetchToken;
+    this.graphPending = true;
+    this.repaint();
     try {
       const filled = await pieceGraph.fill((graph) => {
         const passes = this.passesOn(graph);
@@ -4626,13 +4632,15 @@ class CandidateOverviewSession extends RefCounted {
           if (piece.candidateCount > 0) passes(piece);
         }
       });
-      if (!filled) return;
-      warnIfGraphTruncated(pieceGraph);
+      if (filled) warnIfGraphTruncated(pieceGraph);
     } catch (e) {
       if (token === this.fetchToken) {
+        this.graphPending = false;
         this.setStatus(`Could not load the piece graph: ${e}`);
       }
       return;
+    } finally {
+      if (token === this.fetchToken) this.graphPending = false;
     }
     if (token === this.fetchToken) this.repaint();
   }
@@ -4708,7 +4716,7 @@ class CandidateOverviewSession extends RefCounted {
     const traceState = this.connection.state.zettaTraceState;
     // Scoring a whole segment takes seconds. Without saying so the checkbox
     // looks like it did nothing at all.
-    this.setStatus("Scoring the segment…");
+    this.setStatus(SCORING_SEGMENT_STATUS);
     let root: bigint;
     let pieces: PieceOverview[];
     try {
@@ -4733,7 +4741,6 @@ class CandidateOverviewSession extends RefCounted {
     this.segmentsState.visibleSegments.add(root);
     // The camera stays where the seed was placed: the list starts on the
     // strongest piece, but going to it is the proofreader's call.
-    this.repaint();
     void this.refreshGraphContext();
   }
 
@@ -4760,9 +4767,12 @@ class CandidateOverviewSession extends RefCounted {
     if (asPoints) this.drawPoints();
     else this.connection.setSplitErrorPoints([]);
     this.setStatus(
-      `${this.ranked.length.toLocaleString()} of ` +
-        `${this.pieces.length.toLocaleString()} pieces flagged · ` +
-        `${partnersWithSemantics(this.pieces)} candidates with semantics`,
+      splitDetectionStatus({
+        graphPending: this.graphPending,
+        flagged: this.ranked.length,
+        total: this.pieces.length,
+        withSemantics: partnersWithSemantics(this.pieces),
+      }),
     );
   }
 
@@ -5550,13 +5560,12 @@ void main() {
           const { active } = state.overviewState;
           const { zettaTraceState } = state;
           this.traceSession.revealTraceTab();
-          if (zettaTraceState.active.value || zettaTraceState.aiming.value) {
-            return;
-          }
-          if (!active.value && this.graph.branchId.value === MAIN_BRANCH_ID) {
-            return;
-          }
-          active.value = !active.value;
+          active.value = toggleSplitDetection({
+            tracing:
+              zettaTraceState.active.value || zettaTraceState.aiming.value,
+            active: active.value,
+            onMain: this.graph.branchId.value === MAIN_BRANCH_ID,
+          });
         },
       ),
     );
