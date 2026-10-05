@@ -41,6 +41,7 @@ import {
   keyboardEventToIdentifier,
 } from "#src/editing/keybind_event.js";
 import type { SaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
+import { canCombine } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
   effectiveEditKeybinds,
   type EditKeybindName,
@@ -133,12 +134,21 @@ function areaCount(count: number): string {
   return count === 1 ? "1 area" : `${count} areas`;
 }
 
+/** "1 voxel" / "12 voxels" — the unit a combine's loss is measured in. */
+function voxelCount(count: number): string {
+  return count === 1 ? "1 voxel" : `${count} voxels`;
+}
+
 /**
  * The refused save, in the annotator's terms.
  *
  * Counts areas rather than listing chunk ids on purpose: "0,1,3" names nothing
  * a tracer can act on, and the decision does not turn on WHICH chunks moved —
- * only on how much moved and what overwriting costs.
+ * only on how much moved and what each answer costs.
+ *
+ * One sentence per button, each opening with that button's name, so the reader
+ * does not have to map prose back onto the button row. The combine sentence
+ * appears only when combining is actually on offer.
  */
 function describeSaveConflict(conflict: SaveConflictError | undefined): string {
   if (conflict === undefined) return "";
@@ -146,42 +156,54 @@ function describeSaveConflict(conflict: SaveConflictError | undefined): string {
   const sentences: string[] = [];
   if (diverged.length > 0) {
     sentences.push(
-      `${areaCount(diverged.length)} you painted changed after you loaded ` +
-        "the region.",
+      `Someone else saved changes to ${areaCount(diverged.length)} you painted.`,
     );
   }
   if (uncomparable.length > 0) {
     sentences.push(`${areaCount(uncomparable.length)} couldn't be checked.`);
   }
+  if (canCombine(conflict.scan)) {
+    sentences.push(
+      "Combine keeps both sides: your paint stays, theirs comes in, and " +
+        "where you both painted the same voxel theirs wins.",
+    );
+  }
+  sentences.push("Take theirs drops your edits in these areas.");
   sentences.push(
-    "Merge keeps both sides, except where you both changed the same voxels — " +
-      "those areas are reloaded and your edits in them are dropped.",
-  );
-  sentences.push(
-    "Reload takes their version of every area listed. Overwrite replaces " +
-      "their work permanently — these layers keep no history, so it can't be " +
-      "undone.",
+    "Take mine replaces their work — these layers keep no history, so that " +
+      "can't be undone.",
   );
   sentences.push("Press Esc to leave everything as it is.");
   return sentences.join(" ");
 }
 
 /**
- * What a save that reconciled itself cost the user, said plainly.
- *
- * Shown after the save, not before: this is the one outcome where work was
- * destroyed without anyone choosing it, so it names the amount, points at the
- * data, and names the way back.
+ * What a combine cost the user. Voxels, not areas — a collision now costs
+ * only the voxels actually shared.
  */
-function describeConflictReload(count: number): string {
-  const those = count === 1 ? "that area was" : "those areas were";
+function describeCombineLoss(voxels: number): string {
   return (
-    `Your edits in ${areaCount(count)} were discarded: you and someone else ` +
-    `changed the same voxels there, so ${those} reloaded from storage. ` +
-    "Everything else was saved. Please review your data — one undo puts your " +
-    "version back."
+    `Your paint in ${voxelCount(voxels)} was replaced by theirs: you both ` +
+    "painted the same spot."
   );
 }
+
+/** What Take theirs cost the user, for the answer they chose themselves. */
+function describeTakeTheirsLoss(areas: number): string {
+  return `Your edits in ${areaCount(areas)} were replaced by the stored version.`;
+}
+
+/**
+ * Closes any report of lost work.
+ *
+ * Said once however many ways the save lost something, which is why the two
+ * clauses above stop at naming their own loss: one save can both take theirs
+ * and combine, and "one undo puts your version back" twice reads as two
+ * different undos.
+ */
+const SAVE_LOSS_TAIL =
+  "Everything else was saved. Please review your data — one undo puts your " +
+  "version back.";
 
 function ActiveTopbarControls({
   host,
@@ -259,8 +281,14 @@ function ActiveTopbarControls({
     if (failure !== undefined) {
       StatusMessage.showTemporaryMessage(failure, 10000);
     }
+    const losses: string[] = [];
+    const conflicted = saveTracker.conflictedVoxelCount();
+    if (conflicted > 0) losses.push(describeCombineLoss(conflicted));
     const reloaded = saveTracker.reloadedChunkCount();
-    if (reloaded > 0) setReloadNotice(describeConflictReload(reloaded));
+    if (reloaded > 0) losses.push(describeTakeTheirsLoss(reloaded));
+    if (losses.length > 0) {
+      setReloadNotice([...losses, SAVE_LOSS_TAIL].join(" "));
+    }
   }, [saveTracker]);
   const confirmMerge = useCallback(() => {
     void (async () => {
@@ -282,9 +310,7 @@ function ActiveTopbarControls({
   // baseline to merge from, so offering it would promise something we cannot
   // deliver for part of the save.
   const canMergeConflict =
-    pendingConflict !== undefined &&
-    pendingConflict.scan.uncomparable.length === 0 &&
-    pendingConflict.scan.diverged.length > 0;
+    pendingConflict !== undefined && canCombine(pendingConflict.scan);
 
   // Distinct layers with saved-but-unconfirmed chunks. Read inline (cheap) so
   // it stays in sync with `hasUnconfirmed`; the component already re-renders on
@@ -686,29 +712,29 @@ function ActiveTopbarControls({
         message={describeSaveConflict(pendingConflict)}
         {...(canMergeConflict
           ? {
-              // Merging keeps both sides wherever it can, so it is the primary
-              // and is not tinted destructive; overwriting is the one that
-              // destroys someone else's work outright.
-              confirmLabel: "Merge",
+              // Combining keeps both sides wherever it can, so it is the
+              // primary and is not tinted destructive; Take mine is the one
+              // that destroys someone else's work outright.
+              confirmLabel: "Combine",
               onConfirm: confirmMerge,
               secondaryActions: [
-                { label: "Reload", onClick: confirmReload },
+                { label: "Take theirs", onClick: confirmReload },
                 {
-                  label: "Overwrite",
+                  label: "Take mine",
                   destructive: true,
                   onClick: confirmOverwrite,
                 },
               ],
             }
           : {
-              // Nothing to merge from — an unprovable chunk has no baseline.
-              // Reload still works, because it needs only their bytes, so it
-              // becomes the primary: the safe answer stays the default one.
-              confirmLabel: "Reload",
+              // Nothing to combine from — an unprovable chunk has no baseline.
+              // Take theirs still works, because it needs only their bytes, so
+              // it becomes the primary: the safe answer stays the default one.
+              confirmLabel: "Take theirs",
               onConfirm: confirmReload,
               secondaryActions: [
                 {
-                  label: "Overwrite",
+                  label: "Take mine",
                   destructive: true,
                   onClick: confirmOverwrite,
                 },

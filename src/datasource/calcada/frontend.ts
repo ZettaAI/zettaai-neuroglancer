@@ -145,6 +145,7 @@ import {
   TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/timestamp_picker.js";
 import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
+import { RetiredRoots } from "#src/datasource/calcada/retired_roots.js";
 import {
   interceptedRemovals,
   TRACE_CANDIDATE_COLOR_PACKED,
@@ -175,7 +176,6 @@ import {
 import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_perspective_overlay.js";
 import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
-import { rootsKeptOnExit } from "#src/datasource/calcada/trace_exit_view.js";
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
@@ -184,6 +184,10 @@ import {
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 import { CalcadaTraceTab } from "#src/datasource/calcada/trace_tab.js";
+import {
+  rootsKeptOnExit,
+  rootsShownWhileTracing,
+} from "#src/datasource/calcada/trace_view_roots.js";
 import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
 import type {
   DataSource,
@@ -2849,7 +2853,10 @@ class ZettaTraceSession extends RefCounted {
   // Roots this session's edits retired. Exiting must not put them back on
   // screen: they no longer exist in the graph, and the segment that replaced
   // them is already visible.
-  private readonly retired = new Set<bigint>();
+  private readonly retired = new RetiredRoots();
+  // Roots cuts made during this trace: shown alongside the roles when the
+  // proofreader keeps the parts of a split on screen.
+  private readonly splitParts = new Set<bigint>();
   private priorUseTempSegmentStatedColors2d = false;
   private reassertingRoleColors = false;
 
@@ -2895,6 +2902,15 @@ class ZettaTraceSession extends RefCounted {
     this.registerDisposer(
       connection.graph.branchId.changed.add(() => {
         void this.followSeedToBranch();
+      }),
+    );
+    // Turning the parts of a split on or off shows the change at once, not
+    // with the next candidate.
+    this.registerDisposer(
+      state.keepSplitParts.changed.add(() => {
+        const seedRoot = state.seedRoot.value;
+        if (!state.active.value || seedRoot === undefined) return;
+        this.showOnly(seedRoot, this.current?.partnerRootId);
       }),
     );
     const refetchOnFilterChange = () => {
@@ -3082,6 +3098,7 @@ class ZettaTraceSession extends RefCounted {
       this.layer.displayState.useTempSegmentStatedColors2d.value;
     this.dimmed.clear();
     this.retired.clear();
+    this.splitParts.clear();
 
     // Arrows review candidates instead of panning until the mode ends.
     const bindings = bindModeInputs(this.layer, ZETTA_TRACE_INPUT_EVENT_MAP, {
@@ -3266,6 +3283,7 @@ class ZettaTraceSession extends RefCounted {
   setSeed(rootId: bigint, pieceId?: bigint) {
     this.state.seedRoot.value = rootId;
     this.seedPieceId = pieceId;
+    this.splitParts.clear();
     this.undoFloor = this.connection.undoTop();
     this.current = undefined;
     this.pool = [];
@@ -3280,8 +3298,11 @@ class ZettaTraceSession extends RefCounted {
   // comparison on screen is what made merges look like they had done nothing.
   private showOnly(seedRoot: bigint, candidateRoot?: bigint) {
     const { segmentsState } = this;
-    const wanted =
-      candidateRoot === undefined ? [seedRoot] : [seedRoot, candidateRoot];
+    const wanted = rootsShownWhileTracing(seedRoot, candidateRoot, {
+      splitParts: this.splitParts,
+      keepSplitParts: this.state.keepSplitParts.value,
+      retired: this.retired,
+    });
     const unchanged = (set: { size: number; has(id: bigint): boolean }) =>
       set.size === wanted.length && wanted.every((id) => set.has(id));
     if (
@@ -3786,9 +3807,9 @@ class ZettaTraceSession extends RefCounted {
     // roots they retire are recorded here. Without this, leaving the trace put
     // the pre-merge seed back on screen: a dead id still drawn from cached mesh
     // and chunks, which no click in 3D could deselect.
-    for (const retired of [seedRoot, accepted.partnerRootId]) {
-      if (retired !== merged) this.retired.add(retired);
-    }
+    this.retired.retireAccept(
+      [seedRoot, accepted.partnerRootId].filter((root) => root !== merged),
+    );
     this.state.seedRoot.value = merged;
     this.showOnly(merged);
 
@@ -3995,12 +4016,13 @@ class ZettaTraceSession extends RefCounted {
     if (this.bindings === undefined || this.busy) return;
     // A graph answer landing mid-refresh would re-pick against a cleared cache.
     ++this.graphToken;
-    for (const id of oldRoots) {
-      if (!newRoots.has(id)) this.retired.add(id);
-    }
+    this.retired.retire([...oldRoots].filter((id) => !newRoots.has(id)));
     // Taken now, synchronously: the notification that fired this is the edit
     // the carved pieces belong to.
     const carved = this.connection.takeCarvedPieces();
+    if (carved.size > 0) {
+      for (const id of newRoots) this.splitParts.add(id);
+    }
     // Likewise which pieces each retired root held. A merge notifies before it
     // rewrites the equivalences, so this is the last moment the map can say
     // which pieces the segment merged into the seed brought with it.
@@ -4049,7 +4071,12 @@ class ZettaTraceSession extends RefCounted {
       // quietly draining the list.
       if (await this.connection.undo()) {
         const lastAccepted = this.acceptedLines.pop();
-        if (lastAccepted !== undefined) this.decided.delete(lastAccepted);
+        if (lastAccepted !== undefined) {
+          this.decided.delete(lastAccepted);
+          // Undo revives the seed and candidate that accept retired: hiding
+          // them again has to dim them, not drop them.
+          this.retired.undoAccept();
+        }
       }
     } finally {
       // Undo does not carry the retired root set the way a graph edit

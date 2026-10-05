@@ -201,6 +201,44 @@ export class NgChunkSource implements LibraryChunkSource {
     }
   }
 
+  /**
+   * Evict EVERY resident chunk of the given `(layerId, resolution)` scopes, so
+   * the next frame refetches them. Returns how many were evicted.
+   *
+   * This is "reload all chunks" as a tracer means it. {@link
+   * invalidateDatasourceChunks} can only evict chunks the caller can name, and
+   * the caller only ever knows the ones this session wrote — so a colleague's
+   * work in a chunk you never painted stayed on screen as this session first
+   * loaded it. The resident set needs no region arithmetic and is by definition
+   * the only thing that can be showing stale data.
+   *
+   * The paint survives: it lives in the session overlay and in this layer's own
+   * patch store, neither of which is a datasource chunk. What the user sees is
+   * one round-trip of hole — the GPU patch is bound inside the base chunk's
+   * draw call, so a chunk that is not resident draws neither.
+   */
+  invalidateLoadedChunks(
+    scopes: readonly {
+      readonly layerId: LayerId;
+      readonly resolution: Resolution;
+    }[],
+  ): number {
+    let evicted = 0;
+    for (const { layerId, resolution } of scopes) {
+      let source: VolumeChunkSource;
+      try {
+        source = this.resolveVolumeChunkSource(layerId, resolution);
+      } catch {
+        continue; // layer/source gone — nothing to evict
+      }
+      const keys = Array.from(source.chunks.keys());
+      if (keys.length === 0) continue;
+      source.invalidateChunkCache(keys);
+      evicted += keys.length;
+    }
+    return evicted;
+  }
+
   async pinChunks(
     coords: readonly OverlayCoord[],
     signal?: AbortSignal,

@@ -291,6 +291,7 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
   const radiusNm = useWatchable(traceState.sphereRadiusNm);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
+  const keepSplitParts = useWatchable(traceState.keepSplitParts);
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
   return (
@@ -386,6 +387,16 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           }}
         />
         Zoom the 3D view to each candidate
+      </label>
+      <label className="calcada-trace-panel-check">
+        <input
+          type="checkbox"
+          checked={keepSplitParts}
+          onChange={(event) => {
+            traceState.keepSplitParts.value = event.target.checked;
+          }}
+        />
+        Keep the parts of a split visible
       </label>
 
       <div className="calcada-trace-panel-buttons">

@@ -163,6 +163,9 @@ describe("EditSessionHost exit lock", () => {
     const session = {
       dirty: { getDirtyChunks: () => new Set<string>() },
       discard: vi.fn(async () => {}),
+      // Discarding also refetches the writable layers, which reads the
+      // selection; no layers means nothing to refetch.
+      config: { layers: [] },
     } as unknown as EditSession;
     host.activeSession.value = session;
     return session;

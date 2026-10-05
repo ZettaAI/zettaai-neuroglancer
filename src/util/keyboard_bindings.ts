@@ -128,7 +128,16 @@ export class KeyboardEventBinder<
     }
     // Event target is one of (TEXTAREA, INPUT, BUTTON, SELECT).
     // Allow modifier shortcuts, unless we shouldn't.
+    //
+    // A BUTTON is excluded because it edits no text: a modifier shortcut that
+    // arrives while one has focus is the user driving the app, and swallowing
+    // it broke every editing hotkey after any topbar click — most visibly
+    // redo, whose natural gesture is to click Undo and then press
+    // Cmd/Ctrl+Shift+Z, leaving focus on the button that was just clicked.
+    // Text fields keep the old behaviour: Cmd+A / Cmd+C / Cmd+Z belong to the
+    // field, and handing those to an app action would hijack editing.
     if (
+      tagName !== "BUTTON" &&
       this.modifierShortcutsAreGlobal &&
       (event.altKey || event.ctrlKey || event.metaKey)
     ) {
