@@ -18,12 +18,13 @@
  *   only I changed it        -> mine
  *   only they changed it     -> theirs
  *   both, to the same value  -> that value
- *   both, to different values-> a COLLISION; counted, not resolved here
+ *   both, to different values-> theirs, counted as a COLLISION
  *
- * The kernel leaves mine in place for a collision, but that is a detail of
- * how it counts rather than the system's answer: a chunk with any collision
- * is handed to `reloadedOwnedRegion`, which gives its whole owned box back to
- * the remote. So treat `unresolved` as detection, not as a decision.
+ * A collision costs only the voxels it covers. Handing the whole owned box
+ * back to the remote the moment one voxel collided — which is what this used
+ * to do — threw away a whole chunk's painting over a single shared voxel, so
+ * two tracers working the same region could not both keep their strokes. The
+ * count survives as what lets the save say how many voxels went the other way.
  *
  * WHY NOT "COMBINE NON-ZEROS". The obvious union — take whichever side is
  * non-zero — cannot represent an ERASE. Erasing is painting zero, so a union
@@ -55,16 +56,12 @@ export interface ThreeWayMerge {
   /** Voxels the remote changed and we did not — their work, taken in. */
   readonly acceptedFromRemote: number;
   /**
-   * Voxels both sides changed, to different values.
-   *
-   * Non-zero means this chunk cannot be merged: the caller discards `merged`
-   * and reloads the owned box from the remote instead (see
-   * `owned_region_reload.ts`). The count survives as the finer measure behind
-   * that decision — it is what lets the save report how much of the user's
-   * work the reload cost, which PRODUCT.md's "never lose the user's input"
-   * demands we say out loud when we cannot honour it.
+   * Voxels both sides changed, to different values. These are resolved to the
+   * remote's value, so they are already in `merged`; the count is what lets
+   * the save report the user's loss, which PRODUCT.md's "never lose the
+   * user's input" demands we say out loud when we cannot honour it.
    */
-  readonly unresolved: number;
+  readonly conflicted: number;
 }
 
 /**
@@ -99,7 +96,7 @@ export function mergeOwnedRegion(
   const endZ = owned.ownedBox.end[2] - owned.chunkBox.start[2];
 
   let acceptedFromRemote = 0;
-  let unresolved = 0;
+  let conflicted = 0;
 
   for (let channel = 0; channel < owned.channels; channel++) {
     const channelOffset = channel * channelStrideBytes;
@@ -116,24 +113,23 @@ export function mergeOwnedRegion(
             voxelOffset,
             voxelBytes,
           );
-          if (outcome === "take-remote") {
+          if (outcome !== "keep-mine") {
             merged.set(
               remoteBytes.subarray(voxelOffset, voxelOffset + voxelBytes),
               voxelOffset,
             );
-            acceptedFromRemote++;
-          } else if (outcome === "unresolved") {
-            unresolved++;
+            if (outcome === "conflict") conflicted++;
+            else acceptedFromRemote++;
           }
         }
       }
     }
   }
 
-  return { merged, acceptedFromRemote, unresolved };
+  return { merged, acceptedFromRemote, conflicted };
 }
 
-type VoxelOutcome = "keep-mine" | "take-remote" | "unresolved";
+type VoxelOutcome = "keep-mine" | "take-remote" | "conflict";
 
 /**
  * Which side wins one voxel. `keep-mine` covers three cases that need no
@@ -151,9 +147,7 @@ function resolveVoxel(
   if (!remoteChanged) return "keep-mine";
   const mineChanged = !bytesEqualAt(baseline, mine, offset, length);
   if (!mineChanged) return "take-remote";
-  return bytesEqualAt(mine, remote, offset, length)
-    ? "keep-mine"
-    : "unresolved";
+  return bytesEqualAt(mine, remote, offset, length) ? "keep-mine" : "conflict";
 }
 
 /** Equality of one voxel's bytes, at the same offset in two whole chunks. */

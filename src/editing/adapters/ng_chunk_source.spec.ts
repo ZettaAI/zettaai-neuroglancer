@@ -303,6 +303,8 @@ interface FakeVolumeSource {
     transform: (chunk: { data: ArrayBufferView | null }) => ChunkVoxelBuffer,
   ) => Promise<ChunkVoxelBuffer>;
   invalidateChunkCache: ReturnType<typeof vi.fn>;
+  /** Resident chunks, keyed as NG keys them: `chunkGridPosition.join()`. */
+  chunks: Map<string, unknown>;
 }
 
 /**
@@ -339,6 +341,7 @@ function fakeSource(
         : (_grid, transform) =>
             Promise.resolve(transform({ data: datasource })),
     invalidateChunkCache: vi.fn(),
+    chunks: new Map(),
   };
 }
 
@@ -571,6 +574,55 @@ describe("NgChunkSource exit reconciliation (TM-352)", () => {
       "0,0,0",
       "1,2,3",
     ]);
+  });
+
+  /**
+   * "Reload all chunks", as a tracer means it: everything currently loaded for
+   * the layer, not just the chunks this session painted. Takes the resident set
+   * rather than enumerating the region's grid, because what is loaded is the
+   * only thing that can be showing stale data.
+   */
+  it("invalidateLoadedChunks evicts every resident chunk of a scope", () => {
+    const source = fakeSource(SAVED.slice());
+    source.chunks.set("0,0,0", {});
+    source.chunks.set("1,0,0", {});
+    const chunkSource = makeChunkSourceResolving(source);
+
+    const count = chunkSource.invalidateLoadedChunks([
+      { layerId: LAYER, resolution: RES_8 },
+    ]);
+
+    expect(count).toBe(2);
+    expect(source.invalidateChunkCache).toHaveBeenCalledTimes(1);
+    expect(source.invalidateChunkCache).toHaveBeenCalledWith([
+      "0,0,0",
+      "1,0,0",
+    ]);
+  });
+
+  it("invalidateLoadedChunks leaves a scope with nothing loaded alone", () => {
+    const source = fakeSource(SAVED.slice());
+    const chunkSource = makeChunkSourceResolving(source);
+
+    expect(
+      chunkSource.invalidateLoadedChunks([
+        { layerId: LAYER, resolution: RES_8 },
+      ]),
+    ).toBe(0);
+    expect(source.invalidateChunkCache).not.toHaveBeenCalled();
+  });
+
+  it("invalidateLoadedChunks skips a scope whose layer no longer resolves", () => {
+    const source = fakeSource(SAVED.slice());
+    source.chunks.set("0,0,0", {});
+    const chunkSource = makeChunkSourceResolving(source);
+
+    expect(
+      chunkSource.invalidateLoadedChunks([
+        { layerId: "gone" as LayerId, resolution: RES_8 },
+      ]),
+    ).toBe(0);
+    expect(source.invalidateChunkCache).not.toHaveBeenCalled();
   });
 
   it("skips chunks whose layer no longer resolves to a source", () => {

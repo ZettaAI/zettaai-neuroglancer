@@ -60,6 +60,13 @@ export class SaveTracker {
    * Read once the save settles, to tell the user what reconciling cost them.
    */
   private reloadedChunks_ = 0;
+  /**
+   * Voxels the last save's combine resolved to the remote. Counted apart from
+   * {@link reloadedChunks_} because the two are different losses in different
+   * units — a combine costs the shared voxels, Take theirs costs whole boxes —
+   * and the user is owed the one that actually happened.
+   */
+  private conflictedVoxels_ = 0;
 
   constructor(host: EditSessionHost, session: EditSession) {
     this.layerStatuses_ = initializeLayerStatuses(host, session);
@@ -120,6 +127,14 @@ export class SaveTracker {
    */
   reloadedChunkCount(): number {
     return this.reloadedChunks_;
+  }
+
+  /**
+   * How many voxels the last save's combine gave to the remote, zero if none.
+   * A count rather than a sentence, for the same reason as above.
+   */
+  conflictedVoxelCount(): number {
+    return this.conflictedVoxels_;
   }
 
   /**
@@ -248,7 +263,7 @@ export class SaveTracker {
     // a scan would only re-report the divergence the merge just resolved. Any
     // LATER save scans normally — which is what makes undoing a merge safe.
     await this.startSave(host, session, "just-merged");
-    this.recordDiscard(outcome.reloadedChunks);
+    this.recordConflictedVoxels(outcome.conflicted);
     return outcome;
   }
 
@@ -267,10 +282,20 @@ export class SaveTracker {
    * should be told about both.
    */
   private recordDiscard(chunks: number): void {
-    if (chunks === 0) return;
-    if (this.state_.kind !== "done-success") return;
+    if (!this.canReportLoss(chunks)) return;
     this.reloadedChunks_ += chunks;
     this.changed.dispatch();
+  }
+
+  /** What a combine cost, under the same conditions as {@link recordDiscard}. */
+  private recordConflictedVoxels(voxels: number): void {
+    if (!this.canReportLoss(voxels)) return;
+    this.conflictedVoxels_ += voxels;
+    this.changed.dispatch();
+  }
+
+  private canReportLoss(count: number): boolean {
+    return count > 0 && this.state_.kind === "done-success";
   }
 
   /**
@@ -363,6 +388,7 @@ export class SaveTracker {
     this.state_ = { kind: "saving", controller };
     this.saveStartedAt_ = Date.now();
     this.reloadedChunks_ = 0;
+    this.conflictedVoxels_ = 0;
     this.markAllWritablePending();
     this.changed.dispatch();
 

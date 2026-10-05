@@ -46,13 +46,12 @@ function conflictScan(diverged = 1, uncomparable = 0): StaleBaselineScan {
   } as unknown as StaleBaselineScan;
 }
 
-/** What `mergeConflicts` resolves to. Reloaded chunks are the destructive half. */
-function mergeOutcome(over: { merged?: number; reloaded?: number } = {}) {
+/** What `mergeConflicts` resolves to. Conflicted voxels are the lossy half. */
+function mergeOutcome(over: { merged?: number; conflicted?: number } = {}) {
   return {
     mergedChunks: over.merged ?? 1,
-    reloadedChunks: over.reloaded ?? 0,
     acceptedFromRemote: 2,
-    unresolved: over.reloaded !== undefined && over.reloaded > 0 ? 3 : 0,
+    conflicted: over.conflicted ?? 0,
   };
 }
 
@@ -288,6 +287,39 @@ describe("SaveTracker — refused saves", () => {
     expect(tracker.pendingConflict()).toBeInstanceOf(SaveConflictError);
   });
 
+  /**
+   * The toggle decides whether the user is ASKED, never what combining does.
+   * Both answers share `reconcileAndSave`, which is what makes that true; this
+   * pins it from the outside, so routing either path around that shared call —
+   * or making any part of the reconcile read the setting — is caught.
+   */
+  it("combines identically whether it was asked for or automatic", async () => {
+    async function combineWith(automerge: boolean) {
+      const host = fakeHost({ failFirstWithConflict: true, automerge });
+      const mergeConflicts = vi.fn(async () => mergeOutcome({ conflicted: 4 }));
+      (host as unknown as { mergeConflicts: unknown }).mergeConflicts =
+        mergeConflicts;
+      const session = fakeSession();
+      const tracker = new SaveTracker(host, session);
+      await tracker.startSave(host, session);
+      // With automerge off the save stops at the dialog, so the user's click
+      // is what carries on from here; with it on this is already done.
+      if (!automerge) await tracker.mergeConflict(host, session);
+      return { host, tracker, mergeConflicts };
+    }
+
+    const automatic = await combineWith(true);
+    const asked = await combineWith(false);
+
+    expect(asked.mergeConflicts.mock.calls).toEqual(
+      automatic.mergeConflicts.mock.calls,
+    );
+    expect(asked.host.policies).toEqual(automatic.host.policies);
+    expect(asked.tracker.conflictedVoxelCount()).toBe(
+      automatic.tracker.conflictedVoxelCount(),
+    );
+  });
+
   it("asks when the user turned automerge off", async () => {
     const host = fakeHost({ failFirstWithConflict: true, automerge: false });
     const mergeConflicts = vi.fn();
@@ -394,20 +426,37 @@ describe("SaveTracker — refused saves", () => {
     expect(host.policies).toEqual(["refuse"]);
   });
 
-  it("reports what reconciling discarded, so the save can say so", async () => {
+  it("reports the voxels a combine gave to the remote", async () => {
     const host = fakeHost({ failFirstWithConflict: true });
     (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
-      async () => mergeOutcome({ merged: 2, reloaded: 1 }),
+      async () => mergeOutcome({ merged: 2, conflicted: 7 }),
     );
     const session = fakeSession();
     const tracker = new SaveTracker(host, session);
 
     await tracker.startSave(host, session);
 
-    expect(tracker.reloadedChunkCount()).toBe(1);
+    expect(tracker.conflictedVoxelCount()).toBe(7);
   });
 
-  it("reports nothing discarded when every chunk merged cleanly", async () => {
+  /**
+   * A combine no longer costs whole chunks, so it must not report any. The
+   * chunk count belongs to Take theirs alone.
+   */
+  it("reports no discarded chunks for a combine that resolved voxels", async () => {
+    const host = fakeHost({ failFirstWithConflict: true });
+    (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
+      async () => mergeOutcome({ merged: 2, conflicted: 7 }),
+    );
+    const session = fakeSession();
+    const tracker = new SaveTracker(host, session);
+
+    await tracker.startSave(host, session);
+
+    expect(tracker.reloadedChunkCount()).toBe(0);
+  });
+
+  it("reports nothing when every voxel combined cleanly", async () => {
     const host = fakeHost({ failFirstWithConflict: true });
     (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
       async () => mergeOutcome(),
@@ -417,7 +466,7 @@ describe("SaveTracker — refused saves", () => {
 
     await tracker.startSave(host, session);
 
-    expect(tracker.reloadedChunkCount()).toBe(0);
+    expect(tracker.conflictedVoxelCount()).toBe(0);
   });
 
   /**
@@ -497,7 +546,7 @@ describe("SaveTracker — refused saves", () => {
 
     expect(host.policies).toEqual(["refuse"]);
     expect(tracker.pendingConflict()).toBeInstanceOf(SaveConflictError);
-    expect(tracker.reloadedChunkCount()).toBe(0);
+    expect(tracker.conflictedVoxelCount()).toBe(0);
   });
 
   /**
@@ -507,7 +556,7 @@ describe("SaveTracker — refused saves", () => {
   it("reports no discard when the save it paid for never landed", async () => {
     const host = fakeHost({ failFirstWithConflict: true });
     (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
-      async () => mergeOutcome({ merged: 1, reloaded: 2 }),
+      async () => mergeOutcome({ merged: 1, conflicted: 2 }),
     );
     const inner = host.saveActive as unknown as (
       ...args: unknown[]
@@ -525,7 +574,7 @@ describe("SaveTracker — refused saves", () => {
     await tracker.startSave(host, session);
 
     expect(tracker.lastFailureMessage()).toContain("network went away");
-    expect(tracker.reloadedChunkCount()).toBe(0);
+    expect(tracker.conflictedVoxelCount()).toBe(0);
   });
 
   /**
@@ -606,13 +655,15 @@ describe("SaveTracker — refused saves", () => {
   });
 
   /**
-   * Two rounds of discarded work are two rounds. Assigning rather than adding
-   * told the user about only the larger one.
+   * One answer can cost both ways: Take theirs drops whole boxes, and the save
+   * it triggers can itself refuse and be combined. Each loss is reported in
+   * its own unit — collapsing them into one number would have said "5 areas"
+   * about 2 voxels, or the reverse.
    */
-  it("adds up discards when a follow-up save reconciles again", async () => {
+  it("reports a reload's chunks and a follow-up combine's voxels apart", async () => {
     const host = fakeHost({ failFirstWithConflict: true, automerge: false });
     (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
-      async () => mergeOutcome({ merged: 0, reloaded: 2 }),
+      async () => mergeOutcome({ merged: 1, conflicted: 2 }),
     );
     (
       host as unknown as { reloadConflictedChunks: unknown }
@@ -643,6 +694,7 @@ describe("SaveTracker — refused saves", () => {
 
     await tracker.reloadConflict(host, session);
 
-    expect(tracker.reloadedChunkCount()).toBe(7);
+    expect(tracker.reloadedChunkCount()).toBe(5);
+    expect(tracker.conflictedVoxelCount()).toBe(2);
   });
 });

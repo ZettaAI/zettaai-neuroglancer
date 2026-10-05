@@ -50,7 +50,7 @@ describe("mergeOwnedRegion", () => {
 
     expect(result.merged[voxelIndex(1, 0, 0)]).toBe(7);
     expect(result.acceptedFromRemote).toBe(1);
-    expect(result.unresolved).toBe(0);
+    expect(result.conflicted).toBe(0);
   });
 
   it("keeps my voxel where only I changed it", () => {
@@ -63,7 +63,7 @@ describe("mergeOwnedRegion", () => {
 
     expect(result.merged[voxelIndex(0, 0, 0)]).toBe(9);
     expect(result.acceptedFromRemote).toBe(0);
-    expect(result.unresolved).toBe(0);
+    expect(result.conflicted).toBe(0);
   });
 
   it("combines edits from both sides in one pass", () => {
@@ -77,7 +77,7 @@ describe("mergeOwnedRegion", () => {
 
     expect(result.merged[voxelIndex(0, 0, 0)]).toBe(9);
     expect(result.merged[voxelIndex(1, 2, 1)]).toBe(7);
-    expect(result.unresolved).toBe(0);
+    expect(result.conflicted).toBe(0);
   });
 
   /**
@@ -94,7 +94,7 @@ describe("mergeOwnedRegion", () => {
     const result = mergeOwnedRegion(baseline, mine, remote, halfOwned());
 
     expect(result.merged[voxelIndex(0, 0, 0)]).toBe(0);
-    expect(result.unresolved).toBe(0);
+    expect(result.conflicted).toBe(0);
   });
 
   it("accepts the remote's erase where we did not touch the voxel", () => {
@@ -109,7 +109,7 @@ describe("mergeOwnedRegion", () => {
     expect(result.acceptedFromRemote).toBe(1);
   });
 
-  it("keeps mine and counts the voxel when both sides disagree", () => {
+  it("takes the remote's voxel and counts it when both sides disagree", () => {
     const baseline = u8(1);
     const mine = u8(1);
     mine[voxelIndex(0, 0, 0)] = 9;
@@ -118,9 +118,34 @@ describe("mergeOwnedRegion", () => {
 
     const result = mergeOwnedRegion(baseline, mine, remote, halfOwned());
 
-    expect(result.merged[voxelIndex(0, 0, 0)]).toBe(9);
-    expect(result.unresolved).toBe(1);
+    expect(result.merged[voxelIndex(0, 0, 0)]).toBe(7);
+    expect(result.conflicted).toBe(1);
     expect(result.acceptedFromRemote).toBe(0);
+  });
+
+  /**
+   * The acceptance scenario: two tracers paint overlapping strokes, and both
+   * strokes have to survive the merge. Only the shared voxels go to the
+   * remote — a collision no longer costs the whole owned box.
+   */
+  it("keeps both sides' strokes and gives only the overlap to the remote", () => {
+    const MINE_RED = 2;
+    const THEIRS_BLUE = 3;
+    const baseline = u8(0);
+    const mine = u8(0);
+    mine[voxelIndex(0, 0, 0)] = MINE_RED; // only mine
+    mine[voxelIndex(1, 0, 0)] = MINE_RED; // overlap
+    const remote = u8(0);
+    remote[voxelIndex(1, 0, 0)] = THEIRS_BLUE; // overlap
+    remote[voxelIndex(1, 1, 0)] = THEIRS_BLUE; // only theirs
+
+    const result = mergeOwnedRegion(baseline, mine, remote, halfOwned());
+
+    expect(result.merged[voxelIndex(0, 0, 0)]).toBe(MINE_RED);
+    expect(result.merged[voxelIndex(1, 1, 0)]).toBe(THEIRS_BLUE);
+    expect(result.merged[voxelIndex(1, 0, 0)]).toBe(THEIRS_BLUE);
+    expect(result.acceptedFromRemote).toBe(1);
+    expect(result.conflicted).toBe(1);
   });
 
   it("is not a conflict when both sides made the same edit", () => {
@@ -133,7 +158,7 @@ describe("mergeOwnedRegion", () => {
     const result = mergeOwnedRegion(baseline, mine, remote, halfOwned());
 
     expect(result.merged[voxelIndex(0, 0, 0)]).toBe(9);
-    expect(result.unresolved).toBe(0);
+    expect(result.conflicted).toBe(0);
     expect(result.acceptedFromRemote).toBe(0);
   });
 
@@ -178,7 +203,7 @@ describe("mergeOwnedRegion", () => {
 
     expect(merged[voxelIndex(1, 0, 0)]).toBe(999);
     expect(merged[voxelIndex(0, 0, 0)]).toBe(555);
-    expect(result.unresolved).toBe(0);
+    expect(result.conflicted).toBe(0);
   });
 
   it("merges 64-bit segment ids without widening through BigInt", () => {

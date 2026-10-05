@@ -67,6 +67,29 @@ export class SessionRegionSnapshot {
 }
 
 /**
+ * Every `(layerId, resolution)` this session can write, flattened.
+ *
+ * Read-only layers are excluded: nobody paints them, so nobody else can have
+ * changed them, and acting on them (reloading, say) buys a blank frame and a
+ * refetch for nothing. Writability comes in as a predicate because the session
+ * does not know it — `LayerSelection` carries only the resolutions, and the
+ * read-only flag lives in the host's `EditSessionIntent`.
+ */
+export function writableScopes(
+  session: EditSession,
+  isWritable: (layerId: LayerId) => boolean,
+): { readonly layerId: LayerId; readonly resolution: Resolution }[] {
+  return session.config.layers
+    .filter((layer) => isWritable(layer.layerId))
+    .flatMap((layer) =>
+      layer.selectedResolutions.map((resolution) => ({
+        layerId: layer.layerId,
+        resolution,
+      })),
+    );
+}
+
+/**
  * Read every `(layerId, resolution)` the session permits writes at out of the
  * live session, once, while it is still ACTIVE.
  *

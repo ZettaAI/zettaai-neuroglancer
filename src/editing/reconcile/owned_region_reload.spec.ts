@@ -10,11 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  mustReloadFromRemote,
-  reloadedOwnedRegion,
-} from "#src/editing/reconcile/owned_region_reload.js";
-import { mergeOwnedRegion } from "#src/editing/reconcile/three_way_merge.js";
+import { reloadedOwnedRegion } from "#src/editing/reconcile/owned_region_reload.js";
 import type { ChunkOwnedGeometry } from "#src/editing/region/owned_chunk_write.js";
 
 /** X-fastest, channel-slowest: index = channel*sx*sy*sz + z*sx*sy + y*sx + x. */
@@ -42,39 +38,6 @@ function halfOwned(overrides: Partial<ChunkOwnedGeometry> = {}) {
 function u8(fill = 0): Uint8Array {
   return new Uint8Array(VOXELS_PER_CHANNEL).fill(fill);
 }
-
-describe("mustReloadFromRemote", () => {
-  it("is false when every voxel resolved", () => {
-    const baseline = u8(1);
-    const mine = u8(1);
-    mine[voxelIndex(0, 0, 0)] = 9;
-    const remote = u8(1);
-    remote[voxelIndex(1, 0, 0)] = 7;
-
-    expect(
-      mustReloadFromRemote(
-        mergeOwnedRegion(baseline, mine, remote, halfOwned()),
-      ),
-    ).toBe(false);
-  });
-
-  /**
-   * The rule at its least intuitive, and the one worth pinning: a single
-   * colliding voxel condemns the whole owned box, however much work is in it.
-   */
-  it("is true for a single colliding voxel", () => {
-    const baseline = u8(1);
-    const mine = u8(1);
-    mine[voxelIndex(0, 0, 0)] = 9;
-    const remote = u8(1);
-    remote[voxelIndex(0, 0, 0)] = 7;
-
-    const merge = mergeOwnedRegion(baseline, mine, remote, halfOwned());
-
-    expect(merge.unresolved).toBe(1);
-    expect(mustReloadFromRemote(merge)).toBe(true);
-  });
-});
 
 describe("reloadedOwnedRegion", () => {
   it("replaces every owned voxel with the remote's", () => {
