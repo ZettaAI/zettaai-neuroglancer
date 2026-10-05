@@ -1440,8 +1440,11 @@
   }
 }
 
+/* Size containment, not just inline: the viewer's panel row has no
+   min-height of 0, so a body that lets its content height through stretches
+   the whole viewer instead of scrolling. */
 .calcada-filter-editor-panel {
-  container-type: inline-size;
+  container-type: size;
   height: 100%;
 }
 

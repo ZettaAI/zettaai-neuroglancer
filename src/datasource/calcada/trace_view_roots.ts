@@ -9,12 +9,11 @@
  */
 
 /**
- * @file What stays on screen when a trace ends: what the review built, less
- * the roots its edits retired and the candidate that was never accepted.
+ * @file Which roots a trace keeps on screen: while it runs, and when it ends.
  */
 
 export interface TraceExitRoots {
-  retired: ReadonlySet<bigint>;
+  retired: { has(id: bigint): boolean };
   candidateRoot: bigint | undefined;
   /**
    * The live seed, resolved from its piece. It stays even if retired: undoing
@@ -34,4 +33,29 @@ export function rootsKeptOnExit(
     kept.add(id);
   }
   return kept;
+}
+
+export interface SplitPartsView {
+  /** Roots cuts made during this trace. */
+  splitParts: Iterable<bigint>;
+  keepSplitParts: boolean;
+  retired: { has(id: bigint): boolean };
+}
+
+/**
+ * The seed and the candidate, and, when asked, the parts of the segments cut
+ * during the trace that are still live.
+ */
+export function rootsShownWhileTracing(
+  seedRoot: bigint,
+  candidateRoot: bigint | undefined,
+  { splitParts, keepSplitParts, retired }: SplitPartsView,
+): bigint[] {
+  const shown =
+    candidateRoot === undefined ? [seedRoot] : [seedRoot, candidateRoot];
+  if (!keepSplitParts) return shown;
+  for (const part of splitParts) {
+    if (!retired.has(part) && !shown.includes(part)) shown.push(part);
+  }
+  return shown;
 }

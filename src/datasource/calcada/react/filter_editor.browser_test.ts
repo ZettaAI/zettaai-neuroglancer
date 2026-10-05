@@ -15,13 +15,16 @@ import {
   FILTER_EDITOR_WIDTH_PX,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
+import type { DisplayContext } from "#src/display_context.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import type {
   RegisteredSidePanel,
   SidePanelManager,
 } from "#src/ui/side_panel.js";
+import { SidePanelManager as RealSidePanelManager } from "#src/ui/side_panel.js";
 import type { Disposer } from "#src/util/disposable.js";
 import { invokeDisposer } from "#src/util/disposable.js";
+import { NullarySignal } from "#src/util/signal.js";
 
 let disposer: Disposer | undefined;
 let element: HTMLElement | undefined;
@@ -107,6 +110,48 @@ const statusText = () =>
   element!.querySelector(".calcada-filter-status")?.textContent;
 
 const addSize = (root: GroupNode) => (addRow(root, root.id!, "cond"), root);
+
+describe("filter editor in the side panels", () => {
+  it("scrolls a filter taller than the viewer inside its column", async () => {
+    const VIEWER_HEIGHT_PX = 400;
+    const { library } = await libraryWith({ axons: AXON_TEXT });
+    library.select("axons");
+    const display = {
+      updateStarted: new NullarySignal(),
+      resizeGeneration: 0,
+      scheduleRedraw: () => {},
+    } as unknown as DisplayContext;
+    const center = document.createElement("div");
+    const manager = new RealSidePanelManager(display, center);
+    const state = new ZettaTraceState();
+    const unregister = registerFilterEditorPanel(manager, state, library);
+    state.filterEditor.visible = true;
+    element = document.createElement("div");
+    // As the viewer lays itself out: a column, the top row above the panels.
+    element.style.cssText = `display: flex; flex-direction: column; height: ${VIEWER_HEIGHT_PX}px; width: 1600px;`;
+    element.appendChild(document.createElement("div"));
+    element.appendChild(manager.element);
+    document.body.appendChild(element);
+    display.updateStarted.dispatch();
+    disposer = () => {
+      invokeDisposer(unregister);
+      manager.dispose();
+    };
+    const editor = await vi.waitFor(() => {
+      const found = element!.querySelector<HTMLElement>(
+        ".calcada-filter-editor",
+      );
+      expect(found).not.toBe(null);
+      return found!;
+    });
+    await vi.waitFor(() => {
+      expect(editor.scrollHeight).toBeGreaterThan(editor.clientHeight);
+      expect(editor.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        element!.getBoundingClientRect().bottom + 1,
+      );
+    });
+  });
+});
 
 describe("FilterEditor", () => {
   it("shows Saved, then Unsaved after an edit, and saves", async () => {
