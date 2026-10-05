@@ -212,6 +212,9 @@ describe("EditSessionHost.saveActive region clip", () => {
       // default answers with the bytes the save is about to send, i.e. nobody
       // moved the region; tests about conflicts override this.
       readFreshDecoded: vi.fn(async () => remoteBytes()),
+      // A settled save refetches the region so a colleague's work in chunks
+      // this session never painted stops being stale on screen.
+      invalidateLoadedChunks: vi.fn(() => 0),
     };
     // A REAL NgSaveTarget, but built with fakes: the one the host constructs
     // captures the viewer's metadata source, which would need a live
@@ -302,6 +305,33 @@ describe("EditSessionHost.saveActive region clip", () => {
 
       await expect(host.saveActive()).rejects.toThrow(SaveConflictError);
       expect(backend.written).toHaveLength(0);
+    });
+
+    /**
+     * A settled save refetches the region. Our own chunks are already right on
+     * screen; this is for the ones nobody in this session touched, where a
+     * colleague's work was otherwise stuck as we first loaded it — which no
+     * invalidation scoped to our own writes can reach.
+     */
+    it("refetches the loaded chunks once the save has settled", async () => {
+      activate();
+
+      await host.saveActive();
+
+      expect(
+        (host as any).chunkSource.invalidateLoadedChunks,
+      ).toHaveBeenCalledTimes(1);
+    });
+
+    it("refetches nothing when the save was refused", async () => {
+      activate();
+      remoteWrites(1); // x=1 — ours, so the save is refused
+
+      await expect(host.saveActive()).rejects.toThrow(SaveConflictError);
+
+      expect(
+        (host as any).chunkSource.invalidateLoadedChunks,
+      ).not.toHaveBeenCalled();
     });
 
     it("saves normally when a neighbour wrote outside our box", async () => {

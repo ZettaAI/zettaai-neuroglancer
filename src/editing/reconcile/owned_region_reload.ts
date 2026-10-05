@@ -9,23 +9,19 @@
  */
 
 /**
- * @file Giving one chunk back to the remote: the answer for a chunk both
- * sides changed in the same place.
+ * @file Giving one chunk back to the remote: Take theirs, wholesale.
  *
- * `mergeOwnedRegion` combines two edits voxel by voxel and can resolve every
- * voxel except one case — both sides changed it, to different values. This is
- * what happens to a chunk that contains any of those: the whole owned sub-box
- * reverts to what storage holds, and the local edits in it are dropped.
+ * This is no longer what a collision costs. `mergeOwnedRegion` resolves a
+ * colliding voxel to the remote by itself, so Combine keeps every local edit
+ * outside the voxels actually shared — handing the whole owned box back for
+ * one colliding voxel discarded a whole chunk's painting and meant two
+ * tracers in one region could not both keep their strokes.
  *
- * WHY THE WHOLE BOX, FOR ONE COLLIDING VOXEL. Segmentation is topological,
- * not per-voxel. Mixing two traces voxel by voxel can produce an object
- * neither annotator drew — a process spliced from two centrelines, or a label
- * leaking through a membrane one of them drew and the other did not. Taking
- * one side wholesale guarantees the section stays a thing somebody actually
- * traced. It is a deliberately blunt rule and it costs more than it has to:
- * at `chunk_size = [1024, 1024, 1]` a chunk is one z-slice, so a single
- * colliding voxel can discard a whole section's work. Whoever changes this
- * rule should change it here, and should know that is the trade.
+ * What remains is the USER'S explicit answer: Take theirs on the conflict
+ * dialog, and the discard-on-exit path. Both are a deliberate "drop what I
+ * did here", which is why they are allowed to be blunt. The other reason this
+ * survives is that it needs no baseline, so it is the only answer available
+ * for a chunk the scan could not prove.
  *
  * WHY NOT THE WHOLE CHUNK. "Reload the chunk from storage" taken literally
  * would also revert the bytes outside the owned box — and those belong to a
@@ -41,19 +37,7 @@
  * foreign bytes that were staged here.
  */
 
-import type { ThreeWayMerge } from "#src/editing/reconcile/three_way_merge.js";
 import type { ChunkOwnedGeometry } from "#src/editing/region/owned_chunk_write.js";
-
-/**
- * Whether a merged chunk has to be given back to the remote instead.
- *
- * The rule in one line: ANY colliding voxel reloads the whole owned box. The
- * merge already found them, so this is a read of its result rather than a
- * second pass.
- */
-export function mustReloadFromRemote(merge: ThreeWayMerge): boolean {
-  return merge.unresolved > 0;
-}
 
 /**
  * One chunk's owned sub-box, taken from the remote. Inputs are never mutated.

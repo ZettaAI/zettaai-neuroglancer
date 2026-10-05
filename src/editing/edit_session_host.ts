@@ -118,10 +118,7 @@ import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 import "#src/editing/benchmarks/edit_paint_bench.js";
 import { PointerEventBridge } from "#src/editing/pointer_event_bridge.js";
 import { QuickRegionCapture } from "#src/editing/quick_region_capture.js";
-import {
-  mustReloadFromRemote,
-  reloadedOwnedRegion,
-} from "#src/editing/reconcile/owned_region_reload.js";
+import { reloadedOwnedRegion } from "#src/editing/reconcile/owned_region_reload.js";
 import type { SaveConflictPolicy } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
   refusesSave,
@@ -147,7 +144,10 @@ import { voxelCenterInBox } from "#src/editing/region/region_geometry.js";
 import { EditRegionPerspectiveOverlay } from "#src/editing/region/region_perspective_overlay.js";
 import { EditRegionSliceOverlay } from "#src/editing/region/region_slice_overlay.js";
 import type { SessionRegionSnapshot } from "#src/editing/region/session_region_snapshot.js";
-import { captureSessionRegions } from "#src/editing/region/session_region_snapshot.js";
+import {
+  captureSessionRegions,
+  writableScopes,
+} from "#src/editing/region/session_region_snapshot.js";
 import { EditSessionHotkeyBinder } from "#src/editing/session_hotkey_binder.js";
 import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
@@ -432,23 +432,16 @@ export interface ActiveRegion {
 
 /** What {@link EditSessionHost.mergeConflicts} did, chunk by chunk. */
 export interface MergeConflictsOutcome {
-  /** Chunks combined: every local edit in them survived. */
+  /** Chunks combined. Every chunk with a baseline combines; none is dropped. */
   readonly mergedChunks: number;
-  /**
-   * Chunks given back to the remote because both sides changed the same
-   * voxels. The local edits in them were DROPPED. Non-zero is what makes
-   * "some of your changes were discarded" true, so it is what the save has to
-   * tell the user about afterwards.
-   */
-  readonly reloadedChunks: number;
   /** Voxels taken from the remote across merged chunks — their work, kept. */
   readonly acceptedFromRemote: number;
   /**
-   * Voxels both sides changed differently, across reloaded chunks. The finer
-   * measure behind {@link reloadedChunks}: how small a collision was enough
-   * to cost a whole chunk's work.
+   * Voxels both sides changed differently, resolved to the remote's value.
+   * The user's paint in them is gone, so non-zero is what makes "some of your
+   * changes were discarded" true and what the save has to say afterwards.
    */
-  readonly unresolved: number;
+  readonly conflicted: number;
 }
 
 /** What {@link EditSessionHost.reloadConflictedChunks} replaced. */
@@ -1591,6 +1584,11 @@ export class EditSessionHost extends RefCounted {
       await session.discard();
     } finally {
       this.rollbackDirtyChunks([...dirty, ...unconfirmedKeys]);
+      // Before the teardown, which is what still knows the session's writable
+      // layers. Discarding is the user asking to see what storage holds, and
+      // rolling our own patches back only uncovers the datasource chunks this
+      // session loaded — a colleague's work since then is in none of them.
+      this.reloadLoadedChunks();
       this.commitTeardown();
     }
   }
@@ -1828,6 +1826,10 @@ export class EditSessionHost extends RefCounted {
       }
       // 4. Read back each saved chunk and confirm — the gate for "Saved".
       await this.verifySavedChunks(toVerify, controller.signal);
+      // 5. Show what everyone else saved too. Our own chunks are already
+      //    correct on screen, so this is for the ones nobody here touched —
+      //    which is exactly what a save-scoped invalidation cannot reach.
+      this.reloadLoadedChunks();
       return result;
     } finally {
       if (signal !== undefined) {
@@ -2039,12 +2041,7 @@ export class EditSessionHost extends RefCounted {
       prepared.push({ write, remote, baseline });
     }
     if (prepared.length === 0) {
-      return {
-        mergedChunks: 0,
-        reloadedChunks: 0,
-        acceptedFromRemote: 0,
-        unresolved: 0,
-      };
+      return { mergedChunks: 0, acceptedFromRemote: 0, conflicted: 0 };
     }
 
     // From here the only await is `beginWrite`, which materializes a chunk the
@@ -2054,9 +2051,8 @@ export class EditSessionHost extends RefCounted {
       tag: "reconcile.merge",
     });
     let acceptedFromRemote = 0;
-    let unresolved = 0;
+    let conflicted = 0;
     let mergedChunks = 0;
-    let reloadedChunks = 0;
     try {
       for (const { write, remote, baseline } of prepared) {
         const slot = await edit.beginWrite({
@@ -2070,17 +2066,10 @@ export class EditSessionHost extends RefCounted {
           remote.asView(),
           write.owned,
         );
-        // Any colliding voxel costs the whole owned box: it goes back to the
-        // remote and the local edits in it are dropped. The merged buffer is
-        // discarded in that case — one chunk-sized allocation wasted on a
-        // path that has just done network reads, and the merge is precisely
-        // what detected the collision.
-        const reload = mustReloadFromRemote(merge);
-        asWritableBytes(slot.data).set(
-          reload
-            ? reloadedOwnedRegion(slot.data, remote.asView(), write.owned)
-            : merge.merged,
-        );
+        // A collision costs only the voxels it covers; the merge resolved them
+        // to the remote already. The owned box is never handed back wholesale
+        // here — that is Take theirs, and only when the user asks for it.
+        asWritableBytes(slot.data).set(merge.merged);
         edit.commitWrites(slot, ownedSubregion(write.owned));
 
         // NOTHING DURABLE IS ADVANCED HERE. An earlier version recorded
@@ -2097,20 +2086,16 @@ export class EditSessionHost extends RefCounted {
         // policy, which is scoped to that one save. Every later save scans
         // from the original baseline, so an undone merge simply raises the
         // conflict again.
-        if (reload) {
-          reloadedChunks++;
-          unresolved += merge.unresolved;
-        } else {
-          mergedChunks++;
-          acceptedFromRemote += merge.acceptedFromRemote;
-        }
+        mergedChunks++;
+        acceptedFromRemote += merge.acceptedFromRemote;
+        conflicted += merge.conflicted;
       }
     } catch (error) {
       await edit.discard();
       throw error;
     }
     edit.record();
-    return { mergedChunks, reloadedChunks, acceptedFromRemote, unresolved };
+    return { mergedChunks, acceptedFromRemote, conflicted };
   }
 
   /**
@@ -2135,6 +2120,43 @@ export class EditSessionHost extends RefCounted {
    * nothing: this is an undo entry, so the next save must still scan from the
    * baseline this session actually observed.
    */
+  /**
+   * Refetch every loaded chunk of the writable layers from storage.
+   *
+   * Scoped to what is LOADED rather than to what this session wrote, which is
+   * the whole point: a colleague's work in a chunk nobody here painted was
+   * otherwise stuck on screen as this session first read it, and no amount of
+   * reconciling our own writes would have shown it. Returns the number of
+   * chunks evicted.
+   *
+   * Costs one round-trip of blank (or coarse-scale) frame per chunk — the GPU
+   * patch is bound inside the base chunk's draw call, so a chunk that is not
+   * resident draws neither the data nor the paint. The paint itself is never
+   * at risk: it lives in the session overlay and the per-layer patch store,
+   * and comes back with the chunk.
+   */
+  reloadLoadedChunks(): number {
+    const session = this.activeSession.value;
+    if (session === undefined) return 0;
+    return this.chunkSource.invalidateLoadedChunks(
+      writableScopes(session, (layerId) => this.isLayerWritable(layerId)),
+    );
+  }
+
+  /**
+   * Whether this session may write the layer. Unknown layers read as writable,
+   * matching the save path: the intent is the only place the read-only flag
+   * lives, and a layer missing from it has never been marked read-only.
+   */
+  private isLayerWritable(layerId: LayerId): boolean {
+    const intent = this.state.value.value;
+    if (intent === null) return true;
+    for (const layer of intent.layers) {
+      if (layer.layerId === layerId) return layer.writable;
+    }
+    return true;
+  }
+
   async reloadConflictedChunks(
     scan: StaleBaselineScan,
     signal?: AbortSignal,

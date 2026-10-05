@@ -99,6 +99,18 @@ export function refusesSave(scan: StaleBaselineScan): boolean {
   return scan.diverged.length > 0 || scan.uncomparable.length > 0;
 }
 
+/**
+ * Whether a refusal can be answered by combining.
+ *
+ * A combine needs all three inputs, and a chunk the scan could not prove has
+ * no baseline to combine from — so one unprovable chunk takes the option away
+ * from the whole save. Both the dialog's button row and the text it explains
+ * itself with read this, so the two cannot drift apart.
+ */
+export function canCombine(scan: StaleBaselineScan): boolean {
+  return scan.diverged.length > 0 && scan.uncomparable.length === 0;
+}
+
 function describeRefusal(scan: StaleBaselineScan): string {
   const parts: string[] = [];
   if (scan.diverged.length > 0) {
