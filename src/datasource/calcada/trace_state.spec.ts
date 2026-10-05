@@ -288,3 +288,14 @@ describe("ZettaTraceState.stepPlusMinus", () => {
     );
   });
 });
+
+describe("ZettaTraceState keepSplitParts", () => {
+  it("is off by default and kept in the link when on", () => {
+    const state = new ZettaTraceState();
+    expect(state.keepSplitParts.value).toBe(false);
+    state.keepSplitParts.value = true;
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.keepSplitParts.value).toBe(true);
+  });
+});

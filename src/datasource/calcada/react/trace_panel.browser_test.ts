@@ -343,6 +343,23 @@ describe("CalcadaTracePanel", () => {
     expect(tab.textContent).not.toContain("Candidate:");
   });
 
+  it("keeps the parts of a split visible when the box is ticked", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    const box = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLLabelElement>(".calcada-trace-panel-check"),
+      ].find((label) => label.textContent?.includes("parts of a split"));
+      expect(found).toBeDefined();
+      return found!.querySelector<HTMLInputElement>("input")!;
+    });
+    expect(box.checked).toBe(false);
+    box.click();
+    await vi.waitFor(() =>
+      expect(connection.state.zettaTraceState.keepSplitParts.value).toBe(true),
+    );
+  });
+
   it("starts a trace from the tab", async () => {
     await mountPanel(await makeConnection({ busy: false }));
     calls = [];

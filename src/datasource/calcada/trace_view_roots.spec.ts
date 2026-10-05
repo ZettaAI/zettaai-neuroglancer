@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { rootsKeptOnExit } from "#src/datasource/calcada/trace_exit_view.js";
+import {
+  rootsKeptOnExit,
+  rootsShownWhileTracing,
+} from "#src/datasource/calcada/trace_view_roots.js";
 
 describe("rootsKeptOnExit", () => {
   it("drops retired roots and the candidate under review", () => {
@@ -32,5 +35,37 @@ describe("rootsKeptOnExit", () => {
         seedRoot: 5n,
       }),
     ).toEqual(new Set([7n]));
+  });
+});
+
+describe("rootsShownWhileTracing", () => {
+  it("shows the seed and the candidate only, by default", () => {
+    expect(
+      rootsShownWhileTracing(1n, 2n, {
+        splitParts: [5n, 6n],
+        keepSplitParts: false,
+        retired: new Set(),
+      }),
+    ).toEqual([1n, 2n]);
+  });
+
+  it("keeps the live parts of a split on screen when asked", () => {
+    expect(
+      rootsShownWhileTracing(1n, 2n, {
+        splitParts: [5n, 6n, 1n],
+        keepSplitParts: true,
+        retired: new Set([6n]),
+      }),
+    ).toEqual([1n, 2n, 5n]);
+  });
+
+  it("needs no candidate", () => {
+    expect(
+      rootsShownWhileTracing(1n, undefined, {
+        splitParts: [5n],
+        keepSplitParts: true,
+        retired: new Set(),
+      }),
+    ).toEqual([1n, 5n]);
   });
 });
