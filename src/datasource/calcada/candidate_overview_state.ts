@@ -87,3 +87,46 @@ export class CalcadaOverviewState extends RefCounted implements Trackable {
         : DEFAULT_DISPLAY;
   }
 }
+
+/**
+ * What the detection key does. From a running trace it goes straight to
+ * detection: the trace is put down and detection comes on.
+ */
+export function toggleSplitDetection({
+  tracing,
+  active,
+  onMain,
+}: {
+  tracing: boolean;
+  active: boolean;
+  onMain: boolean;
+}): { exitTrace: boolean; active: boolean } {
+  if (tracing) return { exitTrace: true, active: true };
+  if (!active && onMain) return { exitTrace: false, active: false };
+  return { exitTrace: false, active: !active };
+}
+
+export const SCORING_SEGMENT_STATUS = "Scoring the segment…";
+
+/**
+ * The count is only told once the piece graph the filter reads has loaded:
+ * before that, every piece a neighbour condition asks about is undecided and
+ * the count climbs as the graph arrives.
+ */
+export function splitDetectionStatus({
+  graphPending,
+  flagged,
+  total,
+  withSemantics,
+}: {
+  graphPending: boolean;
+  flagged: number;
+  total: number;
+  withSemantics: number;
+}): string {
+  if (graphPending) return SCORING_SEGMENT_STATUS;
+  return (
+    `${flagged.toLocaleString()} of ${total.toLocaleString()} pieces flagged · ` +
+    `${withSemantics} candidates with semantics`
+  );
+}
