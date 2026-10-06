@@ -74,7 +74,6 @@ import type {
 } from "#src/datasource/calcada/candidate_filter_tree.js";
 import {
   semanticsKnown,
-  subjectPasses,
   subjectVerdict,
 } from "#src/datasource/calcada/candidate_filter_tree.js";
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
@@ -85,7 +84,6 @@ import {
   parseClassCounts,
   parseOverviewPoint,
   partnersWithSemantics,
-  pieceOverviewSubject,
   rankFlaggedPieces,
   splitErrorColors,
 } from "#src/datasource/calcada/candidate_heat.js";
@@ -179,6 +177,11 @@ import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sph
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
+import {
+  currentCandidateFilter,
+  piecesPassing,
+  TraceSplitPoints,
+} from "#src/datasource/calcada/trace_split_points.js";
 import {
   withinScoreRange,
   ZettaTraceState,
@@ -2857,6 +2860,8 @@ class ZettaTraceSession extends RefCounted {
   // Roots cuts made during this trace: shown alongside the roles when the
   // proofreader keeps the parts of a split on screen.
   private readonly splitParts = new Set<bigint>();
+  // Detection's points on the seed's and the candidate's segments, when asked.
+  private readonly splitPoints: TraceSplitPoints;
   private priorUseTempSegmentStatedColors2d = false;
   private reassertingRoleColors = false;
 
@@ -2871,6 +2876,48 @@ class ZettaTraceSession extends RefCounted {
     this.registerDisposer(
       segmentSession.segment.piece.changed.add(() => this.clearSeed()),
     );
+    this.splitPoints = new TraceSplitPoints({
+      fetchOverview: (root) =>
+        this.graphServer.fetchCandidateOverview(root, {
+          branchId: this.branchId,
+          minPieceVoxels: state.minPieceVoxels.value,
+          rejectedBy: state.rejectedBy.value,
+        }),
+      passesOn: async (pieces) => {
+        const { pieceGraph } = connection;
+        const filter = currentCandidateFilter(state);
+        await pieceGraph.fill((graph) => {
+          const passes = piecesPassing(pieces, filter, graph);
+          for (const piece of pieces) {
+            if (piece.candidateCount > 0) passes(piece);
+          }
+        });
+        return piecesPassing(pieces, filter, pieceGraph);
+      },
+      draw: (points) => connection.setSplitErrorPoints(points),
+      reportError: (e) =>
+        StatusMessage.showTemporaryMessage(
+          `Could not score for split error points: ${e}`,
+          MESSAGE_DURATION_MS,
+        ),
+    });
+    this.registerDisposer(() => this.splitPoints.clear());
+    // Switching the points on or off shows at once, not with the next
+    // candidate. The server-side filters change the scores themselves.
+    const rescoreSplitPoints = () => {
+      this.splitPoints.clear();
+      this.showSplitPoints();
+    };
+    this.registerDisposer(
+      state.showSplitPoints.changed.add(rescoreSplitPoints),
+    );
+    this.registerDisposer(state.minPieceVoxels.changed.add(rescoreSplitPoints));
+    this.registerDisposer(state.rejectedBy.changed.add(rescoreSplitPoints));
+    for (const signal of state.candidateFilterSignals) {
+      this.registerDisposer(
+        signal.changed.add(() => void this.splitPoints.refresh()),
+      );
+    }
     this.registerDisposer(
       state.active.changed.add(() => {
         if (state.active.value) {
@@ -3003,6 +3050,22 @@ class ZettaTraceSession extends RefCounted {
         // segment snapshot and drops the seed.
         "trace-cancel-aim": () => this.state.cancelInnermost(),
       },
+    );
+  }
+
+  private showSplitPoints(
+    seedRoot = this.state.seedRoot.value,
+    candidateRoot = this.current?.partnerRootId,
+  ) {
+    if (
+      !this.state.showSplitPoints.value ||
+      !this.state.active.value ||
+      seedRoot === undefined
+    ) {
+      return;
+    }
+    void this.splitPoints.show(
+      candidateRoot === undefined ? [seedRoot] : [seedRoot, candidateRoot],
     );
   }
 
@@ -3207,6 +3270,7 @@ class ZettaTraceSession extends RefCounted {
 
     this.dimmed.clear();
     this.clearRoleColors();
+    this.splitPoints.clear();
 
     // Leaving keeps what the review built rather than rewinding to the entry
     // snapshot; see rootsKeptOnExit for what goes.
@@ -3328,6 +3392,7 @@ class ZettaTraceSession extends RefCounted {
   // only: the persistent one serializes into the layer JSON and would leak
   // these role colors into shared links.
   private applyRoleColors(seedRoot: bigint, candidateRoot?: bigint) {
+    this.showSplitPoints(seedRoot, candidateRoot);
     const { displayState } = this.layer;
     this.reassertingRoleColors = true;
     try {
@@ -3749,6 +3814,11 @@ class ZettaTraceSession extends RefCounted {
         undefined,
         this.branchId,
       )
+      .then(() => {
+        // The rejection takes that candidate off the seed's points too.
+        const seedRoot = this.state.seedRoot.value;
+        if (seedRoot !== undefined) void this.splitPoints.forget(seedRoot);
+      })
       .catch((e: unknown) => {
         StatusMessage.showTemporaryMessage(
           `Failed to record rejection: ${e}`,
@@ -4636,13 +4706,11 @@ class CandidateOverviewSession extends RefCounted {
   private passesOn(
     graph: GraphFacts = this.connection.pieceGraph,
   ): (piece: PieceOverview) => boolean {
-    const { filter, scoreRange } = this.connection.state.zettaTraceState;
-    const tree = filter.value;
-    const range = scoreRange.value;
-    const known = semanticsKnown(this.pieces.map(pieceOverviewSubject));
-    return (piece) =>
-      withinScoreRange(piece.bestScore, range) &&
-      subjectPasses(pieceOverviewSubject(piece), tree, known, graph);
+    return piecesPassing(
+      this.pieces,
+      currentCandidateFilter(this.connection.state.zettaTraceState),
+      graph,
+    );
   }
 
   /** Fetch the piece graph the filter reads around every scored piece. */

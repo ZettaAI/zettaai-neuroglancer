@@ -125,6 +125,7 @@ const TRACE_MIN_SCORE_KEY = "minScore";
 const TRACE_CENTRE_KEY = "centreOnCandidate";
 const TRACE_ZOOM_KEY = "zoomOnCandidate";
 const TRACE_KEEP_SPLIT_PARTS_KEY = "keepSplitParts";
+const TRACE_SHOW_SPLIT_POINTS_KEY = "showSplitPoints";
 const TRACE_SOURCE_MIN_VOXELS_KEY = "sourceMinVoxels";
 const TRACE_SOURCE_CLASS_KEY = "sourceClass";
 const TRACE_SOURCE_FRACTION_KEY = "sourceMinFraction";
@@ -211,6 +212,8 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // Keep the parts of a segment cut during the trace on screen, rather than
   // only the seed and the candidate.
   keepSplitParts = new WatchableValue<boolean>(false);
+  // Draw split error points on the seed's and the candidate's segments.
+  showSplitPoints = new WatchableValue<boolean>(false);
 
   // Fires when a merge or a split has rewritten roots. The seed and the
   // candidate are identified by piece from here on: their root ids have just
@@ -232,6 +235,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.centreOnCandidate.changed.add(reemit));
     this.registerDisposer(this.zoomOnCandidate.changed.add(reemit));
     this.registerDisposer(this.keepSplitParts.changed.add(reemit));
+    this.registerDisposer(this.showSplitPoints.changed.add(reemit));
     this.registerDisposer(
       this.filter.changed.add(() => {
         this.minPieceVoxels.value = minCandidateVoxels(this.filter.value);
@@ -306,6 +310,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       [TRACE_CENTRE_KEY]: this.centreOnCandidate.value ? undefined : false,
       [TRACE_ZOOM_KEY]: this.zoomOnCandidate.value ? undefined : false,
       [TRACE_KEEP_SPLIT_PARTS_KEY]: this.keepSplitParts.value || undefined,
+      [TRACE_SHOW_SPLIT_POINTS_KEY]: this.showSplitPoints.value || undefined,
       [TRACE_FILTER_KEY]:
         this.filter.value.children.length > 0
           ? serializeFilterTree(this.filter.value)
@@ -338,6 +343,12 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     verifyOptionalObjectProperty(x, TRACE_CENTRE_KEY, (value) => {
       this.centreOnCandidate.value = verifyBoolean(value);
     });
+    this.showSplitPoints.value =
+      verifyOptionalObjectProperty(
+        x,
+        TRACE_SHOW_SPLIT_POINTS_KEY,
+        verifyBoolean,
+      ) ?? false;
     this.keepSplitParts.value =
       verifyOptionalObjectProperty(
         x,

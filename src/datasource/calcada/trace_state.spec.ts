@@ -299,3 +299,14 @@ describe("ZettaTraceState keepSplitParts", () => {
     expect(restored.keepSplitParts.value).toBe(true);
   });
 });
+
+describe("ZettaTraceState showSplitPoints", () => {
+  it("is off by default and kept in the link when on", () => {
+    const state = new ZettaTraceState();
+    expect(state.showSplitPoints.value).toBe(false);
+    state.showSplitPoints.value = true;
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.showSplitPoints.value).toBe(true);
+  });
+});
