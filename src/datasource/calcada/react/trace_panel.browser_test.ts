@@ -360,6 +360,25 @@ describe("CalcadaTracePanel", () => {
     );
   });
 
+  it("shows split error points while tracing when the box is ticked", async () => {
+    const connection = await makeConnection();
+    await mountPanel(connection);
+    const box = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLLabelElement>(".calcada-trace-panel-check"),
+      ].find((label) => label.textContent?.includes("split error points"));
+      expect(found).toBeDefined();
+      return found!.querySelector<HTMLInputElement>("input")!;
+    });
+    expect(box.checked).toBe(false);
+    box.click();
+    await vi.waitFor(() =>
+      expect(connection.state.zettaTraceState.showSplitPoints.value).toBe(
+        true,
+      ),
+    );
+  });
+
   it("starts a trace from the tab", async () => {
     await mountPanel(await makeConnection({ busy: false }));
     calls = [];

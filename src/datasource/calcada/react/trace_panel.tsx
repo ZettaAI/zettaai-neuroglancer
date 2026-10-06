@@ -292,6 +292,7 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const keepSplitParts = useWatchable(traceState.keepSplitParts);
+  const showSplitPoints = useWatchable(traceState.showSplitPoints);
   const busy = traceSession.isBusy;
   const verdictDisabled = busy || traceSession.current === undefined;
   return (
@@ -397,6 +398,16 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           }}
         />
         Keep the parts of a split visible
+      </label>
+      <label className="calcada-trace-panel-check">
+        <input
+          type="checkbox"
+          checked={showSplitPoints}
+          onChange={(event) => {
+            traceState.showSplitPoints.value = event.target.checked;
+          }}
+        />
+        Show split error points
       </label>
 
       <div className="calcada-trace-panel-buttons">
