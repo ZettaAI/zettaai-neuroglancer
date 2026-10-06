@@ -16,7 +16,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [dev, main]
+    branches: [main]
 
 permissions:
   contents: read
@@ -36,8 +36,7 @@ jobs:
       services: ${{ steps.targets.outputs.services }}
     env:
       BRANCH_SERVICES: |
-        dev: neuroglancer-dev
-        main: neuroglancer
+        main: neuroglancer neuroglancer-dev
     steps:
       - id: targets
         run: |
