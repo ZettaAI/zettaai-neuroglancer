@@ -373,9 +373,7 @@ describe("CalcadaTracePanel", () => {
     expect(box.checked).toBe(false);
     box.click();
     await vi.waitFor(() =>
-      expect(connection.state.zettaTraceState.showSplitPoints.value).toBe(
-        true,
-      ),
+      expect(connection.state.zettaTraceState.showSplitPoints.value).toBe(true),
     );
   });
 

@@ -1,7 +1,7 @@
 name: Claude Auto Review with Tracking
 on:
   pull_request:
-    branches: [dev] # only run for PRs whose target (base) branch is dev
+    branches: [main]
     types: [opened, synchronize, ready_for_review, reopened]
 jobs:
   review:

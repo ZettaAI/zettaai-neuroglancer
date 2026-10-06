@@ -2,15 +2,16 @@
 
 The bundle is served by Cloud Run in `zetta-research` / `us-east1`.
 
-| Branch | Cloud Run service     | URL                                        |
-| ------ | --------------------- | ------------------------------------------ |
-| `main` | `neuroglancer`        | https://neuroglancer.research.zetta.ai     |
-| `dev`  | `neuroglancer-dev`    | https://neuroglancer-dev.research.zetta.ai |
-| any PR | `neuroglancer-pr-<N>` | posted as a PR comment                     |
+| Trigger                | Cloud Run service     | URL                                        |
+| ---------------------- | --------------------- | ------------------------------------------ |
+| push to `main`         | `neuroglancer`        | https://neuroglancer.research.zetta.ai     |
+| push to `main`         | `neuroglancer-dev`    | https://neuroglancer-dev.research.zetta.ai |
+| `deploy-preview` label | `neuroglancer-pr-<N>` | posted as a PR comment                     |
 
 ## How a deploy runs
 
-`.github/workflows/deploy-cloud-run.yml` fires on a push to `dev` or `main`. It reads the
+`.github/workflows/deploy-cloud-run.yml` fires on a push to `main` and deploys every
+service `BRANCH_SERVICES` maps the branch to. For each one it reads the
 `NEUROGLANCER_*` env vars off the live Cloud Run service, passes each one to
 `docker buildx build` as a `--build-arg`, pushes the image to Artifact Registry, and runs
 `gcloud run deploy`.

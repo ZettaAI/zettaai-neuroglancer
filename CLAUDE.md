@@ -45,7 +45,7 @@ npm run e2e / npm run perf  # Playwright; rebuilds the bundle + regenerates fixt
   touching editing code paths.
 - e2e/perf fixtures require `uv` (`testdata/editing/generate.py`, served via fake-gcs —
   deterministic, no live `gs://` access).
-- Deploys are Cloud Run: `dev` → `neuroglancer-dev`, `main` → `neuroglancer`,
+- Deploys are Cloud Run: `main` → `neuroglancer` and `neuroglancer-dev`,
   one service per PR behind the `deploy-preview` label. See `docs/DEPLOY.md`.
 
 ## Imports and TypeScript
@@ -205,5 +205,5 @@ harness/`). Read `docs/TESTING.md` before writing tests.
 - Commits: Conventional Commits with the Linear ticket — `type(scope): subject (TM-XXX)`.
   Common scopes: `editing`, `calcada`, `chunk_manager`.
 - Branches: `fix/tm-xxx`, `feat/tm-xxx`.
-- PRs target `dev`, not `main`. `dev` → `main` promotion is a separate step.
+- PRs target `main`. A merge deploys both `neuroglancer` and `neuroglancer-dev`.
 - Never rewrite pushed commits — add follow-up commits instead of amend/rebase/force-push.
