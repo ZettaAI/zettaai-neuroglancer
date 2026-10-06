@@ -180,6 +180,7 @@ import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay
 import {
   currentCandidateFilter,
   piecesPassing,
+  splitPointsTarget,
   TraceSplitPoints,
 } from "#src/datasource/calcada/trace_split_points.js";
 import {
@@ -2931,9 +2932,17 @@ class ZettaTraceSession extends RefCounted {
       state.aiming.changed.add(() => {
         if (state.aiming.value) {
           this.bindAiming();
+          this.showSplitPoints();
         } else {
           this.aimBindings?.dispose();
           this.aimBindings = undefined;
+          // Placing the sphere puts the sights down a moment before the
+          // trace starts; only an aim that ends in nothing takes its points.
+          void Promise.resolve().then(() => {
+            if (this.splitPointsTarget() === "none" && !state.active.value) {
+              this.splitPoints.clear();
+            }
+          });
         }
       }),
     );
@@ -3053,20 +3062,41 @@ class ZettaTraceSession extends RefCounted {
     );
   }
 
+  private splitPointsTarget() {
+    return splitPointsTarget({
+      showSplitPoints: this.state.showSplitPoints.value,
+      tracing: this.state.active.value,
+      aiming: this.state.aiming.value,
+      detectionActive: this.connection.state.overviewState.active.value,
+    });
+  }
+
   private showSplitPoints(
     seedRoot = this.state.seedRoot.value,
     candidateRoot = this.current?.partnerRootId,
   ) {
-    if (
-      !this.state.showSplitPoints.value ||
-      !this.state.active.value ||
-      seedRoot === undefined
-    ) {
+    const target = this.splitPointsTarget();
+    if (target === "segment") {
+      void this.showSegmentPoints();
       return;
     }
+    if (target !== "trace" || seedRoot === undefined) return;
     void this.splitPoints.show(
       candidateRoot === undefined ? [seedRoot] : [seedRoot, candidateRoot],
     );
+  }
+
+  // While aiming there is no seed yet: the sphere goes on the selected
+  // segment, so that is the segment whose points are shown.
+  private async showSegmentPoints() {
+    let root: bigint | undefined;
+    try {
+      root = await this.segmentSession.root();
+    } catch {
+      return;
+    }
+    if (root === undefined || this.splitPointsTarget() !== "segment") return;
+    await this.splitPoints.show([root]);
   }
 
   /** T: put the sights down, or start a trace on the selected segment. */
@@ -3150,6 +3180,11 @@ class ZettaTraceSession extends RefCounted {
 
   enter() {
     if (this.bindings !== undefined) return;
+    // Detection hands over what it already scored, so its points need not
+    // be asked for again.
+    const scored = this.connection.overviewSession?.scored;
+    if (scored !== undefined)
+      this.splitPoints.prime(scored.root, scored.pieces);
     // Snapshot before the first mutation: restoring what the user was looking
     // at is this mode's exit contract.
     this.savedVisible = [...this.segmentsState.visibleSegments];
@@ -4769,11 +4804,23 @@ class CandidateOverviewSession extends RefCounted {
   private exit() {
     this.bindings?.dispose();
     this.bindings = undefined;
-    this.forget();
+    // A trace that draws the same points replaces these when it is ready;
+    // clearing them first made them blink as the sphere went down.
+    const { zettaTraceState } = this.connection.state;
+    this.forget({
+      keepPoints:
+        zettaTraceState.active.value && zettaTraceState.showSplitPoints.value,
+    });
     this.setStatus("");
   }
 
-  private forget() {
+  /** The segment scored last, for a trace taking over to draw at once. */
+  get scored(): { root: bigint; pieces: PieceOverview[] } | undefined {
+    const { targetRoot, pieces } = this;
+    return targetRoot === undefined ? undefined : { root: targetRoot, pieces };
+  }
+
+  private forget({ keepPoints = false } = {}) {
     ++this.fetchToken;
     this.targetRoot = undefined;
     this.pieces = [];
@@ -4781,7 +4828,7 @@ class CandidateOverviewSession extends RefCounted {
     this.ranked = [];
     this.focusIndex = -1;
     this.clearColors();
-    this.connection.setSplitErrorPoints([]);
+    if (!keepPoints) this.connection.setSplitErrorPoints([]);
   }
 
   private setStatus(text: string) {
