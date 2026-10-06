@@ -112,17 +112,24 @@ export class TraceSplitPoints {
     }
   }
 
+  /** Scores already in hand — detection's, as a trace takes over from it. */
+  prime(root: bigint, pieces: PieceOverview[]) {
+    this.scored.set(root, pieces);
+  }
+
   /** A decision changed this segment's scores; one on screen is scored again. */
   async forget(root: bigint) {
     this.scored.delete(root);
     if (this.roots.includes(root)) await this.refresh();
   }
 
+  /** Points it never drew may be detection's, and stay. */
   clear() {
     ++this.token;
+    const drew = this.roots.length > 0;
     this.roots = [];
     this.scored.clear();
-    this.source.draw([]);
+    if (drew) this.source.draw([]);
   }
 
   private async scoresOf(root: bigint): Promise<PieceOverview[]> {
@@ -132,4 +139,25 @@ export class TraceSplitPoints {
     this.scored.set(root, pieces);
     return pieces;
   }
+}
+
+/**
+ * Whose points to draw: the seed's and the candidate's while tracing, the
+ * selected segment's while aiming — unless detection is already drawing them.
+ */
+export function splitPointsTarget({
+  showSplitPoints,
+  tracing,
+  aiming,
+  detectionActive,
+}: {
+  showSplitPoints: boolean;
+  tracing: boolean;
+  aiming: boolean;
+  detectionActive: boolean;
+}): "trace" | "segment" | "none" {
+  if (!showSplitPoints) return "none";
+  if (tracing) return "trace";
+  if (aiming && !detectionActive) return "segment";
+  return "none";
 }

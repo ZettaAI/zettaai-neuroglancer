@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
 import type { SplitErrorPoint } from "#src/datasource/calcada/split_error_points.js";
-import { TraceSplitPoints } from "#src/datasource/calcada/trace_split_points.js";
+import {
+  splitPointsTarget,
+  TraceSplitPoints,
+} from "#src/datasource/calcada/trace_split_points.js";
 
 const classes = {
   perikaryon: 0,
@@ -90,11 +93,55 @@ describe("TraceSplitPoints", () => {
     expect(fetched).toEqual([10n, 10n]);
   });
 
+  it("takes scores already in hand instead of asking for them", async () => {
+    const { points, fetched, ids } = harness(overviews);
+    points.prime(10n, [piece(5n, 0.8)]);
+    await points.show([10n, 20n]);
+    expect(fetched).toEqual([20n]);
+    expect(ids()).toEqual([5n, 3n]);
+  });
+
+  it("leaves the points alone when clearing what it never drew", () => {
+    const { points, ids } = harness(overviews);
+    points.clear();
+    expect(ids()).toBeUndefined();
+  });
+
   it("draws nothing once cleared, even if a score arrives late", async () => {
     const { points, ids } = harness(overviews);
     const pending = points.show([10n]);
     points.clear();
     await pending;
     expect(ids()).toEqual([]);
+  });
+});
+
+describe("splitPointsTarget", () => {
+  const base = {
+    showSplitPoints: true,
+    tracing: false,
+    aiming: false,
+    detectionActive: false,
+  };
+
+  it("draws the seed and candidate while tracing", () => {
+    expect(splitPointsTarget({ ...base, tracing: true })).toBe("trace");
+  });
+
+  it("draws the selected segment while aiming, before any seed", () => {
+    expect(splitPointsTarget({ ...base, aiming: true })).toBe("segment");
+  });
+
+  it("leaves aiming to detection when detection is drawing them", () => {
+    expect(
+      splitPointsTarget({ ...base, aiming: true, detectionActive: true }),
+    ).toBe("none");
+  });
+
+  it("draws nothing with the box unticked or outside the trace", () => {
+    expect(
+      splitPointsTarget({ ...base, showSplitPoints: false, tracing: true }),
+    ).toBe("none");
+    expect(splitPointsTarget(base)).toBe("none");
   });
 });
