@@ -70,6 +70,8 @@ interface Harness {
   setOverlay: (bytes: number[]) => void;
   /** Make the next `n` baseline reads reject, as a stalled fetch would. */
   failBaselineReads: (n: number) => void;
+  /** This session's own baseline — the saved/committed bytes. */
+  setEditBaseline: (bytes: number[]) => void;
   errors: string[];
   baselineReadCount: () => number;
   dispose: () => void;
@@ -79,6 +81,7 @@ function makeHarness(): Harness {
   const handlers: ((payload: { coord: OverlayCoord }) => void)[] = [];
   let overlay = new Uint8Array(VOLUME);
   const baseline = new Uint8Array(VOLUME);
+  let editBaseline = new Uint8Array(VOLUME);
   let failuresRemaining = 0;
   let baselineReads = 0;
   const errors: string[] = [];
@@ -134,7 +137,16 @@ function makeHarness(): Harness {
     return buffer(baseline);
   };
 
-  const mirror = new PatchMirror(session, LAYER, store, logger, readBaseline);
+  const readEditBaseline = async () => buffer(editBaseline);
+
+  const mirror = new PatchMirror(
+    session,
+    LAYER,
+    store,
+    logger,
+    readBaseline,
+    readEditBaseline,
+  );
 
   return {
     mirror,
@@ -157,6 +169,9 @@ function makeHarness(): Harness {
     },
     failBaselineReads: (n) => {
       failuresRemaining = n;
+    },
+    setEditBaseline: (bytes) => {
+      editBaseline = Uint8Array.from(bytes);
     },
     errors,
     baselineReadCount: () => baselineReads,
@@ -256,5 +271,59 @@ describe("PatchMirror chunk resync", () => {
 
     expect(mirroredValues(harness.source)).toEqual([5, 0, 0, 0]);
     expect(harness.errors).toEqual([]);
+  });
+});
+
+/**
+ * A mid-session refetch replaces the datasource bytes the mask was derived
+ * from, so the mask has to be re-derived against what storage actually holds
+ * or the two halves of the composite come from different versions.
+ */
+describe("PatchMirror resync after a refetch", () => {
+  let harness: Harness;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    harness = makeHarness();
+  });
+
+  afterEach(() => {
+    harness.dispose();
+    vi.useRealTimers();
+  });
+
+  it("clears the mask for paint this session has already saved", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit({ x0: 0, y0: 0, x1: 0, y1: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+
+    // The save landed, so the edit baseline now carries the painted voxel and
+    // the refetched chunk will too: nothing is left for the patch to add.
+    harness.setEditBaseline([7, 0, 0, 0]);
+    await harness.mirror.resyncAfterRefetch([COORD]);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mirroredMask(harness.source)).toEqual([0, 0, 0, 0]);
+  });
+
+  /**
+   * The reason this diffs against the edit baseline and not against the
+   * datasource: a voxel nobody here painted must fall OUT of the mask, so the
+   * chunk that arrives — a colleague's work included — shows through it.
+   * Diffing against the incoming bytes would mark it and paint this session's
+   * untouched baseline over them, which is the bug this exists to prevent.
+   */
+  it("leaves a voxel this session never painted out of the mask", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit({ x0: 0, y0: 0, x1: 0, y1: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Unsaved paint, so the edit baseline is still the session's start.
+    await harness.mirror.resyncAfterRefetch([COORD]);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+    expect(mirroredValues(harness.source)).toEqual([7, 0, 0, 0]);
   });
 });

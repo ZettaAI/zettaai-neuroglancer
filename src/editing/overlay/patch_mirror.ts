@@ -95,6 +95,18 @@ export class PatchMirror extends RefCounted {
     private readonly store: LocalPatchStore,
     private readonly logger: NgLogger,
     private readonly readBaseline: BaselineChunkReader,
+    /**
+     * This session's own baseline — the saved/committed bytes it started from.
+     *
+     * Only {@link resyncAfterRefetch} uses it, and the difference from
+     * {@link readBaseline} is the whole point. Diffed against the overlay it
+     * yields "what THIS SESSION changed", which is the right mask exactly when
+     * the datasource is about to be refetched: voxels nobody here painted fall
+     * out of the mask and the refetched chunk shows through, colleague's work
+     * included. Diffing against the datasource instead would mark every voxel
+     * a colleague moved and paint this session's untouched baseline over it.
+     */
+    private readonly readEditBaseline: BaselineChunkReader,
   ) {
     super();
     const unsubscribe = this.session.dirty.on("chunk-changed", (payload) => {
@@ -122,6 +134,30 @@ export class PatchMirror extends RefCounted {
   }
 
   /**
+   * Re-derive the mask for these chunks as "what this session changed", for a
+   * caller that is refetching their datasource chunks.
+   *
+   * The bytes the ordinary mask was derived from are on their way out, and
+   * leaving it alone leaves the composite built from two versions: the patch
+   * keeps painting this session's older values over the newer ones that come
+   * back, and a colleague's work reads as lost until the page is reloaded.
+   * Against the edit baseline the mask instead marks only this session's own
+   * edits, so everything else renders from the chunk that arrives.
+   *
+   * Always a full-chunk scan — a sub-box hint describes a paint write, and
+   * this is not one. Chunks sync one at a time through the same per-chunk
+   * serialization as a commit, so a resync and a stroke cannot race each
+   * other's fuse.
+   */
+  async resyncAfterRefetch(coords: readonly OverlayCoord[]): Promise<void> {
+    for (const coord of coords) {
+      if (this.wasDisposed) return;
+      if (coord.layerId !== this.layerId) continue;
+      await this.driveChunk(coord, undefined, "edit-baseline");
+    }
+  }
+
+  /**
    * Serialize and repair the sync passes for one chunk.
    *
    * A bounded (`scanBox`) fuse only mirrors the voxels of the commit that
@@ -142,6 +178,7 @@ export class PatchMirror extends RefCounted {
   private async driveChunk(
     coord: OverlayCoord,
     scanBox: ChunkVoxelBox | undefined,
+    readFrom: "datasource" | "edit-baseline" = "datasource",
   ): Promise<void> {
     const chunkKey = keyOfCoord(coord);
     const state = this.getSyncState(chunkKey);
@@ -162,7 +199,7 @@ export class PatchMirror extends RefCounted {
       let box = state.needsResync ? undefined : scanBox;
       for (;;) {
         state.needsResync = false;
-        const ok = await this.syncChunk(coord, box);
+        const ok = await this.syncChunk(coord, box, readFrom);
         if (!ok) {
           state.needsResync = true;
           this.scheduleRetry(coord, chunkKey, state);
@@ -240,6 +277,7 @@ export class PatchMirror extends RefCounted {
   private async syncChunk(
     coord: OverlayCoord,
     scanBox: ChunkVoxelBox | undefined,
+    readFrom: "datasource" | "edit-baseline" = "datasource",
   ): Promise<boolean> {
     const chunkKey = keyOfCoord(coord);
     try {
@@ -256,7 +294,9 @@ export class PatchMirror extends RefCounted {
       let t = prof ? performance.now() : 0;
       const [overlayBuffer, baselineBuffer] = await Promise.all([
         this.session.overlay.read(coord),
-        this.readBaseline(coord),
+        readFrom === "edit-baseline"
+          ? this.readEditBaseline(coord)
+          : this.readBaseline(coord),
       ]);
       if (prof) {
         paintProfiler.record("5.mirror.read(io)", performance.now() - t);

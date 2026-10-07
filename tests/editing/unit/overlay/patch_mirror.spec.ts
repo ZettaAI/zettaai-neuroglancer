@@ -171,6 +171,7 @@ describe("PatchMirror", () => {
       store,
       logger.asNgLogger(),
       readBaseline,
+      readBaseline,
     );
 
     state.emitChunkChanged({
@@ -190,6 +191,7 @@ describe("PatchMirror", () => {
       TARGET_LAYER,
       store,
       logger.asNgLogger(),
+      readBaseline,
       readBaseline,
     );
 
@@ -229,6 +231,7 @@ describe("PatchMirror", () => {
       store,
       logger.asNgLogger(),
       readBaseline,
+      readBaseline,
     );
 
     const coord: OverlayCoord = {
@@ -263,6 +266,7 @@ describe("PatchMirror", () => {
       store,
       logger.asNgLogger(),
       readBaseline,
+      readBaseline,
     );
 
     // No overlay bytes registered — the fake's read() rejects.
@@ -287,6 +291,7 @@ describe("PatchMirror", () => {
       TARGET_LAYER,
       store,
       logger.asNgLogger(),
+      readBaseline,
       readBaseline,
     );
     mirror.dispose();
