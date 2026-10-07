@@ -129,6 +129,7 @@ import type {
   StaleBaselineScan,
 } from "#src/editing/reconcile/stale_baseline_scan.js";
 import { scanForStaleBaselines } from "#src/editing/reconcile/stale_baseline_scan.js";
+import type { ClashWinner } from "#src/editing/reconcile/three_way_merge.js";
 import { mergeOwnedRegion } from "#src/editing/reconcile/three_way_merge.js";
 import {
   checkLayerCompat,
@@ -1999,6 +2000,7 @@ export class EditSessionHost extends RefCounted {
    */
   async mergeConflicts(
     scan: StaleBaselineScan,
+    clashWinner: ClashWinner = "theirs",
     signal?: AbortSignal,
   ): Promise<MergeConflictsOutcome> {
     const session = this.activeSession.value;
@@ -2065,6 +2067,7 @@ export class EditSessionHost extends RefCounted {
           slot.data,
           remote.asView(),
           write.owned,
+          clashWinner,
         );
         // A collision costs only the voxels it covers; the merge resolved them
         // to the remote already. The owned box is never handed back wholesale
@@ -2138,9 +2141,21 @@ export class EditSessionHost extends RefCounted {
   reloadLoadedChunks(): number {
     const session = this.activeSession.value;
     if (session === undefined) return 0;
+    // Chunks this session has painted are left resident, patch and all. See
+    // `stale_patch_selection.ts` for why evicting under a patch, and why
+    // dropping the patch instead, each produced a visible regression.
     return this.chunkSource.invalidateLoadedChunks(
-      writableScopes(session, (layerId) => this.isLayerWritable(layerId)),
+      writableScopes(session, (layerId) => this.isLayerWritable(layerId)).map(
+        (scope) => ({ ...scope, keep: this.paintedChunkKeys(scope.layerId) }),
+      ),
     );
+  }
+
+  /** Cache keys of every chunk this session holds a patch for, by layer. */
+  private paintedChunkKeys(layerId: LayerId): ReadonlySet<string> {
+    const entry = this.perLayer.get(layerId);
+    if (entry === undefined) return new Set();
+    return new Set(entry.patchStore.source.chunks.keys());
   }
 
   /**

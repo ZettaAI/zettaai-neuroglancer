@@ -18,7 +18,13 @@
  *   only I changed it        -> mine
  *   only they changed it     -> theirs
  *   both, to the same value  -> that value
- *   both, to different values-> theirs, counted as a COLLISION
+ *   both, to different values-> the caller's `clashWinner`, counted
+ *
+ * Note what the second line costs the answer that says "take mine": a voxel
+ * only THEY changed goes to them even then. That is deliberate. The bytes this
+ * session holds for a voxel nobody here painted are just the baseline it
+ * loaded, so letting them win would resurrect work a colleague deliberately
+ * deleted — an erase, most visibly — on the strength of a stale read.
  *
  * A collision costs only the voxels it covers. Handing the whole owned box
  * back to the remote the moment one voxel collided — which is what this used
@@ -46,6 +52,17 @@
 
 import type { ChunkOwnedGeometry } from "#src/editing/region/owned_chunk_write.js";
 
+/**
+ * Which side takes a voxel both sides changed, to different values.
+ *
+ * This is the ONLY thing the two combining answers disagree about. Everything
+ * else — an edit only one side made, an erase only one side made, an agreement
+ * — resolves the same way whoever asked. In particular a voxel the user never
+ * touched always goes to the remote, which is what makes "mine" safe to offer:
+ * it wins the user's edits, never the baseline they happened to load.
+ */
+export type ClashWinner = "mine" | "theirs";
+
 export interface ThreeWayMerge {
   /**
    * Full-chunk bytes: a copy of mine, with the owned sub-box replaced by the
@@ -56,9 +73,9 @@ export interface ThreeWayMerge {
   /** Voxels the remote changed and we did not — their work, taken in. */
   readonly acceptedFromRemote: number;
   /**
-   * Voxels both sides changed, to different values. These are resolved to the
-   * remote's value, so they are already in `merged`; the count is what lets
-   * the save report the user's loss, which PRODUCT.md's "never lose the
+   * Voxels both sides changed, to different values. Already resolved in
+   * `merged`, to whichever side the caller named; the count is what lets the
+   * save say whose work was replaced, which PRODUCT.md's "never lose the
    * user's input" demands we say out loud when we cannot honour it.
    */
   readonly conflicted: number;
@@ -76,6 +93,7 @@ export function mergeOwnedRegion(
   mine: ArrayBufferView,
   remote: ArrayBufferView,
   owned: ChunkOwnedGeometry,
+  clashWinner: ClashWinner = "theirs",
 ): ThreeWayMerge {
   const baselineBytes = asBytes(baseline);
   const mineBytes = asBytes(mine);
@@ -113,14 +131,18 @@ export function mergeOwnedRegion(
             voxelOffset,
             voxelBytes,
           );
-          if (outcome !== "keep-mine") {
-            merged.set(
-              remoteBytes.subarray(voxelOffset, voxelOffset + voxelBytes),
-              voxelOffset,
-            );
-            if (outcome === "conflict") conflicted++;
-            else acceptedFromRemote++;
+          if (outcome === "conflict") {
+            conflicted++;
+            if (clashWinner === "mine") continue; // `merged` already holds mine
+          } else if (outcome === "keep-mine") {
+            continue;
+          } else {
+            acceptedFromRemote++;
           }
+          merged.set(
+            remoteBytes.subarray(voxelOffset, voxelOffset + voxelBytes),
+            voxelOffset,
+          );
         }
       }
     }

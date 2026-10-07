@@ -123,6 +123,49 @@ describe("mergeOwnedRegion", () => {
     expect(result.acceptedFromRemote).toBe(0);
   });
 
+  it("keeps my voxel when the caller asks mine to win a disagreement", () => {
+    const baseline = u8(1);
+    const mine = u8(1);
+    mine[voxelIndex(0, 0, 0)] = 9;
+    const remote = u8(1);
+    remote[voxelIndex(0, 0, 0)] = 7;
+
+    const result = mergeOwnedRegion(
+      baseline,
+      mine,
+      remote,
+      halfOwned(),
+      "mine",
+    );
+
+    expect(result.merged[voxelIndex(0, 0, 0)]).toBe(9);
+    expect(result.conflicted).toBe(1);
+  });
+
+  /**
+   * The case that makes "mine wins" safe to offer at all, and the reason Take
+   * mine could not simply write this session's bytes: a voxel the user never
+   * painted is not theirs to win. Their erase has to survive.
+   */
+  it("still yields an untouched voxel to the remote when mine wins clashes", () => {
+    const baseline = u8(5); // both loaded a labelled voxel here
+    const mine = u8(5); // the user never touched it
+    const remote = u8(5);
+    remote[voxelIndex(1, 0, 0)] = 0; // someone else erased it
+
+    const result = mergeOwnedRegion(
+      baseline,
+      mine,
+      remote,
+      halfOwned(),
+      "mine",
+    );
+
+    expect(result.merged[voxelIndex(1, 0, 0)]).toBe(0);
+    expect(result.acceptedFromRemote).toBe(1);
+    expect(result.conflicted).toBe(0);
+  });
+
   /**
    * The acceptance scenario: two tracers paint overlapping strokes, and both
    * strokes have to survive the merge. Only the shared voxels go to the

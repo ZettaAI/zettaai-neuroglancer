@@ -88,12 +88,15 @@ function ConfirmDialogBody({
   useModalDialog({ active: true, containerRef: dialogRef, onClose: onCancel });
 
   // `useModalDialog` autofocuses the first control, which is normally the safe
-  // Cancel. With no Cancel rendered the first control is a real answer — and
-  // with `secondaryActions` the leftmost one can be destructive — so move
-  // focus to the primary instead. Declared after `useModalDialog` so this runs
-  // after its autofocus rather than being undone by it.
+  // Cancel. With no Cancel rendered every control is a real answer — one of
+  // them destructive — so focus the dialog itself instead: the modal still
+  // traps focus and takes Escape, but Enter answers nothing the user did not
+  // click. Focusing the primary was no better than focusing the first button;
+  // it only moved which unchosen answer a stray Enter would commit. Declared
+  // after `useModalDialog` so this runs after its autofocus rather than being
+  // undone by it.
   useEffect(() => {
-    if (hideCancelButton) confirmRef.current?.focus();
+    if (hideCancelButton) dialogRef.current?.focus();
   }, [hideCancelButton]);
 
   const confirmClass = [

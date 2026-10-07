@@ -146,16 +146,49 @@ describe("SaveTracker — refused saves", () => {
     expect(host.policies).toEqual(["refuse"]);
   });
 
-  it("re-saves with the overwrite policy when the user confirms", async () => {
+  /**
+   * Take mine reconciles like Combine does, and differs from it in one thing:
+   * who wins a voxel both sides changed. It must NOT write this session's bytes
+   * wholesale — those carry the baseline for every voxel the user never
+   * painted, so a wholesale write resurrects a colleague's deleted work.
+   */
+  it("reconciles with mine winning clashes when the user takes theirs over", async () => {
     const host = fakeHost({ failFirstWithConflict: true, automerge: false });
+    const clashWinners: unknown[] = [];
+    const mergeConflicts = vi.fn(async (_scan: unknown, winner: unknown) => {
+      clashWinners.push(winner);
+      return mergeOutcome({ conflicted: 4 });
+    });
+    (host as unknown as { mergeConflicts: unknown }).mergeConflicts =
+      mergeConflicts;
     const session = fakeSession();
     const tracker = new SaveTracker(host, session);
     await tracker.startSave(host, session);
 
     await tracker.overwriteConflict(host, session);
 
-    expect(host.policies).toEqual(["refuse", "overwrite"]);
+    expect(clashWinners).toEqual(["mine"]);
+    // The payload already incorporates the remote, so the save that follows
+    // skips the scan — the same contract Combine's save carries.
+    expect(host.policies).toEqual(["refuse", "just-merged"]);
     expect(tracker.pendingConflict()).toBeUndefined();
+  });
+
+  it("reports the voxels Take mine took from the other side", async () => {
+    const host = fakeHost({ failFirstWithConflict: true, automerge: false });
+    (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
+      async () => mergeOutcome({ conflicted: 4 }),
+    );
+    const session = fakeSession();
+    const tracker = new SaveTracker(host, session);
+    await tracker.startSave(host, session);
+
+    await tracker.overwriteConflict(host, session);
+
+    expect(tracker.overriddenVoxelCount()).toBe(4);
+    // Counted apart from a combine's loss: one is the user's work replaced,
+    // the other is the user replacing someone else's.
+    expect(tracker.conflictedVoxelCount()).toBe(0);
   });
 
   it("ignores an overwrite with no conflict outstanding", async () => {
@@ -199,6 +232,9 @@ describe("SaveTracker — refused saves", () => {
 
   it("takes a recoverable draft before overwriting", async () => {
     const host = fakeHost({ failFirstWithConflict: true, automerge: false });
+    (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
+      async () => mergeOutcome(),
+    );
     const order: string[] = [];
     (host as unknown as { snapshotDraft: unknown }).snapshotDraft = vi.fn(
       async (reason: string) => {
@@ -224,7 +260,9 @@ describe("SaveTracker — refused saves", () => {
   });
 
   it("refuses to overwrite when the draft cannot be written", async () => {
-    const host = fakeHost({ failFirstWithConflict: true });
+    // Automerge off so the conflict reaches the dialog; the draft then fails
+    // before anything reconciles, which is what this is about.
+    const host = fakeHost({ failFirstWithConflict: true, automerge: false });
     (host as unknown as { snapshotDraft: unknown }).snapshotDraft = vi.fn(
       async () => {
         throw new Error("quota exceeded");
@@ -618,6 +656,9 @@ describe("SaveTracker — refused saves", () => {
    */
   it("publishes the cleared conflict even when the save cannot start", async () => {
     const host = fakeHost({ failFirstWithConflict: true, automerge: false });
+    (host as unknown as { mergeConflicts: unknown }).mergeConflicts = vi.fn(
+      async () => mergeOutcome(),
+    );
     let releaseSave: () => void = () => {};
     const saving = new Promise<void>((resolve) => {
       releaseSave = resolve;

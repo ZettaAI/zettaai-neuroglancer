@@ -23,9 +23,9 @@
  *
  * Re-planning is also the safer half of the trade. The user's answer is about
  * the conflict they were SHOWN; by the time they answer, the remote may have
- * moved again. Re-scanning on the retry means "overwrite" overwrites what is
- * actually there now, and a conflict that appeared in the meantime is caught
- * rather than silently included in the blast radius.
+ * moved again. Re-planning means the answer is applied against what is actually
+ * there now, and a conflict that appeared in the meantime is caught rather than
+ * silently included in the blast radius.
  */
 
 import type { StaleBaselineScan } from "#src/editing/reconcile/stale_baseline_scan.js";
@@ -42,27 +42,22 @@ export type SaveConflictPolicy =
   /** Default. Scan first; refuse the save if anything diverged or is unproven. */
   | "refuse"
   /**
-   * Skip the scan and write regardless — the user was shown the conflict and
-   * chose to overwrite. Only ever set from an explicit user decision, never as
-   * a fallback: painting layers have no object versioning, so what this
-   * overwrites cannot be recovered.
-   */
-  | "overwrite"
-  /**
-   * Skip the scan because the overlay was just merged against the remote, so
-   * the payload already incorporates it and a scan would only re-report the
-   * divergence the merge resolved.
+   * Skip the scan because the overlay was just reconciled against the remote,
+   * so the payload already incorporates it and a scan would only re-report the
+   * divergence the reconcile resolved.
    *
-   * Distinct from `"overwrite"` on purpose. They behave alike — neither
-   * scans — but they mean opposite things: one knowingly destroys work, the
-   * other has just preserved it. Keeping them apart stops the draft-taking
-   * and the messaging that hang off an overwrite from ever attaching to a
-   * merge, and keeps the intent readable at the call site.
+   * There used to be an `"overwrite"` beside this, which skipped the scan and
+   * wrote this session's bytes wholesale. It is gone because wholesale was the
+   * wrong unit: the owned box it sent carried the session's start-up baseline
+   * for every voxel the user never painted, so answering a conflict with it
+   * resurrected work a colleague had deleted in the meantime. Both answers
+   * that keep the user's work now reconcile, differing only in who wins a
+   * voxel both sides changed, and both arrive here.
    *
-   * Valid only for the save a merge issues immediately. Any later save runs a
-   * full scan again, which is what makes undoing a merge safe: nothing
-   * durable was advanced, so the next scan still sees the original baseline
-   * and still refuses.
+   * Valid only for the save a reconcile issues immediately. Any later save runs
+   * a full scan again, which is what makes undoing a reconcile safe: nothing
+   * durable was advanced, so the next scan still sees the original baseline and
+   * still refuses.
    */
   | "just-merged";
 
