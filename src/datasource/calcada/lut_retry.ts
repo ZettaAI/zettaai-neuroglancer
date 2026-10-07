@@ -24,6 +24,8 @@ import { delayUnlessAborted, HttpError } from "#src/util/http_request.js";
 export const LUT_RETRY_BUDGET_MS = 180_000;
 const FIRST_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 15_000;
+// How a network or CORS failure surfaces (HttpError.fromRequestError).
+const HTTP_NETWORK_OR_CORS = 0;
 const HTTP_REQUEST_TIMEOUT = 408;
 const HTTP_TOO_MANY_REQUESTS = 429;
 const HTTP_SERVER_ERROR = 500;
@@ -44,6 +46,7 @@ function worthRetrying(error: unknown): boolean {
     return false;
   if (!(error instanceof HttpError)) return true;
   return (
+    error.status === HTTP_NETWORK_OR_CORS ||
     error.status >= HTTP_SERVER_ERROR ||
     error.status === HTTP_REQUEST_TIMEOUT ||
     error.status === HTTP_TOO_MANY_REQUESTS

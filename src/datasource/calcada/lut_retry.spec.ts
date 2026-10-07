@@ -55,6 +55,20 @@ describe("fetchUntilAvailable", () => {
     expect(calls).toBe(2);
   });
 
+  it("retries a dropped connection, which arrives as status 0", async () => {
+    const { clock } = fakeClock();
+    let calls = 0;
+    await fetchUntilAvailable(
+      async () => {
+        if (++calls < 2) throw new HttpError("lut", 0, "Network or CORS error");
+        return "roots";
+      },
+      new AbortController().signal,
+      { clock },
+    );
+    expect(calls).toBe(2);
+  });
+
   it("gives up once the budget is spent, with the last error", async () => {
     const { clock } = fakeClock();
     await expect(
