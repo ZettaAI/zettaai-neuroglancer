@@ -48,6 +48,7 @@ import {
 import { FragmentAdmissionLatch } from "#src/datasource/calcada/fragment_admission.js";
 import { FragmentBatchReader } from "#src/datasource/calcada/fragment_batch.js";
 import { FragmentSpatialIndex } from "#src/datasource/calcada/fragment_spatial.js";
+import { fetchUntilAvailable } from "#src/datasource/calcada/lut_retry.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import {
   shouldRetryManifestDownload,
@@ -319,7 +320,7 @@ export class CalcadaVolumeChunkSource extends WithParameters(
     const voxelUrl = `${httpStore.baseUrl}${kvStore.path}${chunkPath}${q.length ? `?${q.join("&")}` : ""}`;
     const lutQuery = q.length ? `&${q.join("&")}` : "";
     let voxelResp: Response;
-    let lutBuffer: ArrayBuffer | undefined;
+    let lutBuffer: ArrayBuffer;
     try {
       [voxelResp, lutBuffer] = await Promise.all([
         // Voxel bytes are browser-cacheable: calcada pins each live branch-overlay
@@ -327,13 +328,11 @@ export class CalcadaVolumeChunkSource extends WithParameters(
         // piece-split rewrite yields a fresh URL and the stale cached copy is
         // never served. Base chunks are immutable and cache freely too.
         httpStore.fetchOkImpl(voxelUrl, { signal }),
-        // Best-effort: voxels don't depend on the LUT (it only affects root
-        // colouring), so a failed trailer fetch must not blank the chunk.
-        fetchLutTrailer(this.lutSource, chunkPath, lutQuery, signal).catch(
-          (e) => {
-            if (e instanceof Error && e.name === "AbortError") throw e;
-            return undefined;
-          },
+        // Required, not best-effort: a chunk drawn without its mapping shows
+        // raw pieces, and keeps showing them — see lut_retry.ts.
+        fetchUntilAvailable(
+          () => fetchLutTrailer(this.lutSource, chunkPath, lutQuery, signal),
+          signal,
         ),
       ]);
     } catch (e) {
@@ -343,10 +342,8 @@ export class CalcadaVolumeChunkSource extends WithParameters(
     }
     const rawChunk = await voxelResp.arrayBuffer();
     // Link equivalences before decoding so they're ready when the chunk renders.
-    if (lutBuffer !== undefined) {
-      const { pieces, roots } = parseLutTrailer(lutBuffer);
-      if (pieces.length > 0) linkChunkEquivalences(pieces, roots, branchId);
-    }
+    const { pieces, roots } = parseLutTrailer(lutBuffer);
+    if (pieces.length > 0) linkChunkEquivalences(pieces, roots, branchId);
     await this.chunkDecoder(chunk, signal, rawChunk);
   }
 }
