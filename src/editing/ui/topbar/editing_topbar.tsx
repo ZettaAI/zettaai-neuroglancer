@@ -170,8 +170,9 @@ function describeSaveConflict(conflict: SaveConflictError | undefined): string {
   }
   sentences.push("Take theirs drops your edits in these areas.");
   sentences.push(
-    "Take mine replaces their work — these layers keep no history, so that " +
-      "can't be undone.",
+    "Take mine keeps both sides too, but where you both painted the same " +
+      "voxel yours wins — and replacing their work there can't be undone, as " +
+      "these layers keep no history.",
   );
   sentences.push("Press Esc to leave everything as it is.");
   return sentences.join(" ");
@@ -191,6 +192,17 @@ function describeCombineLoss(voxels: number): string {
 /** What Take theirs cost the user, for the answer they chose themselves. */
 function describeTakeTheirsLoss(areas: number): string {
   return `Your edits in ${areaCount(areas)} were replaced by the stored version.`;
+}
+
+/**
+ * What Take mine cost the OTHER side. The only report here about someone
+ * else's loss, which is why it names them rather than the reader.
+ */
+function describeTakeMineLoss(voxels: number): string {
+  return (
+    `You replaced someone else's work in ${voxelCount(voxels)}: you both ` +
+    "painted the same spot."
+  );
 }
 
 /**
@@ -286,6 +298,8 @@ function ActiveTopbarControls({
     if (conflicted > 0) losses.push(describeCombineLoss(conflicted));
     const reloaded = saveTracker.reloadedChunkCount();
     if (reloaded > 0) losses.push(describeTakeTheirsLoss(reloaded));
+    const overridden = saveTracker.overriddenVoxelCount();
+    if (overridden > 0) losses.push(describeTakeMineLoss(overridden));
     if (losses.length > 0) {
       setReloadNotice([...losses, SAVE_LOSS_TAIL].join(" "));
     }

@@ -343,20 +343,20 @@ describe("EditSessionHost.saveActive region clip", () => {
       expect(backend.written).toHaveLength(1);
     });
 
-    it("writes anyway once the user has chosen to overwrite", async () => {
+    it("writes anyway once the overlay has been reconciled", async () => {
       activate();
       remoteWrites(1);
 
-      const result = await host.saveActive(undefined, undefined, "overwrite");
+      const result = await host.saveActive(undefined, undefined, "just-merged");
       expect(result.overall).toBe("all-succeeded");
       expect(backend.written).toHaveLength(1);
     });
 
-    it("skips the scan entirely when overwriting", async () => {
+    it("skips the scan entirely for a reconciled save", async () => {
       activate();
       remoteWrites(1);
 
-      await host.saveActive(undefined, undefined, "overwrite");
+      await host.saveActive(undefined, undefined, "just-merged");
       expect(
         (host as any).chunkSource.readFreshDecoded as ReturnType<typeof vi.fn>,
       ).not.toHaveBeenCalled();

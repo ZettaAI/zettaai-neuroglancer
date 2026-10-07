@@ -24,6 +24,7 @@ import type {
   SaveConflictPolicy,
 } from "#src/editing/reconcile/save_conflict_refusal.js";
 import { isSaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
+import type { ClashWinner } from "#src/editing/reconcile/three_way_merge.js";
 import { automergeEnabled } from "#src/editing/tooling/edit_preferences.js";
 import { NullarySignal } from "#src/util/signal.js";
 
@@ -67,6 +68,12 @@ export class SaveTracker {
    * and the user is owed the one that actually happened.
    */
   private conflictedVoxels_ = 0;
+  /**
+   * Voxels the last save's Take mine won from the other side. The mirror of
+   * {@link conflictedVoxels_}: same voxels, opposite winner, and the one case
+   * where the loss being reported is someone else's.
+   */
+  private overriddenVoxels_ = 0;
 
   constructor(host: EditSessionHost, session: EditSession) {
     this.layerStatuses_ = initializeLayerStatuses(host, session);
@@ -137,6 +144,11 @@ export class SaveTracker {
     return this.conflictedVoxels_;
   }
 
+  /** How many voxels the last save's Take mine took from the other side. */
+  overriddenVoxelCount(): number {
+    return this.overriddenVoxels_;
+  }
+
   /**
    * Leave the conflict unanswered: keep the paint, save nothing.
    *
@@ -151,18 +163,42 @@ export class SaveTracker {
   }
 
   /**
-   * Answer the conflict by writing anyway, replacing whatever landed after
-   * this session read the region.
+   * Answer the conflict by reconciling with THIS session's edits winning every
+   * voxel both sides changed.
    *
-   * Irreversible: painting layers carry no object versioning, so the bytes
-   * this replaces cannot be recovered. Only ever reached from an explicit
-   * confirmation.
+   * It reconciles rather than writing this session's bytes wholesale, and the
+   * difference is the whole point. A wholesale write sends the owned box
+   * absolutely, and for every voxel the user never painted that box carries
+   * the baseline the session loaded — so it silently resurrects work a
+   * colleague deleted after this session started reading. Reconciling keeps
+   * the user's EDITS and nothing else, which is what the button name promises
+   * and what the same word means in a version-control merge.
+   *
+   * Still irreversible where it does bite: painting layers carry no object
+   * versioning, so a colleague's voxel this replaces cannot be recovered.
+   * Only ever reached from an explicit confirmation, and still behind a draft.
+   *
+   * Chunks with no retained baseline cannot be reconciled, so they keep the
+   * wholesale behaviour — they fall through `mergeConflicts` untouched and the
+   * unscanned save that follows writes them as this session holds them. That
+   * is deliberate: it is the only answer available for them, and it is why
+   * this button stays offered when Combine is withheld.
    */
   async overwriteConflict(
     host: EditSessionHost,
     session: EditSession,
   ): Promise<void> {
     if (this.conflict_ === undefined) return;
+    // A save already in flight owns the overlay, so this answer cannot act on
+    // it: reconciling would read bytes that save is mid-write on. The dialog
+    // still closes — the user decided, and leaving it open over a save whose
+    // end they cannot see is worse than dropping the answer. Before the draft,
+    // because a draft taken for a write that will not happen is wasted I/O.
+    if (this.state_.kind === "saving" || this.state_.kind === "reconciling") {
+      this.conflict_ = undefined;
+      this.changed.dispatch();
+      return;
+    }
     // Take the recoverable copy BEFORE the irreversible write, and let a
     // failure to take it stop the write. The user agreed to overwrite with a
     // safety net; proceeding without one silently would be answering a
@@ -179,13 +215,7 @@ export class SaveTracker {
       this.changed.dispatch();
       return;
     }
-    this.conflict_ = undefined;
-    // Dispatch before the save, not after it: `startSave` returns without
-    // dispatching when another save is already in flight, which would leave
-    // the dialog rendered against a conflict that no longer exists and every
-    // one of its buttons a no-op.
-    this.changed.dispatch();
-    await this.startSave(host, session, "overwrite");
+    await this.reconcileAndSave(host, session, this.conflict_, "mine");
   }
 
   /**
@@ -231,6 +261,7 @@ export class SaveTracker {
     host: EditSessionHost,
     session: EditSession,
     conflict: SaveConflictError,
+    clashWinner: ClashWinner = "theirs",
   ): Promise<MergeConflictsOutcome | undefined> {
     let outcome: MergeConflictsOutcome;
     // Claimed before the first await, so there is no window in which a second
@@ -238,7 +269,7 @@ export class SaveTracker {
     this.state_ = { kind: "reconciling" };
     this.changed.dispatch();
     try {
-      outcome = await host.mergeConflicts(conflict.scan);
+      outcome = await host.mergeConflicts(conflict.scan, clashWinner);
     } catch (error) {
       // The conflict is cleared only once the merge has actually happened.
       // Clearing first would close the dialog on a merge that then threw,
@@ -263,7 +294,14 @@ export class SaveTracker {
     // a scan would only re-report the divergence the merge just resolved. Any
     // LATER save scans normally — which is what makes undoing a merge safe.
     await this.startSave(host, session, "just-merged");
-    this.recordConflictedVoxels(outcome.conflicted);
+    // Both counts are "voxels both sides changed", told apart by who won: one
+    // is the user's work replaced, the other is the user replacing someone
+    // else's. They read as different sentences, so they are counted apart.
+    if (clashWinner === "mine") {
+      this.recordOverriddenVoxels(outcome.conflicted);
+    } else {
+      this.recordConflictedVoxels(outcome.conflicted);
+    }
     return outcome;
   }
 
@@ -291,6 +329,13 @@ export class SaveTracker {
   private recordConflictedVoxels(voxels: number): void {
     if (!this.canReportLoss(voxels)) return;
     this.conflictedVoxels_ += voxels;
+    this.changed.dispatch();
+  }
+
+  /** What Take mine cost the OTHER side, under the same conditions. */
+  private recordOverriddenVoxels(voxels: number): void {
+    if (!this.canReportLoss(voxels)) return;
+    this.overriddenVoxels_ += voxels;
     this.changed.dispatch();
   }
 
@@ -389,6 +434,7 @@ export class SaveTracker {
     this.saveStartedAt_ = Date.now();
     this.reloadedChunks_ = 0;
     this.conflictedVoxels_ = 0;
+    this.overriddenVoxels_ = 0;
     this.markAllWritablePending();
     this.changed.dispatch();
 
