@@ -1,0 +1,270 @@
+name: Sync upstream (google/neuroglancer)
+
+# Keeps this fork current with google/neuroglancer, its real upstream.
+# Merges upstream/master into `dev`, has Claude resolve any conflicts,
+# regenerates the lockfile, typechecks, and opens a PR from a
+# `sync/upstream-<date>` branch. A human reviews and merges that PR —
+# when it opens as a draft, review the conflict resolutions first.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref to merge (branch or tag)"
+        default: "master"
+        required: false
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+env:
+  UPSTREAM_REPO: https://github.com/google/neuroglancer.git
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+  BASE_BRANCH: dev
+  SYNC_REVIEWERS: magic-vladyslav
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not available in a step-level `if:`, only in job `env`.
+      HAS_SYNC_APP: ${{ secrets.SYNC_APP_CLIENT_ID != '' }}
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        if: env.HAS_SYNC_APP == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Bail out if a sync PR is already open
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          # gh resolves an unqualified repo to the fork parent, not this one.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          open=$(gh pr list --state open --label upstream-sync --json number --jq 'length')
+          if [ "$open" -gt 0 ]; then
+            echo "An upstream-sync PR is already open; resolve it before syncing again." >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Fetch upstream
+        if: env.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream "$UPSTREAM_REF"
+
+      - name: Check whether there is anything to merge
+        if: env.skip != 'true'
+        run: |
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "Already up to date with upstream/$UPSTREAM_REF." >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_ENV"
+          else
+            behind=$(git rev-list --count HEAD..FETCH_HEAD)
+            echo "behind=$behind" >> "$GITHUB_ENV"
+            echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+            # A failed earlier run may already hold today's branch name.
+            branch="sync/upstream-$(date -u +%Y-%m-%d)"
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              branch="$branch-$GITHUB_RUN_ID"
+            fi
+            echo "branch=$branch" >> "$GITHUB_ENV"
+            echo "Behind upstream by $behind commits." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Restore rerere cache
+        if: env.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-${{ github.run_id }}
+          restore-keys: rerere-
+
+      - name: Merge upstream
+        if: env.skip != 'true'
+        run: |
+          git checkout -b "$branch"
+          git config rerere.enabled true
+          if git merge --no-edit FETCH_HEAD; then
+            echo "conflicts=none" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          deleted_by_us=$(git status --porcelain | grep '^DU ' | cut -c4-)
+          if [ -n "$deleted_by_us" ]; then
+            echo "Kept deleted (fork removed these upstream files):" >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r f; do
+              git rm -q -f -- "$f"
+              echo "  - $f" >> "$GITHUB_STEP_SUMMARY"
+            done <<< "$deleted_by_us"
+          fi
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "conflicts=yes" >> "$GITHUB_ENV"
+          else
+            echo "conflicts=none" >> "$GITHUB_ENV"
+          fi
+
+      - name: Resolve conflicts with Claude
+        if: env.skip != 'true' && env.conflicts == 'yes'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--allowedTools "Bash,Read,Edit,Write,Grep,Glob"'
+          prompt: |
+            You are resolving the conflicts of an in-progress `git merge` of
+            google/neuroglancer master into ZettaAI's fork (branch `dev`).
+
+            zettaai-neuroglancer is a heavily customized fork of
+            google/neuroglancer (TypeScript WebGL viewer; main-thread frontend
+            plus WebWorker backend over RPC). It adds a voxel edit-session
+            layer (Preact editing UI, painting/alignment tools, the calcada
+            datasource) and customizes the graphene datasource, the annotation
+            UI, and segmentation display.
+
+            Side meanings:
+              `ours` / HEAD / `:2:PATH`              = the fork. PRESERVE its behavior.
+              `theirs` / FETCH_HEAD / `:3:PATH`      = google upstream. ADOPT its improvements.
+              `:1:PATH`                              = common merge base.
+
+            Useful read-only commands:
+              git diff --name-only --diff-filter=U     list conflicted files
+              git show :1:PATH / :2:PATH / :3:PATH     the three versions
+              git diff :1:PATH :2:PATH                 what the fork changed
+              git diff :1:PATH :3:PATH                 what upstream changed
+              git log --oneline HEAD..FETCH_HEAD -- PATH
+
+            Rules:
+            1. Resolve every conflicted file. Leave no conflict markers.
+            2. Never drop fork functionality to make the merge easy, and never
+               drop an upstream change just because it conflicts. Combine both
+               intents. If upstream refactored an API the fork calls, update
+               the fork's call sites.
+            3. Google sometimes upstreams a feature the fork already has its
+               own version of. Never ship both implementations: keep the
+               fork's, fold in upstream's genuine fixes, and note it.
+            4. For `package.json`, keep every fork-only dependency and every
+               fork-only script, and take upstream's version bumps. Do NOT
+               hand-edit `package-lock.json` — a later step regenerates it.
+            5. Read CLAUDE.md for the repo's code-structure rules.
+            6. Do NOT run `git add`, `commit`, `merge`, `rebase`, `push`, or
+               `reset` — later steps stage and commit. Do not run npm install.
+
+            Finish by writing a concise markdown summary of every resolution
+            decision, and anything a human must double-check, to the file
+            `/tmp/resolution-notes.md`.
+
+      - name: Regenerate lockfile
+        if: env.skip != 'true'
+        run: |
+          # Checking the lockfile out clears its unmerged state, so test first.
+          lock_conflicted=false
+          if git diff --name-only --diff-filter=U | grep -qx 'package-lock.json'; then
+            lock_conflicted=true
+            git checkout FETCH_HEAD -- package-lock.json
+          fi
+          if [ "$lock_conflicted" = true ] || ! git diff --quiet HEAD -- package.json; then
+            npm install --package-lock-only --no-audit --no-fund
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Fail if the merge is not fully resolved
+        if: env.skip != 'true'
+        run: |
+          # Editing a conflicted file leaves its index stage unmerged, so the
+          # surviving markers, not the stages, are what can be tested.
+          git add -A
+          # A bare `=======` would false-positive on markdown setext headings.
+          if grep -rEnI '^(<{7}|>{7}) ' --exclude-dir=node_modules --exclude-dir=.git \
+               --exclude-dir=dist -- .; then
+            echo "Conflict markers remain in the tree." >&2
+            echo "Resolve this sync locally: git fetch upstream && git merge upstream/$UPSTREAM_REF" >&2
+            exit 1
+          fi
+
+      - name: Sanity-check the merge
+        if: env.skip != 'true'
+        continue-on-error: true
+        id: sanity
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+
+      - name: Commit and push
+        if: env.skip != 'true'
+        run: |
+          git add -A
+          if [ -f .git/MERGE_HEAD ]; then
+            git commit --no-edit
+          elif ! git diff --cached --quiet; then
+            git commit -m "chore: regenerate package-lock.json after upstream merge"
+          fi
+          git push origin "$branch"
+
+      - name: Open pull request
+        if: env.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Merges \`google/neuroglancer@$UPSTREAM_REF\` into \`$BASE_BRANCH\` ($behind upstream commits)."
+            echo
+            if [ "${{ env.conflicts }}" = "yes" ]; then
+              echo "**Conflicts were resolved by Claude — review the resolutions, not just the diff.**"
+              echo
+              if [ -f /tmp/resolution-notes.md ]; then cat /tmp/resolution-notes.md; fi
+            else
+              echo "The merge was clean; no conflicts to resolve."
+            fi
+            echo
+            echo "Typecheck sanity run: ${{ steps.sanity.outcome || 'skipped' }}."
+            echo
+            echo "Upstream commits in this range:"
+            echo '```'
+            git log --oneline --no-merges "$base_sha..FETCH_HEAD" | head -50
+            echo '```'
+          } > /tmp/pr-body.md
+
+          draft=""
+          labels="upstream-sync"
+          if [ "${{ env.conflicts }}" = "yes" ] || [ "${{ steps.sanity.outcome }}" != "success" ]; then
+            draft="--draft"
+            labels="upstream-sync,needs-human-review"
+          fi
+
+          gh label create upstream-sync --color 1d76db --description "Automated merge from google/neuroglancer" --force || true
+          gh label create needs-human-review --color d93f0b --force || true
+          gh pr create $draft \
+            --base "$BASE_BRANCH" \
+            --head "$branch" \
+            --title "chore: sync upstream google/neuroglancer ($(date -u +%Y-%m-%d))" \
+            --body-file /tmp/pr-body.md \
+            --label "$labels"
+
+          # The PR already exists; a stale reviewer must not fail the sync.
+          gh pr edit "$branch" --add-reviewer "$SYNC_REVIEWERS" \
+            || echo "Could not request a review from $SYNC_REVIEWERS — assign one by hand." \
+                 >> "$GITHUB_STEP_SUMMARY"
