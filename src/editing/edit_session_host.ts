@@ -2141,21 +2141,44 @@ export class EditSessionHost extends RefCounted {
   reloadLoadedChunks(): number {
     const session = this.activeSession.value;
     if (session === undefined) return 0;
-    // Chunks this session has painted are left resident, patch and all. See
-    // `stale_patch_selection.ts` for why evicting under a patch, and why
-    // dropping the patch instead, each produced a visible regression.
-    return this.chunkSource.invalidateLoadedChunks(
-      writableScopes(session, (layerId) => this.isLayerWritable(layerId)).map(
-        (scope) => ({ ...scope, keep: this.paintedChunkKeys(scope.layerId) }),
-      ),
+    const scopes = writableScopes(session, (layerId) =>
+      this.isLayerWritable(layerId),
     );
+    const evicted = this.chunkSource.invalidateLoadedChunks(scopes);
+    // The eviction is only half of it. A chunk this session painted carries a
+    // GPU patch whose mask was derived from the bytes just evicted, so left
+    // alone it keeps painting this session's older values over the newer ones
+    // that arrive — a colleague's work ends up underneath, invisible until the
+    // page is reloaded. Re-deriving the mask as "what this session changed"
+    // lets everything else render from the chunk that comes back.
+    if (evicted > 0) void this.resyncPatchesAfterRefetch(scopes);
+    return evicted;
   }
 
-  /** Cache keys of every chunk this session holds a patch for, by layer. */
-  private paintedChunkKeys(layerId: LayerId): ReadonlySet<string> {
-    const entry = this.perLayer.get(layerId);
-    if (entry === undefined) return new Set();
-    return new Set(entry.patchStore.source.chunks.keys());
+  /** Re-derive every patched chunk's mask for the layers just refetched. */
+  private async resyncPatchesAfterRefetch(
+    scopes: readonly {
+      readonly layerId: LayerId;
+      readonly resolution: Resolution;
+    }[],
+  ): Promise<void> {
+    for (const { layerId, resolution } of scopes) {
+      const entry = this.perLayer.get(layerId);
+      if (entry?.mirror === undefined) continue;
+      const coords = Array.from(
+        entry.patchStore.source.chunks.keys(),
+        (key) => {
+          const [x, y, z] = key.split(",").map(Number);
+          return {
+            layerId,
+            resolution,
+            chunkId: ChunkIdFactory.fromCoord({ x, y, z }),
+          };
+        },
+      );
+      if (coords.length === 0) continue;
+      await entry.mirror.resyncAfterRefetch(coords);
+    }
   }
 
   /**
@@ -3523,6 +3546,29 @@ export class EditSessionHost extends RefCounted {
             coord.chunkId,
             ChunkIdFactory.toCoord(coord.chunkId),
           ),
+        // This session's own baseline, for `resyncAfterRefetch` only.
+        //
+        // Deliberately NOT `readBaselineChunk`: that one falls through to the
+        // datasource when it has no saved or committed copy, and the datasource
+        // is precisely what a refetch is replacing — so for a chunk painted but
+        // never saved it would hand back the colleague's incoming bytes and the
+        // mask would mark everything they moved. The chain here ends at the
+        // session-open baseline and returns undefined rather than guessing.
+        async (coord) => {
+          const committed = this.commitTarget.getChunk(
+            coord.layerId,
+            coord.resolution,
+            coord.chunkId,
+          );
+          if (committed !== undefined) return committed.bytes;
+          const saved = this.chunkSource.getSavedBytes(
+            coord.layerId,
+            coord.resolution,
+            coord.chunkId,
+          );
+          if (saved !== undefined) return saved;
+          return session.overlay.baselineRefOf(coord)?.retain();
+        },
       );
     }
 

@@ -17,16 +17,14 @@
  * top of those chunks and its mask is derived from the very bytes being
  * evicted, so the eviction has to be careful about which patches survive it.
  *
- * This pins the half that matters most, through the real stack: a chunk this
- * session painted is not evicted at all, so nothing about what is on screen
- * can move. Stated as a count rather than only as pixels, because "the picture
- * did not change" is also what a refetch that silently succeeded would look
- * like once it landed.
+ * This pins it through the real stack: every resident chunk is evicted, the
+ * patched ones have their mask re-derived as "what this session changed", and
+ * with storage unmoved the refetched bytes are byte-identical — so the paint
+ * is still exactly where it was once everything has settled.
  *
- * The other half — that an UNpainted resident chunk IS evicted, which is the
- * whole point of refetching — needs a chunk nobody here has touched and a
- * colleague to change it. The e2e app registers no save backend, so that half
- * rests on `ng_chunk_source.spec.ts` and on a two-session check by hand.
+ * The half this cannot reach is a colleague actually changing a chunk, which
+ * needs a second session and a save; the e2e app registers no save backend, so
+ * that rests on `patch_mirror.spec.ts` and on a two-session check by hand.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -120,7 +118,7 @@ test.describe("reloadLoadedChunks", () => {
     await page?.context().close();
   });
 
-  test("refuses to evict the chunks this session painted", async () => {
+  test("keeps the painted picture across a full refetch", async () => {
     test.skip(setupError !== undefined, setupError);
 
     await page.evaluate(
@@ -138,13 +136,11 @@ test.describe("reloadLoadedChunks", () => {
     const evicted = (await page.evaluate(() =>
       (globalThis as any).viewer.editSessionHost.reloadLoadedChunks(),
     )) as number;
-    // Everything resident here has been painted, so the refetch has nothing it
-    // is allowed to take — which is the invariant, stated as a number.
-    expect(evicted).toBe(0);
+    expect(evicted).toBeGreaterThan(0);
 
-    // Long enough that a refetch, had one been issued, would have landed and
-    // shown itself in the pixels below.
-    await page.waitForTimeout(6000);
+    // Long enough for every evicted chunk to come back and for the mirror to
+    // finish re-deriving the masks over them.
+    await page.waitForTimeout(8000);
 
     expect(await paintedVoxels(page)).toBe(paintedBefore);
     expect((await sliceShot(page)).equals(before)).toBe(true);

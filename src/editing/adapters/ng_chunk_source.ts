@@ -30,7 +30,6 @@ import { makeChunkGridPosition } from "#src/editing/adapters/ng_chunk_grid.js";
 import { resolutionFor } from "#src/editing/adapters/ng_layer_metadata_source.js";
 import type { ChunkLoadProgressState } from "#src/editing/adapters/session_chunk_preloader.js";
 import { SessionChunkPreloader } from "#src/editing/adapters/session_chunk_preloader.js";
-import { chunksSafeToRefetch } from "#src/editing/overlay/stale_patch_selection.js";
 import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
 import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
 import type { LayerManager, UserLayer } from "#src/layer/index.js";
@@ -217,28 +216,26 @@ export class NgChunkSource implements LibraryChunkSource {
    * patch store, neither of which is a datasource chunk. What the user sees is
    * one round-trip of hole — the GPU patch is bound inside the base chunk's
    * draw call, so a chunk that is not resident draws neither.
+   *
+   * CALLERS MUST RESYNC THE PATCH MIRROR. A patched chunk's mask is derived
+   * from the bytes this evicts, so leaving it alone composites two versions of
+   * the same chunk; see `PatchMirror.resyncAfterRefetch`.
    */
   invalidateLoadedChunks(
     scopes: readonly {
       readonly layerId: LayerId;
       readonly resolution: Resolution;
-      /**
-       * Resident chunks to leave alone, keyed as the chunk cache keys them.
-       * The caller passes the chunks this session has painted: evicting under
-       * a GPU patch composites two different versions of the same chunk.
-       */
-      readonly keep: ReadonlySet<string>;
     }[],
   ): number {
     let evicted = 0;
-    for (const { layerId, resolution, keep } of scopes) {
+    for (const { layerId, resolution } of scopes) {
       let source: VolumeChunkSource;
       try {
         source = this.resolveVolumeChunkSource(layerId, resolution);
       } catch {
         continue; // layer/source gone — nothing to evict
       }
-      const keys = chunksSafeToRefetch(source.chunks.keys(), keep);
+      const keys = Array.from(source.chunks.keys());
       if (keys.length === 0) continue;
       source.invalidateChunkCache(keys);
       evicted += keys.length;

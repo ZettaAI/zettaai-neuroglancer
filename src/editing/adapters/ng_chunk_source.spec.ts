@@ -589,7 +589,7 @@ describe("NgChunkSource exit reconciliation (TM-352)", () => {
     const chunkSource = makeChunkSourceResolving(source);
 
     const count = chunkSource.invalidateLoadedChunks([
-      { layerId: LAYER, resolution: RES_8, keep: new Set<string>() },
+      { layerId: LAYER, resolution: RES_8 },
     ]);
 
     expect(count).toBe(2);
@@ -600,45 +600,13 @@ describe("NgChunkSource exit reconciliation (TM-352)", () => {
     ]);
   });
 
-  /**
-   * The chunks this session painted keep their bytes. Evicting under a GPU
-   * patch composites the patch's values against whatever comes back, which is
-   * how a colleague's newer work ended up hidden behind this session's older.
-   */
-  it("invalidateLoadedChunks never evicts a chunk the session painted", () => {
-    const source = fakeSource(SAVED.slice());
-    source.chunks.set("0,0,0", {});
-    source.chunks.set("1,0,0", {});
-    const chunkSource = makeChunkSourceResolving(source);
-
-    const count = chunkSource.invalidateLoadedChunks([
-      { layerId: LAYER, resolution: RES_8, keep: new Set(["0,0,0"]) },
-    ]);
-
-    expect(count).toBe(1);
-    expect(source.invalidateChunkCache).toHaveBeenCalledWith(["1,0,0"]);
-  });
-
-  it("invalidateLoadedChunks evicts nothing when every chunk is painted", () => {
-    const source = fakeSource(SAVED.slice());
-    source.chunks.set("0,0,0", {});
-    const chunkSource = makeChunkSourceResolving(source);
-
-    expect(
-      chunkSource.invalidateLoadedChunks([
-        { layerId: LAYER, resolution: RES_8, keep: new Set(["0,0,0"]) },
-      ]),
-    ).toBe(0);
-    expect(source.invalidateChunkCache).not.toHaveBeenCalled();
-  });
-
   it("invalidateLoadedChunks leaves a scope with nothing loaded alone", () => {
     const source = fakeSource(SAVED.slice());
     const chunkSource = makeChunkSourceResolving(source);
 
     expect(
       chunkSource.invalidateLoadedChunks([
-        { layerId: LAYER, resolution: RES_8, keep: new Set<string>() },
+        { layerId: LAYER, resolution: RES_8 },
       ]),
     ).toBe(0);
     expect(source.invalidateChunkCache).not.toHaveBeenCalled();
@@ -651,11 +619,7 @@ describe("NgChunkSource exit reconciliation (TM-352)", () => {
 
     expect(
       chunkSource.invalidateLoadedChunks([
-        {
-          layerId: "gone" as LayerId,
-          resolution: RES_8,
-          keep: new Set<string>(),
-        },
+        { layerId: "gone" as LayerId, resolution: RES_8 },
       ]),
     ).toBe(0);
     expect(source.invalidateChunkCache).not.toHaveBeenCalled();
