@@ -3546,16 +3546,29 @@ export class EditSessionHost extends RefCounted {
             coord.chunkId,
             ChunkIdFactory.toCoord(coord.chunkId),
           ),
-        // The edit baseline, for `resyncAfterRefetch` only — see its docs for
-        // why a refetch needs "what this session changed" rather than a diff
-        // against bytes that are being replaced.
-        (coord) =>
-          this.chunkSource.readBaselineChunk(
+        // This session's own baseline, for `resyncAfterRefetch` only.
+        //
+        // Deliberately NOT `readBaselineChunk`: that one falls through to the
+        // datasource when it has no saved or committed copy, and the datasource
+        // is precisely what a refetch is replacing — so for a chunk painted but
+        // never saved it would hand back the colleague's incoming bytes and the
+        // mask would mark everything they moved. The chain here ends at the
+        // session-open baseline and returns undefined rather than guessing.
+        async (coord) => {
+          const committed = this.commitTarget.getChunk(
             coord.layerId,
             coord.resolution,
             coord.chunkId,
-            ChunkIdFactory.toCoord(coord.chunkId),
-          ),
+          );
+          if (committed !== undefined) return committed.bytes;
+          const saved = this.chunkSource.getSavedBytes(
+            coord.layerId,
+            coord.resolution,
+            coord.chunkId,
+          );
+          if (saved !== undefined) return saved;
+          return session.overlay.baselineRefOf(coord)?.retain();
+        },
       );
     }
 

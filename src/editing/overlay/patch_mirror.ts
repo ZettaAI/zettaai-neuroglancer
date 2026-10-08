@@ -37,6 +37,20 @@ export type BaselineChunkReader = (
 ) => Promise<ReadonlyChunkVoxelBuffer>;
 
 /**
+ * Read THIS SESSION's own baseline for a chunk — the bytes it started from.
+ *
+ * Undefined when the session cannot say, which is not the same as "use the
+ * datasource instead": the datasource is the thing being replaced, and
+ * diffing against it marks every voxel a colleague moved and paints this
+ * session's untouched baseline over them. A reader that falls through to it
+ * silently reintroduces exactly that. {@link PatchMirror.resyncAfterRefetch}
+ * leaves such a chunk's mask alone rather than guess.
+ */
+export type SessionBaselineReader = (
+  coord: OverlayCoord,
+) => Promise<ReadonlyChunkVoxelBuffer | undefined>;
+
+/**
  * Delays before each automatic full-rescan retry of a chunk whose sync failed.
  * Its length caps the retries; a chunk that exhausts them keeps `needsResync`
  * set, so the next commit to it still repairs the mirror.
@@ -106,7 +120,7 @@ export class PatchMirror extends RefCounted {
      * included. Diffing against the datasource instead would mark every voxel
      * a colleague moved and paint this session's untouched baseline over it.
      */
-    private readonly readEditBaseline: BaselineChunkReader,
+    private readonly readEditBaseline: SessionBaselineReader,
   ) {
     super();
     const unsubscribe = this.session.dirty.on("chunk-changed", (payload) => {
@@ -298,6 +312,10 @@ export class PatchMirror extends RefCounted {
           ? this.readEditBaseline(coord)
           : this.readBaseline(coord),
       ]);
+      // No baseline means no way to tell this session's edits from the bytes it
+      // merely loaded. Leave the mask as it stands: the paint keeps rendering,
+      // which is the safe half of the trade.
+      if (baselineBuffer === undefined) return true;
       if (prof) {
         paintProfiler.record("5.mirror.read(io)", performance.now() - t);
       }
