@@ -68,6 +68,10 @@ import {
   BRANCH_PICKER_TITLE,
   MAIN_BRANCH_ID,
 } from "#src/datasource/calcada/branch_picker_logic.js";
+import {
+  candidateDecisionBody,
+  type CandidateDecisionRequest,
+} from "#src/datasource/calcada/candidate_decision.js";
 import type {
   GraphFacts,
   Verdict,
@@ -113,6 +117,7 @@ import {
   debugEdgeLines,
   mergeDebugGraphs,
 } from "#src/datasource/calcada/debug_graph.js";
+import { DecisionClock } from "#src/datasource/calcada/decision_timing.js";
 import { registerFilterEditorPanel } from "#src/datasource/calcada/filter_editor_panel.js";
 import {
   browserDraftStore,
@@ -2825,6 +2830,10 @@ class ZettaTraceSession extends RefCounted {
   // the head, so its own candidates come before anything the seed offered.
   private pool: PoolEntry[] = [];
   private currentDepth = 0;
+  private clock: DecisionClock | undefined;
+  private readonly onVisibilityChange = () => {
+    this.clock?.setHidden(document.hidden);
+  };
   // Candidates accepted this session, newest last, so an undo can offer the top
   // one again.
   private acceptedLines: bigint[] = [];
@@ -3180,6 +3189,9 @@ class ZettaTraceSession extends RefCounted {
 
   enter() {
     if (this.bindings !== undefined) return;
+    this.clock = new DecisionClock();
+    this.clock.setHidden(document.hidden);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     // Detection hands over what it already scored, so its points need not
     // be asked for again.
     const scored = this.connection.overviewSession?.scored;
@@ -3287,6 +3299,8 @@ class ZettaTraceSession extends RefCounted {
     };
     this.bindings.dispose();
     this.bindings = undefined;
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.clock = undefined;
     this.clearAnnotation();
     this.pool = [];
     this.current = undefined;
@@ -3380,6 +3394,7 @@ class ZettaTraceSession extends RefCounted {
   }
 
   setSeed(rootId: bigint, pieceId?: bigint) {
+    this.clock?.markAction();
     this.state.seedRoot.value = rootId;
     this.seedPieceId = pieceId;
     this.splitParts.clear();
@@ -3547,6 +3562,7 @@ class ZettaTraceSession extends RefCounted {
             partnerRootId: this.rootOfPiece(entry.candidate),
           };
     this.currentDepth = entry?.depth ?? 0;
+    if (entry !== undefined) this.clock?.markShown(entry.candidate.lineId);
     this.remaining = remainingCount(this.pool, this.decided, shown);
     if (this.current === undefined) {
       this.showOnly(seedRoot);
@@ -3838,36 +3854,40 @@ class ZettaTraceSession extends RefCounted {
   }
 
   reject() {
+    this.recordVerdict("reject", "rejection", () => {
+      // The rejection takes that candidate off the seed's points too.
+      const seedRoot = this.state.seedRoot.value;
+      if (seedRoot !== undefined) void this.splitPoints.forget(seedRoot);
+    });
+  }
+
+  skip() {
+    this.recordVerdict("defer", "skip");
+  }
+
+  private recordVerdict(
+    decision: "reject" | "defer",
+    noun: string,
+    onRecorded?: () => void,
+  ) {
     if (this.busy || this.current === undefined) return;
-    const rejected = this.current;
-    this.decided.add(rejected.lineId);
+    const decided = this.current;
+    const depth = this.currentDepth;
+    const timing = this.clock?.decide();
+    this.decided.add(decided.lineId);
     this.showCurrent();
     this.graphServer
       .postCandidateDecision(
-        rejected.lineId,
-        "reject",
-        undefined,
+        { lineId: decided.lineId, decision, timing, depth },
         this.branchId,
       )
-      .then(() => {
-        // The rejection takes that candidate off the seed's points too.
-        const seedRoot = this.state.seedRoot.value;
-        if (seedRoot !== undefined) void this.splitPoints.forget(seedRoot);
-      })
+      .then(onRecorded)
       .catch((e: unknown) => {
         StatusMessage.showTemporaryMessage(
-          `Failed to record rejection: ${e}`,
+          `Failed to record ${noun}: ${e}`,
           5000,
         );
       });
-  }
-
-  // A skip is this session's business only — nothing is written, and exiting
-  // the mode forgets it.
-  skip() {
-    if (this.busy || this.current === undefined) return;
-    this.decided.add(this.current.lineId);
-    this.showCurrent();
   }
 
   async accept() {
@@ -3877,6 +3897,7 @@ class ZettaTraceSession extends RefCounted {
     }
     const accepted = this.current;
     const acceptedDepth = this.currentDepth;
+    const timing = this.clock?.decide();
     this.setBusy(true);
     this.clearAnnotation();
     this.setProgress("Merging…");
@@ -3885,7 +3906,7 @@ class ZettaTraceSession extends RefCounted {
     // moment it is absorbed, so afterwards there is no id left to ask about.
     const children = this.fetchChildren(accepted.partnerRootId);
 
-    let merged: bigint;
+    let merged: { root: bigint; operationId: number };
     try {
       merged = await this.connection.mergeSelections(
         {
@@ -3913,18 +3934,20 @@ class ZettaTraceSession extends RefCounted {
     // the pre-merge seed back on screen: a dead id still drawn from cached mesh
     // and chunks, which no click in 3D could deselect.
     this.retired.retireAccept(
-      [seedRoot, accepted.partnerRootId].filter((root) => root !== merged),
+      [seedRoot, accepted.partnerRootId].filter((root) => root !== merged.root),
     );
-    this.state.seedRoot.value = merged;
-    this.showOnly(merged);
+    this.state.seedRoot.value = merged.root;
+    this.showOnly(merged.root);
 
     this.graphServer
       .postCandidateDecision(
-        accepted.lineId,
-        "accept",
-        // submitMerge returns only the new root, so the operation id the
-        // decision could be tied to is not available here.
-        undefined,
+        {
+          lineId: accepted.lineId,
+          decision: "accept",
+          operationId: merged.operationId > 0 ? merged.operationId : undefined,
+          timing,
+          depth: acceptedDepth,
+        },
         this.branchId,
       )
       .catch((e: unknown) => {
@@ -6657,7 +6680,7 @@ void main() {
   mergeSelections = async (
     sink: SegmentSelection,
     source: SegmentSelection,
-  ): Promise<bigint> => {
+  ): Promise<{ root: bigint; operationId: number }> => {
     return this.submitMerge({
       id: `zetta-trace-${sink.segmentId}-${source.segmentId}`,
       locked: false,
@@ -6669,7 +6692,7 @@ void main() {
   private submitMerge = async (
     submission: MergeSubmission,
     attempts = 1,
-  ): Promise<bigint> => {
+  ): Promise<{ root: bigint; operationId: number }> => {
     this.graph;
     const loadedSubsource = getGraphLoadedSubsource(this.layer)!;
     const annotationToNanometers =
@@ -6756,7 +6779,7 @@ void main() {
             });
           this.refreshChunkSources();
         }
-        return newRoot;
+        return { root: newRoot, operationId };
       } catch (err) {
         if (i === attempts) {
           submission.error = err.message || "unknown";
@@ -6765,7 +6788,7 @@ void main() {
       }
     }
 
-    return 0n; // appease typescript
+    return { root: 0n, operationId: 0 }; // appease typescript
   };
 
   async bulkMerge(submissions: MergeSubmission[]) {
@@ -6806,7 +6829,7 @@ void main() {
             ];
             const startedAt = Date.now();
             this.submitMerge(submission, 3)
-              .then((mergedRoot) => {
+              .then(({ root: mergedRoot }) => {
                 segmentsToRemove.push(...segments);
                 submission.status = editTookLabel("merge", startedAt);
                 submission.mergedRoot = mergedRoot;
@@ -7388,9 +7411,7 @@ class CalcadaGraphServerInterface {
   }
 
   async postCandidateDecision(
-    lineId: bigint,
-    decision: "accept" | "reject" | "defer",
-    operationId?: number,
+    request: CandidateDecisionRequest,
     branchId = 0,
   ): Promise<void> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -7399,14 +7420,7 @@ class CalcadaGraphServerInterface {
     const query = params.toString();
     await fetchOkImpl(
       `${baseUrl}/candidates/decision${query ? `?${query}` : ""}`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          line_id: String(lineId),
-          decision,
-          ...(operationId === undefined ? {} : { operation_id: operationId }),
-        }),
-      },
+      { method: "POST", body: candidateDecisionBody(request) },
     );
   }
 
