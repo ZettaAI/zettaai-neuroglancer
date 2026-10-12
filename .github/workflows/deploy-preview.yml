@@ -18,6 +18,7 @@ permissions:
   contents: read
   id-token: write
   pull-requests: write
+  deployments: write
 
 jobs:
   name:
@@ -28,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       service: ${{ steps.name.outputs.service }}
+      pr: ${{ steps.name.outputs.pr }}
     steps:
       - id: name
         run: |
@@ -40,6 +42,7 @@ jobs:
             echo "::error::No PR found for $BRANCH; previews are named after the PR"
             exit 1
           fi
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
           echo "service=neuroglancer-pr-$PR" >> "$GITHUB_OUTPUT"
         env:
           PR: ${{ github.event.pull_request.number }}
@@ -60,30 +63,24 @@ jobs:
       public: true
     secrets: inherit
 
-  cleanup:
+  record:
+    name: Record preview-pr-${{ needs.name.outputs.pr }}
+    needs: [name, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: preview-pr-${{ needs.name.outputs.pr }}
+      url: ${{ needs.deploy.outputs.url }}
+    steps:
+      - run: echo "Preview of PR ${{ needs.name.outputs.pr }} is live"
+
+  teardown:
     needs: name
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.delete) ||
       github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    env:
-      PROJECT_ID: zetta-research
-      REGION: us-east1
-      SERVICE: ${{ needs.name.outputs.service }}
-    steps:
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - run: |
-          set -euo pipefail
-          existing=$(gcloud run services list --project="$PROJECT_ID" --region="$REGION" \
-            --filter="metadata.name=$SERVICE" --format='value(metadata.name)')
-          if [ -z "$existing" ]; then
-            echo "$SERVICE does not exist, nothing to clean up"
-            exit 0
-          fi
-          gcloud run services delete "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --quiet
+    uses: ./.github/workflows/preview-teardown.yml
+    with:
+      pr: ${{ fromJSON(needs.name.outputs.pr) }}
+      reason: ${{ github.event.action == 'closed' && 'the PR is closed' || format('@{0} deleted it', github.actor) }}
+    secrets: inherit

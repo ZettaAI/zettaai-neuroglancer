@@ -1,0 +1,98 @@
+name: Preview teardown
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        type: number
+        required: true
+      reason:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+  deployments: write
+
+env:
+  PROJECT_ID: zetta-research
+  REGION: us-east1
+  IMAGE: us-east1-docker.pkg.dev/zetta-research/zettaai-neuroglancer/zettaai-neuroglancer
+  PR: ${{ inputs.pr }}
+  REASON: ${{ inputs.reason }}
+  MARKER: "<!-- preview-deploy -->"
+
+jobs:
+  teardown:
+    name: Delete the preview of #${{ inputs.pr }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Delete the preview service and images
+        run: .github/scripts/delete-preview-service.sh
+
+      - name: Delete the preview's GitHub deployments
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: .github/scripts/delete-preview-deployments.sh
+
+      - name: Get an administration token from the GitHub App
+        id: app_token
+        if: ${{ !cancelled() }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PEM }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: write
+
+      - name: Delete the preview's GitHub environment
+        if: ${{ !cancelled() && steps.app_token.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! out=$(gh api --method DELETE -H "X-GitHub-Api-Version: 2026-03-10" "repos/$REPO/environments/preview-pr-$PR" 2>&1); then
+            grep -q "HTTP 404" <<< "$out" || { echo "::error::Could not delete environment preview-pr-$PR: $out"; exit 1; }
+          fi
+          echo "preview-pr-$PR is gone"
+
+      - name: Remove the preview label and report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | awk 'NR==1')
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$id" \
+              -f body="$MARKER
+          **Cloud Run preview** deleted, $REASON." >/dev/null
+          fi
+          pr=$(gh api "repos/$REPO/pulls/$PR")
+          if [ "$(jq -r .state <<< "$pr")" != open ]; then
+            exit 0
+          fi
+          if jq -e 'any(.labels[]; .name == "deploy-preview")' <<< "$pr" >/dev/null; then
+            gh api --method DELETE "repos/$REPO/issues/$PR/labels/deploy-preview" >/dev/null
+            gh api --method POST "repos/$REPO/issues/$PR/comments" \
+              -f body="Cloud Run preview deleted, $REASON. Add the \`deploy-preview\` label to deploy it again." >/dev/null
+          fi
