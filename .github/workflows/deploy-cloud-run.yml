@@ -185,7 +185,9 @@ jobs:
 
           It is not redeployed automatically: re-run the \`Deploy preview\`
           workflow on this branch, or toggle the \`deploy-preview\` label.
-          Closing this PR deletes the service, and so does 5 days without activity."
+          Closing this PR deletes the service, and so does 5 days without activity.
+
+          To delete it now: [Preview cleanup]($CLEANUP_URL) -> **Run workflow** -> \`pr\` = \`$pr\`."
           id=$(gh api "repos/$REPO/issues/$pr/comments" --paginate \
             --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | awk 'NR==1')
           if [ -n "$id" ]; then
@@ -199,3 +201,4 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
           URL: ${{ steps.deploy.outputs.url }}
+          CLEANUP_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/preview-cleanup.yml
