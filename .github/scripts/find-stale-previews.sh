@@ -10,7 +10,10 @@ gcloud run services list --project="$PROJECT_ID" --region="$REGION" --format='va
   | sed -nE 's/^neuroglancer-pr-([0-9]+)$/\1/p' \
   | sort -un \
   | while read -r pr; do
-      pull=$(gh api "repos/$REPO/pulls/$pr")
+      pull=$(gh api "repos/$REPO/pulls/$pr") || {
+        echo "::warning::Could not fetch PR #$pr, skipping" >&2
+        continue
+      }
       if [ "$(jq -r .state <<< "$pull")" != open ]; then
         jq -cn --argjson pr "$pr" '{pr: $pr, reason: "the PR is closed"}' >> "$found"
       elif [ "$(jq -r '.updated_at | fromdateiso8601' <<< "$pull")" -lt "$cutoff" ]; then
