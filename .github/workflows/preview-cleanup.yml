@@ -1,0 +1,75 @@
+name: Preview cleanup
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR whose preview to delete; empty deletes every stale or orphaned preview
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+  deployments: write
+
+env:
+  PROJECT_ID: zetta-research
+  REGION: us-east1
+  STALE_DAYS: 5
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      previews: ${{ steps.find.outputs.previews }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Find previews to delete
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR:-}" ]; then
+            previews=$(jq -cn --argjson pr "$PR" --arg actor "$ACTOR" '[{pr: $pr, reason: "@\($actor) ran Preview cleanup"}]')
+          else
+            previews=$(.github/scripts/find-stale-previews.sh)
+          fi
+          echo "previews=$previews" >> "$GITHUB_OUTPUT"
+          {
+            echo "| PR | Reason |"
+            echo "|---|---|"
+            jq -r '.[] | "| #\(.pr) | \(.reason) |"' <<< "$previews"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  teardown:
+    needs: find
+    if: needs.find.outputs.previews != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.find.outputs.previews) }}
+    concurrency:
+      group: preview-pr-${{ matrix.pr }}
+    uses: ./.github/workflows/preview-teardown.yml
+    with:
+      pr: ${{ matrix.pr }}
+      reason: ${{ matrix.reason }}
+    secrets: inherit
