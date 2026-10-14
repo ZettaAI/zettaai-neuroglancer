@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { bestAlternative } from "#src/datasource/calcada/candidate_ranking.js";
 import {
   nextDecidedEntry,
   nextEntry,
@@ -218,5 +219,24 @@ describe("nextDecidedEntry", () => {
       verdicts({ 1: false, 2: false }),
     );
     expect(pick).toBeUndefined();
+  });
+});
+
+describe("bestAlternative", () => {
+  const seedRoot = 2000n;
+
+  it("is the strongest merge the partner has with anything but the seed", () => {
+    const toSeed = candidate(1, 0.9, 5, 2);
+    const weaker = candidate(2, 0.3, 5, 3);
+    const stronger = candidate(3, 0.6, 5, 4);
+    expect(bestAlternative([toSeed, weaker, stronger], seedRoot)).toBe(
+      stronger,
+    );
+  });
+
+  it("is nothing when the seed is all the partner has", () => {
+    expect(bestAlternative([candidate(1, 0.9, 5, 2)], seedRoot)).toBe(
+      undefined,
+    );
   });
 });

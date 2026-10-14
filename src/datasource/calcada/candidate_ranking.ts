@@ -28,3 +28,20 @@ export interface EdgeCandidate {
   selfClasses: PieceClasses;
   selfHasInfo: boolean;
 }
+
+/**
+ * The strongest merge the candidate's segment has on offer elsewhere — anything
+ * but the seed. A seed that beats it is the candidate's own first choice too,
+ * which is evidence for the merge; one that only ties it is not.
+ */
+export function bestAlternative(
+  partnerCandidates: readonly EdgeCandidate[],
+  seedRoot: bigint,
+): EdgeCandidate | undefined {
+  let best: EdgeCandidate | undefined;
+  for (const candidate of partnerCandidates) {
+    if (candidate.partnerRootId === seedRoot) continue;
+    if (best === undefined || candidate.score > best.score) best = candidate;
+  }
+  return best;
+}

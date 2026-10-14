@@ -99,6 +99,7 @@ import {
   toggleSplitDetection,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { bestAlternative } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
   nextDecidedEntry,
@@ -2855,9 +2856,11 @@ class ZettaTraceSession extends RefCounted {
   // the graph does not move the camera again.
   private shownLineId: bigint | undefined;
   private annotationIds: string[] = [];
-  // Guards against re-requesting the same partner's candidates every time the
-  // panel re-renders the current one.
-  private prefetchedPartner: bigint | undefined;
+  // The current partner's own candidates: warmed for the accept branch, and
+  // read for the merge it would rather make elsewhere.
+  private partnerCandidates:
+    | { root: bigint; fetched: Promise<EdgeCandidate[]> }
+    | undefined;
   private bindings: RefCounted | undefined;
   private aimBindings: RefCounted | undefined;
   // Role segments the proofreader toggled "off": they stay visible but faint
@@ -3306,7 +3309,7 @@ class ZettaTraceSession extends RefCounted {
     this.current = undefined;
     this.decided.clear();
     this.acceptedLines.length = 0;
-    this.prefetchedPartner = undefined;
+    this.partnerCandidates = undefined;
     this.seedPieceId = undefined;
     ++this.fetchToken;
 
@@ -3661,19 +3664,68 @@ class ZettaTraceSession extends RefCounted {
   }
 
   // The banner keeps to what a verdict turns on; interfaces and depth stay in
-  // the Trace tab.
-  private reportCandidate(candidate: EdgeCandidate) {
-    const score = `score ${candidate.score.toFixed(2)}`;
+  // the Trace tab. The candidate's best merge elsewhere follows once known.
+  private reportCandidate(
+    candidate: EdgeCandidate,
+    alternative?: EdgeCandidate | null,
+  ) {
+    const score = `score ${candidate.score.toFixed(SCORE_DIGITS)}`;
     const left = `${this.remaining} left`;
+    const elsewhere =
+      alternative === undefined
+        ? []
+        : [
+            `best elsewhere ${alternative?.score.toFixed(SCORE_DIGITS) ?? "none"}`,
+          ];
     this.setStatus(
-      `${score} · ${candidate.nInterfaces} interface(s)` +
-        ` · depth ${this.currentDepth} · ${left}`,
+      [
+        score,
+        ...elsewhere,
+        `${candidate.nInterfaces} interface(s)`,
+        `depth ${this.currentDepth}`,
+        left,
+      ].join(" · "),
       {
         kind: "candidate",
         title: `${score} · ${left}`,
-        details: describeCandidateSides(candidate),
+        details: [
+          ...describeCandidateSides(candidate),
+          ...elsewhere.map((text) => `Candidate's ${text}`),
+        ],
       },
     );
+    if (alternative === undefined) void this.reportAlternative(candidate);
+  }
+
+  private async reportAlternative(candidate: EdgeCandidate) {
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot === undefined) return;
+    const partnerCandidates = await this.partnerCandidatesOf(
+      candidate.partnerRootId,
+    );
+    if (this.current !== candidate) return;
+    this.reportCandidate(
+      candidate,
+      bestAlternative(partnerCandidates, seedRoot) ?? null,
+    );
+  }
+
+  private partnerCandidatesOf(partnerRoot: bigint) {
+    if (this.partnerCandidates?.root !== partnerRoot) {
+      this.partnerCandidates = {
+        root: partnerRoot,
+        fetched: this.graphServer
+          .fetchCandidates(partnerRoot, {
+            limit: CANDIDATE_FETCH_LIMIT,
+            minPieceVoxels: this.state.minPieceVoxels.value,
+            rejectedBy: this.state.rejectedBy.value,
+            branchId: this.branchId,
+            priority: "low",
+          })
+          .catch(() => []),
+      };
+    }
+    return this.partnerCandidates.fetched;
   }
 
   /**
@@ -3703,17 +3755,7 @@ class ZettaTraceSession extends RefCounted {
     // the path of the query that follows. A cache keyed on the root id in the
     // path would not be hit; this is worth its cost only for the row-level
     // caching underneath.
-    if (this.prefetchedPartner === current.partnerRootId) return;
-    this.prefetchedPartner = current.partnerRootId;
-    void this.graphServer
-      .fetchCandidates(current.partnerRootId, {
-        limit: CANDIDATE_FETCH_LIMIT,
-        minPieceVoxels: this.state.minPieceVoxels.value,
-        rejectedBy: this.state.rejectedBy.value,
-        branchId: this.branchId,
-        priority: "low",
-      })
-      .catch(() => undefined);
+    void this.partnerCandidatesOf(current.partnerRootId);
   }
 
   private fetchOnce(seedRoot: bigint) {
@@ -10566,6 +10608,8 @@ registerTool(SegmentationUserLayer, CALCADA_MERGE_SEGMENTS_TOOL_ID, (layer) => {
 registerTool(SegmentationUserLayer, CALCADA_FIND_PATH_TOOL_ID, (layer) => {
   return new FindPathTool(layer, true);
 });
+
+const SCORE_DIGITS = 2;
 
 // Stage 0 serves a single ingested contact wave. The value must match the batch
 // the ingest job was run with — it identifies the experiment as well as the
