@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
+  bestAlternative,
+  describePartnerChoice,
+} from "#src/datasource/calcada/candidate_ranking.js";
+import {
   nextDecidedEntry,
   nextEntry,
   prependChildren,
@@ -218,5 +222,47 @@ describe("nextDecidedEntry", () => {
       verdicts({ 1: false, 2: false }),
     );
     expect(pick).toBeUndefined();
+  });
+});
+
+describe("bestAlternative", () => {
+  const seedRoot = 2000n;
+
+  it("is the strongest merge the partner has with anything but the seed", () => {
+    const toSeed = candidate(1, 0.9, 5, 2);
+    const weaker = candidate(2, 0.3, 5, 3);
+    const stronger = candidate(3, 0.6, 5, 4);
+    expect(bestAlternative([toSeed, weaker, stronger], seedRoot)).toBe(
+      stronger,
+    );
+  });
+
+  it("is nothing when the seed is all the partner has", () => {
+    expect(bestAlternative([candidate(1, 0.9, 5, 2)], seedRoot)).toBe(
+      undefined,
+    );
+  });
+});
+
+describe("describePartnerChoice", () => {
+  it("calls the seed the best match when it beats every alternative", () => {
+    expect(describePartnerChoice(0.62, candidate(1, 0.4))).toEqual({
+      seedIsBest: true,
+      text: "Seed is the candidate's best match (next 0.40)",
+    });
+  });
+
+  it("calls the seed the only match when there is nothing else", () => {
+    expect(describePartnerChoice(0.62, undefined).seedIsBest).toBe(true);
+  });
+
+  it("names the alternative when one ties or beats the seed", () => {
+    expect(describePartnerChoice(0.5, candidate(1, 0.5))).toEqual({
+      seedIsBest: false,
+      text: "Candidate has an alternative: score 0.50",
+    });
+    expect(describePartnerChoice(0.5, candidate(1, 0.7)).seedIsBest).toBe(
+      false,
+    );
   });
 });
