@@ -14,6 +14,7 @@ import {
   flaggedPieceCount,
   heatColor,
   heatColorGlsl,
+  parsePieceOverviews,
   pieceOverviewSubject,
   rankFlaggedPieces,
   splitErrorColors,
@@ -133,6 +134,75 @@ describe("rankFlaggedPieces", () => {
       (p) => p.bestScore >= 0.5,
     );
     expect(ranked.map((p) => p.pieceId)).toEqual([3n, 4n]);
+  });
+});
+
+describe("parsePieceOverviews", () => {
+  const raw = {
+    piece_id: "1",
+    best_score: 0.9,
+    candidate_count: 2,
+    voxel_count: 46,
+    point_a: [1, 1, 1],
+    candidates: [
+      {
+        line_id: "101",
+        score: 0.9,
+        partner_piece: "7",
+        partner_root: "70",
+        partner_voxels: 5,
+        point_a: [1, 1, 1],
+        point_b: [2, 2, 2],
+      },
+      {
+        line_id: "301",
+        score: 0.04,
+        partner_piece: "8",
+        partner_root: "80",
+        partner_voxels: 9,
+        point_a: [3, 3, 3],
+        point_b: [4, 4, 4],
+      },
+    ],
+  };
+
+  it("makes a row of every candidate a piece offers, each where it touches", () => {
+    const rows = parsePieceOverviews([raw]);
+    expect(rows.map((row) => [row.lineId, row.bestScore, row.contact])).toEqual(
+      [
+        [101n, 0.9, [1, 1, 1]],
+        [301n, 0.04, [3, 3, 3]],
+      ],
+    );
+    expect(rows[1].bestPartnerRoot).toBe(80n);
+    expect(rows[1].voxelCount).toBe(46);
+  });
+
+  it("keeps a piece that offers nothing as one row", () => {
+    const rows = parsePieceOverviews([
+      {
+        piece_id: "2",
+        best_score: 0,
+        candidate_count: 0,
+        voxel_count: 10,
+        candidates: [],
+      },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].lineId).toBeUndefined();
+  });
+
+  it("flags, ranks and paints each candidate of a piece on its own", () => {
+    const rows = parsePieceOverviews([raw]);
+    expect(rankFlaggedPieces(rows, passAll).map((row) => row.lineId)).toEqual([
+      101n,
+      301n,
+    ]);
+    const weakOnly = (row: PieceOverview) => row.bestScore < 0.5;
+    expect(rankFlaggedPieces(rows, weakOnly).map((row) => row.lineId)).toEqual([
+      301n,
+    ]);
+    expect(splitErrorColors(rows, weakOnly).get(1n)).toBe(heatColor(0.04));
   });
 });
 

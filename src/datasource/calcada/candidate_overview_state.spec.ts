@@ -63,7 +63,7 @@ describe("toggleSplitDetection", () => {
 });
 
 describe("splitDetectionStatus", () => {
-  it("counts flagged pieces once the filter has all it needs", () => {
+  it("counts flagged candidates once the filter has all it needs", () => {
     expect(
       splitDetectionStatus({
         graphPending: false,
@@ -71,7 +71,7 @@ describe("splitDetectionStatus", () => {
         total: 2000,
         withSemantics: 0,
       }),
-    ).toBe("2 of 2,000 pieces flagged · 0 candidates with semantics");
+    ).toBe("2 of 2,000 candidates flagged · 0 with semantics");
   });
 
   it("says it is still scoring while the piece graph loads", () => {
