@@ -99,7 +99,11 @@ import {
   toggleSplitDetection,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
-import { bestAlternative } from "#src/datasource/calcada/candidate_ranking.js";
+import {
+  bestAlternative,
+  describePartnerChoice,
+  SCORE_DIGITS,
+} from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
   nextDecidedEntry,
@@ -3664,23 +3668,23 @@ class ZettaTraceSession extends RefCounted {
   }
 
   // The banner keeps to what a verdict turns on; interfaces and depth stay in
-  // the Trace tab. The candidate's best merge elsewhere follows once known.
+  // the Trace tab. Whether the candidate would rather join something else
+  // follows once its own candidates are known.
   private reportCandidate(
     candidate: EdgeCandidate,
     alternative?: EdgeCandidate | null,
   ) {
     const score = `score ${candidate.score.toFixed(SCORE_DIGITS)}`;
     const left = `${this.remaining} left`;
-    const elsewhere =
+    const choice =
       alternative === undefined
-        ? []
-        : [
-            `best elsewhere ${alternative?.score.toFixed(SCORE_DIGITS) ?? "none"}`,
-          ];
+        ? undefined
+        : describePartnerChoice(candidate.score, alternative ?? undefined);
+    const choiceText = choice === undefined ? [] : [choice.text];
     this.setStatus(
       [
         score,
-        ...elsewhere,
+        ...choiceText,
         `${candidate.nInterfaces} interface(s)`,
         `depth ${this.currentDepth}`,
         left,
@@ -3688,9 +3692,10 @@ class ZettaTraceSession extends RefCounted {
       {
         kind: "candidate",
         title: `${score} · ${left}`,
+        highlight: choice?.seedIsBest ? choice.text : undefined,
         details: [
           ...describeCandidateSides(candidate),
-          ...elsewhere.map((text) => `Candidate's ${text}`),
+          ...(choice?.seedIsBest === false ? choiceText : []),
         ],
       },
     );
@@ -10608,8 +10613,6 @@ registerTool(SegmentationUserLayer, CALCADA_MERGE_SEGMENTS_TOOL_ID, (layer) => {
 registerTool(SegmentationUserLayer, CALCADA_FIND_PATH_TOOL_ID, (layer) => {
   return new FindPathTool(layer, true);
 });
-
-const SCORE_DIGITS = 2;
 
 // Stage 0 serves a single ingested contact wave. The value must match the batch
 // the ingest job was run with — it identifies the experiment as well as the

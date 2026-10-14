@@ -24,6 +24,8 @@ export interface TraceNotice {
   kind: "loading" | "candidate" | "empty" | "error";
   title: string;
   details?: readonly string[];
+  /** A detail that should not be missed, shown in bold. */
+  highlight?: string;
 }
 
 export interface TraceNoticeSource {
@@ -52,6 +54,11 @@ export function CalcadaTraceNotice({ source }: { source: TraceNoticeSource }) {
         )}
         {notice.title}
       </div>
+      {notice.highlight !== undefined && (
+        <div className="calcada-trace-notice-detail calcada-trace-notice-highlight">
+          {notice.highlight}
+        </div>
+      )}
       {notice.details?.map((detail) => (
         <div key={detail} className="calcada-trace-notice-detail">
           {detail}

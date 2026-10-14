@@ -29,6 +29,8 @@ export interface EdgeCandidate {
   selfHasInfo: boolean;
 }
 
+export const SCORE_DIGITS = 2;
+
 /**
  * The strongest merge the candidate's segment has on offer elsewhere — anything
  * but the seed. A seed that beats it is the candidate's own first choice too,
@@ -44,4 +46,27 @@ export function bestAlternative(
     if (best === undefined || candidate.score > best.score) best = candidate;
   }
   return best;
+}
+
+/**
+ * Whether the seed is the candidate's own first choice: it has nothing else, or
+ * nothing it would rather join. A tie leaves it a choice, so it is not.
+ */
+export function describePartnerChoice(
+  score: number,
+  alternative: EdgeCandidate | undefined,
+): { seedIsBest: boolean; text: string } {
+  if (alternative === undefined) {
+    return { seedIsBest: true, text: "Seed is the candidate's only match" };
+  }
+  const other = alternative.score.toFixed(SCORE_DIGITS);
+  return score > alternative.score
+    ? {
+        seedIsBest: true,
+        text: `Seed is the candidate's best match (next ${other})`,
+      }
+    : {
+        seedIsBest: false,
+        text: `Candidate has an alternative: score ${other}`,
+      };
 }
