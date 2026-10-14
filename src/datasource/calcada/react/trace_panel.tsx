@@ -615,7 +615,7 @@ export function CalcadaTracePanel({
       />
 
       <details className="calcada-trace-panel-keys-section">
-        <summary>Keys</summary>
+        <summary>Hotkeys</summary>
         <dl className="calcada-trace-panel-keys">
           {KEY_HINTS.map(([keys, meaning]) => (
             <Fragment key={`${keys} ${meaning}`}>
