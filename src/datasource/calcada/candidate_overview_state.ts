@@ -126,7 +126,7 @@ export function splitDetectionStatus({
 }): string {
   if (graphPending) return SCORING_SEGMENT_STATUS;
   return (
-    `${flagged.toLocaleString()} of ${total.toLocaleString()} pieces flagged · ` +
-    `${withSemantics} candidates with semantics`
+    `${flagged.toLocaleString()} of ${total.toLocaleString()} candidates flagged · ` +
+    `${withSemantics} with semantics`
   );
 }

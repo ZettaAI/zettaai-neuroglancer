@@ -96,9 +96,7 @@ async function makeConnection({
     },
     overviewSession: {
       changed: new NullarySignal(),
-      status: busy
-        ? "12 of 1,234 pieces flagged · 800 candidates with semantics"
-        : "",
+      status: busy ? "12 of 1,234 candidates flagged · 800 with semantics" : "",
       focus: busy
         ? {
             index: 2,

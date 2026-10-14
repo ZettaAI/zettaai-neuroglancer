@@ -86,7 +86,7 @@ import {
   edgeCandidateSubject,
   heatColorGlsl,
   parseClassCounts,
-  parseOverviewPoint,
+  parsePieceOverviews,
   partnersWithSemantics,
   rankFlaggedPieces,
   splitErrorColors,
@@ -4935,7 +4935,7 @@ class CandidateOverviewSession extends RefCounted {
       splitDetectionStatus({
         graphPending: this.graphPending,
         flagged: this.ranked.length,
-        total: this.pieces.length,
+        total: this.pieces.filter((row) => row.candidateCount > 0).length,
         withSemantics: partnersWithSemantics(this.pieces),
       }),
     );
@@ -4982,9 +4982,9 @@ class CandidateOverviewSession extends RefCounted {
   // A filter change keeps the piece on show when it still qualifies, so
   // loosening a filter does not throw the proofreader back to the top.
   private rerank() {
-    const focused = this.ranked[this.focusIndex]?.pieceId;
+    const focused = this.ranked[this.focusIndex];
     this.ranked = rankFlaggedPieces(this.pieces, this.passesOn());
-    const kept = this.ranked.findIndex((piece) => piece.pieceId === focused);
+    const kept = focused === undefined ? -1 : this.ranked.indexOf(focused);
     // Nothing chosen yet stays that way; a piece the filter now hides hands
     // its place to the next one down.
     this.focusIndex =
@@ -5023,7 +5023,7 @@ class CandidateOverviewSession extends RefCounted {
         sphere && nanometresToGlobal(sphere.center, coordinateSpace.value);
       if (center === undefined) {
         StatusMessage.showTemporaryMessage(
-          "This piece's position is not known yet — its mesh has not loaded.",
+          "This candidate's position is not known yet — its mesh has not loaded.",
           4000,
         );
         return;
@@ -5063,7 +5063,7 @@ class CandidateOverviewSession extends RefCounted {
       return;
     }
     this.connection.setSplitErrorPoints(
-      splitErrorPoints(this.ranked, this.ranked[this.focusIndex]?.pieceId),
+      splitErrorPoints(this.ranked, this.ranked[this.focusIndex]),
     );
   }
 
@@ -7391,23 +7391,7 @@ class CalcadaGraphServerInterface {
       { priority: "low" },
     );
     const jsonResp = await response.json();
-    return (jsonResp.pieces ?? []).map(
-      (piece: any): PieceOverview => ({
-        pieceId: parseUint64(piece.piece_id),
-        bestScore: Number(piece.best_score),
-        bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
-        bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
-        bestPartnerVoxels: Number(piece.best_partner_voxels ?? 0),
-        partnerClasses: parseClassCounts(piece.partner_classes),
-        partnerHasInfo: piece.partner_has_info === true,
-        candidateCount: Number(piece.candidate_count ?? 0),
-        voxelCount: Number(piece.voxel_count),
-        classes: parseClassCounts(piece.classes),
-        hasInfo: piece.has_info === true,
-        contact: parseOverviewPoint(piece.point_a),
-        partnerContact: parseOverviewPoint(piece.point_b),
-      }),
-    );
+    return parsePieceOverviews(jsonResp.pieces ?? []);
   }
 
   async postCandidateDecision(

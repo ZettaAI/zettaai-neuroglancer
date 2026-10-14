@@ -205,7 +205,7 @@ const KEY_HINTS: ReadonlyArray<[string, string]> = [
   ["Ctrl+Z", "undo the last edit"],
   ["Esc", "put the seed down, then leave"],
   [SPLIT_DETECTION_KEY, "split error detection on / off"],
-  ["← / →", "previous / next flagged piece"],
+  ["← / →", "previous / next flagged candidate"],
 ];
 
 const NO_VALUE = "—";
@@ -455,7 +455,7 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
 }
 
 /**
- * One flagged piece at a time, strongest first, so a proofreader is taken to
+ * One flagged candidate at a time, strongest first, so a proofreader is taken to
  * each likely split instead of hunting for red on a whole segment.
  */
 function SplitDetectionSection({
@@ -511,7 +511,7 @@ function SplitDetectionSection({
           size="xs"
           variant="outline"
           disabled={focus === undefined}
-          title="Previous flagged piece (left arrow)"
+          title="Previous flagged candidate (left arrow)"
           onClick={() => session.previousPiece()}
         >
           ‹
@@ -519,7 +519,7 @@ function SplitDetectionSection({
         <button
           type="button"
           className="calcada-trace-panel-navigator-position"
-          title="Go back to this piece"
+          title="Go back to this candidate"
           disabled={focus?.index === undefined}
           onClick={() => session.showFocus()}
         >
@@ -530,7 +530,7 @@ function SplitDetectionSection({
           size="xs"
           variant="outline"
           disabled={focus === undefined}
-          title="Next flagged piece (right arrow)"
+          title="Next flagged candidate (right arrow)"
           onClick={() => session.nextPiece()}
         >
           ›
@@ -540,9 +540,9 @@ function SplitDetectionSection({
         {piece === undefined
           ? NO_VALUE
           : `score ${piece.bestScore.toFixed(SCORE_DIGITS)} · ${describePiece({
-              voxels: piece.voxelCount,
-              classes: piece.classes,
-              hasInfo: piece.hasInfo,
+              voxels: piece.bestPartnerVoxels,
+              classes: piece.partnerClasses,
+              hasInfo: piece.partnerHasInfo,
             })}`}
       </div>
     </fieldset>

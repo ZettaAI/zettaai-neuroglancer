@@ -10,7 +10,7 @@
 
 /**
  * @file Split error detection drawn as red points on a segment left in its
- * own colour: one point per flagged piece, where its best candidate touches it.
+ * own colour: one point per flagged candidate, where it touches the segment.
  */
 
 import type { PieceOverview } from "#src/datasource/calcada/candidate_heat.js";
@@ -19,13 +19,13 @@ export interface SplitErrorPoint {
   pieceId: bigint;
   position: Float32Array;
   score: number;
-  /** The piece ← / → are on. */
+  /** The candidate ← / → are on. */
   focused: boolean;
 }
 
 export function splitErrorPoints(
   flagged: readonly PieceOverview[],
-  focusedPiece: bigint | undefined,
+  focusedRow: PieceOverview | undefined,
 ): SplitErrorPoint[] {
   const points: SplitErrorPoint[] = [];
   for (const piece of flagged) {
@@ -34,7 +34,7 @@ export function splitErrorPoints(
       pieceId: piece.pieceId,
       position: Float32Array.from(piece.contact),
       score: piece.bestScore,
-      focused: piece.pieceId === focusedPiece,
+      focused: piece === focusedRow,
     });
   }
   return points;
