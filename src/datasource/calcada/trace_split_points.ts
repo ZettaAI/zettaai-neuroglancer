@@ -95,6 +95,7 @@ export class TraceSplitPoints {
 
   /** The filter changed: the same scores, judged again. */
   async refresh() {
+    if (this.roots.length === 0) return;
     const token = ++this.token;
     try {
       const lists = await Promise.all(

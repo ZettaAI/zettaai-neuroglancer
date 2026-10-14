@@ -107,6 +107,12 @@ describe("TraceSplitPoints", () => {
     expect(ids()).toBeUndefined();
   });
 
+  it("leaves the points alone when the filter changes before it drew any", async () => {
+    const { points, ids } = harness(overviews);
+    await points.refresh();
+    expect(ids()).toBeUndefined();
+  });
+
   it("draws nothing once cleared, even if a score arrives late", async () => {
     const { points, ids } = harness(overviews);
     const pending = points.show([10n]);
