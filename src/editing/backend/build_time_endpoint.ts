@@ -108,16 +108,22 @@ export function logoutBuildTimeBackendAuth(): boolean {
  * obtained via the browser implicit flow (no client secret). The provider and
  * token are created lazily on first use, cached, and silently refreshed once
  * the cached token nears expiry. After a `logoutBackend()` the next login forces
- * the account chooser; subsequent refreshes are silent again.
+ * the account chooser; subsequent refreshes are silent again. With
+ * `trackForLogout: false` the authorizer stays out of `logoutBackend()`, so a
+ * secondary endpoint cannot take over the main endpoint's logout.
  */
-function makeGoogleOAuthAuthorize(
+export function makeGoogleOAuthAuthorize(
   clientId: string,
+  {
+    trackForLogout = true,
+    description = "Zetta backend",
+  }: { trackForLogout?: boolean; description?: string } = {},
 ): BackendEndpoint["authorize"] {
   const makeProvider = (prompt?: "select_account") =>
     new GoogleOAuth2CredentialsProvider({
       clientId,
       scopes: [OPENID_SCOPE, EMAIL_SCOPE],
-      description: "Zetta backend",
+      description,
       prompt,
     });
 
@@ -126,13 +132,15 @@ function makeGoogleOAuthAuthorize(
   let expiryEpochMs = 0;
   let promptNextLogin = false;
 
-  activeGoogleAuthReset = () => {
-    provider = undefined;
-    current = undefined;
-    expiryEpochMs = 0;
-    promptNextLogin = true;
-  };
-  activeGoogleAccessToken = () => current?.credentials.accessToken;
+  if (trackForLogout) {
+    activeGoogleAuthReset = () => {
+      provider = undefined;
+      current = undefined;
+      expiryEpochMs = 0;
+      promptNextLogin = true;
+    };
+    activeGoogleAccessToken = () => current?.credentials.accessToken;
+  }
 
   return async (init) => {
     provider ??= makeProvider(promptNextLogin ? "select_account" : undefined);

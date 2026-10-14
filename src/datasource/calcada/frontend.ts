@@ -148,6 +148,13 @@ import {
   TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/timestamp_picker.js";
 import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
+import type {
+  RealignCrop,
+  RealignPreview,
+} from "#src/datasource/calcada/realign/realign_client.js";
+import type { RealignBox } from "#src/datasource/calcada/realign/realign_selection.js";
+import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
+import { CalcadaRealignTab } from "#src/datasource/calcada/realign/realign_tab.js";
 import { RetiredRoots } from "#src/datasource/calcada/retired_roots.js";
 import {
   interceptedRemovals,
@@ -1266,6 +1273,7 @@ const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const ZETTA_TRACE_JSON_KEY = "zettaTrace";
 const CALCADA_DEBUG_JSON_KEY = "debug";
 const CALCADA_TRACE_TAB_ID = "calcada-trace";
+const CALCADA_REALIGN_TAB_ID = "calcada-realign";
 const CALCADA_OVERVIEW_JSON_KEY = "candidateOverview";
 const PROOFREAD_SEGMENT_JSON_KEY = "proofreadSegment";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
@@ -5149,6 +5157,22 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       order: -21,
       getter: () => new CalcadaTraceTab(this),
     });
+    const realignSession = this.registerDisposer(
+      new RealignSession(layer.manager, {
+        branchId: graph.branchId,
+        resolution: graph.info.scales[0].resolution as unknown as [
+          number,
+          number,
+          number,
+        ],
+        graphServer: graph.graphServer,
+      }),
+    );
+    layer.tabs.add(CALCADA_REALIGN_TAB_ID, {
+      label: "Realign",
+      order: -19,
+      getter: () => new CalcadaRealignTab(realignSession),
+    });
     // The side panel snapshots the layer's tab list before this
     // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
     // and it only registers hidden-listeners for tabs it knew at init — so
@@ -5162,6 +5186,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     this.registerDisposer(() => {
       layer.tabs.remove("calcada-debug");
       layer.tabs.remove(CALCADA_TRACE_TAB_ID);
+      layer.tabs.remove(CALCADA_REALIGN_TAB_ID);
       layer.panels.updateTabs();
     });
     this.registerDisposer(
@@ -7012,6 +7037,15 @@ function appendCoordParams(
   return `${url}${sep}${parts.join("&")}`;
 }
 
+function realignQuery(box: RealignBox, branchId: number): string {
+  const params = new URLSearchParams({
+    bbox: `${box.x0},${box.y0},${box.x1},${box.y1}`,
+    z: String(box.z),
+  });
+  if (branchId) params.set("branch_id", String(branchId));
+  return params.toString();
+}
+
 class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
 
@@ -7422,6 +7456,39 @@ class CalcadaGraphServerInterface {
       `${baseUrl}/candidates/decision${query ? `?${query}` : ""}`,
       { method: "POST", body: candidateDecisionBody(request) },
     );
+  }
+
+  async fetchRealignSection(
+    box: RealignBox,
+    branchId: number,
+  ): Promise<RealignCrop> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/section?${realignQuery(box, branchId)}`,
+      {},
+    );
+    return {
+      data: new Uint8Array(await response.arrayBuffer()),
+      width: Number(response.headers.get("X-Realign-Width")),
+      height: Number(response.headers.get("X-Realign-Height")),
+    };
+  }
+
+  async putRealignPreview(
+    box: RealignBox,
+    branchId: number,
+    crop: Uint8Array<ArrayBuffer>,
+  ): Promise<RealignPreview> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/preview?${realignQuery(box, branchId)}`,
+      { method: "PUT", body: crop },
+    );
+    const json = (await response.json()) as {
+      preview_id: string;
+      layer_source: string;
+    };
+    return { previewId: json.preview_id, layerSource: json.layer_source };
   }
 
   async splitSegments(
