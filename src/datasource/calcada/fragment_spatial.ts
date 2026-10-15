@@ -98,7 +98,7 @@ function isInFrustum(
   const cz = sphere.cz / resolution[2];
   // Dividing by the smallest axis resolution over-estimates the model-space
   // radius on the other axes, so an edge piece stays classified in-frustum
-  // rather than incorrectly deferred.
+  // rather than incorrectly scored as out-of-view.
   const r = sphere.r / Math.min(resolution[0], resolution[1], resolution[2]);
   for (let i = 0; i < 6; ++i) {
     const a = normalizedPlanes[4 * i];
@@ -205,8 +205,8 @@ export class FragmentSpatialIndex {
 
   // Returns whether the hint actually changed. A non-finite hint (degenerate
   // camera during a navigation transient) is ignored — it can't reject
-  // anything, so accepting it would flush the deferred pool for one broken
-  // frame.
+  // anything, so accepting it would misclassify every piece as in-view and
+  // scramble the download order for one broken frame.
   updateHint(hint: FragmentSpatialHint | null): boolean {
     if (hint !== null && !hintIsFinite(hint)) return false;
     if (hintEquals(this.hint, hint)) return false;
