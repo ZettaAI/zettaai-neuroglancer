@@ -3692,11 +3692,8 @@ class ZettaTraceSession extends RefCounted {
       {
         kind: "candidate",
         title: `${score} · ${left}`,
-        highlight: choice?.seedIsBest ? choice.text : undefined,
-        details: [
-          ...describeCandidateSides(candidate),
-          ...(choice?.seedIsBest === false ? choiceText : []),
-        ],
+        headline: choice && { text: choice.text, bold: choice.seedIsBest },
+        details: describeCandidateSides(candidate),
       },
     );
     if (alternative === undefined) void this.reportAlternative(candidate);
@@ -5675,7 +5672,7 @@ void main() {
     this.registerDisposer(
       new TraceNoticeOverlay(layer.manager.root.display, {
         active: state.zettaTraceState.active,
-        sphereCenter: state.zettaTraceState.sphereCenter,
+        seedRoot: state.zettaTraceState.seedRoot,
         session: this.traceSession,
       }),
     );
