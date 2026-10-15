@@ -18,6 +18,7 @@ import type {
   RealignSummary,
 } from "#src/datasource/calcada/react/realign_panel.js";
 import { RealignPanel } from "#src/datasource/calcada/react/realign_panel.js";
+import type { RealignCommitRow } from "#src/datasource/calcada/realign/realign_commit.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { Disposer } from "#src/util/disposable.js";
@@ -25,7 +26,17 @@ import { invokeDisposer } from "#src/util/disposable.js";
 
 const SIDE_PANEL_WIDTH_PX = 260;
 
-function makeSession(summary: RealignSummary) {
+const SUMMARY_DEFAULTS = {
+  arrows: [],
+  onMain: false,
+  canCommit: false,
+} as const;
+
+function makeSession(
+  partial: Omit<RealignSummary, keyof typeof SUMMARY_DEFAULTS> &
+    Partial<RealignSummary>,
+) {
+  const summary: RealignSummary = { ...SUMMARY_DEFAULTS, ...partial };
   const apply = vi.fn(async () => {});
   const session: RealignPanelSession = {
     status: new WatchableValue<RealignStatus>({ kind: "idle", message: "" }),
@@ -35,6 +46,12 @@ function makeSession(summary: RealignSummary) {
     apply,
     clearPreview: vi.fn(),
     cancel: vi.fn(),
+    focusArrow: vi.fn(),
+    removeAllArrows: vi.fn(),
+    plannedSections: vi.fn(() => 7),
+    commit: vi.fn(async () => {}),
+    commits: new WatchableValue<readonly RealignCommitRow[]>([]),
+    undo: vi.fn(async () => {}),
   };
   return { session, apply };
 }
@@ -84,6 +101,7 @@ describe("RealignPanel", () => {
       hasBox: true,
       lineCount: 3,
       rejected: [{ id: "x", reason: "outside-box" }],
+      arrows: [{ id: "x", lengthPx: 2, rejected: "outside-box" }],
     });
     await mountPanel(session);
     expect(tab.textContent).toContain("3 correspondences");
@@ -118,6 +136,24 @@ describe("RealignPanel", () => {
     expect(button("Apply").disabled).toBe(true);
   });
 
+  it("shows the commit progress, pieces cut included", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      lineCount: 1,
+      rejected: [],
+    });
+    await mountPanel(session);
+    session.status.value = {
+      kind: "committing",
+      message: "Writing section 1 of 3 (12 pieces cut)…",
+    };
+    await vi.waitFor(() => {
+      expect(tab.textContent).toContain(
+        "Writing section 1 of 3 (12 pieces cut)…",
+      );
+    });
+  });
+
   it("offers Cancel while working", async () => {
     const { session } = makeSession({
       hasBox: true,
@@ -131,5 +167,104 @@ describe("RealignPanel", () => {
     });
     button("Cancel").click();
     expect(session.cancel).toHaveBeenCalledTimes(1);
+  });
+  it("lists arrows with length, residual and the rejection reason, and focuses one on click", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      lineCount: 2,
+      rejected: [{ id: "c", reason: "outside-box" }],
+      arrows: [
+        { id: "a", lengthPx: 6.2, residualPx: 0.4 },
+        { id: "c", lengthPx: 3, rejected: "outside-box" },
+      ],
+      residualMeanPx: 0.4,
+      onMain: false,
+      canCommit: false,
+    });
+    await mountPanel(session);
+    expect(tab.textContent).toContain("6.2 px");
+    expect(tab.textContent).toContain("0.4 px");
+    expect(tab.textContent).toContain("an end is outside the box");
+    tab.querySelector<HTMLElement>('[data-arrow-id="a"]')!.click();
+    expect(session.focusArrow).toHaveBeenCalledWith("a");
+  });
+
+  it("asks for an inline confirmation naming the section count before committing", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      lineCount: 3,
+      rejected: [],
+      arrows: [],
+      onMain: false,
+      canCommit: true,
+    });
+    await mountPanel(session);
+    button("Commit").click();
+    await vi.waitFor(() => expect(tab.textContent).toContain("7 sections"));
+    button("Confirm").click();
+    expect(session.commit).toHaveBeenCalledWith(1);
+  });
+
+  it("disables Commit on main and says why", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      lineCount: 3,
+      rejected: [],
+      arrows: [],
+      onMain: true,
+      canCommit: true,
+    });
+    await mountPanel(session);
+    expect(button("Commit").disabled).toBe(true);
+    expect(tab.textContent).toContain("Switch to a branch");
+  });
+
+  it("lists commits with Undo enabled only when undoable, and names the blocker", async () => {
+    const { session } = makeSession({
+      hasBox: false,
+      lineCount: 0,
+      rejected: [],
+    });
+    session.commits.value = [
+      {
+        operationId: 12,
+        box: [50, 50, 150, 150],
+        z0: 12,
+        sections: 4,
+        status: "completed",
+        undoable: true,
+      },
+      {
+        operationId: 11,
+        box: [0, 0, 100, 100],
+        z0: 10,
+        sections: 5,
+        status: "completed",
+        undoable: false,
+        blockedBy: 12,
+      },
+    ];
+    await mountPanel(session);
+    const newer = tab.querySelector<HTMLElement>('[data-commit-id="12"]')!;
+    const older = tab.querySelector<HTMLElement>('[data-commit-id="11"]')!;
+    const undoOf = (row: HTMLElement) =>
+      [...row.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Undo",
+      )!;
+    expect(undoOf(newer).disabled).toBe(false);
+    expect(undoOf(older).disabled).toBe(true);
+    expect(older.textContent).toContain("undo #12 first");
+    undoOf(newer).click();
+    expect(session.undo).toHaveBeenCalledWith(12);
+  });
+
+  it("says when the branch has no commits", async () => {
+    const { session } = makeSession({
+      hasBox: false,
+      lineCount: 0,
+      rejected: [],
+    });
+    await mountPanel(session);
+    expect(tab.textContent).toContain("No commits on this branch.");
   });
 });

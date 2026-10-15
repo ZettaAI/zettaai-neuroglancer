@@ -13,6 +13,7 @@ import {
 import type { CorrespondenceLine } from "#src/datasource/calcada/realign/realign_selection.js";
 import { joinBackendUrl } from "#src/editing/backend/backend_client.js";
 import type { BackendEndpoint } from "#src/editing/backend/backend_endpoint.js";
+import { HttpError } from "#src/util/http_request.js";
 
 export interface RealignCrop {
   readonly data: Uint8Array;
@@ -133,4 +134,23 @@ export async function applyCorrespondences(
     );
   }
   return parseApplyCorrespondencesResponse(await response.arrayBuffer());
+}
+
+/**
+ * A calcada refusal (4xx/5xx with a JSON `{error}` body) as a RealignError that
+ * keeps calcada's own reason; anything else passes through unchanged.
+ */
+export async function calcadaRefusal(error: unknown): Promise<unknown> {
+  if (!(error instanceof HttpError) || error.response === undefined) {
+    return error;
+  }
+  const body = await error.response.text();
+  try {
+    return new RealignError(
+      "failed",
+      (JSON.parse(body) as { error: string }).error,
+    );
+  } catch {
+    return new RealignError("failed", body || `HTTP ${error.status}`);
+  }
 }

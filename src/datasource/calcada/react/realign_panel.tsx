@@ -9,13 +9,17 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import { useState } from "react";
+
+import type { RealignCommitRow } from "#src/datasource/calcada/realign/realign_commit.js";
+import { DEFAULT_MAX_SHIFT_PX } from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RejectReason } from "#src/datasource/calcada/realign/realign_selection.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { Button } from "@/components/ui/button";
 
 export interface RealignStatus {
-  readonly kind: "idle" | "working" | "done" | "error";
+  readonly kind: "idle" | "working" | "committing" | "done" | "error";
   readonly message: string;
 }
 
@@ -24,6 +28,18 @@ export interface RealignSummary {
   readonly lineCount: number;
   readonly rejected: readonly { id: string; reason: RejectReason }[];
   readonly unavailableReason?: string;
+  readonly arrows: readonly ArrowRow[];
+  readonly residualMeanPx?: number;
+  readonly onMain: boolean;
+  /** An applied field matches the arrows and no commit is running. */
+  readonly canCommit: boolean;
+}
+
+export interface ArrowRow {
+  readonly id: string;
+  readonly lengthPx: number;
+  readonly residualPx?: number;
+  readonly rejected?: RejectReason;
 }
 
 /**
@@ -38,6 +54,19 @@ export interface RealignPanelSession {
   apply(): Promise<void>;
   clearPreview(): void;
   cancel(): void;
+  focusArrow(id: string): void;
+  removeAllArrows(): void;
+  plannedSections(maxShiftPx: number): number | undefined;
+  commit(maxShiftPx: number): Promise<void>;
+  /** The branch's realigns, newest first. */
+  readonly commits: WatchableValueInterface<readonly RealignCommitRow[]>;
+  undo(operationId: number): Promise<void>;
+}
+
+const PIXEL_DIGITS = 1;
+
+function pixels(value: number): string {
+  return `${value.toFixed(PIXEL_DIGITS)} px`;
 }
 
 const REJECT_REASON_TEXT: Record<RejectReason, string> = {
@@ -45,10 +74,26 @@ const REJECT_REASON_TEXT: Record<RejectReason, string> = {
   "not-across-sections": "must join the box's section and the one below",
 };
 
+const UNDO_PENDING_STATUS = "undo_pending";
+
+function commitLabel({ operationId, box, z0, sections }: RealignCommitRow) {
+  const [x0, y0, x1, y1] = box;
+  return `#${operationId} · z ${z0}–${z0 + sections - 1} · ${x0},${y0} → ${x1},${y1}`;
+}
+
+function commitNote({ status, blockedBy }: RealignCommitRow) {
+  if (blockedBy !== undefined) return ` · undo #${blockedBy} first`;
+  if (status === UNDO_PENDING_STATUS) return " · undo unfinished";
+  return "";
+}
+
 export function RealignPanel({ session }: { session: RealignPanelSession }) {
   const status = useWatchable(session.status);
   const summary = useWatchable(session.summary);
-  const working = status.kind === "working";
+  const commits = useWatchable(session.commits);
+  const [maxShiftPx, setMaxShiftPx] = useState(DEFAULT_MAX_SHIFT_PX);
+  const [confirming, setConfirming] = useState(false);
+  const working = status.kind === "working" || status.kind === "committing";
   const canApply =
     !working &&
     summary.unavailableReason === undefined &&
@@ -68,10 +113,22 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           {summary.hasBox ? "Box drawn" : "No box"} · {summary.lineCount}{" "}
           correspondences
         </div>
-        {summary.rejected.map(({ id, reason }) => (
-          <div key={id} className="calcada-trace-panel-status">
-            Line ignored: {REJECT_REASON_TEXT[reason]}
-          </div>
+        {summary.arrows.map((arrow, index) => (
+          <button
+            key={arrow.id}
+            type="button"
+            className="calcada-trace-panel-row"
+            data-arrow-id={arrow.id}
+            title="Go to this correspondence"
+            onClick={() => session.focusArrow(arrow.id)}
+          >
+            #{index + 1} · {pixels(arrow.lengthPx)}
+            {arrow.rejected !== undefined
+              ? ` · ${REJECT_REASON_TEXT[arrow.rejected]}`
+              : arrow.residualPx !== undefined
+                ? ` → ${pixels(arrow.residualPx)}`
+                : ""}
+          </button>
         ))}
         <div className="calcada-trace-panel-buttons">
           <Button
@@ -90,6 +147,15 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           >
             Add correspondence
           </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={summary.arrows.length === 0}
+            title="Delete every correspondence"
+            onClick={() => session.removeAllArrows()}
+          >
+            Remove all
+          </Button>
         </div>
       </fieldset>
       <fieldset className="calcada-trace-panel-section">
@@ -103,7 +169,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           >
             Apply
           </Button>
-          {working && (
+          {status.kind === "working" && (
             <Button
               size="xs"
               variant="outline"
@@ -122,9 +188,104 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
             Clear preview
           </Button>
         </div>
+        {summary.residualMeanPx !== undefined && (
+          <div className="calcada-trace-panel-status">
+            Mean residual after warp: {pixels(summary.residualMeanPx)}
+          </div>
+        )}
         {status.message && (
           <div className="calcada-trace-panel-status">{status.message}</div>
         )}
+      </fieldset>
+      <fieldset className="calcada-trace-panel-section">
+        <legend>Commit</legend>
+        {summary.onMain && (
+          <div className="calcada-trace-panel-warning">
+            Commits are made on a branch. Switch to a branch, or create one,
+            with the Branch control.
+          </div>
+        )}
+        <label className="calcada-trace-panel-row">
+          Max shift between sections, px
+          <input
+            type="number"
+            min="0.1"
+            step="0.1"
+            value={maxShiftPx}
+            onChange={(event) => setMaxShiftPx(Number(event.target.value))}
+          />
+        </label>
+        {confirming ? (
+          <>
+            <div className="calcada-trace-panel-status">
+              Changes {session.plannedSections(maxShiftPx) ?? "?"} sections on
+              this branch.
+            </div>
+            <div className="calcada-trace-panel-buttons">
+              <Button
+                size="xs"
+                onClick={() => {
+                  setConfirming(false);
+                  void session.commit(maxShiftPx);
+                }}
+              >
+                Confirm
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => setConfirming(false)}
+              >
+                Back
+              </Button>
+            </div>
+          </>
+        ) : (
+          <div className="calcada-trace-panel-buttons">
+            <Button
+              size="xs"
+              disabled={
+                !summary.canCommit ||
+                summary.onMain ||
+                working ||
+                !(maxShiftPx > 0)
+              }
+              title="Write the warp into this branch over the box's section and the ones above"
+              onClick={() => setConfirming(true)}
+            >
+              Commit
+            </Button>
+          </div>
+        )}
+      </fieldset>
+      <fieldset className="calcada-trace-panel-section">
+        <legend>Commits</legend>
+        {commits.length === 0 && (
+          <div className="calcada-trace-panel-status">
+            No commits on this branch.
+          </div>
+        )}
+        {commits.map((row) => (
+          <div
+            key={row.operationId}
+            className="calcada-trace-panel-row"
+            data-commit-id={row.operationId}
+          >
+            <span>
+              {commitLabel(row)}
+              {commitNote(row)}
+            </span>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={!row.undoable || working}
+              title="Restore the image, segmentation and graph from before this realign"
+              onClick={() => void session.undo(row.operationId)}
+            >
+              Undo
+            </Button>
+          </div>
+        ))}
       </fieldset>
     </div>
   );

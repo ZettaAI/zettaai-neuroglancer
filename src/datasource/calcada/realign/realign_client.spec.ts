@@ -2,9 +2,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyCorrespondences,
+  calcadaRefusal,
   RealignError,
   realignErrorMessage,
 } from "#src/datasource/calcada/realign/realign_client.js";
+import { HttpError } from "#src/util/http_request.js";
 
 const endpoint = {
   baseUrl: "https://gpu.example",
@@ -85,5 +87,27 @@ describe("applyCorrespondences", () => {
     const error = await pending;
     expect((error as RealignError).kind).toBe("cancelled");
     expect(realignErrorMessage(error)).toMatch(/cancelled/i);
+  });
+});
+
+describe("calcadaRefusal", () => {
+  it("keeps the reason calcada gave, so a busy region is not read as a missing image", async () => {
+    const error = new HttpError(
+      "https://calcada/realign/commit",
+      409,
+      "Conflict",
+      new Response(
+        '{"error":"another edit is changing this region of the branch; try again later"}',
+        { status: 409 },
+      ),
+    );
+    const refusal = await calcadaRefusal(error);
+    expect(realignErrorMessage(refusal)).toContain("try again later");
+    expect(realignErrorMessage(refusal)).not.toContain("no image");
+  });
+
+  it("passes other errors through", async () => {
+    const error = new Error("network");
+    expect(await calcadaRefusal(error)).toBe(error);
   });
 });
