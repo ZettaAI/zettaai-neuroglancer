@@ -530,9 +530,12 @@ export class RealignSession extends RefCounted {
     hint: string,
   ): void {
     const managed = this.findOrCreateAnnotationLayer();
-    if (this.toolLayer === undefined) {
-      this.layers.root.selectedLayer.layer = managed;
-    }
+    // The viewer sends a Ctrl+click to the selected layer's tool, so the layer
+    // holding the drawing tool must be the selected one.
+    this.layers.root.selectedLayer.layer =
+      this.layers.rootLayers.managedLayers.find(
+        (candidate) => candidate.layer === this.toolLayer,
+      ) ?? managed;
     this.whenAnnotationsReady(managed, (layer) => {
       (this.toolLayer ?? layer).tool.value = makeTool(layer);
       this.status.value = { kind: "idle", message: hint };
@@ -583,6 +586,9 @@ export class RealignSession extends RefCounted {
         return false;
       }
       giveArrowLook(layer);
+      // A tool of the realign layer itself, possibly restored from a saved
+      // state, would draw boxes that ignore the section.
+      if (this.toolLayer !== undefined) layer.tool.value = undefined;
       this.watchAnnotations(layer.localAnnotations);
       ready?.(layer);
       return true;
