@@ -37,6 +37,35 @@ export interface RealignSelection {
 const X = 0;
 const Y = 1;
 const Z = 2;
+// A section boundary converted from global coordinates can come back a hair
+// below the integer; this keeps it on its own section.
+const SECTION_EPSILON = 1e-6;
+
+/** The section a graph-voxel z falls on. */
+export function sectionOf(z: number): number {
+  return Math.floor(z + SECTION_EPSILON);
+}
+
+/** The z range, in graph voxels, of the one section under `z`. */
+export function sectionSpan(z: number): [number, number] {
+  const section = sectionOf(z);
+  return [section, section + 1];
+}
+
+/**
+ * Whether an arrow runs from the section below the box up to the box's
+ * section, so that turning it round puts its tail on the box's section.
+ */
+export function arrowNeedsReversal(
+  pointA: ArrayLike<number>,
+  pointB: ArrayLike<number>,
+  boxSection: number,
+): boolean {
+  return (
+    sectionOf(pointA[Z]) === boxSection - 1 &&
+    sectionOf(pointB[Z]) === boxSection
+  );
+}
 
 export function boxFromCorners(
   pointA: ArrayLike<number>,
@@ -47,7 +76,7 @@ export function boxFromCorners(
     y0: Math.floor(Math.min(pointA[Y], pointB[Y])),
     x1: Math.ceil(Math.max(pointA[X], pointB[X])),
     y1: Math.ceil(Math.max(pointA[Y], pointB[Y])),
-    z: Math.floor(Math.min(pointA[Z], pointB[Z])),
+    z: sectionOf(Math.min(pointA[Z], pointB[Z])),
   };
 }
 
@@ -72,8 +101,8 @@ export function selectCorrespondences(
   const rejected: { id: string; reason: RejectReason }[] = [];
   const referenceSection = box.z - 1;
   for (const line of lines) {
-    const sectionA = Math.floor(line.pointA[Z]);
-    const sectionB = Math.floor(line.pointB[Z]);
+    const sectionA = sectionOf(line.pointA[Z]);
+    const sectionB = sectionOf(line.pointB[Z]);
     let moving: ArrayLike<number>;
     let reference: ArrayLike<number>;
     if (sectionA === box.z && sectionB === referenceSection) {

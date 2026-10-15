@@ -25,6 +25,8 @@ export interface RealignStatus {
 
 export interface RealignSummary {
   readonly hasBox: boolean;
+  /** The section the box is on, when there is a box. */
+  readonly boxSection?: number;
   readonly lineCount: number;
   readonly rejected: readonly { id: string; reason: RejectReason }[];
   readonly unavailableReason?: string;
@@ -38,6 +40,8 @@ export interface RealignSummary {
 export interface ArrowRow {
   readonly id: string;
   readonly lengthPx: number;
+  /** The sections of the arrow's tail and head. */
+  readonly sections: readonly [number, number];
   readonly residualPx?: number;
   readonly rejected?: RejectReason;
 }
@@ -69,10 +73,28 @@ function pixels(value: number): string {
   return `${value.toFixed(PIXEL_DIGITS)} px`;
 }
 
-const REJECT_REASON_TEXT: Record<RejectReason, string> = {
-  "outside-box": "an end is outside the box",
-  "not-across-sections": "must join the box's section and the one below",
-};
+function rejectionText(
+  reason: RejectReason,
+  [tail, head]: readonly [number, number],
+  boxSection: number | undefined,
+): string {
+  if (reason === "outside-box") return "an end is outside the box";
+  const needed =
+    boxSection === undefined ? "" : `, needs ${boxSection} → ${boxSection - 1}`;
+  return `on z ${tail} → ${head}${needed}`;
+}
+
+function correspondenceCount({
+  hasBox,
+  boxSection,
+  arrows,
+  rejected,
+}: RealignSummary): string {
+  const box = hasBox ? `Box on z ${boxSection}` : "No box";
+  const rejectedNote =
+    rejected.length > 0 ? ` · ${rejected.length} rejected` : "";
+  return `${box} · ${arrows.length} correspondences${rejectedNote}`;
+}
 
 const UNDO_PENDING_STATUS = "undo_pending";
 
@@ -110,8 +132,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
       <fieldset className="calcada-trace-panel-section">
         <legend>Correspondences</legend>
         <div className="calcada-trace-panel-status">
-          {summary.hasBox ? "Box drawn" : "No box"} · {summary.lineCount}{" "}
-          correspondences
+          {correspondenceCount(summary)}
         </div>
         {summary.arrows.map((arrow, index) => (
           <button
@@ -124,7 +145,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           >
             #{index + 1} · {pixels(arrow.lengthPx)}
             {arrow.rejected !== undefined
-              ? ` · ${REJECT_REASON_TEXT[arrow.rejected]}`
+              ? ` · ${rejectionText(arrow.rejected, arrow.sections, summary.boxSection)}`
               : arrow.residualPx !== undefined
                 ? ` → ${pixels(arrow.residualPx)}`
                 : ""}

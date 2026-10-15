@@ -99,17 +99,48 @@ describe("RealignPanel", () => {
   it("counts correspondences, explains rejected lines and applies", async () => {
     const { session, apply } = makeSession({
       hasBox: true,
-      lineCount: 3,
+      boxSection: 3104,
+      lineCount: 2,
       rejected: [{ id: "x", reason: "outside-box" }],
-      arrows: [{ id: "x", lengthPx: 2, rejected: "outside-box" }],
+      arrows: [
+        { id: "a", lengthPx: 2, sections: [3104, 3103] },
+        { id: "b", lengthPx: 2, sections: [3104, 3103] },
+        {
+          id: "x",
+          lengthPx: 2,
+          sections: [3104, 3103],
+          rejected: "outside-box",
+        },
+      ],
     });
     await mountPanel(session);
-    expect(tab.textContent).toContain("3 correspondences");
+    expect(tab.textContent).toContain(
+      "Box on z 3104 · 3 correspondences · 1 rejected",
+    );
     expect(tab.textContent).toContain("an end is outside the box");
     const applyButton = button("Apply");
     expect(applyButton.disabled).toBe(false);
     applyButton.click();
     expect(apply).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the sections a cross-section arrow is on and the ones it needs", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      boxSection: 3103,
+      lineCount: 0,
+      rejected: [{ id: "a", reason: "not-across-sections" }],
+      arrows: [
+        {
+          id: "a",
+          lengthPx: 21.1,
+          sections: [3103, 3104],
+          rejected: "not-across-sections",
+        },
+      ],
+    });
+    await mountPanel(session);
+    expect(tab.textContent).toContain("on z 3103 → 3104, needs 3103 → 3102");
   });
 
   it("disables Apply without a box", async () => {
@@ -174,8 +205,8 @@ describe("RealignPanel", () => {
       lineCount: 2,
       rejected: [{ id: "c", reason: "outside-box" }],
       arrows: [
-        { id: "a", lengthPx: 6.2, residualPx: 0.4 },
-        { id: "c", lengthPx: 3, rejected: "outside-box" },
+        { id: "a", lengthPx: 6.2, sections: [32, 31], residualPx: 0.4 },
+        { id: "c", lengthPx: 3, sections: [32, 31], rejected: "outside-box" },
       ],
       residualMeanPx: 0.4,
       onMain: false,

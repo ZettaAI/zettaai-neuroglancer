@@ -5168,16 +5168,20 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       getter: () => new CalcadaTraceTab(this),
     });
     const realignSession = this.registerDisposer(
-      new RealignSession(layer.manager, {
-        branchId: graph.branchId,
-        resolution: graph.info.scales[0].resolution as unknown as [
-          number,
-          number,
-          number,
-        ],
-        graphServer: graph.graphServer,
-        applyRootChanges: (rootMap) => this.applyRootChanges(rootMap),
-      }),
+      new RealignSession(
+        layer.manager,
+        {
+          branchId: graph.branchId,
+          resolution: graph.info.scales[0].resolution as unknown as [
+            number,
+            number,
+            number,
+          ],
+          graphServer: graph.graphServer,
+          applyRootChanges: (rootMap) => this.applyRootChanges(rootMap),
+        },
+        layer,
+      ),
     );
     layer.tabs.add(CALCADA_REALIGN_TAB_ID, {
       label: "Realign",

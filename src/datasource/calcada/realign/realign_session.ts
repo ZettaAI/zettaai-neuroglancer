@@ -71,19 +71,26 @@ import type {
   RealignBox,
 } from "#src/datasource/calcada/realign/realign_selection.js";
 import {
+  arrowNeedsReversal,
   boxFromCorners,
+  sectionOf,
   selectCorrespondences,
 } from "#src/datasource/calcada/realign/realign_selection.js";
+import {
+  globalSectionSpan,
+  RealignArrowTool,
+  RealignBoxTool,
+} from "#src/datasource/calcada/realign/realign_tools.js";
 import { AnnotationUserLayer } from "#src/layer/annotation/index.js";
 import { ImageUserLayer } from "#src/layer/image/index.js";
 import type {
   LayerListSpecification,
   ManagedUserLayer,
+  UserLayer,
 } from "#src/layer/index.js";
 import { makeLayer } from "#src/layer/index.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
-import { PlaceBoundingBoxTool, PlaceLineTool } from "#src/ui/annotations.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { HttpError } from "#src/util/http_request.js";
 
@@ -105,6 +112,7 @@ void main() {
 const HTTP_CONFLICT = 409;
 const X_AXIS = 0;
 const Y_AXIS = 1;
+const Z_AXIS = 2;
 export const REALIGN_PATCH_LAYER = "realign patch";
 export const REALIGN_MAIN_PATCH_LAYER = "realign patch (main)";
 // Image layers default to half opacity, which would blend the preview with
@@ -188,9 +196,14 @@ export class RealignSession extends RefCounted {
   private readonly commitsRequests = latestRequestGate();
   private unwatchSource: (() => void) | undefined;
 
+  /**
+   * @param toolLayer - The layer whose Realign tab drives the session. The
+   *   drawing tools are installed on it, so the selection stays there.
+   */
   constructor(
     private readonly layers: LayerListSpecification,
     private readonly graph: RealignGraph,
+    private readonly toolLayer?: UserLayer,
   ) {
     super();
     const existing = this.findAnnotationLayer();
@@ -210,15 +223,20 @@ export class RealignSession extends RefCounted {
   }
 
   drawBox(): void {
+    const { scales } = this.layers.root.coordinateSpace.value;
+    const resolutionZ = this.graph.resolution[Z_AXIS];
     this.armTool(
-      (layer) => new PlaceBoundingBoxTool(layer, {}),
+      (layer) =>
+        new RealignBoxTool(layer, (globalZ) =>
+          globalSectionSpan(globalZ, scales[Z_AXIS], resolutionZ),
+        ),
       "Ctrl+click two corners of the box on the misaligned section.",
     );
   }
 
   addCorrespondence(): void {
     this.armTool(
-      (layer) => new PlaceLineTool(layer, {}),
+      (layer) => new RealignArrowTool(layer, {}),
       "Ctrl+click a feature on the box's section, then where it belongs on the section below.",
     );
   }
@@ -508,15 +526,15 @@ export class RealignSession extends RefCounted {
   }
 
   private armTool(
-    makeTool: (
-      layer: AnnotationUserLayer,
-    ) => PlaceBoundingBoxTool | PlaceLineTool,
+    makeTool: (layer: AnnotationUserLayer) => RealignBoxTool | RealignArrowTool,
     hint: string,
   ): void {
     const managed = this.findOrCreateAnnotationLayer();
-    this.layers.root.selectedLayer.layer = managed;
+    if (this.toolLayer === undefined) {
+      this.layers.root.selectedLayer.layer = managed;
+    }
     this.whenAnnotationsReady(managed, (layer) => {
-      layer.tool.value = makeTool(layer);
+      (this.toolLayer ?? layer).tool.value = makeTool(layer);
       this.status.value = { kind: "idle", message: hint };
     });
   }
@@ -593,6 +611,7 @@ export class RealignSession extends RefCounted {
       source.childDeleted.add(refresh),
       source.childCommitted.add((annotationId) => {
         this.keepOnlyBox(source, annotationId);
+        this.orientArrow(source, annotationId);
         refresh();
       }),
     ];
@@ -619,6 +638,37 @@ export class RealignSession extends RefCounted {
         } finally {
           reference.dispose();
         }
+      }
+    });
+  }
+
+  /** Turns a new arrow round when it was drawn from the section below up. */
+  private orientArrow(source: LocalAnnotationSource, committedId: string) {
+    const committed = source.get(committedId);
+    const box = [...source].find(isBox);
+    if (committed === undefined || !isLine(committed) || box === undefined) {
+      return;
+    }
+    const toVoxels = this.globalToGraphVoxels();
+    const { z } = boxFromCorners(toVoxels(box.pointA), toVoxels(box.pointB));
+    if (
+      !arrowNeedsReversal(
+        toVoxels(committed.pointA),
+        toVoxels(committed.pointB),
+        z,
+      )
+    ) {
+      return;
+    }
+    // Deferred for the same reason as keepOnlyBox.
+    queueMicrotask(() => {
+      const line = source.get(committedId);
+      if (line === undefined || !isLine(line)) return;
+      const reference = source.getReference(committedId);
+      try {
+        source.update(reference, reversedLine(line));
+      } finally {
+        reference.dispose();
       }
     });
   }
@@ -661,11 +711,11 @@ export class RealignSession extends RefCounted {
     if (!isReverseArrowKey(event) || isTextEntry(event.target)) return;
     const managed = this.findAnnotationLayer();
     const source = this.watchedSource;
-    if (
-      managed === undefined ||
-      source === undefined ||
-      this.layers.root.selectedLayer.layer !== managed
-    ) {
+    const selectedLayer = this.layers.root.selectedLayer.layer;
+    const onRealignLayer =
+      selectedLayer === managed ||
+      (this.toolLayer !== undefined && selectedLayer?.layer === this.toolLayer);
+    if (managed === undefined || source === undefined || !onRealignLayer) {
       return;
     }
     const layer = managed.layer as AnnotationUserLayer;
@@ -703,6 +753,7 @@ export class RealignSession extends RefCounted {
     }
     this.summary.value = {
       hasBox: selection !== undefined,
+      boxSection: selection?.box.z,
       lineCount: selection?.lines.length ?? 0,
       rejected: selection?.rejected ?? [],
       unavailableReason: unavailableReason(),
@@ -730,10 +781,11 @@ export class RealignSession extends RefCounted {
     const toVoxels = this.globalToGraphVoxels();
     return [...source].filter(isLine).map((line) => {
       const cropLine = accepted.get(line.id);
-      const [tailX, tailY] = toVoxels(line.pointA);
-      const [headX, headY] = toVoxels(line.pointB);
+      const [tailX, tailY, tailZ] = toVoxels(line.pointA);
+      const [headX, headY, headZ] = toVoxels(line.pointB);
       return {
         id: line.id,
+        sections: [sectionOf(tailZ), sectionOf(headZ)] as const,
         lengthPx:
           cropLine === undefined
             ? Math.hypot(headX - tailX, headY - tailY)
