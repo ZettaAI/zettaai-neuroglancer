@@ -24,13 +24,13 @@ export interface TraceNotice {
   kind: "loading" | "candidate" | "empty" | "error";
   title: string;
   details?: readonly string[];
-  /** A detail that should not be missed, shown in bold. */
-  highlight?: string;
+  /** The detail right under the title, in bold when it is good news. */
+  headline?: { text: string; bold: boolean };
 }
 
 export interface TraceNoticeSource {
   readonly active: WatchableValueInterface<boolean>;
-  readonly sphereCenter: WatchableValueInterface<Float32Array | undefined>;
+  readonly seedRoot: WatchableValueInterface<bigint | undefined>;
   readonly session: {
     readonly changed: NullarySignal;
     readonly notice: TraceNotice | undefined;
@@ -54,9 +54,15 @@ export function CalcadaTraceNotice({ source }: { source: TraceNoticeSource }) {
         )}
         {notice.title}
       </div>
-      {notice.highlight !== undefined && (
-        <div className="calcada-trace-notice-detail calcada-trace-notice-highlight">
-          {notice.highlight}
+      {notice.headline !== undefined && (
+        <div
+          className={
+            notice.headline.bold
+              ? "calcada-trace-notice-detail calcada-trace-notice-highlight"
+              : "calcada-trace-notice-detail"
+          }
+        >
+          {notice.headline.text}
         </div>
       )}
       {notice.details?.map((detail) => (
