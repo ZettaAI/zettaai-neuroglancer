@@ -14,6 +14,7 @@ import { useState } from "react";
 import type { RealignCommitRow } from "#src/datasource/calcada/realign/realign_commit.js";
 import { DEFAULT_MAX_SHIFT_PX } from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RejectReason } from "#src/datasource/calcada/realign/realign_selection.js";
+import { MAX_REFERENCE_OFFSET } from "#src/datasource/calcada/realign/realign_selection.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { Button } from "@/components/ui/button";
@@ -25,8 +26,10 @@ export interface RealignStatus {
 
 export interface RealignSummary {
   readonly hasBox: boolean;
-  /** The section the box is on, when there is a box. */
+  /** The section the box realigns, when there is a box. */
   readonly boxSection?: number;
+  /** The section its correspondences point to, when there is a box. */
+  readonly referenceSection?: number;
   readonly lineCount: number;
   readonly rejected: readonly { id: string; reason: RejectReason }[];
   readonly unavailableReason?: string;
@@ -65,7 +68,15 @@ export interface RealignPanelSession {
   /** The branch's realigns, newest first. */
   readonly commits: WatchableValueInterface<readonly RealignCommitRow[]>;
   undo(operationId: number): Promise<void>;
+  /** The reference section's offset from the moving one, never 0. */
+  readonly referenceOffset: WatchableValueInterface<number>;
+  setReferenceOffset(offset: number): void;
 }
+
+const REFERENCE_OFFSETS = Array.from(
+  { length: 2 * MAX_REFERENCE_OFFSET + 1 },
+  (_, index) => index - MAX_REFERENCE_OFFSET,
+).filter((offset) => offset !== 0);
 
 const PIXEL_DIGITS = 1;
 
@@ -76,11 +87,13 @@ function pixels(value: number): string {
 function rejectionText(
   reason: RejectReason,
   [tail, head]: readonly [number, number],
-  boxSection: number | undefined,
+  { boxSection, referenceSection }: RealignSummary,
 ): string {
   if (reason === "outside-box") return "an end is outside the box";
   const needed =
-    boxSection === undefined ? "" : `, needs ${boxSection} → ${boxSection - 1}`;
+    boxSection === undefined || referenceSection === undefined
+      ? ""
+      : `, needs ${boxSection} → ${referenceSection}`;
   return `on z ${tail} → ${head}${needed}`;
 }
 
@@ -113,6 +126,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
   const status = useWatchable(session.status);
   const summary = useWatchable(session.summary);
   const commits = useWatchable(session.commits);
+  const referenceOffset = useWatchable(session.referenceOffset);
   const [maxShiftPx, setMaxShiftPx] = useState(DEFAULT_MAX_SHIFT_PX);
   const [confirming, setConfirming] = useState(false);
   const working = status.kind === "working" || status.kind === "committing";
@@ -134,6 +148,29 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
         <div className="calcada-trace-panel-status">
           {correspondenceCount(summary)}
         </div>
+        <label className="calcada-trace-panel-row">
+          Reference section
+          <select
+            aria-label="Reference section"
+            value={referenceOffset}
+            onChange={(event) =>
+              session.setReferenceOffset(Number(event.target.value))
+            }
+          >
+            {REFERENCE_OFFSETS.map((offset) => (
+              <option key={offset} value={offset}>
+                {offset > 0 ? `+${offset}` : offset}
+              </option>
+            ))}
+          </select>
+        </label>
+        {summary.boxSection !== undefined &&
+          summary.referenceSection !== undefined && (
+            <div className="calcada-trace-panel-status">
+              z {summary.boxSection} → {summary.referenceSection} · Q switches
+              between them
+            </div>
+          )}
         {summary.arrows.map((arrow, index) => (
           <button
             key={arrow.id}
@@ -145,7 +182,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           >
             #{index + 1} · {pixels(arrow.lengthPx)}
             {arrow.rejected !== undefined
-              ? ` · ${rejectionText(arrow.rejected, arrow.sections, summary.boxSection)}`
+              ? ` · ${rejectionText(arrow.rejected, arrow.sections, summary)}`
               : arrow.residualPx !== undefined
                 ? ` → ${pixels(arrow.residualPx)}`
                 : ""}

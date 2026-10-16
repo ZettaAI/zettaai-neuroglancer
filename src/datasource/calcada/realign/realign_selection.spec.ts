@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   arrowNeedsReversal,
   boxFromCorners,
+  referenceDirection,
   sectionSpan,
+  sectionToggleTarget,
   selectCorrespondences,
 } from "#src/datasource/calcada/realign/realign_selection.js";
 
@@ -89,19 +91,77 @@ describe("boxFromCorners on a two-section box", () => {
 });
 
 describe("arrowNeedsReversal", () => {
-  it("reverses an arrow drawn from the section below up to the box's section", () => {
-    expect(arrowNeedsReversal([1, 1, 3103.5], [2, 2, 3104.5], 3104)).toBe(true);
+  it("reverses an arrow drawn from the reference section to the moving one", () => {
+    expect(arrowNeedsReversal([1, 1, 3103.5], [2, 2, 3104.5], 3104, 3103)).toBe(
+      true,
+    );
   });
 
-  it("keeps an arrow already drawn from the box's section down", () => {
-    expect(arrowNeedsReversal([1, 1, 3104.5], [2, 2, 3103.5], 3104)).toBe(
+  it("keeps an arrow already drawn from the moving section", () => {
+    expect(arrowNeedsReversal([1, 1, 3104.5], [2, 2, 3103.5], 3104, 3103)).toBe(
       false,
     );
   });
 
   it("leaves an arrow on other sections alone", () => {
-    expect(arrowNeedsReversal([1, 1, 3102.5], [2, 2, 3103.5], 3104)).toBe(
+    expect(arrowNeedsReversal([1, 1, 3102.5], [2, 2, 3103.5], 3104, 3103)).toBe(
       false,
     );
+  });
+
+  it("follows a reference above", () => {
+    expect(arrowNeedsReversal([1, 1, 3106.5], [2, 2, 3104.5], 3104, 3106)).toBe(
+      true,
+    );
+  });
+});
+
+describe("a reference section other than the one below", () => {
+  it("takes the lower section of a box reaching up to a reference above", () => {
+    expect(boxFromCorners([100, 200, 3104], [164, 248, 3107], 2).z).toBe(3104);
+  });
+
+  it("takes the upper section of a box reaching down to a reference two below", () => {
+    expect(boxFromCorners([100, 200, 3102], [164, 248, 3105], -2).z).toBe(3104);
+  });
+
+  it("accepts arrows from the moving section to the reference above", () => {
+    const moving = boxFromCorners([100, 200, 32], [164, 248, 35], 2);
+    const selection = selectCorrespondences(
+      moving,
+      [
+        {
+          id: "up",
+          pointA: [110.5, 210.5, 32.5],
+          pointB: [112.5, 205.5, 34.5],
+        },
+        {
+          id: "below",
+          pointA: [110.5, 210.5, 32.5],
+          pointB: [112.5, 205.5, 31.5],
+        },
+      ],
+      2,
+    );
+    expect(selection.referenceSection).toBe(34);
+    expect(selection.lines.map(({ id }) => id)).toEqual(["up"]);
+    expect(selection.rejected).toEqual([
+      { id: "below", reason: "not-across-sections" },
+    ]);
+  });
+});
+
+describe("referenceDirection", () => {
+  it("names where the reference lies from the moving section", () => {
+    expect(referenceDirection(-2)).toBe("below");
+    expect(referenceDirection(1)).toBe("above");
+  });
+});
+
+describe("sectionToggleTarget", () => {
+  it("goes to the reference from the moving section and back from anywhere else", () => {
+    expect(sectionToggleTarget(3104, 3104, 3102)).toBe(3102);
+    expect(sectionToggleTarget(3102, 3104, 3102)).toBe(3104);
+    expect(sectionToggleTarget(3110, 3104, 3102)).toBe(3104);
   });
 });

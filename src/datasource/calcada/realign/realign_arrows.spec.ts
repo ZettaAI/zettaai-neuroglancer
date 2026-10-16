@@ -3,6 +3,7 @@ import type { Line } from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 import {
   isReverseArrowKey,
+  isSectionToggleKey,
   REALIGN_ARROW_SHADER,
   reversedLine,
   withRejectedFlag,
@@ -61,5 +62,23 @@ describe("REALIGN_ARROW_SHADER", () => {
   // transparent, so the realign box would be invisible.
   it("colours the box border", () => {
     expect(REALIGN_ARROW_SHADER).toContain("setBoundingBoxBorderColor(");
+  });
+});
+
+describe("isSectionToggleKey", () => {
+  it("is a bare Q", () => {
+    expect(
+      isSectionToggleKey(new KeyboardEvent("keydown", { code: "KeyQ" })),
+    ).toBe(true);
+    expect(
+      isSectionToggleKey(
+        new KeyboardEvent("keydown", { code: "KeyQ", ctrlKey: true }),
+      ),
+    ).toBe(false);
+    expect(
+      isSectionToggleKey(
+        new KeyboardEvent("keydown", { code: "KeyQ", shiftKey: true }),
+      ),
+    ).toBe(false);
   });
 });

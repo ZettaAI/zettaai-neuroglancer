@@ -68,6 +68,7 @@ describe("appliedFieldKey", () => {
   it("differs between branches for the same box and arrows", () => {
     const selection = {
       box: { x0: 0, y0: 0, x1: 4, y1: 4, z: 3 },
+      referenceSection: 2,
       lines: [
         {
           id: "a",
@@ -81,6 +82,18 @@ describe("appliedFieldKey", () => {
       appliedFieldKey(selection, 5),
     );
     expect(appliedFieldKey(selection, 3)).toBe(appliedFieldKey(selection, 3));
+  });
+
+  it("differs when the reference section moves", () => {
+    const selection = {
+      box: { x0: 0, y0: 0, x1: 4, y1: 4, z: 3 },
+      referenceSection: 2,
+      lines: [],
+      rejected: [],
+    };
+    expect(appliedFieldKey(selection, 3)).not.toBe(
+      appliedFieldKey({ ...selection, referenceSection: 5 }, 3),
+    );
   });
 });
 

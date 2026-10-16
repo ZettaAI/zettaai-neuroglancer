@@ -33,23 +33,30 @@ registerLegacyTool(REALIGN_DRAW_TOOL_ID, () => undefined);
 
 /**
  * The z range, in annotation units, of a realign box drawn at an annotation z:
- * the graph section under it and the reference section below.
+ * the graph section under it, the reference section and every section
+ * between.
  *
  * @param z - z in annotation coordinate units.
  * @param nanometresPerUnitZ - nanometres per annotation z unit.
  * @param resolutionZ - graph voxel z size in nanometres.
+ * @param referenceOffset - the reference section's offset from the drawn one.
  */
 export function boxSpanInUnits(
   z: number,
   nanometresPerUnitZ: number,
   resolutionZ: number,
+  referenceOffset: number,
 ): [number, number] {
   const unitsPerVoxel = resolutionZ / nanometresPerUnitZ;
-  const [lo, hi] = sectionSpan(z / unitsPerVoxel);
-  return [(lo - 1) * unitsPerVoxel, hi * unitsPerVoxel];
+  const [section] = sectionSpan(z / unitsPerVoxel);
+  const reference = section + referenceOffset;
+  return [
+    Math.min(section, reference) * unitsPerVoxel,
+    (Math.max(section, reference) + 1) * unitsPerVoxel,
+  ];
 }
 
-/** A box on the section of its first corner and the section below it. */
+/** A box over the section of its first corner and the reference section. */
 export class RealignBoxTool extends PlaceBoundingBoxTool {
   constructor(
     layer: UserLayerWithAnnotations,

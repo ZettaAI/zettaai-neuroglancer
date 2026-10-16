@@ -27,6 +27,8 @@ void main() {
 `;
 
 const REVERSE_ARROW_CODE = "KeyR";
+// Bare Q is bound neither by Neuroglancer nor by the calcada layer.
+const SECTION_TOGGLE_CODE = "KeyQ";
 
 export function reversedLine(line: Line): Line {
   return { ...line, pointA: line.pointB, pointB: line.pointA };
@@ -48,6 +50,17 @@ export function isReverseArrowKey(event: KeyboardEvent): boolean {
   return (
     event.code === REVERSE_ARROW_CODE &&
     event.shiftKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey
+  );
+}
+
+/** Q: show the other of the moving and reference sections. */
+export function isSectionToggleKey(event: KeyboardEvent): boolean {
+  return (
+    event.code === SECTION_TOGGLE_CODE &&
+    !event.shiftKey &&
     !event.ctrlKey &&
     !event.metaKey &&
     !event.altKey

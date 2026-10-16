@@ -166,7 +166,10 @@ import {
   parseRootMap,
   PartialUndoError,
 } from "#src/datasource/calcada/realign/realign_commit.js";
-import type { RealignBox } from "#src/datasource/calcada/realign/realign_selection.js";
+import type {
+  RealignBox,
+  ReferenceDirection,
+} from "#src/datasource/calcada/realign/realign_selection.js";
 import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
 import { CalcadaRealignTab } from "#src/datasource/calcada/realign/realign_tab.js";
 import { RetiredRoots } from "#src/datasource/calcada/retired_roots.js";
@@ -7567,11 +7570,13 @@ class CalcadaGraphServerInterface {
     box: RealignBox,
     branchId: number,
     maxShiftPx: number,
+    reference: ReferenceDirection,
     field: ArrayBuffer,
   ): Promise<{ operationId: number; sections: number; touchedPieces: number }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     const params = new URLSearchParams(realignQuery(box, branchId));
     params.set("d_max", String(maxShiftPx));
+    params.set("reference", reference);
     const response = await fetchOkImpl(`${baseUrl}/realign/commit?${params}`, {
       method: "POST",
       body: field,

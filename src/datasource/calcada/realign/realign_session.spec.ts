@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
-import type { Annotation } from "#src/annotation/index.js";
+import type {
+  Annotation,
+  AxisAlignedBoundingBox,
+} from "#src/annotation/index.js";
 import {
   AnnotationType,
   LocalAnnotationSource,
@@ -147,5 +150,23 @@ describe("RealignSession drawing", () => {
     expect(summary.boxSection).toBe(3104);
     expect(summary.lineCount).toBe(1);
     expect(summary.arrows[0].sections).toEqual([3104, 3103]);
+  });
+
+  it("stretches the box over the new pair when the reference moves", () => {
+    const { session, source } = drawingSession();
+    addCommitted(source, {
+      id: "box",
+      type: AnnotationType.AXIS_ALIGNED_BOUNDING_BOX,
+      description: "",
+      pointA: Float32Array.of(100, 100, 3103),
+      pointB: Float32Array.of(200, 200, 3105),
+      properties: [0],
+    });
+    session.setReferenceOffset(2);
+
+    const box = source.get("box") as AxisAlignedBoundingBox;
+    expect([box.pointA[2], box.pointB[2]]).toEqual([3104, 3107]);
+    expect(session.summary.value.boxSection).toBe(3104);
+    expect(session.summary.value.referenceSection).toBe(3106);
   });
 });

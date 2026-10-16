@@ -52,6 +52,8 @@ function makeSession(
     commit: vi.fn(async () => {}),
     commits: new WatchableValue<readonly RealignCommitRow[]>([]),
     undo: vi.fn(async () => {}),
+    referenceOffset: new WatchableValue(-1),
+    setReferenceOffset: vi.fn(),
   };
   return { session, apply };
 }
@@ -128,6 +130,7 @@ describe("RealignPanel", () => {
     const { session } = makeSession({
       hasBox: true,
       boxSection: 3103,
+      referenceSection: 3102,
       lineCount: 0,
       rejected: [{ id: "a", reason: "not-across-sections" }],
       arrows: [
@@ -141,6 +144,32 @@ describe("RealignPanel", () => {
     });
     await mountPanel(session);
     expect(tab.textContent).toContain("on z 3103 → 3104, needs 3103 → 3102");
+  });
+
+  it("picks the reference section and names the pair", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      boxSection: 3104,
+      referenceSection: 3106,
+      lineCount: 0,
+      rejected: [],
+    });
+    await mountPanel(session);
+    expect(tab.textContent).toContain("z 3104 → 3106");
+    const select = tab.querySelector<HTMLSelectElement>(
+      'select[aria-label="Reference section"]',
+    )!;
+    expect([...select.options].map((option) => option.value)).toEqual([
+      "-3",
+      "-2",
+      "-1",
+      "1",
+      "2",
+      "3",
+    ]);
+    select.value = "2";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(session.setReferenceOffset).toHaveBeenCalledWith(2);
   });
 
   it("disables Apply without a box", async () => {

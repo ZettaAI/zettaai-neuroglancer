@@ -33,6 +33,7 @@ import { warpedImageToUint8 } from "#src/datasource/calcada/realign/apply_corres
 import { gpuBackend } from "#src/datasource/calcada/realign/gpu_backend_endpoint.js";
 import {
   isReverseArrowKey,
+  isSectionToggleKey,
   reversedLine,
   withRejectedFlag,
 } from "#src/datasource/calcada/realign/realign_arrows.js";
@@ -65,10 +66,15 @@ import type {
   RealignSelection,
   RealignBox,
 } from "#src/datasource/calcada/realign/realign_selection.js";
+import type { ReferenceDirection } from "#src/datasource/calcada/realign/realign_selection.js";
 import {
   arrowNeedsReversal,
   boxFromCorners,
+  DEFAULT_REFERENCE_OFFSET,
+  MAX_REFERENCE_OFFSET,
+  referenceDirection,
   sectionOf,
+  sectionToggleTarget,
   selectCorrespondences,
 } from "#src/datasource/calcada/realign/realign_selection.js";
 import {
@@ -106,6 +112,8 @@ const HTTP_CONFLICT = 409;
 const X_AXIS = 0;
 const Y_AXIS = 1;
 const Z_AXIS = 2;
+// A section's middle, where Neuroglancer puts the view when stepping to it.
+const SECTION_CENTRE = 0.5;
 export const REALIGN_PATCH_LAYER = "realign patch";
 export const REALIGN_MAIN_PATCH_LAYER = "realign patch (main)";
 // Image layers default to half opacity, which would blend the preview with
@@ -144,6 +152,7 @@ export interface RealignGraph {
       box: RealignBox,
       branchId: number,
       maxShiftPx: number,
+      reference: ReferenceDirection,
       field: ArrayBuffer,
     ): Promise<{
       operationId: number;
@@ -195,6 +204,7 @@ export class RealignSession extends RefCounted {
   private inFlight: AbortController | undefined;
   private applied: AppliedField | undefined;
   readonly commits = new WatchableValue<readonly RealignCommitRow[]>([]);
+  readonly referenceOffset = new WatchableValue(DEFAULT_REFERENCE_OFFSET);
   private committing = false;
   private undoing = false;
   private readonly patchRequests = latestRequestGate();
@@ -212,9 +222,10 @@ export class RealignSession extends RefCounted {
         drawing.annotations.source as LocalAnnotationSource,
       );
     }
-    this.registerEventListener(window, "keydown", (event: KeyboardEvent) =>
-      this.reverseSelectedArrow(event),
-    );
+    this.registerEventListener(window, "keydown", (event: KeyboardEvent) => {
+      this.reverseSelectedArrow(event);
+      this.toggleSection(event);
+    });
     this.registerDisposer(
       this.graph.branchId.changed.add(() => {
         this.refreshSummary();
@@ -231,7 +242,12 @@ export class RealignSession extends RefCounted {
     this.armTool(
       (drawing) =>
         new RealignBoxTool(drawing.layer, drawing.annotations, (z) =>
-          boxSpanInUnits(z, drawing.nanometresPerUnit()[Z_AXIS], resolutionZ),
+          boxSpanInUnits(
+            z,
+            drawing.nanometresPerUnit()[Z_AXIS],
+            resolutionZ,
+            this.referenceOffset.value,
+          ),
         ),
       "Ctrl+click two corners of the box on the misaligned section.",
     );
@@ -240,7 +256,7 @@ export class RealignSession extends RefCounted {
   addCorrespondence(): void {
     this.armTool(
       (drawing) => new RealignArrowTool(drawing.layer, drawing.annotations),
-      "Ctrl+click a feature on the box's section, then where it belongs on the section below.",
+      "Ctrl+click a feature on the box's section, then where it belongs on the reference section (Q switches).",
     );
   }
 
@@ -257,7 +273,7 @@ export class RealignSession extends RefCounted {
     }
     if (selection.lines.length === 0) {
       this.setError(
-        "Add at least one correspondence from the box's section to the one below.",
+        "Add at least one correspondence from the box's section to the reference section.",
       );
       return;
     }
@@ -301,7 +317,7 @@ export class RealignSession extends RefCounted {
       this.showPreview(preview.layerSource);
       this.status.value = {
         kind: "done",
-        message: `Preview updated — scroll ${box.z - 1} ↔ ${box.z} to compare.`,
+        message: `Preview updated — press Q to switch ${box.z} ↔ ${selection.referenceSection}.`,
       };
     } catch (error) {
       if (signal.aborted) return;
@@ -355,6 +371,9 @@ export class RealignSession extends RefCounted {
           applied.selection.box,
           branchId,
           maxShiftPx,
+          referenceDirection(
+            applied.selection.referenceSection - applied.selection.box.z,
+          ),
           await encodeField(applied.field),
         );
       // The branch now carries (or will carry) this warp: committing the same
@@ -600,12 +619,18 @@ export class RealignSession extends RefCounted {
       return;
     }
     const toVoxels = this.toGraphVoxels();
-    const { z } = boxFromCorners(toVoxels(box.pointA), toVoxels(box.pointB));
+    const offset = this.referenceOffset.value;
+    const { z } = boxFromCorners(
+      toVoxels(box.pointA),
+      toVoxels(box.pointB),
+      offset,
+    );
     if (
       !arrowNeedsReversal(
         toVoxels(committed.pointA),
         toVoxels(committed.pointB),
         z,
+        z + offset,
       )
     ) {
       return;
@@ -635,10 +660,75 @@ export class RealignSession extends RefCounted {
       pointA: toVoxels(line.pointA),
       pointB: toVoxels(line.pointB),
     }));
+    const offset = this.referenceOffset.value;
     return selectCorrespondences(
-      boxFromCorners(toVoxels(box.pointA), toVoxels(box.pointB)),
+      boxFromCorners(toVoxels(box.pointA), toVoxels(box.pointB), offset),
       lines,
+      offset,
     );
+  }
+
+  /**
+   * Moves the reference to `offset` sections from the moving one, and stretches
+   * the box over the new pair so it stays visible on both.
+   */
+  setReferenceOffset(offset: number): void {
+    if (
+      !Number.isInteger(offset) ||
+      offset === 0 ||
+      Math.abs(offset) > MAX_REFERENCE_OFFSET
+    ) {
+      return;
+    }
+    const source = this.watchedSource;
+    const box = source === undefined ? undefined : [...source].find(isBox);
+    if (source !== undefined && box !== undefined) {
+      const toVoxels = this.toGraphVoxels();
+      const { z } = boxFromCorners(
+        toVoxels(box.pointA),
+        toVoxels(box.pointB),
+        this.referenceOffset.value,
+      );
+      const unitsPerVoxel = this.unitsPerVoxelZ();
+      const pointA = box.pointA.slice();
+      const pointB = box.pointB.slice();
+      pointA[Z_AXIS] = Math.min(z, z + offset) * unitsPerVoxel;
+      pointB[Z_AXIS] = (Math.max(z, z + offset) + 1) * unitsPerVoxel;
+      const reference = source.getReference(box.id);
+      try {
+        source.update(reference, { ...box, pointA, pointB });
+      } finally {
+        reference.dispose();
+      }
+    }
+    this.referenceOffset.value = offset;
+    this.refreshSummary();
+  }
+
+  /** Q: jumps the view between the moving and the reference section. */
+  private toggleSection(event: KeyboardEvent): void {
+    if (!isSectionToggleKey(event) || isTextEntry(event.target)) return;
+    const selection = this.currentSelection();
+    if (selection === undefined) return;
+    event.preventDefault();
+    const { globalPosition, coordinateSpace } = this.layers.root;
+    const metresPerVoxel = this.graph.resolution[Z_AXIS] * METRES_PER_NANOMETRE;
+    const globalUnitsPerVoxel =
+      metresPerVoxel / coordinateSpace.value.scales[Z_AXIS];
+    const position = globalPosition.value;
+    const target = sectionToggleTarget(
+      sectionOf(position[Z_AXIS] / globalUnitsPerVoxel),
+      selection.box.z,
+      selection.referenceSection,
+    );
+    position[Z_AXIS] = (target + SECTION_CENTRE) * globalUnitsPerVoxel;
+    globalPosition.changed.dispatch();
+  }
+
+  /** Annotation z units per graph voxel. */
+  private unitsPerVoxelZ(): number {
+    const nanometres = this.drawing?.nanometresPerUnit() ?? [];
+    return this.graph.resolution[Z_AXIS] / nanometres[Z_AXIS];
   }
 
   /** Flags rejected lines so the arrow shader draws them red. */
@@ -705,6 +795,7 @@ export class RealignSession extends RefCounted {
     this.summary.value = {
       hasBox: selection !== undefined,
       boxSection: selection?.box.z,
+      referenceSection: selection?.referenceSection,
       lineCount: selection?.lines.length ?? 0,
       rejected: selection?.rejected ?? [],
       unavailableReason: unavailableReason(),

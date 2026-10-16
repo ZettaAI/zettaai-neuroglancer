@@ -156,7 +156,12 @@ export function appliedFieldKey(
   selection: RealignSelection,
   branchId: number,
 ): string {
-  return JSON.stringify([branchId, selection.box, selection.lines]);
+  return JSON.stringify([
+    branchId,
+    selection.box,
+    selection.referenceSection,
+    selection.lines,
+  ]);
 }
 
 /** The commit's progress line: which section is being written, and how many pieces the whole commit cuts. */

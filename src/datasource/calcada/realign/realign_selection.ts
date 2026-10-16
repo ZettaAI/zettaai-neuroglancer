@@ -2,7 +2,8 @@
  * @file Turns the realign annotation layer into a box and correspondences.
  *
  * A correspondence joins where a feature sits on the moving section (`z0`,
- * the box's section) to where it belongs on the reference section (`z0 - 1`).
+ * the box's section) to where it belongs on the reference section
+ * (`z0 + referenceOffset`, the section below unless chosen otherwise).
  * web_api wants crop pixels as `[y, x]`, with `start` on the moving section.
  */
 
@@ -30,6 +31,7 @@ export type RejectReason = "not-across-sections" | "outside-box";
 
 export interface RealignSelection {
   readonly box: RealignBox;
+  readonly referenceSection: number;
   readonly lines: CorrespondenceLine[];
   readonly rejected: { id: string; reason: RejectReason }[];
 }
@@ -52,39 +54,70 @@ export function sectionSpan(z: number): [number, number] {
   return [section, section + 1];
 }
 
+/** The reference is the section below the moving one unless chosen otherwise. */
+export const DEFAULT_REFERENCE_OFFSET = -1;
+/** How far, in sections, the reference may lie from the moving section. */
+export const MAX_REFERENCE_OFFSET = 3;
+
+export type ReferenceDirection = "below" | "above";
+
+export function referenceDirection(
+  referenceOffset: number,
+): ReferenceDirection {
+  return referenceOffset < 0 ? "below" : "above";
+}
+
 /**
- * Whether an arrow runs from the section below the box up to the box's
- * section, so that turning it round puts its tail on the box's section.
+ * Whether an arrow runs from the reference section to the moving one, so that
+ * turning it round puts its tail on the moving section.
  */
 export function arrowNeedsReversal(
   pointA: ArrayLike<number>,
   pointB: ArrayLike<number>,
-  boxSection: number,
+  movingSection: number,
+  referenceSection: number,
 ): boolean {
   return (
-    sectionOf(pointA[Z]) === boxSection - 1 &&
-    sectionOf(pointB[Z]) === boxSection
+    sectionOf(pointA[Z]) === referenceSection &&
+    sectionOf(pointB[Z]) === movingSection
   );
 }
 
+/** The section to show next when toggling between the moving and reference. */
+export function sectionToggleTarget(
+  currentSection: number,
+  movingSection: number,
+  referenceSection: number,
+): number {
+  return currentSection === movingSection ? referenceSection : movingSection;
+}
+
 /**
- * The section a box realigns: the upper one it covers. A box drawn by the
- * realign tool covers that section and the reference section below it.
+ * The section a box realigns. A box drawn by the realign tool covers it, the
+ * reference section and every section between, so it is the box's top
+ * section when the reference is below and its bottom one when above.
  */
-function boxSection(zA: number, zB: number): number {
-  return sectionOf(Math.max(zA, zB)) - 1;
+function movingSectionOf(
+  zA: number,
+  zB: number,
+  referenceOffset: number,
+): number {
+  return referenceDirection(referenceOffset) === "below"
+    ? sectionOf(Math.max(zA, zB)) - 1
+    : sectionOf(Math.min(zA, zB));
 }
 
 export function boxFromCorners(
   pointA: ArrayLike<number>,
   pointB: ArrayLike<number>,
+  referenceOffset = DEFAULT_REFERENCE_OFFSET,
 ): RealignBox {
   return {
     x0: Math.floor(Math.min(pointA[X], pointB[X])),
     y0: Math.floor(Math.min(pointA[Y], pointB[Y])),
     x1: Math.ceil(Math.max(pointA[X], pointB[X])),
     y1: Math.ceil(Math.max(pointA[Y], pointB[Y])),
-    z: boxSection(pointA[Z], pointB[Z]),
+    z: movingSectionOf(pointA[Z], pointB[Z], referenceOffset),
   };
 }
 
@@ -104,10 +137,11 @@ function cropPixel(
 export function selectCorrespondences(
   box: RealignBox,
   lines: readonly LineEndpoints[],
+  referenceOffset = DEFAULT_REFERENCE_OFFSET,
 ): RealignSelection {
   const accepted: CorrespondenceLine[] = [];
   const rejected: { id: string; reason: RejectReason }[] = [];
-  const referenceSection = box.z - 1;
+  const referenceSection = box.z + referenceOffset;
   for (const line of lines) {
     const sectionA = sectionOf(line.pointA[Z]);
     const sectionB = sectionOf(line.pointB[Z]);
@@ -131,5 +165,5 @@ export function selectCorrespondences(
       end: cropPixel(box, reference),
     });
   }
-  return { box, lines: accepted, rejected };
+  return { box, referenceSection, lines: accepted, rejected };
 }
