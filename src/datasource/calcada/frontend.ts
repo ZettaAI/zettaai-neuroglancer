@@ -172,6 +172,7 @@ import type {
 } from "#src/datasource/calcada/realign/realign_selection.js";
 import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
 import { CalcadaRealignTab } from "#src/datasource/calcada/realign/realign_tab.js";
+import { RealignCoordinates } from "#src/datasource/calcada/realign/realign_tools.js";
 import { RetiredRoots } from "#src/datasource/calcada/retired_roots.js";
 import {
   interceptedRemovals,
@@ -449,7 +450,6 @@ const DEBUG_PIECE_PALETTE: bigint[] = (
 const MULTICUT_OFF_COLOR = vec4.fromValues(0, 0, 0, 0.5);
 const WHITE_COLOR = vec3.fromValues(1, 1, 1);
 const REALIGN_COLOR = vec3.fromValues(1, 0.85, 0.1);
-const METRES_PER_NANOMETRE = 1e-9;
 // Trace candidates get their own colour so they never read as pending merges,
 // which are red.
 const YELLOW_COLOR = vec3.fromValues(1, 1, 0);
@@ -5202,10 +5202,15 @@ class GraphConnection extends SegmentationGraphSourceConnection {
         {
           layer,
           annotations: realignAnnotations,
-          nanometresPerUnit: () =>
-            realignLoadedSubsource.loadedDataSource.transform.inputSpace.value.scales.map(
-              (scale) => scale / METRES_PER_NANOMETRE,
-            ),
+          coordinates: () => {
+            const transform = realignAnnotations.transform.value;
+            if (transform.error !== undefined) return undefined;
+            return RealignCoordinates.fromTransform(
+              transform,
+              layer.manager.root.coordinateSpace.value.scales,
+              graph.info.scales[0].resolution,
+            );
+          },
         },
       ),
     );

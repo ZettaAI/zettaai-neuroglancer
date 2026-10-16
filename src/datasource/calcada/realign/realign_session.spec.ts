@@ -18,6 +18,7 @@ import { REALIGN_ARROW_PROPERTIES } from "#src/datasource/calcada/realign/realig
 import { PartialUndoError } from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RealignGraph } from "#src/datasource/calcada/realign/realign_session.js";
 import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
+import { RealignCoordinates } from "#src/datasource/calcada/realign/realign_tools.js";
 import type { LayerListSpecification } from "#src/layer/index.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { UserLayerWithAnnotations } from "#src/ui/annotations.js";
@@ -112,7 +113,16 @@ describe("RealignSession drawing", () => {
     const drawing = {
       layer: {} as UserLayerWithAnnotations,
       annotations: { source } as unknown as AnnotationLayerState,
-      nanometresPerUnit: () => NANOMETRES_PER_UNIT,
+      coordinates: () =>
+        new RealignCoordinates(
+          [0, 1, 2].map((annotationAxis) => ({
+            annotationAxis,
+            scale: 1,
+            offset: 0,
+          })),
+          NANOMETRES_PER_UNIT.map((nm) => nm * 1e-9),
+          NANOMETRES_PER_UNIT,
+        ),
     };
     return {
       session: new RealignSession(emptyLayers(), graph, drawing),

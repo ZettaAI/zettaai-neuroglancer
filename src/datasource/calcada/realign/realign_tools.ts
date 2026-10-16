@@ -19,8 +19,9 @@ import type {
   Annotation,
   AxisAlignedBoundingBox,
 } from "#src/annotation/index.js";
-import { sectionSpan } from "#src/datasource/calcada/realign/realign_selection.js";
+import { sectionOf } from "#src/datasource/calcada/realign/realign_selection.js";
 import type { MouseSelectionState } from "#src/layer/index.js";
+import type { RenderLayerTransform } from "#src/render_coordinate_transform.js";
 import type { UserLayerWithAnnotations } from "#src/ui/annotations.js";
 import { PlaceBoundingBoxTool, PlaceLineTool } from "#src/ui/annotations.js";
 import { registerLegacyTool } from "#src/ui/tool.js";
@@ -31,29 +32,112 @@ const Z = 2;
 const REALIGN_DRAW_TOOL_ID = "calcadaRealignDraw";
 registerLegacyTool(REALIGN_DRAW_TOOL_ID, () => undefined);
 
+const METRES_PER_NANOMETRE = 1e-9;
+const GLOBAL_AXES = 3;
+
+/** One global axis as an affine function of one annotation axis. */
+interface AxisMapping {
+  readonly annotationAxis: number;
+  readonly scale: number;
+  readonly offset: number;
+}
+
 /**
- * The z range, in annotation units, of a realign box drawn at an annotation z:
- * the graph section under it, the reference section and every section
- * between.
- *
- * @param z - z in annotation coordinate units.
- * @param nanometresPerUnitZ - nanometres per annotation z unit.
- * @param resolutionZ - graph voxel z size in nanometres.
- * @param referenceOffset - the reference section's offset from the drawn one.
+ * Converts between a layer's annotation coordinates, global coordinates and
+ * graph voxels. Annotation coordinates are the layer's source coordinates,
+ * which the layer's transform may shift or scale against global ones.
  */
-export function boxSpanInUnits(
+export class RealignCoordinates {
+  constructor(
+    private readonly axes: readonly AxisMapping[],
+    private readonly globalScales: ArrayLike<number>,
+    private readonly resolution: ArrayLike<number>,
+  ) {}
+
+  /**
+   * @param transform - the annotation state's render layer transform; assumed
+   *   axis-aligned, as calcada sources are.
+   * @param globalScales - metres per global unit, per axis.
+   * @param resolution - graph voxel size in nanometres, per axis.
+   */
+  static fromTransform(
+    transform: RenderLayerTransform,
+    globalScales: ArrayLike<number>,
+    resolution: ArrayLike<number>,
+  ): RealignCoordinates {
+    const { rank, modelToRenderLayerTransform: matrix } = transform;
+    const stride = rank + 1;
+    const axes = Array.from({ length: GLOBAL_AXES }, (_, globalAxis) => {
+      const renderAxis = transform.globalToRenderLayerDimensions[globalAxis];
+      let annotationAxis = 0;
+      for (let axis = 1; axis < rank; ++axis) {
+        if (
+          Math.abs(matrix[axis * stride + renderAxis]) >
+          Math.abs(matrix[annotationAxis * stride + renderAxis])
+        ) {
+          annotationAxis = axis;
+        }
+      }
+      return {
+        annotationAxis,
+        scale: matrix[annotationAxis * stride + renderAxis],
+        offset: matrix[rank * stride + renderAxis],
+      };
+    });
+    return new RealignCoordinates(axes, globalScales, resolution);
+  }
+
+  toGlobal(point: ArrayLike<number>): number[] {
+    return this.axes.map(
+      ({ annotationAxis, scale, offset }) =>
+        scale * point[annotationAxis] + offset,
+    );
+  }
+
+  toGraphVoxels(point: ArrayLike<number>): number[] {
+    return this.toGlobal(point).map((value, axis) =>
+      this.globalToGraphVoxel(value, axis),
+    );
+  }
+
+  annotationZToGraphVoxelZ(z: number): number {
+    const { scale, offset } = this.axes[Z];
+    return this.globalToGraphVoxel(scale * z + offset, Z);
+  }
+
+  graphVoxelZToAnnotationZ(voxelZ: number): number {
+    const { scale, offset } = this.axes[Z];
+    const globalZ =
+      (voxelZ * this.resolution[Z] * METRES_PER_NANOMETRE) /
+      this.globalScales[Z];
+    return (globalZ - offset) / scale;
+  }
+
+  private globalToGraphVoxel(value: number, axis: number): number {
+    return (
+      (value * this.globalScales[axis]) /
+      METRES_PER_NANOMETRE /
+      this.resolution[axis]
+    );
+  }
+}
+
+/**
+ * The annotation z range of a realign box drawn at annotation z: the graph
+ * section under it, the reference section and every section between.
+ */
+export function boxSpanInAnnotationZ(
   z: number,
-  nanometresPerUnitZ: number,
-  resolutionZ: number,
   referenceOffset: number,
+  coordinates: RealignCoordinates,
 ): [number, number] {
-  const unitsPerVoxel = resolutionZ / nanometresPerUnitZ;
-  const [section] = sectionSpan(z / unitsPerVoxel);
+  const section = sectionOf(coordinates.annotationZToGraphVoxelZ(z));
   const reference = section + referenceOffset;
-  return [
-    Math.min(section, reference) * unitsPerVoxel,
-    (Math.max(section, reference) + 1) * unitsPerVoxel,
+  const ends = [
+    coordinates.graphVoxelZToAnnotationZ(Math.min(section, reference)),
+    coordinates.graphVoxelZToAnnotationZ(Math.max(section, reference) + 1),
   ];
+  return [Math.min(...ends), Math.max(...ends)];
 }
 
 /** A box over the section of its first corner and the reference section. */

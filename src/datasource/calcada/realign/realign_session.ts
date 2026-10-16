@@ -77,10 +77,11 @@ import {
   sectionToggleTarget,
   selectCorrespondences,
 } from "#src/datasource/calcada/realign/realign_selection.js";
+import type { RealignCoordinates } from "#src/datasource/calcada/realign/realign_tools.js";
 import {
   RealignArrowTool,
   RealignBoxTool,
-  boxSpanInUnits,
+  boxSpanInAnnotationZ,
 } from "#src/datasource/calcada/realign/realign_tools.js";
 import { ImageUserLayer } from "#src/layer/image/index.js";
 import type {
@@ -129,8 +130,8 @@ export interface RealignDrawing {
   /** The calcada layer; the drawing tools are installed on it. */
   readonly layer: UserLayerWithAnnotations;
   readonly annotations: AnnotationLayerState;
-  /** Nanometres per annotation coordinate unit, per axis. */
-  nanometresPerUnit(): ArrayLike<number>;
+  /** How the annotations' coordinates map to global ones and graph voxels. */
+  coordinates(): RealignCoordinates | undefined;
 }
 
 /** What the session needs from the calcada graph it realigns. */
@@ -238,17 +239,14 @@ export class RealignSession extends RefCounted {
   }
 
   drawBox(): void {
-    const resolutionZ = this.graph.resolution[Z_AXIS];
     this.armTool(
       (drawing) =>
-        new RealignBoxTool(drawing.layer, drawing.annotations, (z) =>
-          boxSpanInUnits(
-            z,
-            drawing.nanometresPerUnit()[Z_AXIS],
-            resolutionZ,
-            this.referenceOffset.value,
-          ),
-        ),
+        new RealignBoxTool(drawing.layer, drawing.annotations, (z) => {
+          const coordinates = drawing.coordinates();
+          return coordinates === undefined
+            ? [z, z]
+            : boxSpanInAnnotationZ(z, this.referenceOffset.value, coordinates);
+        }),
       "Ctrl+click two corners of the box on the misaligned section.",
     );
   }
@@ -448,16 +446,15 @@ export class RealignSession extends RefCounted {
     const { drawing } = this;
     const line = this.watchedSource?.get(id);
     if (drawing === undefined || line === undefined || !isLine(line)) return;
-    const { globalPosition, coordinateSpace } = this.layers.root;
-    const { scales } = coordinateSpace.value;
-    const nanometres = drawing.nanometresPerUnit();
-    const position = globalPosition.value;
-    for (const axis of [X_AXIS, Y_AXIS]) {
-      position[axis] =
-        (line.pointA[axis] * nanometres[axis] * METRES_PER_NANOMETRE) /
-        scales[axis];
+    const coordinates = drawing.coordinates();
+    if (coordinates !== undefined) {
+      const { globalPosition } = this.layers.root;
+      const global = coordinates.toGlobal(line.pointA);
+      const position = globalPosition.value;
+      position[X_AXIS] = global[X_AXIS];
+      position[Y_AXIS] = global[Y_AXIS];
+      globalPosition.changed.dispatch();
     }
-    globalPosition.changed.dispatch();
     drawing.layer.selectAnnotation(drawing.annotations, id, true);
   }
 
@@ -682,18 +679,26 @@ export class RealignSession extends RefCounted {
     }
     const source = this.watchedSource;
     const box = source === undefined ? undefined : [...source].find(isBox);
-    if (source !== undefined && box !== undefined) {
+    const coordinates = this.drawing?.coordinates();
+    if (
+      source !== undefined &&
+      box !== undefined &&
+      coordinates !== undefined
+    ) {
       const toVoxels = this.toGraphVoxels();
       const { z } = boxFromCorners(
         toVoxels(box.pointA),
         toVoxels(box.pointB),
         this.referenceOffset.value,
       );
-      const unitsPerVoxel = this.unitsPerVoxelZ();
+      const ends = [
+        coordinates.graphVoxelZToAnnotationZ(Math.min(z, z + offset)),
+        coordinates.graphVoxelZToAnnotationZ(Math.max(z, z + offset) + 1),
+      ];
       const pointA = box.pointA.slice();
       const pointB = box.pointB.slice();
-      pointA[Z_AXIS] = Math.min(z, z + offset) * unitsPerVoxel;
-      pointB[Z_AXIS] = (Math.max(z, z + offset) + 1) * unitsPerVoxel;
+      pointA[Z_AXIS] = Math.min(...ends);
+      pointB[Z_AXIS] = Math.max(...ends);
       const reference = source.getReference(box.id);
       try {
         source.update(reference, { ...box, pointA, pointB });
@@ -723,12 +728,6 @@ export class RealignSession extends RefCounted {
     );
     position[Z_AXIS] = (target + SECTION_CENTRE) * globalUnitsPerVoxel;
     globalPosition.changed.dispatch();
-  }
-
-  /** Annotation z units per graph voxel. */
-  private unitsPerVoxelZ(): number {
-    const nanometres = this.drawing?.nanometresPerUnit() ?? [];
-    return this.graph.resolution[Z_AXIS] / nanometres[Z_AXIS];
   }
 
   /** Flags rejected lines so the arrow shader draws them red. */
@@ -841,15 +840,13 @@ export class RealignSession extends RefCounted {
     });
   }
 
-  /** Annotation coordinates to graph voxels, through nanometres. */
+  /** Annotation coordinates to graph voxels, through the layer's transform. */
   private toGraphVoxels(): (point: Float32Array) => number[] {
-    const nanometres = this.drawing?.nanometresPerUnit() ?? [];
-    const { resolution } = this.graph;
+    const coordinates = this.drawing?.coordinates();
     return (point) =>
-      Array.from(
-        point,
-        (value, axis) => (value * nanometres[axis]) / resolution[axis],
-      );
+      coordinates === undefined
+        ? Array.from(point)
+        : coordinates.toGraphVoxels(point);
   }
 
   private showPreview(source: string): void {
