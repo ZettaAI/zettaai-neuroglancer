@@ -402,10 +402,14 @@ const TRANSPARENT_COLOR = vec4.fromValues(0.5, 0.5, 0.5, 0.01);
 const RED_COLOR_SEGMENT_PACKED = BigInt(packColor(RED_COLOR_SEGMENT));
 const BLUE_COLOR_SEGMENT_PACKED = BigInt(packColor(BLUE_COLOR_SEGMENT));
 const TRANSPARENT_COLOR_PACKED = BigInt(packColor(TRANSPARENT_COLOR));
-// A piece holding BOTH colours is the split target — tint it green so it stands
-// out as "this piece will be cut" instead of looking deselected.
-const SPLIT_TARGET_COLOR = vec4FromVec3(vec3.fromValues(0, 1, 0), 0.6);
-const SPLIT_TARGET_COLOR_PACKED = BigInt(packColor(SPLIT_TARGET_COLOR));
+// Cut-tool piece tints carry alpha 0 so the layer's own opacity stays in charge
+// (see role_colors.ts). A piece holding BOTH colours is the split target — tint
+// it green so it stands out as "this piece will be cut".
+const RED_PIECE_COLOR_PACKED = BigInt(packColor(vec4FromVec3(RED_COLOR)));
+const BLUE_PIECE_COLOR_PACKED = BigInt(packColor(vec4FromVec3(BLUE_COLOR)));
+const SPLIT_TARGET_COLOR_PACKED = BigInt(
+  packColor(vec4FromVec3(vec3.fromValues(0, 1, 0))),
+);
 // Distinct per-piece colours for the debug overlay. Green is left out: the cut
 // tool tints its split target green.
 const DEBUG_PIECE_PALETTE: bigint[] = (
@@ -2101,6 +2105,22 @@ interface PointEntry {
 const PIECE_SPLIT_BLUE_KEY = "blue";
 const PIECE_SPLIT_RED_KEY = "red";
 const PIECE_SPLIT_USE_IMAGE_KEY = "useImage";
+const PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY = "brightnessWeight";
+// The server's bound on brightness_weight.
+const MAX_BRIGHTNESS_WEIGHT = 10;
+const BRIGHTNESS_WEIGHT_STEP = 0.5;
+
+// How the server prices the voxel min-cut. brightnessWeight left undefined
+// takes the server's own default.
+interface CutPricing {
+  useImage: boolean;
+  brightnessWeight?: number;
+}
+
+function boundedBrightnessWeight(weight: number): number | undefined {
+  if (!(weight > 0)) return undefined;
+  return Math.min(weight, MAX_BRIGHTNESS_WEIGHT);
+}
 
 // PieceSplitState holds the working state of the point-driven piece split tool:
 // the two coloured point lists and the active colour. The focused segment is not
@@ -2116,6 +2136,9 @@ class PieceSplitState extends RefCounted implements Trackable {
   // default: the image volume is then never read, which makes the split
   // several seconds faster; the cut runs on geometry and the data term alone.
   useImage = new WatchableValue<boolean>(false);
+  // How much darker a boundary has to be to be worth a longer cut. Undefined
+  // leaves it to the server.
+  brightnessWeight = new WatchableValue<number | undefined>(undefined);
   // Whether the Cut tool is open. Session-only, never serialised: the point
   // markers belong to the act of cutting, so nothing should draw them once the
   // tool is put down.
@@ -2136,8 +2159,16 @@ class PieceSplitState extends RefCounted implements Trackable {
     this.registerDisposer(this.bluePoints.changed.add(reemit));
     this.registerDisposer(this.redPoints.changed.add(reemit));
     this.registerDisposer(this.useImage.changed.add(reemit));
+    this.registerDisposer(this.brightnessWeight.changed.add(reemit));
     this.registerDisposer(this.advanced.changed.add(reemit));
     this.registerDisposer(this.artificialPoints.changed.add(reemit));
+  }
+
+  get cutPricing(): CutPricing {
+    return {
+      useImage: this.useImage.value,
+      brightnessWeight: this.brightnessWeight.value,
+    };
   }
 
   reset() {
@@ -2181,6 +2212,7 @@ class PieceSplitState extends RefCounted implements Trackable {
       [PIECE_SPLIT_BLUE_KEY]: this.bluePoints.value.map(entryToJSON),
       [PIECE_SPLIT_RED_KEY]: this.redPoints.value.map(entryToJSON),
       [PIECE_SPLIT_USE_IMAGE_KEY]: this.useImage.value ? true : undefined,
+      [PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY]: this.brightnessWeight.value,
     };
   }
 
@@ -2196,6 +2228,15 @@ class PieceSplitState extends RefCounted implements Trackable {
     verifyOptionalObjectProperty(x, PIECE_SPLIT_USE_IMAGE_KEY, (value) => {
       this.useImage.value = verifyBoolean(value);
     });
+    verifyOptionalObjectProperty(
+      x,
+      PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY,
+      (value) => {
+        this.brightnessWeight.value = boundedBrightnessWeight(
+          verifyFiniteFloat(value),
+        );
+      },
+    );
   }
 }
 
@@ -7540,9 +7581,9 @@ class CalcadaGraphServerInterface {
     // left to a separate call. It exists to make that intermediate graph
     // inspectable, which is otherwise invisible.
     piecesOnly = false,
-    // useImage prices the voxel min-cut from the EM image. Off by default: the
-    // backend then skips the image read entirely and cuts on geometry alone.
-    useImage = false,
+    // Off by default: the backend then skips the image read entirely and cuts
+    // on geometry alone.
+    pricing: CutPricing = { useImage: false },
   ): Promise<{
     operationId: number;
     roots: bigint[];
@@ -7574,7 +7615,8 @@ class CalcadaGraphServerInterface {
               z: p.z,
               origin: p.origin,
             })),
-            use_image: useImage,
+            use_image: pricing.useImage,
+            brightness_weight: pricing.brightnessWeight,
           }),
         },
       );
@@ -7618,7 +7660,7 @@ class CalcadaGraphServerInterface {
       origin: "2d" | "3d";
     }[],
     branchId: number,
-    useImage: boolean,
+    pricing: CutPricing,
   ): Promise<{
     conflicted: bigint[];
     artificialPoints: {
@@ -7645,7 +7687,8 @@ class CalcadaGraphServerInterface {
               z: p.z,
               origin: p.origin,
             })),
-            use_image: useImage,
+            use_image: pricing.useImage,
+            brightness_weight: pricing.brightnessWeight,
           }),
         },
       );
@@ -9697,9 +9740,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         displayState.useTempSegmentStatedColors2d.value = false;
         return;
       }
-      // Colour each piece by the points placed on it — blue-only piece → blue,
-      // red-only → red, a piece holding BOTH colours → left transparent so its
-      // point markers show where it will be split. Mirrors the per-piece
+      // Colour each piece by the points placed on it. Mirrors the per-piece
       // recolouring MulticutSegmentsTool does, but driven by placed points and
       // allowing multiple points (both colours) inside one piece.
       const pieceColor = new Map<bigint, "blue" | "red" | "both">();
@@ -9722,9 +9763,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       // colour, so the rest of the segment never looks deselected while you place
       // points. We do NOT dim the rest of the view (no MULTICUT_OFF_COLOR).
       // While a trace is reviewing this very segment, the trace owns what is
-      // visible (seed + candidate only). Overriding it here would put the rest
-      // of the view back and fight showOnly; the per-piece tinting below is
-      // still applied, so the split preview is unaffected.
+      // visible (seed + candidate only), so the temporary set copies it rather
+      // than putting the rest of the view back and fighting showOnly.
       const { zettaTraceState } = graphConnection.state;
       const traceOwnsFocus =
         zettaTraceState.active.value &&
@@ -9734,9 +9774,15 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       // screen here is what used to make a double-click report "Hid segment"
       // and change nothing.
       const focusHidden = !segmentationGroupState.visibleSegments.has(focus);
-      const forceFocusVisible = !traceOwnsFocus && !focusHidden;
-      if (forceFocusVisible) {
+      if (!focusHidden) {
         segmentationGroupState.useTemporaryVisibleSegments.value = true;
+        // A tint without alpha of its own draws only when its piece is visible,
+        // and the trace's set names roots, not the pieces the tint splits off.
+        if (traceOwnsFocus) {
+          for (const id of segmentationGroupState.visibleSegments) {
+            segmentationGroupState.temporaryVisibleSegments.add(id);
+          }
+        }
         segmentationGroupState.temporaryVisibleSegments.add(focus);
       }
       segmentationGroupState.useTemporarySegmentEquivalences.value = true;
@@ -9745,20 +9791,20 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       for (const piece of segmentationGroupState.segmentEquivalences.setElements(
         focus,
       )) {
-        if (forceFocusVisible) {
+        if (!focusHidden) {
           segmentationGroupState.temporaryVisibleSegments.add(piece);
         }
         const color = pieceColor.get(piece);
         if (color === "blue") {
           displayState.tempSegmentStatedColors2d.value.set(
             piece,
-            BLUE_COLOR_SEGMENT_PACKED,
+            BLUE_PIECE_COLOR_PACKED,
           );
           anyTint = true;
         } else if (color === "red") {
           displayState.tempSegmentStatedColors2d.value.set(
             piece,
-            RED_COLOR_SEGMENT_PACKED,
+            RED_PIECE_COLOR_PACKED,
           );
           anyTint = true;
         } else if (color === "both") {
@@ -9927,6 +9973,28 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     useImageLabel.appendChild(document.createTextNode("Use image for cut"));
     body.appendChild(useImageLabel);
 
+    const brightnessWeightInput = document.createElement("input");
+    brightnessWeightInput.type = "number";
+    brightnessWeightInput.min = String(BRIGHTNESS_WEIGHT_STEP);
+    brightnessWeightInput.max = String(MAX_BRIGHTNESS_WEIGHT);
+    brightnessWeightInput.step = String(BRIGHTNESS_WEIGHT_STEP);
+    brightnessWeightInput.placeholder = "default";
+    brightnessWeightInput.addEventListener("change", () => {
+      pieceSplitState.brightnessWeight.value = boundedBrightnessWeight(
+        Number.parseFloat(brightnessWeightInput.value),
+      );
+    });
+    const brightnessWeightLabel = document.createElement("label");
+    brightnessWeightLabel.className = "piece-split-use-image";
+    brightnessWeightLabel.title =
+      "How strongly the image steers the cut. Higher: a long cut along dark " +
+      "membrane beats a short one through bright cytoplasm. Empty: server default.";
+    brightnessWeightLabel.appendChild(
+      document.createTextNode("Brightness weight"),
+    );
+    brightnessWeightLabel.appendChild(brightnessWeightInput);
+    body.appendChild(brightnessWeightLabel);
+
     const advancedCheckbox = document.createElement("input");
     advancedCheckbox.type = "checkbox";
     advancedCheckbox.checked = pieceSplitState.advanced.value;
@@ -10025,6 +10093,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       busy = nextBusy;
       spinner.style.display = busy ? "" : "none";
       useImageCheckbox.disabled = busy;
+      brightnessWeightInput.disabled = busy || !pieceSplitState.useImage.value;
       for (const button of [swapButton, clearButton, applyButton, undoButton]) {
         button.classList.toggle("disabled", busy);
       }
@@ -10092,6 +10161,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       );
 
       useImageCheckbox.checked = pieceSplitState.useImage.value;
+      brightnessWeightInput.value = String(
+        pieceSplitState.brightnessWeight.value ?? "",
+      );
+      brightnessWeightInput.disabled = busy || !pieceSplitState.useImage.value;
       // Applying needs at least one point of each colour.
       setStepButtonsEnabled(
         pieceSplitState.bluePoints.value.length > 0 &&
@@ -10182,7 +10255,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             ],
             branchId,
             false,
-            pieceSplitState.useImage.value,
+            pieceSplitState.cutPricing,
           );
         const newRoots = roots.filter((root) => root !== 0n);
         if (newRoots.length === 0) {
@@ -10286,7 +10359,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           await graphConnection.graph.graphServer.generalSplitPoints(
             points,
             branchId,
-            pieceSplitState.useImage.value,
+            pieceSplitState.cutPricing,
           );
         const loadedSubsource = getGraphLoadedSubsource(layer)!;
         const annotationToNanometers = new Float64Array(
@@ -10338,7 +10411,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
             points,
             branchId,
             true,
-            pieceSplitState.useImage.value,
+            pieceSplitState.cutPricing,
           );
         graphConnection.pushUndo(operationId, branchId);
         rememberStep(operationId);
