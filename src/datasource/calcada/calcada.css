@@ -154,7 +154,16 @@
 }
 
 .calcada-piece-split .piece-split-brightness-weight .range-slider {
-  flex: 1;
+  justify-content: flex-start;
+  gap: 5px;
+}
+
+.calcada-piece-split
+  .piece-split-brightness-weight
+  .range-slider
+  input[type="range"] {
+  flex: none;
+  width: 120px;
 }
 
 .calcada-piece-split .piece-split-brightness-weight input:disabled {
