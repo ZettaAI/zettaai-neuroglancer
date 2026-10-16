@@ -76,7 +76,11 @@ describe("sectionSpan", () => {
   });
 });
 
-describe("boxFromCorners on a section span", () => {
+describe("boxFromCorners on a two-section box", () => {
+  it("takes the upper of the two sections the box covers", () => {
+    expect(boxFromCorners([100, 200, 3103], [164, 248, 3105]).z).toBe(3104);
+  });
+
   it("takes the span's section even when its lower bound came back a hair short", () => {
     expect(
       boxFromCorners([100, 200, 3103.9999999999], [164, 248, 3105]).z,

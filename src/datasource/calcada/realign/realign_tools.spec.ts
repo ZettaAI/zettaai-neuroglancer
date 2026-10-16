@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { sectionSpanInUnits } from "#src/datasource/calcada/realign/realign_tools.js";
+import { boxSpanInUnits } from "#src/datasource/calcada/realign/realign_tools.js";
 
-describe("sectionSpanInUnits", () => {
-  it("spans one graph section when annotation units are graph voxels", () => {
-    expect(sectionSpanInUnits(3103.5, 45, 45)).toEqual([3103, 3104]);
+describe("boxSpanInUnits", () => {
+  it("covers the clicked section and the one below it", () => {
+    expect(boxSpanInUnits(3104.5, 45, 45)).toEqual([3103, 3105]);
   });
 
   it("converts through nanometres when the units differ", () => {
-    const [lo, hi] = sectionSpanInUnits(126, 10, 40);
-    expect(lo).toBeCloseTo(124);
+    const [lo, hi] = boxSpanInUnits(126, 10, 40);
+    expect(lo).toBeCloseTo(120);
     expect(hi).toBeCloseTo(128);
   });
 });

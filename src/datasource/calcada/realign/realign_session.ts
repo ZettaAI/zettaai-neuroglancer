@@ -74,7 +74,7 @@ import {
 import {
   RealignArrowTool,
   RealignBoxTool,
-  sectionSpanInUnits,
+  boxSpanInUnits,
 } from "#src/datasource/calcada/realign/realign_tools.js";
 import { ImageUserLayer } from "#src/layer/image/index.js";
 import type {
@@ -231,11 +231,7 @@ export class RealignSession extends RefCounted {
     this.armTool(
       (drawing) =>
         new RealignBoxTool(drawing.layer, drawing.annotations, (z) =>
-          sectionSpanInUnits(
-            z,
-            drawing.nanometresPerUnit()[Z_AXIS],
-            resolutionZ,
-          ),
+          boxSpanInUnits(z, drawing.nanometresPerUnit()[Z_AXIS], resolutionZ),
         ),
       "Ctrl+click two corners of the box on the misaligned section.",
     );

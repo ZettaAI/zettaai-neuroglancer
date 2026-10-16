@@ -32,23 +32,24 @@ const REALIGN_DRAW_TOOL_ID = "calcadaRealignDraw";
 registerLegacyTool(REALIGN_DRAW_TOOL_ID, () => undefined);
 
 /**
- * The z range, in annotation units, of the graph section under an annotation z.
+ * The z range, in annotation units, of a realign box drawn at an annotation z:
+ * the graph section under it and the reference section below.
  *
  * @param z - z in annotation coordinate units.
  * @param nanometresPerUnitZ - nanometres per annotation z unit.
  * @param resolutionZ - graph voxel z size in nanometres.
  */
-export function sectionSpanInUnits(
+export function boxSpanInUnits(
   z: number,
   nanometresPerUnitZ: number,
   resolutionZ: number,
 ): [number, number] {
   const unitsPerVoxel = resolutionZ / nanometresPerUnitZ;
   const [lo, hi] = sectionSpan(z / unitsPerVoxel);
-  return [lo * unitsPerVoxel, hi * unitsPerVoxel];
+  return [(lo - 1) * unitsPerVoxel, hi * unitsPerVoxel];
 }
 
-/** A box one section thick, on the section of its first corner. */
+/** A box on the section of its first corner and the section below it. */
 export class RealignBoxTool extends PlaceBoundingBoxTool {
   constructor(
     layer: UserLayerWithAnnotations,
@@ -66,7 +67,7 @@ export class RealignBoxTool extends PlaceBoundingBoxTool {
     mouseState: MouseSelectionState,
     annotationLayer: AnnotationLayerState,
   ): Annotation {
-    return this.onFirstSection(
+    return this.onBoxSections(
       super.getInitialAnnotation(
         mouseState,
         annotationLayer,
@@ -79,7 +80,7 @@ export class RealignBoxTool extends PlaceBoundingBoxTool {
     mouseState: MouseSelectionState,
     annotationLayer: AnnotationLayerState,
   ): AxisAlignedBoundingBox {
-    return this.onFirstSection(
+    return this.onBoxSections(
       super.getUpdatedAnnotation(
         oldAnnotation,
         mouseState,
@@ -92,7 +93,7 @@ export class RealignBoxTool extends PlaceBoundingBoxTool {
     return REALIGN_DRAW_TOOL_ID;
   }
 
-  private onFirstSection(box: AxisAlignedBoundingBox): AxisAlignedBoundingBox {
+  private onBoxSections(box: AxisAlignedBoundingBox): AxisAlignedBoundingBox {
     const [lo, hi] = this.spanOf(box.pointA[Z]);
     const pointA = box.pointA.slice();
     const pointB = box.pointB.slice();

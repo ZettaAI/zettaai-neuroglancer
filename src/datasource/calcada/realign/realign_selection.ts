@@ -67,6 +67,14 @@ export function arrowNeedsReversal(
   );
 }
 
+/**
+ * The section a box realigns: the upper one it covers. A box drawn by the
+ * realign tool covers that section and the reference section below it.
+ */
+function boxSection(zA: number, zB: number): number {
+  return sectionOf(Math.max(zA, zB)) - 1;
+}
+
 export function boxFromCorners(
   pointA: ArrayLike<number>,
   pointB: ArrayLike<number>,
@@ -76,7 +84,7 @@ export function boxFromCorners(
     y0: Math.floor(Math.min(pointA[Y], pointB[Y])),
     x1: Math.ceil(Math.max(pointA[X], pointB[X])),
     y1: Math.ceil(Math.max(pointA[Y], pointB[Y])),
-    z: sectionOf(Math.min(pointA[Z], pointB[Z])),
+    z: boxSection(pointA[Z], pointB[Z]),
   };
 }
 
