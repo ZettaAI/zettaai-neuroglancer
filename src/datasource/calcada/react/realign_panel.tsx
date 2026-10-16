@@ -143,8 +143,8 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
       <div className="calcada-trace-panel calcada-realign-panel">
         <div className="calcada-trace-panel-warning">
           Realign works on a branch only: a commit rewrites the branch&apos;s
-          image and segmentation, and reaches main by merging the branch.
-          Switch to a branch, or create one, with the Branch control.
+          image and segmentation, and reaches main by merging the branch. Switch
+          to a branch, or create one, with the Branch control.
         </div>
       </div>
     );
@@ -310,11 +310,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           <div className="calcada-trace-panel-buttons">
             <Button
               size="xs"
-              disabled={
-                !summary.canCommit ||
-                working ||
-                !(maxShiftPx > 0)
-              }
+              disabled={!summary.canCommit || working || !(maxShiftPx > 0)}
               title="Write the warp into this branch over the box's section and the ones above"
               onClick={() => setConfirming(true)}
             >
