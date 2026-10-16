@@ -25,6 +25,7 @@ import {
 import { RealignCoordinates } from "#src/datasource/calcada/realign/realign_tools.js";
 import type { LayerListSpecification } from "#src/layer/index.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import { NullarySignal } from "#src/util/signal.js";
 import type { UserLayerWithAnnotations } from "#src/ui/annotations.js";
 
 const BRANCH_ID = 3;
@@ -210,7 +211,7 @@ describe("RealignSession.clearPreview", () => {
 });
 
 describe("RealignSession segmentation preview", () => {
-  it("hides the segmentation layer under it and shows it again on clear", () => {
+  it("hides the segmentation layer only on the previewed section, and shows it again on clear", () => {
     const drawingLayer = {} as UserLayerWithAnnotations;
     const host = {
       name: "segmentation",
@@ -221,8 +222,18 @@ describe("RealignSession segmentation preview", () => {
     host.setVisible.mockImplementation((visible: boolean) => {
       host.visible = visible;
     });
+    const globalPosition = {
+      value: Float32Array.of(0, 0, 3104.5),
+      changed: new NullarySignal(),
+    };
     const managedLayers: { name: string; layer?: unknown }[] = [host];
     const layers = {
+      root: {
+        globalPosition,
+        coordinateSpace: {
+          value: { scales: Float64Array.of(16e-9, 16e-9, 45e-9) },
+        },
+      },
       rootLayers: {
         managedLayers,
         removeManagedLayer: vi.fn((managed) => {
@@ -259,10 +270,20 @@ describe("RealignSession segmentation preview", () => {
       } as unknown as AnnotationLayerState,
       coordinates: () => undefined,
     });
+    const moveTo = (z: number) => {
+      globalPosition.value[2] = z;
+      globalPosition.changed.dispatch();
+    };
 
-    session["hideSegmentationUnderPreview"]();
+    session["hideSegmentationUnderPreview"](3104);
+    expect(host.visible).toBe(false);
+    moveTo(3103.5);
+    expect(host.visible).toBe(true);
+    moveTo(3104.5);
     expect(host.visible).toBe(false);
     session.clearPreview();
+    expect(host.visible).toBe(true);
+    moveTo(3104.5);
     expect(host.visible).toBe(true);
   });
 });

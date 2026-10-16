@@ -218,8 +218,13 @@ export class RealignSession extends RefCounted {
   private readonly patchRequests = latestRequestGate();
   private readonly commitsRequests = latestRequestGate();
   private unwatchSource: (() => void) | undefined;
-  /** The segmentation layer the preview hid, to show again when it goes. */
-  private hiddenUnderPreview: ManagedUserLayer | undefined;
+  /**
+   * The segmentation layer the preview covers on `previewedSection`, hidden
+   * while that section is on screen and shown again when the preview goes.
+   */
+  private underPreview:
+    | { host: ManagedUserLayer; previewedSection: number; stop: () => void }
+    | undefined;
 
   constructor(
     private readonly layers: LayerListSpecification,
@@ -369,21 +374,52 @@ export class RealignSession extends RefCounted {
         this.layers.rootLayers.removeManagedLayer(preview);
       }
     }
-    this.hiddenUnderPreview?.setVisible(true);
-    this.hiddenUnderPreview = undefined;
+    if (this.underPreview !== undefined) {
+      this.underPreview.stop();
+      this.underPreview.host.setVisible(true);
+      this.underPreview = undefined;
+    }
   }
 
   /**
    * Both layers are translucent, so with the segmentation still showing the
-   * box would carry the segments where they are and where they would go.
+   * previewed section would carry its segments where they are and where they
+   * would go. Every other section keeps the segmentation as it is.
    */
-  private hideSegmentationUnderPreview(): void {
-    const host = this.layers.rootLayers.managedLayers.find(
-      (managed) => managed.layer === this.drawing?.layer,
+  private hideSegmentationUnderPreview(previewedSection: number): void {
+    this.underPreview?.stop();
+    const host =
+      this.underPreview?.host ??
+      this.layers.rootLayers.managedLayers.find(
+        (managed) => managed.layer === this.drawing?.layer,
+      );
+    if (
+      host === undefined ||
+      (this.underPreview === undefined && !host.visible)
+    ) {
+      return;
+    }
+    const sync = () =>
+      host.setVisible(this.currentSection() !== previewedSection);
+    const stop = this.layers.root.globalPosition.changed.add(sync);
+    this.underPreview = { host, previewedSection, stop };
+    sync();
+  }
+
+  /** The graph section on screen. */
+  private currentSection(): number {
+    return sectionOf(
+      this.layers.root.globalPosition.value[Z_AXIS] /
+        this.globalUnitsPerVoxelZ(),
     );
-    if (host === undefined || !host.visible) return;
-    host.setVisible(false);
-    this.hiddenUnderPreview = host;
+  }
+
+  /** Global z units per graph voxel. */
+  private globalUnitsPerVoxelZ(): number {
+    const metresPerVoxel = this.graph.resolution[Z_AXIS] * METRES_PER_NANOMETRE;
+    return (
+      metresPerVoxel / this.layers.root.coordinateSpace.value.scales[Z_AXIS]
+    );
   }
 
   /**
@@ -404,7 +440,9 @@ export class RealignSession extends RefCounted {
           branchId,
           await encodeField(field),
         );
-      if (!signal.aborted) this.showSegmentationPreview(preview.layerSource);
+      if (!signal.aborted) {
+        this.showSegmentationPreview(preview.layerSource, box.z);
+      }
       return "";
     } catch (error) {
       return ` The segmentation preview failed: ${realignErrorMessage(calcadaError(error))}`;
@@ -781,21 +819,18 @@ export class RealignSession extends RefCounted {
     const selection = this.currentSelection();
     if (selection === undefined) return;
     event.preventDefault();
-    const { globalPosition, coordinateSpace } = this.layers.root;
-    const metresPerVoxel = this.graph.resolution[Z_AXIS] * METRES_PER_NANOMETRE;
-    const globalUnitsPerVoxel =
-      metresPerVoxel / coordinateSpace.value.scales[Z_AXIS];
-    const position = globalPosition.value;
+    const { globalPosition } = this.layers.root;
     const target = sectionToggleTarget(
-      sectionOf(position[Z_AXIS] / globalUnitsPerVoxel),
+      this.currentSection(),
       selection.box.z,
       selection.referenceSection,
     );
-    position[Z_AXIS] = (target + SECTION_CENTRE) * globalUnitsPerVoxel;
+    globalPosition.value[Z_AXIS] =
+      (target + SECTION_CENTRE) * this.globalUnitsPerVoxelZ();
     globalPosition.changed.dispatch();
   }
 
-  /** Flags rejected lines so the arrow shader draws them red. */
+  /** Flags rejected lines so the arrow shader draws them grey. */
   private markRejectedArrows(rejectedIds: ReadonlySet<string>): void {
     const source = this.watchedSource;
     if (source === undefined) return;
@@ -928,7 +963,7 @@ export class RealignSession extends RefCounted {
     this.layers.add(managed, this.previewIndex());
   }
 
-  private showSegmentationPreview(source: string): void {
+  private showSegmentationPreview(source: string, section: number): void {
     const previous = this.findManagedLayer(REALIGN_SEGMENTATION_PREVIEW_LAYER);
     if (previous !== undefined) {
       this.layers.rootLayers.removeManagedLayer(previous);
@@ -938,7 +973,7 @@ export class RealignSession extends RefCounted {
       source,
     });
     this.layers.add(managed, this.segmentationPreviewIndex());
-    this.hideSegmentationUnderPreview();
+    this.hideSegmentationUnderPreview(section);
   }
 
   /** Directly above the calcada layer, or on top when it is not in the list. */

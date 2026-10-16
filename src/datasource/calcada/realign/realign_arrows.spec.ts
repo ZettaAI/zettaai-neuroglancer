@@ -63,6 +63,12 @@ describe("REALIGN_ARROW_SHADER", () => {
   it("colours the box border", () => {
     expect(REALIGN_ARROW_SHADER).toContain("setBoundingBoxBorderColor(");
   });
+
+  it("marks the ends as the portal does: blue start, red end", () => {
+    expect(REALIGN_ARROW_SHADER).toContain(
+      "setEndpointMarkerColor(vec4(0.0, 0.0, 1.0, 1.0), vec4(1.0, 0.0, 0.0, 1.0))",
+    );
+  });
 });
 
 describe("isSectionToggleKey", () => {
