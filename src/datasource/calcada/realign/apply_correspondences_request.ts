@@ -41,22 +41,30 @@ export interface ApplyCorrespondencesResult {
   readonly warpedImage?: FloatTensor;
 }
 
+/** With a reference crop, image similarity weighs in as in the portal. */
+const REFERENCE_MSE_WEIGHT = 1;
+
 /**
  * The crop goes once, as the encoding: without a separate display image,
- * web_api returns the warped encoding as `warped_image`. It is gzipped because
- * Cloud Run caps a request at 32 MiB, which raw float32 crosses near 2900².
+ * web_api returns the warped encoding as `warped_image`. The reference
+ * section's crop, when given, is the target encoding the MSE term matches it
+ * to. Both are gzipped because Cloud Run caps a request at 32 MiB, which raw
+ * float32 crosses near 2900².
  */
 export async function buildApplyCorrespondencesForm(
   crop: Uint8Array,
   width: number,
   height: number,
   lines: readonly CorrespondenceLine[],
+  referenceCrop?: Uint8Array,
 ): Promise<FormData> {
-  const normalised = Float32Array.from(crop, (value) => value / UINT8_MAX);
+  const shape = [1, height, width, 1];
   const metadata = {
     correspondences: { lines },
-    src_encoding_shape: [1, height, width, 1],
-    mse_weight: 0,
+    src_encoding_shape: shape,
+    ...(referenceCrop === undefined
+      ? { mse_weight: 0 }
+      : { tgt_encoding_shape: shape, mse_weight: REFERENCE_MSE_WEIGHT }),
     ...PORTAL_OPTIMIZATION,
     run_misd: false,
     run_warp: true,
@@ -68,14 +76,18 @@ export async function buildApplyCorrespondencesForm(
     new Blob([JSON.stringify(metadata)], { type: "application/json" }),
     "metadata.json",
   );
-  form.append(
-    "src-encoding-data",
-    new Blob([await gzip(normalised.buffer)], {
-      type: "application/octet-stream",
-    }),
-    "src",
-  );
+  form.append("src-encoding-data", await encodingBlob(crop), "src");
+  if (referenceCrop !== undefined) {
+    form.append("tgt-encoding-data", await encodingBlob(referenceCrop), "tgt");
+  }
   return form;
+}
+
+async function encodingBlob(crop: Uint8Array): Promise<Blob> {
+  const normalised = Float32Array.from(crop, (value) => value / UINT8_MAX);
+  return new Blob([await gzip(normalised.buffer)], {
+    type: "application/octet-stream",
+  });
 }
 
 async function gzip(buffer: ArrayBuffer): Promise<ArrayBuffer> {

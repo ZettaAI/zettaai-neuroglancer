@@ -289,11 +289,14 @@ export class RealignSession extends RefCounted {
     this.inFlight = controller;
     const { signal } = controller;
     try {
-      this.setWorking("Reading the section…");
-      const crop = await this.graph.graphServer.fetchRealignSection(
-        box,
-        branchId,
-      );
+      this.setWorking("Reading the sections…");
+      const [crop, referenceCrop] = await Promise.all([
+        this.graph.graphServer.fetchRealignSection(box, branchId),
+        this.graph.graphServer.fetchRealignSection(
+          { ...box, z: selection.referenceSection },
+          branchId,
+        ),
+      ]);
       if (signal.aborted) return;
       this.setWorking("Computing the field…");
       const result = await applyCorrespondences(
@@ -302,6 +305,7 @@ export class RealignSession extends RefCounted {
         lines,
         fetch,
         signal,
+        referenceCrop,
       );
       if (result.warpedImage === undefined) {
         throw new RealignError("failed", "no warped image returned");

@@ -106,12 +106,14 @@ export async function applyCorrespondences(
   lines: readonly CorrespondenceLine[],
   fetchImpl: typeof fetch = fetch,
   signal?: AbortSignal,
+  referenceCrop?: RealignCrop,
 ): Promise<ApplyCorrespondencesResult> {
   const body = await buildApplyCorrespondencesForm(
     crop.data,
     crop.width,
     crop.height,
     lines,
+    referenceCrop?.data,
   );
   const init = await unlessCancelled(
     Promise.resolve(endpoint.authorize({ method: "POST", body })),

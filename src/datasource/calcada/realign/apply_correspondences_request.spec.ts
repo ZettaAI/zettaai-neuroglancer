@@ -58,6 +58,25 @@ describe("buildApplyCorrespondencesForm", () => {
     expect(encoding).toEqual(Float32Array.from([0, 1, 0.2, 0.4]));
   });
 
+  it("sends the reference section as the target encoding, with MSE on", async () => {
+    const form = await buildApplyCorrespondencesForm(
+      new Uint8Array([0, 255, 51, 102]),
+      2,
+      2,
+      [],
+      new Uint8Array([255, 0, 102, 51]),
+    );
+    const metadata = JSON.parse(await (form.get("metadata") as Blob).text());
+    expect(metadata).toMatchObject({
+      tgt_encoding_shape: [1, 2, 2, 1],
+      mse_weight: 1,
+    });
+    const target = new Float32Array(
+      await gunzip(form.get("tgt-encoding-data") as Blob),
+    );
+    expect(target).toEqual(Float32Array.from([1, 0, 0.4, 0.2]));
+  });
+
   it("sends the crop once, as the encoding", async () => {
     const form = await buildApplyCorrespondencesForm(
       new Uint8Array(4),
