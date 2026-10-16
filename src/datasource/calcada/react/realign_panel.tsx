@@ -136,6 +136,20 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
     summary.hasBox &&
     summary.lineCount > 0;
 
+  // A commit changes the branch it runs on, so on main there is nothing to
+  // draw — only the way out, as the Trace tab does.
+  if (summary.onMain) {
+    return (
+      <div className="calcada-trace-panel calcada-realign-panel">
+        <div className="calcada-trace-panel-warning">
+          Realign works on a branch only: a commit rewrites the branch&apos;s
+          image and segmentation, and reaches main by merging the branch.
+          Switch to a branch, or create one, with the Branch control.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="calcada-trace-panel calcada-realign-panel">
       {summary.unavailableReason !== undefined && (
@@ -257,12 +271,6 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
       </fieldset>
       <fieldset className="calcada-trace-panel-section">
         <legend>Commit</legend>
-        {summary.onMain && (
-          <div className="calcada-trace-panel-warning">
-            Commits are made on a branch. Switch to a branch, or create one,
-            with the Branch control.
-          </div>
-        )}
         <label className="calcada-trace-panel-row">
           Max shift between sections, px
           <input
@@ -304,7 +312,6 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
               size="xs"
               disabled={
                 !summary.canCommit ||
-                summary.onMain ||
                 working ||
                 !(maxShiftPx > 0)
               }

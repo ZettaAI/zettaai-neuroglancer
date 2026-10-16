@@ -24,6 +24,18 @@ export interface FloatTensor {
   readonly shape: number[];
 }
 
+/**
+ * The portal's correspondence-tool defaults (voxel-editor initial state):
+ * without them web_api falls back to rig 1000, lr 0.001 and 200 iterations,
+ * which warp differently from what users know from the portal.
+ */
+const PORTAL_OPTIMIZATION = {
+  rig: 10,
+  lr: 0.03,
+  num_iter: 50,
+  optimizer_type: "adam",
+};
+
 export interface ApplyCorrespondencesResult {
   readonly field: FloatTensor;
   readonly warpedImage?: FloatTensor;
@@ -45,6 +57,7 @@ export async function buildApplyCorrespondencesForm(
     correspondences: { lines },
     src_encoding_shape: [1, height, width, 1],
     mse_weight: 0,
+    ...PORTAL_OPTIMIZATION,
     run_misd: false,
     run_warp: true,
     zero_boundary: true,

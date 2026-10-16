@@ -43,6 +43,10 @@ describe("buildApplyCorrespondencesForm", () => {
     expect(metadata).toMatchObject({
       src_encoding_shape: [1, 2, 2, 1],
       mse_weight: 0,
+      rig: 10,
+      lr: 0.03,
+      num_iter: 50,
+      optimizer_type: "adam",
       run_misd: false,
       run_warp: true,
       zero_boundary: true,

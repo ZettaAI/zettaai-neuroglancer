@@ -265,7 +265,7 @@ describe("RealignPanel", () => {
     expect(session.commit).toHaveBeenCalledWith(1);
   });
 
-  it("disables Commit on main and says why", async () => {
+  it("on main shows only the way to a branch, like the Trace tab", async () => {
     const { session } = makeSession({
       hasBox: true,
       lineCount: 3,
@@ -275,8 +275,11 @@ describe("RealignPanel", () => {
       canCommit: true,
     });
     await mountPanel(session);
-    expect(button("Commit").disabled).toBe(true);
+    expect(tab.textContent).toContain("Realign works on a branch only");
     expect(tab.textContent).toContain("Switch to a branch");
+    expect(
+      [...tab.querySelectorAll("button")].map((found) => found.textContent),
+    ).toEqual([]);
   });
 
   it("lists commits with Undo enabled only when undoable, and names the blocker", async () => {
