@@ -208,3 +208,61 @@ describe("RealignSession.clearPreview", () => {
     expect(removeManagedLayer).toHaveBeenCalledWith(segmentation);
   });
 });
+
+describe("RealignSession segmentation preview", () => {
+  it("hides the segmentation layer under it and shows it again on clear", () => {
+    const drawingLayer = {} as UserLayerWithAnnotations;
+    const host = {
+      name: "segmentation",
+      layer: drawingLayer,
+      visible: true,
+      setVisible: vi.fn(),
+    };
+    host.setVisible.mockImplementation((visible: boolean) => {
+      host.visible = visible;
+    });
+    const managedLayers: { name: string; layer?: unknown }[] = [host];
+    const layers = {
+      rootLayers: {
+        managedLayers,
+        removeManagedLayer: vi.fn((managed) => {
+          managedLayers.splice(managedLayers.indexOf(managed), 1);
+        }),
+      },
+      add: vi.fn((managed) => managedLayers.push(managed)),
+    } as unknown as LayerListSpecification;
+    const graph = {
+      branchId: new WatchableValue(BRANCH_ID),
+      resolution: [16, 16, 45],
+      graphServer: {
+        realignPatchSource: vi.fn(async () => undefined),
+        realignCommits: vi.fn(async () => []),
+      },
+      applyRootChanges: vi.fn(),
+    } as unknown as RealignGraph;
+    const session = new RealignSession(layers, graph, {
+      layer: drawingLayer,
+      annotations: {
+        source: new LocalAnnotationSource(
+          new WatchableCoordinateSpaceTransform(
+            makeIdentityTransform(
+              makeCoordinateSpace({
+                names: ["x", "y", "z"],
+                units: ["m", "m", "m"],
+                scales: Float64Array.of(1, 1, 1),
+              }),
+            ),
+          ),
+          new WatchableValue([]),
+          [],
+        ),
+      } as unknown as AnnotationLayerState,
+      coordinates: () => undefined,
+    });
+
+    session["hideSegmentationUnderPreview"]();
+    expect(host.visible).toBe(false);
+    session.clearPreview();
+    expect(host.visible).toBe(true);
+  });
+});

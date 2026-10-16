@@ -218,6 +218,8 @@ export class RealignSession extends RefCounted {
   private readonly patchRequests = latestRequestGate();
   private readonly commitsRequests = latestRequestGate();
   private unwatchSource: (() => void) | undefined;
+  /** The segmentation layer the preview hid, to show again when it goes. */
+  private hiddenUnderPreview: ManagedUserLayer | undefined;
 
   constructor(
     private readonly layers: LayerListSpecification,
@@ -367,6 +369,21 @@ export class RealignSession extends RefCounted {
         this.layers.rootLayers.removeManagedLayer(preview);
       }
     }
+    this.hiddenUnderPreview?.setVisible(true);
+    this.hiddenUnderPreview = undefined;
+  }
+
+  /**
+   * Both layers are translucent, so with the segmentation still showing the
+   * box would carry the segments where they are and where they would go.
+   */
+  private hideSegmentationUnderPreview(): void {
+    const host = this.layers.rootLayers.managedLayers.find(
+      (managed) => managed.layer === this.drawing?.layer,
+    );
+    if (host === undefined || !host.visible) return;
+    host.setVisible(false);
+    this.hiddenUnderPreview = host;
   }
 
   /**
@@ -921,6 +938,7 @@ export class RealignSession extends RefCounted {
       source,
     });
     this.layers.add(managed, this.segmentationPreviewIndex());
+    this.hideSegmentationUnderPreview();
   }
 
   /** Directly above the calcada layer, or on top when it is not in the list. */
