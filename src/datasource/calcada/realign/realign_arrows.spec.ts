@@ -3,6 +3,7 @@ import type { Line } from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 import {
   isReverseArrowKey,
+  REALIGN_ARROW_SHADER,
   reversedLine,
   withRejectedFlag,
 } from "#src/datasource/calcada/realign/realign_arrows.js";
@@ -52,5 +53,13 @@ describe("isReverseArrowKey", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("REALIGN_ARROW_SHADER", () => {
+  // A user shader that never sets a box's border colour draws the box
+  // transparent, so the realign box would be invisible.
+  it("colours the box border", () => {
+    expect(REALIGN_ARROW_SHADER).toContain("setBoundingBoxBorderColor(");
   });
 });

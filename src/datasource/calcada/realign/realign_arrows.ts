@@ -1,6 +1,7 @@
 /**
  * @file How realign correspondences look and turn: a small hollow tail on the
  * moving section, a large filled head on the reference, red when rejected.
+ * The box shares the shader and the colour.
  */
 
 import type { Line } from "#src/annotation/index.js";
@@ -14,6 +15,8 @@ export const REALIGN_ARROW_SHADER = `
 void main() {
   vec4 arrow = prop_rejected() == 1u ? vec4(1.0, 0.25, 0.25, 1.0)
                                      : vec4(1.0, 0.85, 0.1, 1.0);
+  setBoundingBoxBorderColor(arrow);
+  setBoundingBoxBorderWidth(2.0);
   setLineColor(arrow);
   setLineWidth(2.0);
   setEndpointMarkerSize(5.0, 13.0);
