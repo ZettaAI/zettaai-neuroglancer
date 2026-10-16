@@ -96,6 +96,8 @@ import { RefCounted } from "#src/util/disposable.js";
 import { HttpError } from "#src/util/http_request.js";
 
 export const REALIGN_PREVIEW_LAYER = "realign preview";
+export const REALIGN_SEGMENTATION_PREVIEW_LAYER =
+  "realign preview (segmentation)";
 
 // Zero is what the preview volume holds outside the box; calcada writes a real
 // zero inside it as 1, so only the outside turns transparent.
@@ -148,6 +150,11 @@ export interface RealignGraph {
       box: RealignBox,
       branchId: number,
       crop: Uint8Array<ArrayBuffer>,
+    ): Promise<RealignPreview>;
+    putRealignSegmentationPreview(
+      box: RealignBox,
+      branchId: number,
+      field: ArrayBuffer,
     ): Promise<RealignPreview>;
     commitRealign(
       box: RealignBox,
@@ -313,9 +320,16 @@ export class RealignSession extends RefCounted {
       };
       this.refreshSummary();
       this.showPreview(preview.layerSource);
+      const segmentationNote = await this.previewSegmentation(
+        box,
+        branchId,
+        result.field,
+        signal,
+      );
+      if (signal.aborted) return;
       this.status.value = {
         kind: "done",
-        message: `Preview updated — press Q to switch ${box.z} ↔ ${selection.referenceSection}.`,
+        message: `Preview updated — press Q to switch ${box.z} ↔ ${selection.referenceSection}.${segmentationNote}`,
       };
     } catch (error) {
       if (signal.aborted) return;
@@ -340,9 +354,39 @@ export class RealignSession extends RefCounted {
   }
 
   private removePreviewLayer(): void {
-    const preview = this.findManagedLayer(REALIGN_PREVIEW_LAYER);
-    if (preview !== undefined) {
-      this.layers.rootLayers.removeManagedLayer(preview);
+    for (const name of [
+      REALIGN_PREVIEW_LAYER,
+      REALIGN_SEGMENTATION_PREVIEW_LAYER,
+    ]) {
+      const preview = this.findManagedLayer(name);
+      if (preview !== undefined) {
+        this.layers.rootLayers.removeManagedLayer(preview);
+      }
+    }
+  }
+
+  /**
+   * Shows the box's section of the segmentation warped by the field. The
+   * image preview stands without it: a failure only adds a note to the status.
+   */
+  private async previewSegmentation(
+    box: RealignBox,
+    branchId: number,
+    field: FloatTensor,
+    signal: AbortSignal,
+  ): Promise<string> {
+    try {
+      this.setWorking("Previewing the segmentation…");
+      const preview =
+        await this.graph.graphServer.putRealignSegmentationPreview(
+          box,
+          branchId,
+          await encodeField(field),
+        );
+      if (!signal.aborted) this.showSegmentationPreview(preview.layerSource);
+      return "";
+    } catch (error) {
+      return ` The segmentation preview failed: ${realignErrorMessage(calcadaError(error))}`;
     }
   }
 
@@ -861,6 +905,26 @@ export class RealignSession extends RefCounted {
       this.layers.rootLayers.removeManagedLayer(previous);
     }
     this.layers.add(managed, this.previewIndex());
+  }
+
+  private showSegmentationPreview(source: string): void {
+    const previous = this.findManagedLayer(REALIGN_SEGMENTATION_PREVIEW_LAYER);
+    if (previous !== undefined) {
+      this.layers.rootLayers.removeManagedLayer(previous);
+    }
+    const managed = makeLayer(this.layers, REALIGN_SEGMENTATION_PREVIEW_LAYER, {
+      type: "segmentation",
+      source,
+    });
+    this.layers.add(managed, this.segmentationPreviewIndex());
+  }
+
+  /** Directly above the calcada layer, or on top when it is not in the list. */
+  private segmentationPreviewIndex(): number | undefined {
+    const index = this.layers.rootLayers.managedLayers.findIndex(
+      (managed) => managed.layer === this.drawing?.layer,
+    );
+    return index === -1 ? undefined : index + 1;
   }
 
   /** Directly above the graph's image, or on top when there is none. */

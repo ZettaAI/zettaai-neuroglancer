@@ -7571,6 +7571,23 @@ class CalcadaGraphServerInterface {
     return { previewId: json.preview_id, layerSource: json.layer_source };
   }
 
+  async putRealignSegmentationPreview(
+    box: RealignBox,
+    branchId: number,
+    field: ArrayBuffer,
+  ): Promise<RealignPreview> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/preview/segmentation?${realignQuery(box, branchId)}`,
+      { method: "PUT", body: field },
+    );
+    const json = (await response.json()) as {
+      preview_id: string;
+      layer_source: string;
+    };
+    return { previewId: json.preview_id, layerSource: json.layer_source };
+  }
+
   async commitRealign(
     box: RealignBox,
     branchId: number,

@@ -17,7 +17,11 @@ import {
 import { REALIGN_ARROW_PROPERTIES } from "#src/datasource/calcada/realign/realign_arrows.js";
 import { PartialUndoError } from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RealignGraph } from "#src/datasource/calcada/realign/realign_session.js";
-import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
+import {
+  REALIGN_PREVIEW_LAYER,
+  REALIGN_SEGMENTATION_PREVIEW_LAYER,
+  RealignSession,
+} from "#src/datasource/calcada/realign/realign_session.js";
 import { RealignCoordinates } from "#src/datasource/calcada/realign/realign_tools.js";
 import type { LayerListSpecification } from "#src/layer/index.js";
 import { WatchableValue } from "#src/trackable_value.js";
@@ -178,5 +182,29 @@ describe("RealignSession drawing", () => {
     expect([box.pointA[2], box.pointB[2]]).toEqual([3104, 3107]);
     expect(session.summary.value.boxSection).toBe(3104);
     expect(session.summary.value.referenceSection).toBe(3106);
+  });
+});
+
+describe("RealignSession.clearPreview", () => {
+  it("removes the image and the segmentation previews", () => {
+    const image = { name: REALIGN_PREVIEW_LAYER };
+    const segmentation = { name: REALIGN_SEGMENTATION_PREVIEW_LAYER };
+    const removeManagedLayer = vi.fn();
+    const layers = {
+      rootLayers: { managedLayers: [image, segmentation], removeManagedLayer },
+      add: vi.fn(),
+    } as unknown as LayerListSpecification;
+    const graph = {
+      branchId: new WatchableValue(BRANCH_ID),
+      resolution: [16, 16, 45],
+      graphServer: {
+        realignPatchSource: vi.fn(async () => undefined),
+        realignCommits: vi.fn(async () => []),
+      },
+      applyRootChanges: vi.fn(),
+    } as unknown as RealignGraph;
+    new RealignSession(layers, graph).clearPreview();
+    expect(removeManagedLayer).toHaveBeenCalledWith(image);
+    expect(removeManagedLayer).toHaveBeenCalledWith(segmentation);
   });
 });
