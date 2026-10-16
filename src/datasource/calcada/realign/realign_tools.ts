@@ -142,6 +142,10 @@ export function boxSpanInAnnotationZ(
 
 /** A box over the section of its first corner and the reference section. */
 export class RealignBoxTool extends PlaceBoundingBoxTool {
+  // Taken once from the first click: re-deriving it from the box's own lower
+  // edge on every mouse move would slide the box down a section each time.
+  private span: [number, number] | undefined;
+
   constructor(
     layer: UserLayerWithAnnotations,
     private readonly annotations: AnnotationLayerState,
@@ -158,12 +162,12 @@ export class RealignBoxTool extends PlaceBoundingBoxTool {
     mouseState: MouseSelectionState,
     annotationLayer: AnnotationLayerState,
   ): Annotation {
-    return this.onBoxSections(
-      super.getInitialAnnotation(
-        mouseState,
-        annotationLayer,
-      ) as AxisAlignedBoundingBox,
-    );
+    const box = super.getInitialAnnotation(
+      mouseState,
+      annotationLayer,
+    ) as AxisAlignedBoundingBox;
+    this.span = this.spanOf(box.pointA[Z]);
+    return this.onBoxSections(box);
   }
 
   getUpdatedAnnotation(
@@ -185,7 +189,7 @@ export class RealignBoxTool extends PlaceBoundingBoxTool {
   }
 
   private onBoxSections(box: AxisAlignedBoundingBox): AxisAlignedBoundingBox {
-    const [lo, hi] = this.spanOf(box.pointA[Z]);
+    const [lo, hi] = this.span ?? this.spanOf(box.pointA[Z]);
     const pointA = box.pointA.slice();
     const pointB = box.pointB.slice();
     pointA[Z] = lo;
