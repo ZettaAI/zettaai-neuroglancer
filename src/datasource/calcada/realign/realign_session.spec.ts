@@ -1,9 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
+import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
+import type { Annotation } from "#src/annotation/index.js";
+import {
+  AnnotationType,
+  LocalAnnotationSource,
+  parseAnnotationPropertySpecs,
+} from "#src/annotation/index.js";
+import {
+  makeCoordinateSpace,
+  makeIdentityTransform,
+  WatchableCoordinateSpaceTransform,
+} from "#src/coordinate_transform.js";
+import { REALIGN_ARROW_PROPERTIES } from "#src/datasource/calcada/realign/realign_arrows.js";
 import { PartialUndoError } from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RealignGraph } from "#src/datasource/calcada/realign/realign_session.js";
 import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
 import type { LayerListSpecification } from "#src/layer/index.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import type { UserLayerWithAnnotations } from "#src/ui/annotations.js";
 
 const BRANCH_ID = 3;
 
@@ -64,5 +78,74 @@ describe("RealignSession.undo", () => {
     expect(session.status.value.message).toContain(
       "voxels partly restored; run undo again",
     );
+  });
+});
+
+describe("RealignSession drawing", () => {
+  const NANOMETRES_PER_UNIT = [16, 16, 45];
+
+  function drawingSession() {
+    const space = makeCoordinateSpace({
+      names: ["x", "y", "z"],
+      units: ["m", "m", "m"],
+      scales: Float64Array.from(NANOMETRES_PER_UNIT, (nm) => nm * 1e-9),
+    });
+    const source = new LocalAnnotationSource(
+      new WatchableCoordinateSpaceTransform(makeIdentityTransform(space)),
+      new WatchableValue(
+        parseAnnotationPropertySpecs(REALIGN_ARROW_PROPERTIES),
+      ),
+      [],
+    );
+    const graph = {
+      branchId: new WatchableValue(BRANCH_ID),
+      resolution: NANOMETRES_PER_UNIT,
+      graphServer: {
+        realignPatchSource: vi.fn(async () => undefined),
+        realignCommits: vi.fn(async () => []),
+      },
+      applyRootChanges: vi.fn(),
+    } as unknown as RealignGraph;
+    const drawing = {
+      layer: {} as UserLayerWithAnnotations,
+      annotations: { source } as unknown as AnnotationLayerState,
+      nanometresPerUnit: () => NANOMETRES_PER_UNIT,
+    };
+    return {
+      session: new RealignSession(emptyLayers(), graph, drawing),
+      source,
+    };
+  }
+
+  function addCommitted(source: LocalAnnotationSource, annotation: Annotation) {
+    const reference = source.add(annotation, /*commit=*/ false);
+    source.commit(reference);
+    reference.dispose();
+  }
+
+  it("reads the box's section and turns an arrow drawn up from the section below", async () => {
+    const { session, source } = drawingSession();
+    addCommitted(source, {
+      id: "box",
+      type: AnnotationType.AXIS_ALIGNED_BOUNDING_BOX,
+      description: "",
+      pointA: Float32Array.of(100, 100, 3104),
+      pointB: Float32Array.of(200, 200, 3105),
+      properties: [0],
+    });
+    addCommitted(source, {
+      id: "arrow",
+      type: AnnotationType.LINE,
+      description: "",
+      pointA: Float32Array.of(150.5, 150.5, 3103.5),
+      pointB: Float32Array.of(152.5, 151.5, 3104.5),
+      properties: [0],
+    });
+    await Promise.resolve();
+
+    const summary = session.summary.value;
+    expect(summary.boxSection).toBe(3104);
+    expect(summary.lineCount).toBe(1);
+    expect(summary.arrows[0].sections).toEqual([3104, 3103]);
   });
 });

@@ -14,16 +14,14 @@
  * shown as a temporary image layer above the graph's image.
  */
 
+import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
 import type {
   Annotation,
   AxisAlignedBoundingBox,
   Line,
   LocalAnnotationSource,
 } from "#src/annotation/index.js";
-import {
-  AnnotationType,
-  parseAnnotationPropertySpecs,
-} from "#src/annotation/index.js";
+import { AnnotationType } from "#src/annotation/index.js";
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import type {
   ArrowRow,
@@ -35,9 +33,6 @@ import { warpedImageToUint8 } from "#src/datasource/calcada/realign/apply_corres
 import { gpuBackend } from "#src/datasource/calcada/realign/gpu_backend_endpoint.js";
 import {
   isReverseArrowKey,
-  REALIGN_ARROW_PROPERTIES,
-  REALIGN_ARROW_SHADER,
-  REJECTED_PROPERTY_INDEX,
   reversedLine,
   withRejectedFlag,
 } from "#src/datasource/calcada/realign/realign_arrows.js";
@@ -77,24 +72,22 @@ import {
   selectCorrespondences,
 } from "#src/datasource/calcada/realign/realign_selection.js";
 import {
-  globalSectionSpan,
   RealignArrowTool,
   RealignBoxTool,
+  sectionSpanInUnits,
 } from "#src/datasource/calcada/realign/realign_tools.js";
-import { AnnotationUserLayer } from "#src/layer/annotation/index.js";
 import { ImageUserLayer } from "#src/layer/image/index.js";
 import type {
   LayerListSpecification,
   ManagedUserLayer,
-  UserLayer,
 } from "#src/layer/index.js";
 import { makeLayer } from "#src/layer/index.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import type { UserLayerWithAnnotations } from "#src/ui/annotations.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { HttpError } from "#src/util/http_request.js";
 
-export const REALIGN_ANNOTATION_LAYER = "realign";
 export const REALIGN_PREVIEW_LAYER = "realign preview";
 
 // Zero is what the preview volume holds outside the box; calcada writes a real
@@ -119,6 +112,18 @@ export const REALIGN_MAIN_PATCH_LAYER = "realign patch (main)";
 // the misaligned section underneath it.
 const REALIGN_PREVIEW_OPACITY = 1;
 const METRES_PER_NANOMETRE = 1e-9;
+
+/**
+ * Where the box and arrows are drawn: annotations of the calcada segmentation
+ * layer itself, so no separate layer is ever added or selected.
+ */
+export interface RealignDrawing {
+  /** The calcada layer; the drawing tools are installed on it. */
+  readonly layer: UserLayerWithAnnotations;
+  readonly annotations: AnnotationLayerState;
+  /** Nanometres per annotation coordinate unit, per axis. */
+  nanometresPerUnit(): ArrayLike<number>;
+}
 
 /** What the session needs from the calcada graph it realigns. */
 export interface RealignGraph {
@@ -196,18 +201,17 @@ export class RealignSession extends RefCounted {
   private readonly commitsRequests = latestRequestGate();
   private unwatchSource: (() => void) | undefined;
 
-  /**
-   * @param toolLayer - The layer whose Realign tab drives the session. The
-   *   drawing tools are installed on it, so the selection stays there.
-   */
   constructor(
     private readonly layers: LayerListSpecification,
     private readonly graph: RealignGraph,
-    private readonly toolLayer?: UserLayer,
+    private readonly drawing?: RealignDrawing,
   ) {
     super();
-    const existing = this.findAnnotationLayer();
-    if (existing !== undefined) this.whenAnnotationsReady(existing);
+    if (drawing !== undefined) {
+      this.watchAnnotations(
+        drawing.annotations.source as LocalAnnotationSource,
+      );
+    }
     this.registerEventListener(window, "keydown", (event: KeyboardEvent) =>
       this.reverseSelectedArrow(event),
     );
@@ -223,12 +227,15 @@ export class RealignSession extends RefCounted {
   }
 
   drawBox(): void {
-    const { scales } = this.layers.root.coordinateSpace.value;
     const resolutionZ = this.graph.resolution[Z_AXIS];
     this.armTool(
-      (layer) =>
-        new RealignBoxTool(layer, (globalZ) =>
-          globalSectionSpan(globalZ, scales[Z_AXIS], resolutionZ),
+      (drawing) =>
+        new RealignBoxTool(drawing.layer, drawing.annotations, (z) =>
+          sectionSpanInUnits(
+            z,
+            drawing.nanometresPerUnit()[Z_AXIS],
+            resolutionZ,
+          ),
         ),
       "Ctrl+click two corners of the box on the misaligned section.",
     );
@@ -236,7 +243,7 @@ export class RealignSession extends RefCounted {
 
   addCorrespondence(): void {
     this.armTool(
-      (layer) => new RealignArrowTool(layer, {}),
+      (drawing) => new RealignArrowTool(drawing.layer, drawing.annotations),
       "Ctrl+click a feature on the box's section, then where it belongs on the section below.",
     );
   }
@@ -423,19 +430,20 @@ export class RealignSession extends RefCounted {
   }
 
   focusArrow(id: string): void {
-    const managed = this.findAnnotationLayer();
+    const { drawing } = this;
     const line = this.watchedSource?.get(id);
-    if (managed === undefined || line === undefined || !isLine(line)) return;
-    const { globalPosition } = this.layers.root;
+    if (drawing === undefined || line === undefined || !isLine(line)) return;
+    const { globalPosition, coordinateSpace } = this.layers.root;
+    const { scales } = coordinateSpace.value;
+    const nanometres = drawing.nanometresPerUnit();
     const position = globalPosition.value;
-    position[X_AXIS] = line.pointA[X_AXIS];
-    position[Y_AXIS] = line.pointA[Y_AXIS];
-    globalPosition.changed.dispatch();
-    const layer = managed.layer as AnnotationUserLayer;
-    const [annotationLayerState] = layer.annotationStates.states;
-    if (annotationLayerState !== undefined) {
-      layer.selectAnnotation(annotationLayerState, id, true);
+    for (const axis of [X_AXIS, Y_AXIS]) {
+      position[axis] =
+        (line.pointA[axis] * nanometres[axis] * METRES_PER_NANOMETRE) /
+        scales[axis];
     }
+    globalPosition.changed.dispatch();
+    drawing.layer.selectAnnotation(drawing.annotations, id, true);
   }
 
   removeAllArrows(): void {
@@ -526,84 +534,24 @@ export class RealignSession extends RefCounted {
   }
 
   private armTool(
-    makeTool: (layer: AnnotationUserLayer) => RealignBoxTool | RealignArrowTool,
+    makeTool: (drawing: RealignDrawing) => RealignBoxTool | RealignArrowTool,
     hint: string,
   ): void {
-    const managed = this.findOrCreateAnnotationLayer();
-    // The viewer sends a Ctrl+click to the selected layer's tool, so the layer
-    // holding the drawing tool must be the selected one.
-    this.layers.root.selectedLayer.layer =
-      this.layers.rootLayers.managedLayers.find(
-        (candidate) => candidate.layer === this.toolLayer,
-      ) ?? managed;
-    this.whenAnnotationsReady(managed, (layer) => {
-      (this.toolLayer ?? layer).tool.value = makeTool(layer);
-      this.status.value = { kind: "idle", message: hint };
-    });
+    const { drawing } = this;
+    if (drawing === undefined) return;
+    // The viewer sends a Ctrl+click to the selected layer's tool.
+    const host = this.layers.rootLayers.managedLayers.find(
+      (managed) => managed.layer === drawing.layer,
+    );
+    if (host !== undefined) this.layers.root.selectedLayer.layer = host;
+    drawing.layer.tool.value = makeTool(drawing);
+    this.status.value = { kind: "idle", message: hint };
   }
 
   private findManagedLayer(name: string): ManagedUserLayer | undefined {
     return this.layers.rootLayers.managedLayers.find(
       (managed) => managed.name === name,
     );
-  }
-
-  private findAnnotationLayer(): ManagedUserLayer | undefined {
-    const managed = this.findManagedLayer(REALIGN_ANNOTATION_LAYER);
-    return managed?.layer instanceof AnnotationUserLayer ? managed : undefined;
-  }
-
-  private findOrCreateAnnotationLayer(): ManagedUserLayer {
-    const existing = this.findAnnotationLayer();
-    if (existing !== undefined) {
-      existing.setVisible(true);
-      return existing;
-    }
-    const managed = makeLayer(this.layers, REALIGN_ANNOTATION_LAYER, {
-      type: "annotation",
-      source: "local://annotations",
-      shader: REALIGN_ARROW_SHADER,
-      annotationProperties: REALIGN_ARROW_PROPERTIES,
-    });
-    this.layers.add(managed);
-    return managed;
-  }
-
-  /**
-   * Runs `ready` once the layer's local annotation source exists — a tick
-   * after the layer is added — and starts following its annotations.
-   */
-  private whenAnnotationsReady(
-    managed: ManagedUserLayer,
-    ready?: (layer: AnnotationUserLayer) => void,
-  ): void {
-    const tryNow = () => {
-      const layer = managed.layer;
-      if (
-        !(layer instanceof AnnotationUserLayer) ||
-        layer.localAnnotations === undefined
-      ) {
-        return false;
-      }
-      giveArrowLook(layer);
-      // A tool of the realign layer itself, possibly restored from a saved
-      // state, would draw boxes that ignore the section.
-      if (this.toolLayer !== undefined) layer.tool.value = undefined;
-      this.watchAnnotations(layer.localAnnotations);
-      ready?.(layer);
-      return true;
-    };
-    if (tryNow()) return;
-    const stop = () => {
-      offReady();
-      offChanged();
-    };
-    const check = () => {
-      if (tryNow()) stop();
-    };
-    const offReady = managed.readyStateChanged.add(check);
-    const offChanged = managed.layerChanged.add(check);
-    this.registerDisposer(stop);
   }
 
   private watchAnnotations(source: LocalAnnotationSource): void {
@@ -655,7 +603,7 @@ export class RealignSession extends RefCounted {
     if (committed === undefined || !isLine(committed) || box === undefined) {
       return;
     }
-    const toVoxels = this.globalToGraphVoxels();
+    const toVoxels = this.toGraphVoxels();
     const { z } = boxFromCorners(toVoxels(box.pointA), toVoxels(box.pointB));
     if (
       !arrowNeedsReversal(
@@ -685,7 +633,7 @@ export class RealignSession extends RefCounted {
     const annotations = [...source];
     const box = annotations.find(isBox);
     if (box === undefined) return undefined;
-    const toVoxels = this.globalToGraphVoxels();
+    const toVoxels = this.toGraphVoxels();
     const lines: LineEndpoints[] = annotations.filter(isLine).map((line) => ({
       id: line.id,
       pointA: toVoxels(line.pointA),
@@ -715,19 +663,20 @@ export class RealignSession extends RefCounted {
 
   private reverseSelectedArrow(event: KeyboardEvent): void {
     if (!isReverseArrowKey(event) || isTextEntry(event.target)) return;
-    const managed = this.findAnnotationLayer();
+    const { drawing } = this;
     const source = this.watchedSource;
-    const selectedLayer = this.layers.root.selectedLayer.layer;
-    const onRealignLayer =
-      selectedLayer === managed ||
-      (this.toolLayer !== undefined && selectedLayer?.layer === this.toolLayer);
-    if (managed === undefined || source === undefined || !onRealignLayer) {
+    if (
+      drawing === undefined ||
+      source === undefined ||
+      this.layers.root.selectedLayer.layer?.layer !== drawing.layer
+    ) {
       return;
     }
-    const layer = managed.layer as AnnotationUserLayer;
-    const selected = layer.getSelectedAnnotationContext();
+    const selected = drawing.layer.getSelectedAnnotationContext();
     const line =
-      selected === undefined ? undefined : source.get(selected.annotationId);
+      selected?.annotationLayerState === drawing.annotations
+        ? source.get(selected.annotationId)
+        : undefined;
     if (line === undefined || !isLine(line)) return;
     event.preventDefault();
     const reference = source.getReference(line.id);
@@ -784,7 +733,7 @@ export class RealignSession extends RefCounted {
     const rejected = new Map(
       selection?.rejected.map(({ id, reason }) => [id, reason]),
     );
-    const toVoxels = this.globalToGraphVoxels();
+    const toVoxels = this.toGraphVoxels();
     return [...source].filter(isLine).map((line) => {
       const cropLine = accepted.get(line.id);
       const [tailX, tailY, tailZ] = toVoxels(line.pointA);
@@ -805,18 +754,14 @@ export class RealignSession extends RefCounted {
     });
   }
 
-  /**
-   * Local annotations live in the global coordinate space; realign boxes are
-   * in graph voxels, so go through nanometres.
-   */
-  private globalToGraphVoxels(): (point: Float32Array) => number[] {
-    const { scales } = this.layers.root.coordinateSpace.value;
+  /** Annotation coordinates to graph voxels, through nanometres. */
+  private toGraphVoxels(): (point: Float32Array) => number[] {
+    const nanometres = this.drawing?.nanometresPerUnit() ?? [];
     const { resolution } = this.graph;
     return (point) =>
       Array.from(
         point,
-        (value, axis) =>
-          (value * scales[axis]) / METRES_PER_NANOMETRE / resolution[axis],
+        (value, axis) => (value * nanometres[axis]) / resolution[axis],
       );
   }
 
@@ -869,21 +814,6 @@ function isTextEntry(target: EventTarget | null): boolean {
 }
 
 /** Gives a realign layer made before arrows existed the arrow shader and flag. */
-function giveArrowLook(layer: AnnotationUserLayer): void {
-  const source = layer.localAnnotations!;
-  const rejectedId = REALIGN_ARROW_PROPERTIES[REJECTED_PROPERTY_INDEX].id;
-  if (
-    !source.properties.value.some(({ identifier }) => identifier === rejectedId)
-  ) {
-    source.properties.value = parseAnnotationPropertySpecs(
-      REALIGN_ARROW_PROPERTIES,
-    );
-  }
-  if (layer.annotationDisplayState.shader.value !== REALIGN_ARROW_SHADER) {
-    layer.annotationDisplayState.shader.value = REALIGN_ARROW_SHADER;
-  }
-}
-
 function isLine(annotation: Annotation): annotation is Line {
   return annotation.type === AnnotationType.LINE;
 }

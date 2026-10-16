@@ -9,10 +9,9 @@
  */
 
 /**
- * @file The realign box and arrow tools. They place annotations in the
- * managed realign layer but are installed on the calcada segmentation layer,
- * so drawing never moves the selection off the layer whose Realign tab is
- * open.
+ * @file The realign box and arrow tools: installed on the calcada
+ * segmentation layer and drawing into that layer's own realign annotations,
+ * so drawing never adds or selects another layer.
  */
 
 import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
@@ -21,42 +20,46 @@ import type {
   AxisAlignedBoundingBox,
 } from "#src/annotation/index.js";
 import { sectionSpan } from "#src/datasource/calcada/realign/realign_selection.js";
-import type { AnnotationUserLayer } from "#src/layer/annotation/index.js";
 import type { MouseSelectionState } from "#src/layer/index.js";
+import type { UserLayerWithAnnotations } from "#src/ui/annotations.js";
 import { PlaceBoundingBoxTool, PlaceLineTool } from "#src/ui/annotations.js";
 import { registerLegacyTool } from "#src/ui/tool.js";
 
 const Z = 2;
-const METRES_PER_NANOMETRE = 1e-9;
 // Saved with the segmentation layer, which hosts the tools, and restored as no
-// tool: the realign annotation layer they draw into is not there yet on load.
+// tool: a realign session arms them again when it needs them.
 const REALIGN_DRAW_TOOL_ID = "calcadaRealignDraw";
 registerLegacyTool(REALIGN_DRAW_TOOL_ID, () => undefined);
 
 /**
- * The global z range of the graph section under a global z.
+ * The z range, in annotation units, of the graph section under an annotation z.
  *
- * @param globalZ - z in global coordinates.
- * @param globalScaleZ - metres per global z unit.
+ * @param z - z in annotation coordinate units.
+ * @param nanometresPerUnitZ - nanometres per annotation z unit.
  * @param resolutionZ - graph voxel z size in nanometres.
  */
-export function globalSectionSpan(
-  globalZ: number,
-  globalScaleZ: number,
+export function sectionSpanInUnits(
+  z: number,
+  nanometresPerUnitZ: number,
   resolutionZ: number,
 ): [number, number] {
-  const toGlobal = (resolutionZ * METRES_PER_NANOMETRE) / globalScaleZ;
-  const [lo, hi] = sectionSpan(globalZ / toGlobal);
-  return [lo * toGlobal, hi * toGlobal];
+  const unitsPerVoxel = resolutionZ / nanometresPerUnitZ;
+  const [lo, hi] = sectionSpan(z / unitsPerVoxel);
+  return [lo * unitsPerVoxel, hi * unitsPerVoxel];
 }
 
 /** A box one section thick, on the section of its first corner. */
 export class RealignBoxTool extends PlaceBoundingBoxTool {
   constructor(
-    layer: AnnotationUserLayer,
-    private readonly spanOf: (globalZ: number) => [number, number],
+    layer: UserLayerWithAnnotations,
+    private readonly annotations: AnnotationLayerState,
+    private readonly spanOf: (z: number) => [number, number],
   ) {
     super(layer, {});
+  }
+
+  get annotationLayer() {
+    return this.annotations;
   }
 
   getInitialAnnotation(
@@ -100,6 +103,17 @@ export class RealignBoxTool extends PlaceBoundingBoxTool {
 }
 
 export class RealignArrowTool extends PlaceLineTool {
+  constructor(
+    layer: UserLayerWithAnnotations,
+    private readonly annotations: AnnotationLayerState,
+  ) {
+    super(layer, {});
+  }
+
+  get annotationLayer() {
+    return this.annotations;
+  }
+
   toJSON() {
     return REALIGN_DRAW_TOOL_ID;
   }

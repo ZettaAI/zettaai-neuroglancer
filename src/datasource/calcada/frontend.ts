@@ -33,6 +33,7 @@ import {
   type Line,
   LocalAnnotationSource,
   makeDataBoundsBoundingBoxAnnotationSet,
+  parseAnnotationPropertySpecs,
   type Point,
 } from "#src/annotation/index.js";
 import { LayerChunkProgressInfo } from "#src/chunk_manager/base.js";
@@ -148,6 +149,10 @@ import {
   TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/timestamp_picker.js";
 import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
+import {
+  REALIGN_ARROW_PROPERTIES,
+  REALIGN_ARROW_SHADER,
+} from "#src/datasource/calcada/realign/realign_arrows.js";
 import type {
   RealignCrop,
   RealignPreview,
@@ -440,6 +445,8 @@ const DEBUG_PIECE_PALETTE: bigint[] = (
 );
 const MULTICUT_OFF_COLOR = vec4.fromValues(0, 0, 0, 0.5);
 const WHITE_COLOR = vec3.fromValues(1, 1, 1);
+const REALIGN_COLOR = vec3.fromValues(1, 0.85, 0.1);
+const METRES_PER_NANOMETRE = 1e-9;
 // Trace candidates get their own colour so they never read as pending merges,
 // which are red.
 const YELLOW_COLOR = vec3.fromValues(1, 1, 0);
@@ -5167,6 +5174,15 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       order: -21,
       getter: () => new CalcadaTraceTab(this),
     });
+    const realignLoadedSubsource = getGraphLoadedSubsource(layer)!;
+    const realignAnnotations = makeColoredAnnotationState(
+      layer,
+      realignLoadedSubsource,
+      "calcadaRealign",
+      REALIGN_COLOR,
+      parseAnnotationPropertySpecs(REALIGN_ARROW_PROPERTIES),
+    );
+    realignAnnotations.displayState.shader.value = REALIGN_ARROW_SHADER;
     const realignSession = this.registerDisposer(
       new RealignSession(
         layer.manager,
@@ -5180,7 +5196,14 @@ class GraphConnection extends SegmentationGraphSourceConnection {
           graphServer: graph.graphServer,
           applyRootChanges: (rootMap) => this.applyRootChanges(rootMap),
         },
-        layer,
+        {
+          layer,
+          annotations: realignAnnotations,
+          nanometresPerUnit: () =>
+            realignLoadedSubsource.loadedDataSource.transform.inputSpace.value.scales.map(
+              (scale) => scale / METRES_PER_NANOMETRE,
+            ),
+        },
       ),
     );
     layer.tabs.add(CALCADA_REALIGN_TAB_ID, {
