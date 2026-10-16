@@ -377,6 +377,7 @@ import {
   addLayerControlToOptionsTab,
   registerLayerControl,
 } from "#src/widget/layer_control.js";
+import { RangeWidget } from "#src/widget/range.js";
 import { Tab } from "#src/widget/tab_view.js";
 import type { RPC } from "#src/worker_rpc.js";
 import { registerRPC } from "#src/worker_rpc.js";
@@ -2106,7 +2107,9 @@ const PIECE_SPLIT_BLUE_KEY = "blue";
 const PIECE_SPLIT_RED_KEY = "red";
 const PIECE_SPLIT_USE_IMAGE_KEY = "useImage";
 const PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY = "brightnessWeight";
-// The server's bound on brightness_weight.
+// Mirrors the server: PIECE_SPLIT_WEIGHT_EXPONENT's default and the bound on
+// brightness_weight.
+const DEFAULT_BRIGHTNESS_WEIGHT = 2;
 const MAX_BRIGHTNESS_WEIGHT = 10;
 const BRIGHTNESS_WEIGHT_STEP = 0.5;
 
@@ -2115,11 +2118,6 @@ const BRIGHTNESS_WEIGHT_STEP = 0.5;
 interface CutPricing {
   useImage: boolean;
   brightnessWeight?: number;
-}
-
-function boundedBrightnessWeight(weight: number): number | undefined {
-  if (!(weight > 0)) return undefined;
-  return Math.min(weight, MAX_BRIGHTNESS_WEIGHT);
 }
 
 // PieceSplitState holds the working state of the point-driven piece split tool:
@@ -2136,9 +2134,8 @@ class PieceSplitState extends RefCounted implements Trackable {
   // default: the image volume is then never read, which makes the split
   // several seconds faster; the cut runs on geometry and the data term alone.
   useImage = new WatchableValue<boolean>(false);
-  // How much darker a boundary has to be to be worth a longer cut. Undefined
-  // leaves it to the server.
-  brightnessWeight = new WatchableValue<number | undefined>(undefined);
+  // How much darker a boundary has to be to be worth a longer cut.
+  brightnessWeight = new WatchableValue<number>(DEFAULT_BRIGHTNESS_WEIGHT);
   // Whether the Cut tool is open. Session-only, never serialised: the point
   // markers belong to the act of cutting, so nothing should draw them once the
   // tool is put down.
@@ -2212,7 +2209,10 @@ class PieceSplitState extends RefCounted implements Trackable {
       [PIECE_SPLIT_BLUE_KEY]: this.bluePoints.value.map(entryToJSON),
       [PIECE_SPLIT_RED_KEY]: this.redPoints.value.map(entryToJSON),
       [PIECE_SPLIT_USE_IMAGE_KEY]: this.useImage.value ? true : undefined,
-      [PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY]: this.brightnessWeight.value,
+      [PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY]:
+        this.brightnessWeight.value === DEFAULT_BRIGHTNESS_WEIGHT
+          ? undefined
+          : this.brightnessWeight.value,
     };
   }
 
@@ -2232,8 +2232,9 @@ class PieceSplitState extends RefCounted implements Trackable {
       x,
       PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY,
       (value) => {
-        this.brightnessWeight.value = boundedBrightnessWeight(
-          verifyFiniteFloat(value),
+        this.brightnessWeight.value = Math.min(
+          verifyFinitePositiveFloat(value),
+          MAX_BRIGHTNESS_WEIGHT,
         );
       },
     );
@@ -9973,27 +9974,27 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     useImageLabel.appendChild(document.createTextNode("Use image for cut"));
     body.appendChild(useImageLabel);
 
-    const brightnessWeightInput = document.createElement("input");
-    brightnessWeightInput.type = "number";
-    brightnessWeightInput.min = String(BRIGHTNESS_WEIGHT_STEP);
-    brightnessWeightInput.max = String(MAX_BRIGHTNESS_WEIGHT);
-    brightnessWeightInput.step = String(BRIGHTNESS_WEIGHT_STEP);
-    brightnessWeightInput.placeholder = "default";
-    brightnessWeightInput.addEventListener("change", () => {
-      pieceSplitState.brightnessWeight.value = boundedBrightnessWeight(
-        Number.parseFloat(brightnessWeightInput.value),
-      );
-    });
-    const brightnessWeightLabel = document.createElement("label");
-    brightnessWeightLabel.className = "piece-split-use-image";
-    brightnessWeightLabel.title =
+    const brightnessWeightWidget = activation.registerDisposer(
+      new RangeWidget(pieceSplitState.brightnessWeight, {
+        min: BRIGHTNESS_WEIGHT_STEP,
+        max: MAX_BRIGHTNESS_WEIGHT,
+        step: BRIGHTNESS_WEIGHT_STEP,
+      }),
+    );
+    const brightnessWeightRow = document.createElement("div");
+    brightnessWeightRow.className = "piece-split-brightness-weight";
+    brightnessWeightRow.title =
       "How strongly the image steers the cut. Higher: a long cut along dark " +
-      "membrane beats a short one through bright cytoplasm. Empty: server default.";
-    brightnessWeightLabel.appendChild(
+      "membrane beats a short one through bright cytoplasm.";
+    brightnessWeightRow.appendChild(
       document.createTextNode("Brightness weight"),
     );
-    brightnessWeightLabel.appendChild(brightnessWeightInput);
-    body.appendChild(brightnessWeightLabel);
+    brightnessWeightRow.appendChild(brightnessWeightWidget.element);
+    body.appendChild(brightnessWeightRow);
+    const setBrightnessWeightEnabled = (enabled: boolean) => {
+      brightnessWeightWidget.inputElement.disabled = !enabled;
+      brightnessWeightWidget.numericInputElement.disabled = !enabled;
+    };
 
     const advancedCheckbox = document.createElement("input");
     advancedCheckbox.type = "checkbox";
@@ -10093,7 +10094,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       busy = nextBusy;
       spinner.style.display = busy ? "" : "none";
       useImageCheckbox.disabled = busy;
-      brightnessWeightInput.disabled = busy || !pieceSplitState.useImage.value;
+      setBrightnessWeightEnabled(!busy && pieceSplitState.useImage.value);
       for (const button of [swapButton, clearButton, applyButton, undoButton]) {
         button.classList.toggle("disabled", busy);
       }
@@ -10161,10 +10162,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       );
 
       useImageCheckbox.checked = pieceSplitState.useImage.value;
-      brightnessWeightInput.value = String(
-        pieceSplitState.brightnessWeight.value ?? "",
-      );
-      brightnessWeightInput.disabled = busy || !pieceSplitState.useImage.value;
+      setBrightnessWeightEnabled(!busy && pieceSplitState.useImage.value);
       // Applying needs at least one point of each colour.
       setStepButtonsEnabled(
         pieceSplitState.bluePoints.value.length > 0 &&

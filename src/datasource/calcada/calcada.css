@@ -146,6 +146,21 @@
   user-select: none;
 }
 
+.calcada-piece-split .piece-split-brightness-weight {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 12px sans-serif;
+}
+
+.calcada-piece-split .piece-split-brightness-weight .range-slider {
+  flex: 1;
+}
+
+.calcada-piece-split .piece-split-brightness-weight input:disabled {
+  opacity: 0.4;
+}
+
 .calcada-piece-split .neuroglancer-icon.disabled {
   opacity: 0.4;
   pointer-events: none;
