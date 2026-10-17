@@ -111,13 +111,6 @@ function unsupportedError(): FragmentBatchUnsupportedError {
  *
  * `sortPool` (default: none), if given, reorders the pool by piece id right
  * before each pump's dispatch, so pieces are no longer strictly FIFO.
- *
- * `deferPiece` (default: none), if given, parks pieces it reports true for
- * in the pool — they never download while the predicate holds. Pumps (new
- * read() calls, batch completions) re-consult it; when the predicate's
- * backing state changes with nothing else in motion (a camera move over a
- * fully parked pool), the owner MUST call reconsiderDeferred() or the
- * parked pieces stall forever.
  */
 export class FragmentBatchReader {
   private pendingEntries: PendingEntry[] = [];
@@ -130,7 +123,6 @@ export class FragmentBatchReader {
     private fetchBatch: FragmentBatchFetch,
     private isUnsupportedError: (error: unknown) => boolean = () => false,
     private sortPool?: (a: string, b: string) => number,
-    private deferPiece?: (pieceId: string) => boolean,
   ) {}
 
   get supported(): boolean | undefined {
@@ -175,8 +167,6 @@ export class FragmentBatchReader {
           entry.notifyAbort();
           return;
         }
-        // Parked entry with the reader otherwise idle: no follow-up pump is
-        // coming, so sweep here or the read never settles.
         queueMicrotask(() => this.rejectAbortedPoolEntries());
       };
       signal.addEventListener("abort", entry.abortHandler);
@@ -218,35 +208,11 @@ export class FragmentBatchReader {
     }
   }
 
-  // Call when the deferPiece predicate's backing state changes (the view
-  // moved): a fully parked pool has no batch completion coming to pump it.
-  reconsiderDeferred(): void {
-    this.pumpQueue();
-  }
-
   private takeNextBatch(): PendingEntry[] {
-    const { deferPiece } = this;
-    if (deferPiece === undefined) {
-      return this.pool.splice(0, FRAGMENT_BATCH_MAX_PIECES);
-    }
-    const dispatchable: PendingEntry[] = [];
-    const remaining: PendingEntry[] = [];
-    for (const entry of this.pool) {
-      if (
-        dispatchable.length < FRAGMENT_BATCH_MAX_PIECES &&
-        !deferPiece(entry.pieceId)
-      ) {
-        dispatchable.push(entry);
-      } else {
-        remaining.push(entry);
-      }
-    }
-    if (dispatchable.length === 0) return [];
-    this.pool = remaining;
-    return dispatchable;
+    return this.pool.splice(0, FRAGMENT_BATCH_MAX_PIECES);
   }
 
-  // Parked entries can abort while they wait (e.g. their chunk got evicted).
+  // Pooled entries can abort while they wait (e.g. their chunk got evicted).
   private rejectAbortedPoolEntries() {
     if (!this.pool.some((entry) => entry.aborted)) return;
     const alive: PendingEntry[] = [];
