@@ -2108,9 +2108,9 @@ const PIECE_SPLIT_RED_KEY = "red";
 const PIECE_SPLIT_USE_IMAGE_KEY = "useImage";
 const PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY = "brightnessWeight";
 // Mirrors the server's default and bound for brightness_weight.
-const DEFAULT_BRIGHTNESS_WEIGHT = 1;
+const DEFAULT_BRIGHTNESS_WEIGHT = 3;
 const MIN_BRIGHTNESS_WEIGHT = 1;
-const MAX_BRIGHTNESS_WEIGHT = 100;
+const MAX_BRIGHTNESS_WEIGHT = 20;
 const BRIGHTNESS_WEIGHT_STEP = 1;
 
 // How the server prices the voxel min-cut. brightnessWeight left undefined
