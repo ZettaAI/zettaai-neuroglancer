@@ -2145,6 +2145,9 @@ class PieceSplitState extends RefCounted implements Trackable {
   // only: it is a way of working, not part of the cut being described, and a
   // saved state that reopened in advanced mode would surprise.
   advanced = new WatchableValue<boolean>(false);
+  // Off keeps the points through Apply, so one cut can be undone and re-run
+  // with other settings. Session only, like advanced.
+  clearPointsAfterApply = new WatchableValue<boolean>(true);
   // Points the last step placed. Session only and never serialised: they are
   // derived from the graph, so a saved state that restored them could restore
   // points the graph no longer justifies.
@@ -10013,6 +10016,25 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     advancedLabel.appendChild(document.createTextNode("Advanced: step stages"));
     body.appendChild(advancedLabel);
 
+    const clearAfterApplyCheckbox = document.createElement("input");
+    clearAfterApplyCheckbox.type = "checkbox";
+    clearAfterApplyCheckbox.checked =
+      pieceSplitState.clearPointsAfterApply.value;
+    clearAfterApplyCheckbox.addEventListener("change", () => {
+      pieceSplitState.clearPointsAfterApply.value =
+        clearAfterApplyCheckbox.checked;
+    });
+    const clearAfterApplyLabel = document.createElement("label");
+    clearAfterApplyLabel.className = "piece-split-use-image";
+    clearAfterApplyLabel.title =
+      "Off: the points stay after Apply, so Ctrl+Z and Apply repeat the same " +
+      "cut, e.g. to compare brightness weights.";
+    clearAfterApplyLabel.appendChild(clearAfterApplyCheckbox);
+    clearAfterApplyLabel.appendChild(
+      document.createTextNode("Clear points after apply"),
+    );
+    body.appendChild(clearAfterApplyLabel);
+
     // Advanced mode: one button per stage the server can stop after, plus the
     // commit. The session lives only as long as the tool is open.
     const stagesRow = document.createElement("div");
@@ -10298,7 +10320,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         // escape — deselecting the segment — is switched off while the points
         // are outliving the split. Advanced mode keeps them, where dropping
         // them is its own stage.
-        const kept = pieceSplitState.advanced.value;
+        const kept =
+          pieceSplitState.advanced.value ||
+          !pieceSplitState.clearPointsAfterApply.value;
         if (!kept) clearPoints();
         renderStages();
         StatusMessage.showTemporaryMessage(
