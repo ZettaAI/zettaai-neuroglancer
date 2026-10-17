@@ -2107,11 +2107,11 @@ const PIECE_SPLIT_BLUE_KEY = "blue";
 const PIECE_SPLIT_RED_KEY = "red";
 const PIECE_SPLIT_USE_IMAGE_KEY = "useImage";
 const PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY = "brightnessWeight";
-// Mirrors the server: PIECE_SPLIT_WEIGHT_EXPONENT's default and the bound on
-// brightness_weight.
-const DEFAULT_BRIGHTNESS_WEIGHT = 2;
-const MAX_BRIGHTNESS_WEIGHT = 10;
-const BRIGHTNESS_WEIGHT_STEP = 0.5;
+// Mirrors the server's default and bound for brightness_weight.
+const DEFAULT_BRIGHTNESS_WEIGHT = 1;
+const MIN_BRIGHTNESS_WEIGHT = 1;
+const MAX_BRIGHTNESS_WEIGHT = 100;
+const BRIGHTNESS_WEIGHT_STEP = 1;
 
 // How the server prices the voxel min-cut. brightnessWeight left undefined
 // takes the server's own default.
@@ -2134,7 +2134,8 @@ class PieceSplitState extends RefCounted implements Trackable {
   // default: the image volume is then never read, which makes the split
   // several seconds faster; the cut runs on geometry and the data term alone.
   useImage = new WatchableValue<boolean>(false);
-  // How much darker a boundary has to be to be worth a longer cut.
+  // How far the cut may leave the midpoint between the points to follow a dark
+  // boundary: the image's weight against the pull toward that midpoint.
   brightnessWeight = new WatchableValue<number>(DEFAULT_BRIGHTNESS_WEIGHT);
   // Whether the Cut tool is open. Session-only, never serialised: the point
   // markers belong to the act of cutting, so nothing should draw them once the
@@ -9976,7 +9977,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
 
     const brightnessWeightWidget = activation.registerDisposer(
       new RangeWidget(pieceSplitState.brightnessWeight, {
-        min: BRIGHTNESS_WEIGHT_STEP,
+        min: MIN_BRIGHTNESS_WEIGHT,
         max: MAX_BRIGHTNESS_WEIGHT,
         step: BRIGHTNESS_WEIGHT_STEP,
       }),
@@ -9984,8 +9985,9 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const brightnessWeightRow = document.createElement("div");
     brightnessWeightRow.className = "piece-split-brightness-weight";
     brightnessWeightRow.title =
-      "How strongly the image steers the cut. Higher: a long cut along dark " +
-      "membrane beats a short one through bright cytoplasm.";
+      "How strongly the image steers the cut against the pull toward the " +
+      "midpoint between the points. Higher: the cut follows a dark boundary " +
+      "further from that midpoint. Too high and it collapses around one point.";
     brightnessWeightRow.appendChild(
       document.createTextNode("Brightness weight"),
     );
