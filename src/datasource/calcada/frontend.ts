@@ -33,6 +33,7 @@ import {
   type Line,
   LocalAnnotationSource,
   makeDataBoundsBoundingBoxAnnotationSet,
+  parseAnnotationPropertySpecs,
   type Point,
 } from "#src/annotation/index.js";
 import { LayerChunkProgressInfo } from "#src/chunk_manager/base.js";
@@ -153,6 +154,30 @@ import {
   TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/timestamp_picker.js";
 import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
+import {
+  REALIGN_ARROW_PROPERTIES,
+  REALIGN_ARROW_SHADER,
+} from "#src/datasource/calcada/realign/realign_arrows.js";
+import type {
+  RealignCrop,
+  RealignPreview,
+} from "#src/datasource/calcada/realign/realign_client.js";
+import type {
+  RealignCommitRow,
+  RealignCommitStatus,
+} from "#src/datasource/calcada/realign/realign_commit.js";
+import {
+  parseCommitRows,
+  parseRootMap,
+  PartialUndoError,
+} from "#src/datasource/calcada/realign/realign_commit.js";
+import type {
+  RealignBox,
+  ReferenceDirection,
+} from "#src/datasource/calcada/realign/realign_selection.js";
+import { RealignSession } from "#src/datasource/calcada/realign/realign_session.js";
+import { CalcadaRealignTab } from "#src/datasource/calcada/realign/realign_tab.js";
+import { RealignCoordinates } from "#src/datasource/calcada/realign/realign_tools.js";
 import { RetiredRoots } from "#src/datasource/calcada/retired_roots.js";
 import {
   interceptedRemovals,
@@ -324,6 +349,7 @@ import {
   registerLegacyTool,
   registerTool,
 } from "#src/ui/tool.js";
+import type { Uint64OrderedSet } from "#src/uint64_ordered_set.js";
 import { Uint64Set } from "#src/uint64_set.js";
 import { transposeNestedArrays } from "#src/util/array.js";
 import { setClipboard } from "#src/util/clipboard.js";
@@ -433,6 +459,7 @@ const DEBUG_PIECE_PALETTE: bigint[] = (
 );
 const MULTICUT_OFF_COLOR = vec4.fromValues(0, 0, 0, 0.5);
 const WHITE_COLOR = vec3.fromValues(1, 1, 1);
+const REALIGN_COLOR = vec3.fromValues(1, 0.85, 0.1);
 // Trace candidates get their own colour so they never read as pending merges,
 // which are red.
 const YELLOW_COLOR = vec3.fromValues(1, 1, 0);
@@ -1276,6 +1303,7 @@ const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const ZETTA_TRACE_JSON_KEY = "zettaTrace";
 const CALCADA_DEBUG_JSON_KEY = "debug";
 const CALCADA_TRACE_TAB_ID = "calcada-trace";
+const CALCADA_REALIGN_TAB_ID = "calcada-realign";
 const CALCADA_OVERVIEW_JSON_KEY = "candidateOverview";
 const PROOFREAD_SEGMENT_JSON_KEY = "proofreadSegment";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
@@ -5235,6 +5263,48 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       order: -21,
       getter: () => new CalcadaTraceTab(this),
     });
+    const realignLoadedSubsource = getGraphLoadedSubsource(layer)!;
+    const realignAnnotations = makeColoredAnnotationState(
+      layer,
+      realignLoadedSubsource,
+      "calcadaRealign",
+      REALIGN_COLOR,
+      parseAnnotationPropertySpecs(REALIGN_ARROW_PROPERTIES),
+    );
+    realignAnnotations.displayState.shader.value = REALIGN_ARROW_SHADER;
+    const realignSession = this.registerDisposer(
+      new RealignSession(
+        layer.manager,
+        {
+          branchId: graph.branchId,
+          resolution: graph.info.scales[0].resolution as unknown as [
+            number,
+            number,
+            number,
+          ],
+          graphServer: graph.graphServer,
+          applyRootChanges: (rootMap) => this.applyRootChanges(rootMap),
+        },
+        {
+          layer,
+          annotations: realignAnnotations,
+          coordinates: () => {
+            const transform = realignAnnotations.transform.value;
+            if (transform.error !== undefined) return undefined;
+            return RealignCoordinates.fromTransform(
+              transform,
+              layer.manager.root.coordinateSpace.value.scales,
+              graph.info.scales[0].resolution,
+            );
+          },
+        },
+      ),
+    );
+    layer.tabs.add(CALCADA_REALIGN_TAB_ID, {
+      label: "Realign",
+      order: -19,
+      getter: () => new CalcadaRealignTab(realignSession),
+    });
     // The side panel snapshots the layer's tab list before this
     // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
     // and it only registers hidden-listeners for tabs it knew at init — so
@@ -5248,6 +5318,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     this.registerDisposer(() => {
       layer.tabs.remove("calcada-debug");
       layer.tabs.remove(CALCADA_TRACE_TAB_ID);
+      layer.tabs.remove(CALCADA_REALIGN_TAB_ID);
       layer.panels.updateTabs();
     });
     this.registerDisposer(
@@ -6172,12 +6243,8 @@ void main() {
     // represents anything, and leaving it in visibleSegments would let a
     // stray click on a stale chunk re-select the merged blob via cached
     // mesh data.
-    segmentsState.visibleSegments.delete(oldRoot);
-    segmentsState.selectedSegments.delete(oldRoot);
-    for (let i = 0; i < newRoots.length; ++i) {
-      segmentsState.visibleSegments.add(newRoots[i]);
-      segmentsState.selectedSegments.add(newRoots[i]);
-    }
+    this.retargetRoot(segmentsState.visibleSegments, oldRoot, newRoots);
+    this.retargetRoot(segmentsState.selectedSegments, oldRoot, newRoots);
     // One delta: re-point each component's pieces onto its new root and retire
     // the old root. Patches the equivalences table in place instead of forcing
     // a full ~1s rebuild (the old deleteSet + per-piece link path did).
@@ -6198,6 +6265,42 @@ void main() {
     // Voxels a carve relabelled are the exception: the ids those chunks
     // carry no longer exist in storage, so the pixels have to come again.
     if (relabelledVoxels) this.refetchChunkPixels();
+  }
+
+  /** Swaps a root for its replacements in one segment set. */
+  private retargetRoot(
+    set: Uint64Set | Uint64OrderedSet,
+    oldRoot: bigint,
+    newRoots: readonly bigint[],
+  ): void {
+    set.delete(oldRoot);
+    set.add([...newRoots]);
+  }
+
+  /**
+   * Retargets, onto its new roots, every root a realign commit superseded
+   * that this layer currently shows or has selected — roots the viewer never
+   * touched are left alone, even though the commit cut their pieces too.
+   * Unlike a split's equivalence delta, realign rewrites real voxel ids in
+   * storage, so a full chunk-source refresh follows rather than
+   * refetchChunkPixels: there is no prior equivalence to preserve for ids the
+   * client has never seen.
+   */
+  applyRootChanges(rootMap: ReadonlyMap<bigint, readonly bigint[]>): void {
+    const segmentsState = this.layer.displayState.segmentationGroupState.value;
+    for (const [oldRoot, newRoots] of rootMap) {
+      const wasVisible = segmentsState.visibleSegments.has(oldRoot);
+      const wasSelected = segmentsState.selectedSegments.has(oldRoot);
+      if (!wasVisible && !wasSelected) continue;
+      this.provisionMeshes([oldRoot], newRoots);
+      if (wasVisible) {
+        this.retargetRoot(segmentsState.visibleSegments, oldRoot, newRoots);
+      }
+      if (wasSelected) {
+        this.retargetRoot(segmentsState.selectedSegments, oldRoot, newRoots);
+      }
+    }
+    this.refreshChunkSources();
   }
 
   /**
@@ -7098,6 +7201,17 @@ function appendCoordParams(
   return `${url}${sep}${parts.join("&")}`;
 }
 
+const HTTP_NOT_FOUND = 404;
+
+function realignQuery(box: RealignBox, branchId: number): string {
+  const params = new URLSearchParams({
+    bbox: `${box.x0},${box.y0},${box.x1},${box.y1}`,
+    z: String(box.z),
+  });
+  if (branchId) params.set("branch_id", String(branchId));
+  return params.toString();
+}
+
 class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
 
@@ -7494,6 +7608,138 @@ class CalcadaGraphServerInterface {
     );
   }
 
+  async fetchRealignSection(
+    box: RealignBox,
+    branchId: number,
+  ): Promise<RealignCrop> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/section?${realignQuery(box, branchId)}`,
+      {},
+    );
+    return {
+      data: new Uint8Array(await response.arrayBuffer()),
+      width: Number(response.headers.get("X-Realign-Width")),
+      height: Number(response.headers.get("X-Realign-Height")),
+    };
+  }
+
+  async putRealignPreview(
+    box: RealignBox,
+    branchId: number,
+    crop: Uint8Array<ArrayBuffer>,
+  ): Promise<RealignPreview> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/preview?${realignQuery(box, branchId)}`,
+      { method: "PUT", body: crop },
+    );
+    const json = (await response.json()) as {
+      preview_id: string;
+      layer_source: string;
+    };
+    return { previewId: json.preview_id, layerSource: json.layer_source };
+  }
+
+  async putRealignSegmentationPreview(
+    box: RealignBox,
+    branchId: number,
+    field: ArrayBuffer,
+  ): Promise<RealignPreview> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/preview/segmentation?${realignQuery(box, branchId)}`,
+      { method: "PUT", body: field },
+    );
+    const json = (await response.json()) as {
+      preview_id: string;
+      layer_source: string;
+    };
+    return { previewId: json.preview_id, layerSource: json.layer_source };
+  }
+
+  async commitRealign(
+    box: RealignBox,
+    branchId: number,
+    maxShiftPx: number,
+    reference: ReferenceDirection,
+    field: ArrayBuffer,
+  ): Promise<{ operationId: number; sections: number; touchedPieces: number }> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams(realignQuery(box, branchId));
+    params.set("d_max", String(maxShiftPx));
+    params.set("reference", reference);
+    const response = await fetchOkImpl(`${baseUrl}/realign/commit?${params}`, {
+      method: "POST",
+      body: field,
+    });
+    const json = (await response.json()) as {
+      operation_id: number;
+      sections: number;
+      touched_pieces: number;
+    };
+    return {
+      operationId: json.operation_id,
+      sections: json.sections,
+      touchedPieces: json.touched_pieces,
+    };
+  }
+
+  async realignCommitStatus(operationId: number): Promise<RealignCommitStatus> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/commit/${operationId}`,
+      {},
+    );
+    const json = (await response.json()) as {
+      status: RealignCommitStatus["status"];
+      sections_done?: number;
+      sections_total?: number;
+      error?: string;
+      root_map?: Record<string, string[]> | null;
+    };
+    return {
+      status: json.status,
+      sectionsDone: json.sections_done,
+      sectionsTotal: json.sections_total,
+      error: json.error,
+      rootMap: parseRootMap(json.root_map),
+    };
+  }
+
+  async realignCommits(branchId: number): Promise<RealignCommitRow[]> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const response = await fetchOkImpl(
+      `${baseUrl}/realign/commits?branch_id=${branchId}`,
+      {},
+    );
+    return parseCommitRows(await response.json());
+  }
+
+  /** Undoes a realign; answers the inverse root map: each superseded root mapped to the roots it returns to. */
+  async undoRealign(
+    operationId: number,
+    branchId: number,
+  ): Promise<ReadonlyMap<bigint, readonly bigint[]>> {
+    return (await this.revertOperation(operationId, branchId)).rootMap;
+  }
+
+  async realignPatchSource(branchId: number): Promise<string | undefined> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    try {
+      const response = await fetchOkImpl(
+        `${baseUrl}/realign/patch?branch_id=${branchId}`,
+        {},
+      );
+      return ((await response.json()) as { layer_source: string }).layer_source;
+    } catch (error) {
+      if (error instanceof HttpError && error.status === HTTP_NOT_FOUND) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   async splitSegments(
     first: SegmentSelection[],
     second: SegmentSelection[],
@@ -7728,6 +7974,7 @@ class CalcadaGraphServerInterface {
     operationId: number;
     restoredRoots: bigint[];
     supersededRoots: bigint[];
+    rootMap: Map<bigint, bigint[]>;
   }> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     let response: Response;
@@ -7740,7 +7987,7 @@ class CalcadaGraphServerInterface {
         { method: "POST" },
       );
     } catch (e) {
-      throw await wrapCalcadaError(e);
+      throw await revertRefusal(e);
     }
     const jsonResp = await response.json();
     const rootIds: string[] = jsonResp.restored_root_ids ?? [];
@@ -7749,6 +7996,7 @@ class CalcadaGraphServerInterface {
       operationId: Number(jsonResp.operation_id ?? 0),
       restoredRoots: rootIds.map((x) => parseUint64(x)),
       supersededRoots: superseded.map((x) => parseUint64(x)),
+      rootMap: parseRootMap(jsonResp.root_map),
     };
   }
 
@@ -9550,6 +9798,25 @@ const PIECE_SPLIT_INPUT_EVENT_MAP = EventActionMap.fromObject({
 // Error whose message is the server's `error` field (or `message`, or the raw
 // body). Calcada's error envelope is `{"code":"X","error":"...","message":""}`,
 // which `parseCalcadaError` mis-handles because it only reads `.message`.
+/**
+ * A refused revert as an Error with calcada's reason; a realign undo that
+ * failed after its graph step also carries the root map it already applied.
+ */
+async function revertRefusal(e: unknown): Promise<Error> {
+  const body = e instanceof HttpError ? e.response?.clone() : undefined;
+  const wrapped = await wrapCalcadaError(e);
+  if (body === undefined) return wrapped;
+  try {
+    const rootMap = parseRootMap(
+      ((await body.json()) as { root_map?: Record<string, string[]> }).root_map,
+    );
+    if (rootMap.size > 0) return new PartialUndoError(wrapped.message, rootMap);
+  } catch {
+    // Not JSON: the reason alone is all there is.
+  }
+  return wrapped;
+}
+
 async function wrapCalcadaError(e: unknown): Promise<Error> {
   if (!(e instanceof HttpError)) {
     return e instanceof Error ? e : new Error(String(e));
