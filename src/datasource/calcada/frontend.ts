@@ -2108,7 +2108,7 @@ const PIECE_SPLIT_RED_KEY = "red";
 const PIECE_SPLIT_USE_IMAGE_KEY = "useImage";
 const PIECE_SPLIT_BRIGHTNESS_WEIGHT_KEY = "brightnessWeight";
 // Mirrors the server's default and bound for brightness_weight.
-const DEFAULT_BRIGHTNESS_WEIGHT = 3;
+const DEFAULT_BRIGHTNESS_WEIGHT = 10;
 const MIN_BRIGHTNESS_WEIGHT = 1;
 const MAX_BRIGHTNESS_WEIGHT = 20;
 const BRIGHTNESS_WEIGHT_STEP = 1;
@@ -2135,7 +2135,8 @@ class PieceSplitState extends RefCounted implements Trackable {
   // several seconds faster; the cut runs on geometry and the data term alone.
   useImage = new WatchableValue<boolean>(false);
   // How far the cut may leave the midpoint between the points to follow a dark
-  // boundary: the image's weight against the pull toward that midpoint.
+  // boundary: the image's weight against the pull toward that midpoint. Only
+  // advanced mode offers it; otherwise every cut uses the default.
   brightnessWeight = new WatchableValue<number>(DEFAULT_BRIGHTNESS_WEIGHT);
   // Whether the Cut tool is open. Session-only, never serialised: the point
   // markers belong to the act of cutting, so nothing should draw them once the
@@ -2146,7 +2147,7 @@ class PieceSplitState extends RefCounted implements Trackable {
   // saved state that reopened in advanced mode would surprise.
   advanced = new WatchableValue<boolean>(false);
   // Off keeps the points through Apply, so one cut can be undone and re-run
-  // with other settings. Session only, like advanced.
+  // with other settings. Advanced mode only; session only, like advanced.
   clearPointsAfterApply = new WatchableValue<boolean>(true);
   // Points the last step placed. Session only and never serialised: they are
   // derived from the graph, so a saved state that restored them could restore
@@ -2168,7 +2169,9 @@ class PieceSplitState extends RefCounted implements Trackable {
   get cutPricing(): CutPricing {
     return {
       useImage: this.useImage.value,
-      brightnessWeight: this.brightnessWeight.value,
+      brightnessWeight: this.advanced.value
+        ? this.brightnessWeight.value
+        : DEFAULT_BRIGHTNESS_WEIGHT,
     };
   }
 
@@ -9995,7 +9998,6 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       document.createTextNode("Brightness weight"),
     );
     brightnessWeightRow.appendChild(brightnessWeightWidget.element);
-    body.appendChild(brightnessWeightRow);
     const setBrightnessWeightEnabled = (enabled: boolean) => {
       brightnessWeightWidget.inputElement.disabled = !enabled;
       brightnessWeightWidget.numericInputElement.disabled = !enabled;
@@ -10015,6 +10017,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     advancedLabel.appendChild(advancedCheckbox);
     advancedLabel.appendChild(document.createTextNode("Advanced: step stages"));
     body.appendChild(advancedLabel);
+    body.appendChild(brightnessWeightRow);
 
     const clearAfterApplyCheckbox = document.createElement("input");
     clearAfterApplyCheckbox.type = "checkbox";
@@ -10064,6 +10067,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const renderStages = () => {
       const on = pieceSplitState.advanced.value;
       advancedCheckbox.checked = on;
+      brightnessWeightRow.style.display = on ? "" : "none";
+      clearAfterApplyLabel.style.display = on ? "" : "none";
       stagesRow.style.display = on ? "" : "none";
       stageStatus.style.display =
         on && stageStatus.textContent !== "" ? "" : "none";
@@ -10318,10 +10323,10 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
         // the split make the next one start with a trip to Clear: a point
         // placed anywhere outside the old focus is refused, and the usual
         // escape — deselecting the segment — is switched off while the points
-        // are outliving the split. Advanced mode keeps them, where dropping
-        // them is its own stage.
+        // are outliving the split. Advanced mode can keep them, to undo and
+        // repeat one cut with other settings.
         const kept =
-          pieceSplitState.advanced.value ||
+          pieceSplitState.advanced.value &&
           !pieceSplitState.clearPointsAfterApply.value;
         if (!kept) clearPoints();
         renderStages();
