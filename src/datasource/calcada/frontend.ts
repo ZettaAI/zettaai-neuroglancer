@@ -348,6 +348,7 @@ import {
   verifyBoolean,
   verifyEnumString,
   verifyFiniteFloat,
+  verifyFiniteNonNegativeFloat,
   verifyFinitePositiveFloat,
   verifyFloatArray,
   verifyInt,
@@ -2112,12 +2113,18 @@ const DEFAULT_BRIGHTNESS_WEIGHT = 10;
 const MIN_BRIGHTNESS_WEIGHT = 1;
 const MAX_BRIGHTNESS_WEIGHT = 20;
 const BRIGHTNESS_WEIGHT_STEP = 1;
+const PIECE_SPLIT_Z_IMAGE_DISCOUNT_KEY = "zImageDiscount";
+// Mirrors the server's default and bounds for z_image_discount.
+const DEFAULT_Z_IMAGE_DISCOUNT = 0;
+const MAX_Z_IMAGE_DISCOUNT = 1;
+const Z_IMAGE_DISCOUNT_STEP = 0.05;
 
-// How the server prices the voxel min-cut. brightnessWeight left undefined
-// takes the server's own default.
+// How the server prices the voxel min-cut. A field left undefined takes the
+// server's own default.
 interface CutPricing {
   useImage: boolean;
   brightnessWeight?: number;
+  zImageDiscount?: number;
 }
 
 // PieceSplitState holds the working state of the point-driven piece split tool:
@@ -2138,6 +2145,10 @@ class PieceSplitState extends RefCounted implements Trackable {
   // boundary: the image's weight against the pull toward that midpoint. Only
   // advanced mode offers it; otherwise every cut uses the default.
   brightnessWeight = new WatchableValue<number>(DEFAULT_BRIGHTNESS_WEIGHT);
+  // How much cheaper a cut between z slices is than the image says. An object
+  // running obliquely through z leaves its boundary between slices, so the cut
+  // there has to cross bright voxels. Advanced mode only, like the weight.
+  zImageDiscount = new WatchableValue<number>(DEFAULT_Z_IMAGE_DISCOUNT);
   // Whether the Cut tool is open. Session-only, never serialised: the point
   // markers belong to the act of cutting, so nothing should draw them once the
   // tool is put down.
@@ -2162,6 +2173,7 @@ class PieceSplitState extends RefCounted implements Trackable {
     this.registerDisposer(this.redPoints.changed.add(reemit));
     this.registerDisposer(this.useImage.changed.add(reemit));
     this.registerDisposer(this.brightnessWeight.changed.add(reemit));
+    this.registerDisposer(this.zImageDiscount.changed.add(reemit));
     this.registerDisposer(this.advanced.changed.add(reemit));
     this.registerDisposer(this.artificialPoints.changed.add(reemit));
   }
@@ -2172,6 +2184,9 @@ class PieceSplitState extends RefCounted implements Trackable {
       brightnessWeight: this.advanced.value
         ? this.brightnessWeight.value
         : DEFAULT_BRIGHTNESS_WEIGHT,
+      zImageDiscount: this.advanced.value
+        ? this.zImageDiscount.value
+        : DEFAULT_Z_IMAGE_DISCOUNT,
     };
   }
 
@@ -2220,6 +2235,10 @@ class PieceSplitState extends RefCounted implements Trackable {
         this.brightnessWeight.value === DEFAULT_BRIGHTNESS_WEIGHT
           ? undefined
           : this.brightnessWeight.value,
+      [PIECE_SPLIT_Z_IMAGE_DISCOUNT_KEY]:
+        this.zImageDiscount.value === DEFAULT_Z_IMAGE_DISCOUNT
+          ? undefined
+          : this.zImageDiscount.value,
     };
   }
 
@@ -2242,6 +2261,16 @@ class PieceSplitState extends RefCounted implements Trackable {
         this.brightnessWeight.value = Math.min(
           verifyFinitePositiveFloat(value),
           MAX_BRIGHTNESS_WEIGHT,
+        );
+      },
+    );
+    verifyOptionalObjectProperty(
+      x,
+      PIECE_SPLIT_Z_IMAGE_DISCOUNT_KEY,
+      (value) => {
+        this.zImageDiscount.value = Math.min(
+          verifyFiniteNonNegativeFloat(value),
+          MAX_Z_IMAGE_DISCOUNT,
         );
       },
     );
@@ -7625,6 +7654,7 @@ class CalcadaGraphServerInterface {
             })),
             use_image: pricing.useImage,
             brightness_weight: pricing.brightnessWeight,
+            z_image_discount: pricing.zImageDiscount,
           }),
         },
       );
@@ -7697,6 +7727,7 @@ class CalcadaGraphServerInterface {
             })),
             use_image: pricing.useImage,
             brightness_weight: pricing.brightnessWeight,
+            z_image_discount: pricing.zImageDiscount,
           }),
         },
       );
@@ -9981,26 +10012,54 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     useImageLabel.appendChild(document.createTextNode("Use image for cut"));
     body.appendChild(useImageLabel);
 
-    const brightnessWeightWidget = activation.registerDisposer(
-      new RangeWidget(pieceSplitState.brightnessWeight, {
+    // The image-pricing sliders: shown in advanced mode, usable only while the
+    // cut reads the image.
+    const makeCutPricingRow = (
+      label: string,
+      title: string,
+      value: WatchableValue<number>,
+      range: { min: number; max: number; step: number },
+    ) => {
+      const widget = activation.registerDisposer(new RangeWidget(value, range));
+      const row = document.createElement("div");
+      row.className = "piece-split-cut-pricing";
+      row.title = title;
+      row.appendChild(document.createTextNode(label));
+      row.appendChild(widget.element);
+      const setEnabled = (enabled: boolean) => {
+        widget.inputElement.disabled = !enabled;
+        widget.numericInputElement.disabled = !enabled;
+      };
+      return { row, setEnabled };
+    };
+    const brightnessWeightControl = makeCutPricingRow(
+      "Brightness weight",
+      "How strongly the image steers the cut against the pull toward the " +
+        "midpoint between the points. Higher: the cut follows a dark boundary " +
+        "further from that midpoint. Too high and it collapses around one point.",
+      pieceSplitState.brightnessWeight,
+      {
         min: MIN_BRIGHTNESS_WEIGHT,
         max: MAX_BRIGHTNESS_WEIGHT,
         step: BRIGHTNESS_WEIGHT_STEP,
-      }),
+      },
     );
-    const brightnessWeightRow = document.createElement("div");
-    brightnessWeightRow.className = "piece-split-brightness-weight";
-    brightnessWeightRow.title =
-      "How strongly the image steers the cut against the pull toward the " +
-      "midpoint between the points. Higher: the cut follows a dark boundary " +
-      "further from that midpoint. Too high and it collapses around one point.";
-    brightnessWeightRow.appendChild(
-      document.createTextNode("Brightness weight"),
+    const zImageDiscountControl = makeCutPricingRow(
+      "Z edge discount",
+      "How much of the image's price to take off a cut between z slices. " +
+        "Objects running obliquely through z leave their boundary between " +
+        "slices, so the cut there crosses bright voxels. 0: z priced like xy; " +
+        "1: z edges keep only their geometric price.",
+      pieceSplitState.zImageDiscount,
+      {
+        min: DEFAULT_Z_IMAGE_DISCOUNT,
+        max: MAX_Z_IMAGE_DISCOUNT,
+        step: Z_IMAGE_DISCOUNT_STEP,
+      },
     );
-    brightnessWeightRow.appendChild(brightnessWeightWidget.element);
-    const setBrightnessWeightEnabled = (enabled: boolean) => {
-      brightnessWeightWidget.inputElement.disabled = !enabled;
-      brightnessWeightWidget.numericInputElement.disabled = !enabled;
+    const setCutPricingEnabled = (enabled: boolean) => {
+      brightnessWeightControl.setEnabled(enabled);
+      zImageDiscountControl.setEnabled(enabled);
     };
 
     const advancedCheckbox = document.createElement("input");
@@ -10017,7 +10076,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     advancedLabel.appendChild(advancedCheckbox);
     advancedLabel.appendChild(document.createTextNode("Advanced: step stages"));
     body.appendChild(advancedLabel);
-    body.appendChild(brightnessWeightRow);
+    body.appendChild(brightnessWeightControl.row);
+    body.appendChild(zImageDiscountControl.row);
 
     const clearAfterApplyCheckbox = document.createElement("input");
     clearAfterApplyCheckbox.type = "checkbox";
@@ -10067,7 +10127,8 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
     const renderStages = () => {
       const on = pieceSplitState.advanced.value;
       advancedCheckbox.checked = on;
-      brightnessWeightRow.style.display = on ? "" : "none";
+      brightnessWeightControl.row.style.display = on ? "" : "none";
+      zImageDiscountControl.row.style.display = on ? "" : "none";
       clearAfterApplyLabel.style.display = on ? "" : "none";
       stagesRow.style.display = on ? "" : "none";
       stageStatus.style.display =
@@ -10123,7 +10184,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       busy = nextBusy;
       spinner.style.display = busy ? "" : "none";
       useImageCheckbox.disabled = busy;
-      setBrightnessWeightEnabled(!busy && pieceSplitState.useImage.value);
+      setCutPricingEnabled(!busy && pieceSplitState.useImage.value);
       for (const button of [swapButton, clearButton, applyButton, undoButton]) {
         button.classList.toggle("disabled", busy);
       }
@@ -10191,7 +10252,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       );
 
       useImageCheckbox.checked = pieceSplitState.useImage.value;
-      setBrightnessWeightEnabled(!busy && pieceSplitState.useImage.value);
+      setCutPricingEnabled(!busy && pieceSplitState.useImage.value);
       // Applying needs at least one point of each colour.
       setStepButtonsEnabled(
         pieceSplitState.bluePoints.value.length > 0 &&
