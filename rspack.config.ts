@@ -228,6 +228,7 @@ export default defineConfig((env, args) => {
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_URL"),
       ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP"),
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_TOKEN"),
+      ...zettaDefine("NEUROGLANCER_ZETTA_GPU_BACKEND_URL"),
 
       // NEUROGLANCER_GOOGLE_TAG_MANAGER: JSON.stringify('GTM-XXXXXX'),
     },
