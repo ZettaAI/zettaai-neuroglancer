@@ -76,6 +76,74 @@ export function parseCommitRows(json: {
   }));
 }
 
+/** A realign a merge into this branch left out: the target had changed its region since the realign's branch was forked. */
+export interface SkippedRealignRow {
+  readonly mergeOperationId: number;
+  readonly sourceBranchId: number;
+  readonly operationId: number;
+  /** x0, y0, z0, x1, y1, z1 in graph voxels, end-exclusive. */
+  readonly region: readonly [number, number, number, number, number, number];
+  readonly conflictsWith: number;
+}
+
+interface RawSkippedRow {
+  readonly merge_operation_id: number;
+  readonly source_branch_id: number;
+  readonly operation_id: number;
+  readonly region: [number, number, number, number, number, number];
+  readonly conflicts_with: number;
+}
+
+export interface RealignHistory {
+  readonly commits: readonly RealignCommitRow[];
+  readonly skipped: readonly SkippedRealignRow[];
+}
+
+export const EMPTY_REALIGN_HISTORY: RealignHistory = {
+  commits: [],
+  skipped: [],
+};
+
+export function parseRealignHistory(json: {
+  readonly commits?: readonly RawCommitRow[] | null;
+  readonly skipped?: readonly RawSkippedRow[] | null;
+}): RealignHistory {
+  return {
+    commits: parseCommitRows(json),
+    skipped: (json.skipped ?? []).map((row) => ({
+      mergeOperationId: row.merge_operation_id,
+      sourceBranchId: row.source_branch_id,
+      operationId: row.operation_id,
+      region: row.region,
+      conflictsWith: row.conflicts_with,
+    })),
+  };
+}
+
+/** `conflicts_with` the server writes when the target had no conflicting operation: the region's segmentation itself changed. */
+const NO_CONFLICTING_OPERATION = 0;
+
+export function skippedRealignLabel({
+  operationId,
+  sourceBranchId,
+  region: [x0, y0, z0, x1, y1, z1],
+  conflictsWith,
+}: SkippedRealignRow): string {
+  const conflict =
+    conflictsWith === NO_CONFLICTING_OPERATION
+      ? "target segmentation changed"
+      : `target changed it in #${conflictsWith}`;
+  return `#${operationId} from branch ${sourceBranchId} · z ${z0}–${z1 - 1} · ${x0},${y0} → ${x1},${y1} · ${conflict}`;
+}
+
+export function skippedRealignsSummary(count: number): string {
+  const [realigns, possessive, pronoun] =
+    count === 1
+      ? ["1 realign was", "its", "it"]
+      : [`${count} realigns were`, "their", "them"];
+  return `${realigns} skipped on merge because the target changed those regions since ${possessive} branch was forked. Realign ${pronoun} again on a new branch.`;
+}
+
 /**
  * An undo whose graph step went through but whose voxel step did not: the
  * roots changed already, so the client retargets them before reporting it.
@@ -170,7 +238,11 @@ export function commitProgressMessage(
   total: number,
   cut: number,
 ): string {
-  return `Writing section ${done} of ${total} (${cut} pieces cut)…`;
+  return `Writing section ${done} of ${total} (${cut} pieces cut at the seam)…`;
+}
+
+export function commitDoneMessage(sections: number, cut: number): string {
+  return `Changes ${sections} sections and cuts ${cut} pieces at the seam.`;
 }
 
 const MAX_CONSECUTIVE_POLL_FAILURES = 3;

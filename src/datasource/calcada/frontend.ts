@@ -158,11 +158,11 @@ import type {
   RealignPreview,
 } from "#src/datasource/calcada/realign/realign_client.js";
 import type {
-  RealignCommitRow,
   RealignCommitStatus,
+  RealignHistory,
 } from "#src/datasource/calcada/realign/realign_commit.js";
 import {
-  parseCommitRows,
+  parseRealignHistory,
   parseRootMap,
   PartialUndoError,
 } from "#src/datasource/calcada/realign/realign_commit.js";
@@ -5191,6 +5191,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
         layer.manager,
         {
           branchId: graph.branchId,
+          graphUrl: graph.graphServer.baseUrl,
           resolution: graph.info.scales[0].resolution as unknown as [
             number,
             number,
@@ -7115,8 +7116,6 @@ function appendCoordParams(
   return `${url}${sep}${parts.join("&")}`;
 }
 
-const HTTP_NOT_FOUND = 404;
-
 function realignQuery(box: RealignBox, branchId: number): string {
   const params = new URLSearchParams({
     bbox: `${box.x0},${box.y0},${box.x1},${box.y1}`,
@@ -7128,6 +7127,10 @@ function realignQuery(box: RealignBox, branchId: number): string {
 
 class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
+
+  get baseUrl(): string {
+    return this.httpSource.baseUrl;
+  }
 
   async getTimestampLimit() {
     const { fetchOkImpl, baseUrl } = this.httpSource;
@@ -7637,13 +7640,13 @@ class CalcadaGraphServerInterface {
     };
   }
 
-  async realignCommits(branchId: number): Promise<RealignCommitRow[]> {
+  async realignHistory(branchId: number): Promise<RealignHistory> {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     const response = await fetchOkImpl(
       `${baseUrl}/realign/commits?branch_id=${branchId}`,
       {},
     );
-    return parseCommitRows(await response.json());
+    return parseRealignHistory(await response.json());
   }
 
   /** Undoes a realign; answers the inverse root map: each superseded root mapped to the roots it returns to. */
@@ -7652,22 +7655,6 @@ class CalcadaGraphServerInterface {
     branchId: number,
   ): Promise<ReadonlyMap<bigint, readonly bigint[]>> {
     return (await this.revertOperation(operationId, branchId)).rootMap;
-  }
-
-  async realignPatchSource(branchId: number): Promise<string | undefined> {
-    const { fetchOkImpl, baseUrl } = this.httpSource;
-    try {
-      const response = await fetchOkImpl(
-        `${baseUrl}/realign/patch?branch_id=${branchId}`,
-        {},
-      );
-      return ((await response.json()) as { layer_source: string }).layer_source;
-    } catch (error) {
-      if (error instanceof HttpError && error.status === HTTP_NOT_FOUND) {
-        return undefined;
-      }
-      throw error;
-    }
   }
 
   async splitSegments(

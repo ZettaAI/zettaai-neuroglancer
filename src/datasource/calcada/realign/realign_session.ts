@@ -32,6 +32,12 @@ import type { FloatTensor } from "#src/datasource/calcada/realign/apply_correspo
 import { warpedImageToUint8 } from "#src/datasource/calcada/realign/apply_correspondences_request.js";
 import { gpuBackend } from "#src/datasource/calcada/realign/gpu_backend_endpoint.js";
 import {
+  calcadaImageSource,
+  isCalcadaImageSource,
+  nextImageRevision,
+  NO_REVISION,
+} from "#src/datasource/calcada/realign/image_source.js";
+import {
   isReverseArrowKey,
   isSectionToggleKey,
   reversedLine,
@@ -50,11 +56,15 @@ import {
 import type {
   RealignCommitRow,
   RealignCommitStatus,
+  RealignHistory,
+  SkippedRealignRow,
 } from "#src/datasource/calcada/realign/realign_commit.js";
 import {
   appliedFieldKey,
   PartialUndoError,
+  commitDoneMessage,
   commitProgressMessage,
+  EMPTY_REALIGN_HISTORY,
   encodeField,
   latestRequestGate,
   pollCommit,
@@ -117,8 +127,9 @@ const Y_AXIS = 1;
 const Z_AXIS = 2;
 // A section's middle, where Neuroglancer puts the view when stepping to it.
 const SECTION_CENTRE = 0.5;
-export const REALIGN_PATCH_LAYER = "realign patch";
-export const REALIGN_MAIN_PATCH_LAYER = "realign patch (main)";
+// Layers older sessions added for the realign patch volumes; the graph's image
+// layer now reads calcada's composited image instead.
+const LEGACY_PATCH_LAYERS = ["realign patch", "realign patch (main)"] as const;
 // Image layers default to half opacity, which would blend the preview with
 // the misaligned section underneath it.
 const REALIGN_PREVIEW_OPACITY = 1;
@@ -139,6 +150,8 @@ export interface RealignDrawing {
 /** What the session needs from the calcada graph it realigns. */
 export interface RealignGraph {
   readonly branchId: WatchableValueInterface<number>;
+  /** The graph's calcada URL, `…/table/{graph}`; picks out its image layer. */
+  readonly graphUrl: string;
   /** Graph voxel size in nanometres. */
   readonly resolution: readonly [number, number, number];
   readonly graphServer: {
@@ -168,8 +181,7 @@ export interface RealignGraph {
       touchedPieces: number;
     }>;
     realignCommitStatus(operationId: number): Promise<RealignCommitStatus>;
-    realignPatchSource(branchId: number): Promise<string | undefined>;
-    realignCommits(branchId: number): Promise<readonly RealignCommitRow[]>;
+    realignHistory(branchId: number): Promise<RealignHistory>;
     undoRealign(
       operationId: number,
       branchId: number,
@@ -212,10 +224,11 @@ export class RealignSession extends RefCounted {
   private inFlight: AbortController | undefined;
   private applied: AppliedField | undefined;
   readonly commits = new WatchableValue<readonly RealignCommitRow[]>([]);
+  readonly skipped = new WatchableValue<readonly SkippedRealignRow[]>([]);
   readonly referenceOffset = new WatchableValue(DEFAULT_REFERENCE_OFFSET);
   private committing = false;
   private undoing = false;
-  private readonly patchRequests = latestRequestGate();
+  private imageRevision = NO_REVISION;
   private readonly commitsRequests = latestRequestGate();
   private unwatchSource: (() => void) | undefined;
   /**
@@ -244,11 +257,12 @@ export class RealignSession extends RefCounted {
     this.registerDisposer(
       this.graph.branchId.changed.add(() => {
         this.refreshSummary();
-        void this.refreshPatchLayers();
+        this.refreshImage();
         void this.refreshCommits();
       }),
     );
-    void this.refreshPatchLayers();
+    this.removeManagedLayers(LEGACY_PATCH_LAYERS);
+    this.followImageSource();
     void this.refreshCommits();
   }
 
@@ -365,15 +379,10 @@ export class RealignSession extends RefCounted {
   }
 
   private removePreviewLayer(): void {
-    for (const name of [
+    this.removeManagedLayers([
       REALIGN_PREVIEW_LAYER,
       REALIGN_SEGMENTATION_PREVIEW_LAYER,
-    ]) {
-      const preview = this.findManagedLayer(name);
-      if (preview !== undefined) {
-        this.layers.rootLayers.removeManagedLayer(preview);
-      }
-    }
+    ]);
     if (this.underPreview !== undefined) {
       this.underPreview.stop();
       this.underPreview.host.setVisible(true);
@@ -503,10 +512,10 @@ export class RealignSession extends RefCounted {
       }
       this.removePreviewLayer();
       this.graph.applyRootChanges(outcome.rootMap ?? new Map());
-      await this.refreshPatchLayers();
+      this.refreshImage();
       this.status.value = {
         kind: "done",
-        message: `Changes ${sections} sections and cuts ${touchedPieces} pieces on this branch.`,
+        message: commitDoneMessage(sections, touchedPieces),
       };
     } catch (error) {
       this.setError(realignErrorMessage(await calcadaRefusal(error)));
@@ -542,7 +551,8 @@ export class RealignSession extends RefCounted {
       this.undoing = false;
     }
     if (this.wasDisposed) return;
-    await Promise.all([this.refreshPatchLayers(), this.refreshCommits()]);
+    this.refreshImage();
+    await this.refreshCommits();
   }
 
   focusArrow(id: string): void {
@@ -575,60 +585,47 @@ export class RealignSession extends RefCounted {
   }
 
   /**
-   * Shows main's patch volume directly above the image and, on a branch, the
-   * branch's above it; a volume not written yet has no layer.
+   * Points the graph's image layer, the one reading calcada's image source,
+   * at the current branch and image revision. Two calcada layers over one
+   * graph on different branches share that image layer: the last to change
+   * wins.
    */
-  private async refreshPatchLayers(): Promise<void> {
-    const isCurrent = this.patchRequests.begin();
+  private followImageSource(): void {
     const branchId = this.graph.branchId.value;
-    const { graphServer } = this.graph;
-    let sources: (string | undefined)[];
-    try {
-      sources = await Promise.all([
-        graphServer.realignPatchSource(MAIN_BRANCH_ID),
-        branchId === MAIN_BRANCH_ID
-          ? undefined
-          : graphServer.realignPatchSource(branchId),
-      ]);
-    } catch (error) {
-      if (isCurrent()) {
-        this.setError(
-          `Could not load the realign patch: ${realignErrorMessage(error)}`,
-        );
-      }
-      return;
-    }
-    // A branch switch while this was in flight started a newer request, whose
-    // answer is the one that matters.
-    if (this.wasDisposed || !isCurrent()) return;
-    const layerNames = [REALIGN_MAIN_PATCH_LAYER, REALIGN_PATCH_LAYER];
-    for (const name of layerNames) {
-      const existing = this.findManagedLayer(name);
-      if (existing !== undefined) {
-        this.layers.rootLayers.removeManagedLayer(existing);
+    for (const { layer } of this.layers.rootLayers.managedLayers) {
+      if (!(layer instanceof ImageUserLayer)) continue;
+      for (const dataSource of layer.dataSources) {
+        const { spec } = dataSource;
+        if (!isCalcadaImageSource(spec.url, this.graph.graphUrl)) continue;
+        const url = calcadaImageSource(spec.url, branchId, this.imageRevision);
+        if (url !== spec.url) dataSource.spec = { ...spec, url };
       }
     }
-    let index = this.previewIndex();
-    sources.forEach((source, layer) => {
-      if (source === undefined) return;
-      this.layers.add(
-        makeLayer(this.layers, layerNames[layer], {
-          type: "image",
-          source,
-          shader: REALIGN_PREVIEW_SHADER,
-          opacity: REALIGN_PREVIEW_OPACITY,
-        }),
-        index,
-      );
-      if (index !== undefined) index++;
-    });
+  }
+
+  /**
+   * Reads the image again under a new URL: after a commit or an undo rewrote
+   * its chunks, or a branch switch, which may follow a merge.
+   */
+  private refreshImage(): void {
+    this.imageRevision = nextImageRevision();
+    this.followImageSource();
+  }
+
+  private removeManagedLayers(names: readonly string[]): void {
+    for (const name of names) {
+      const managed = this.findManagedLayer(name);
+      if (managed !== undefined) {
+        this.layers.rootLayers.removeManagedLayer(managed);
+      }
+    }
   }
 
   private async refreshCommits(): Promise<void> {
     const isCurrent = this.commitsRequests.begin();
-    let commits: readonly RealignCommitRow[] = [];
+    let history = EMPTY_REALIGN_HISTORY;
     try {
-      commits = await this.graph.graphServer.realignCommits(
+      history = await this.graph.graphServer.realignHistory(
         this.graph.branchId.value,
       );
     } catch (error) {
@@ -639,7 +636,8 @@ export class RealignSession extends RefCounted {
       }
     }
     if (this.wasDisposed || !isCurrent()) return;
-    this.commits.value = commits;
+    this.commits.value = history.commits;
+    this.skipped.value = history.skipped;
   }
 
   override disposed(): void {

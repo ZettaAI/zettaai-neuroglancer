@@ -11,8 +11,15 @@
 
 import { useState } from "react";
 
-import type { RealignCommitRow } from "#src/datasource/calcada/realign/realign_commit.js";
-import { DEFAULT_MAX_SHIFT_PX } from "#src/datasource/calcada/realign/realign_commit.js";
+import type {
+  RealignCommitRow,
+  SkippedRealignRow,
+} from "#src/datasource/calcada/realign/realign_commit.js";
+import {
+  DEFAULT_MAX_SHIFT_PX,
+  skippedRealignLabel,
+  skippedRealignsSummary,
+} from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RejectReason } from "#src/datasource/calcada/realign/realign_selection.js";
 import { MAX_REFERENCE_OFFSET } from "#src/datasource/calcada/realign/realign_selection.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
@@ -68,6 +75,8 @@ export interface RealignPanelSession {
   /** The branch's realigns, newest first. */
   readonly commits: WatchableValueInterface<readonly RealignCommitRow[]>;
   undo(operationId: number): Promise<void>;
+  /** Realigns merges into this branch left out, newest merge first. */
+  readonly skipped: WatchableValueInterface<readonly SkippedRealignRow[]>;
   /** The reference section's offset from the moving one, never 0. */
   readonly referenceOffset: WatchableValueInterface<number>;
   setReferenceOffset(offset: number): void;
@@ -79,6 +88,16 @@ const REFERENCE_OFFSETS = Array.from(
 ).filter((offset) => offset !== 0);
 
 const PIXEL_DIGITS = 1;
+
+// The backend's seam is always beside the box section, however far the reference.
+function seamSectionsText({
+  boxSection,
+  referenceSection,
+}: RealignSummary): string {
+  if (boxSection === undefined || referenceSection === undefined) return "?";
+  const neighbour = boxSection + Math.sign(referenceSection - boxSection);
+  return `z ${boxSection} and z ${neighbour}`;
+}
 
 function pixels(value: number): string {
   return `${value.toFixed(PIXEL_DIGITS)} px`;
@@ -126,6 +145,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
   const status = useWatchable(session.status);
   const summary = useWatchable(session.summary);
   const commits = useWatchable(session.commits);
+  const skipped = useWatchable(session.skipped);
   const referenceOffset = useWatchable(session.referenceOffset);
   const [maxShiftPx, setMaxShiftPx] = useState(DEFAULT_MAX_SHIFT_PX);
   const [confirming, setConfirming] = useState(false);
@@ -137,7 +157,8 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
     summary.lineCount > 0;
 
   // A commit changes the branch it runs on, so on main there is nothing to
-  // draw — only the way out, as the Trace tab does.
+  // draw — only the way out, as the Trace tab does, and what merges into
+  // main skipped.
   if (summary.onMain) {
     return (
       <div className="calcada-trace-panel calcada-realign-panel">
@@ -146,6 +167,7 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           image and segmentation, and reaches main by merging the branch. Switch
           to a branch, or create one, with the Branch control.
         </div>
+        <SkippedOnMerge skipped={skipped} />
       </div>
     );
   }
@@ -285,7 +307,8 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           <>
             <div className="calcada-trace-panel-status">
               Changes {session.plannedSections(maxShiftPx) ?? "?"} sections on
-              this branch.
+              this branch and cuts the pieces that cross the seam between{" "}
+              {seamSectionsText(summary)}.
             </div>
             <div className="calcada-trace-panel-buttons">
               <Button
@@ -348,6 +371,32 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
           </div>
         ))}
       </fieldset>
+      <SkippedOnMerge skipped={skipped} />
     </div>
+  );
+}
+
+function SkippedOnMerge({
+  skipped,
+}: {
+  skipped: readonly SkippedRealignRow[];
+}) {
+  if (skipped.length === 0) return null;
+  return (
+    <fieldset className="calcada-trace-panel-section">
+      <legend>Skipped on merge</legend>
+      <div className="calcada-trace-panel-status">
+        {skippedRealignsSummary(skipped.length)}
+      </div>
+      {skipped.map((row) => (
+        <div
+          key={`${row.mergeOperationId}-${row.operationId}`}
+          className="calcada-trace-panel-row"
+          data-skipped-id={row.operationId}
+        >
+          <span>{skippedRealignLabel(row)}</span>
+        </div>
+      ))}
+    </fieldset>
   );
 }

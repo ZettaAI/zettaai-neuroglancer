@@ -2,14 +2,18 @@
 import { describe, expect, it } from "vitest";
 import {
   appliedFieldKey,
+  commitDoneMessage,
   commitProgressMessage,
   encodeField,
   latestRequestGate,
   parseCommitRows,
+  parseRealignHistory,
   parseRootMap,
   pollCommit,
   residualErrors,
   sectionCount,
+  skippedRealignLabel,
+  skippedRealignsSummary,
 } from "#src/datasource/calcada/realign/realign_commit.js";
 
 function uniformField(width: number, height: number, dx: number, dy: number) {
@@ -98,9 +102,17 @@ describe("appliedFieldKey", () => {
 });
 
 describe("commitProgressMessage", () => {
-  it("names the section progress and the pieces the commit cuts", () => {
+  it("names the section progress and the pieces the commit cuts at the seam", () => {
     expect(commitProgressMessage(1, 3, 12)).toBe(
-      "Writing section 1 of 3 (12 pieces cut)…",
+      "Writing section 1 of 3 (12 pieces cut at the seam)…",
+    );
+  });
+});
+
+describe("commitDoneMessage", () => {
+  it("names the sections the commit changed and the pieces it cut at the seam", () => {
+    expect(commitDoneMessage(7, 2)).toBe(
+      "Changes 7 sections and cuts 2 pieces at the seam.",
     );
   });
 });
@@ -204,5 +216,78 @@ describe("parseCommitRows", () => {
   it("is empty when the branch has no commits", () => {
     expect(parseCommitRows({ commits: [] })).toEqual([]);
     expect(parseCommitRows({})).toEqual([]);
+  });
+});
+
+describe("parseRealignHistory", () => {
+  it("maps the commits and the realigns merges into the branch skipped", () => {
+    expect(
+      parseRealignHistory({
+        commits: [],
+        skipped: [
+          {
+            merge_operation_id: 21,
+            source_branch_id: 5,
+            operation_id: 12,
+            region: [10, 4, 1, 30, 24, 2],
+            conflicts_with: 20,
+          },
+        ],
+      }),
+    ).toEqual({
+      commits: [],
+      skipped: [
+        {
+          mergeOperationId: 21,
+          sourceBranchId: 5,
+          operationId: 12,
+          region: [10, 4, 1, 30, 24, 2],
+          conflictsWith: 20,
+        },
+      ],
+    });
+  });
+
+  it("is empty when the server sends neither list", () => {
+    expect(parseRealignHistory({})).toEqual({ commits: [], skipped: [] });
+  });
+});
+
+describe("skipped realign text", () => {
+  it("names the realign, its branch, its region and the target change", () => {
+    expect(
+      skippedRealignLabel({
+        mergeOperationId: 21,
+        sourceBranchId: 5,
+        operationId: 12,
+        region: [10, 4, 1, 30, 24, 3],
+        conflictsWith: 20,
+      }),
+    ).toBe(
+      "#12 from branch 5 · z 1–2 · 10,4 → 30,24 · target changed it in #20",
+    );
+  });
+
+  it("says the target's segmentation changed, not '#0', when the conflict is not a target operation", () => {
+    expect(
+      skippedRealignLabel({
+        mergeOperationId: 21,
+        sourceBranchId: 5,
+        operationId: 12,
+        region: [10, 4, 1, 30, 24, 3],
+        conflictsWith: 0,
+      }),
+    ).toBe(
+      "#12 from branch 5 · z 1–2 · 10,4 → 30,24 · target segmentation changed",
+    );
+  });
+
+  it("says why they were skipped and what to do", () => {
+    expect(skippedRealignsSummary(1)).toBe(
+      "1 realign was skipped on merge because the target changed those regions since its branch was forked. Realign it again on a new branch.",
+    );
+    expect(skippedRealignsSummary(3)).toBe(
+      "3 realigns were skipped on merge because the target changed those regions since their branch was forked. Realign them again on a new branch.",
+    );
   });
 });

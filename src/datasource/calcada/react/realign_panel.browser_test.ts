@@ -18,7 +18,10 @@ import type {
   RealignSummary,
 } from "#src/datasource/calcada/react/realign_panel.js";
 import { RealignPanel } from "#src/datasource/calcada/react/realign_panel.js";
-import type { RealignCommitRow } from "#src/datasource/calcada/realign/realign_commit.js";
+import type {
+  RealignCommitRow,
+  SkippedRealignRow,
+} from "#src/datasource/calcada/realign/realign_commit.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { Disposer } from "#src/util/disposable.js";
@@ -52,6 +55,7 @@ function makeSession(
     commit: vi.fn(async () => {}),
     commits: new WatchableValue<readonly RealignCommitRow[]>([]),
     undo: vi.fn(async () => {}),
+    skipped: new WatchableValue<readonly SkippedRealignRow[]>([]),
     referenceOffset: new WatchableValue(-1),
     setReferenceOffset: vi.fn(),
   };
@@ -249,9 +253,11 @@ describe("RealignPanel", () => {
     expect(session.focusArrow).toHaveBeenCalledWith("a");
   });
 
-  it("asks for an inline confirmation naming the section count before committing", async () => {
+  it("asks for an inline confirmation naming the section count and the seam before committing", async () => {
     const { session } = makeSession({
       hasBox: true,
+      boxSection: 3104,
+      referenceSection: 3106,
       lineCount: 3,
       rejected: [],
       arrows: [],
@@ -260,9 +266,33 @@ describe("RealignPanel", () => {
     });
     await mountPanel(session);
     button("Commit").click();
-    await vi.waitFor(() => expect(tab.textContent).toContain("7 sections"));
+    await vi.waitFor(() =>
+      expect(tab.textContent).toContain(
+        "Changes 7 sections on this branch and cuts the pieces that cross the seam between z 3104 and z 3105.",
+      ),
+    );
     button("Confirm").click();
     expect(session.commit).toHaveBeenCalledWith(1);
+  });
+
+  it("names the seam beside the box section when the reference lies below", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      boxSection: 3104,
+      referenceSection: 3101,
+      lineCount: 3,
+      rejected: [],
+      arrows: [],
+      onMain: false,
+      canCommit: true,
+    });
+    await mountPanel(session);
+    button("Commit").click();
+    await vi.waitFor(() =>
+      expect(tab.textContent).toContain(
+        "cuts the pieces that cross the seam between z 3104 and z 3103.",
+      ),
+    );
   });
 
   it("on main shows only the way to a branch, like the Trace tab", async () => {
@@ -280,6 +310,28 @@ describe("RealignPanel", () => {
     expect(
       [...tab.querySelectorAll("button")].map((found) => found.textContent),
     ).toEqual([]);
+  });
+
+  it("on main still lists the realigns a merge into it skipped", async () => {
+    const { session } = makeSession({
+      hasBox: false,
+      lineCount: 0,
+      rejected: [],
+      onMain: true,
+    });
+    session.skipped.value = [
+      {
+        mergeOperationId: 40,
+        sourceBranchId: 3,
+        operationId: 12,
+        region: [10, 20, 5, 30, 40, 7],
+        conflictsWith: 9,
+      },
+    ];
+    await mountPanel(session);
+    expect(tab.textContent).toContain("Realign works on a branch only");
+    expect(tab.textContent).toContain("Skipped on merge");
+    expect(tab.querySelector('[data-skipped-id="12"]')).not.toBe(null);
   });
 
   it("lists commits with Undo enabled only when undoable, and names the blocker", async () => {
