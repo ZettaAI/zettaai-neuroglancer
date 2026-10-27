@@ -43,6 +43,9 @@ export interface PaintedVolumeExtent {
   readonly textureSize: [number, number, number];
 }
 
+/** GPU bytes per texel: one class byte and one coverage byte. */
+export const PAINTED_VOLUME_BYTES_PER_TEXEL = 2;
+
 /**
  * Plan the texture for the session region `bounds` (exclusive `hi`), or
  * `undefined` when the region is empty or no allowed factor fits both
@@ -75,7 +78,7 @@ export function planPaintedVolumeExtent(
   }
 
   let extent = extentForFactor(lo, hi, voxelOffset, factor);
-  while (texelCount(extent) > budgetBytes) {
+  while (texelCount(extent) * PAINTED_VOLUME_BYTES_PER_TEXEL > budgetBytes) {
     const axis = nextAxisToDownsample(factor, maxFactor);
     if (axis === undefined) return undefined;
     factor[axis] *= 2;

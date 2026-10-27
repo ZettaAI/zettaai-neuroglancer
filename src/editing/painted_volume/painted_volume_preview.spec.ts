@@ -18,6 +18,7 @@ import { ChunkId as ChunkIdFactory, Resolution } from "@zettaai/edit-session";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LocalPatchStore } from "#src/editing/local_patch_store.js";
+import { PAINTED_VOLUME_BYTES_PER_TEXEL } from "#src/editing/painted_volume/painted_volume_extent.js";
 import type {
   PaintedVolumeFrameState,
   PaintedVolumeGpu,
@@ -454,7 +455,9 @@ describe("PaintedVolumePreview: unavailable", () => {
     const status = preview.status.value;
     expect(status.kind).toBe("live");
     if (status.kind !== "live") return;
-    expect(status.textureBytes).toBe(8 * 8 * 2);
+    expect(status.textureBytes).toBe(
+      8 * 8 * 2 * PAINTED_VOLUME_BYTES_PER_TEXEL,
+    );
     expect(status.factor).toEqual([1, 1, 1]);
   });
 });

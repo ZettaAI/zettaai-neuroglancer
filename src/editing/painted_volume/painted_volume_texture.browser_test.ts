@@ -52,6 +52,30 @@ function readClassLayer(
   return Array.from({ length: width * height }, (_, i) => pixels[i * 4]);
 }
 
+/** Read one z layer of the R8 coverage texture, row-major, x fastest. */
+function readCoverageLayer(
+  gl: GL,
+  texture: WebGLTexture,
+  size: Triple,
+  layer: number,
+): number[] {
+  const [width, height] = size;
+  const framebuffer = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  gl.framebufferTextureLayer(
+    gl.FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    texture,
+    0,
+    layer,
+  );
+  const pixels = new Uint8Array(width * height * 4);
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(framebuffer);
+  return Array.from({ length: width * height }, (_, i) => pixels[i * 4]);
+}
+
 function readPaletteRow(gl: GL, texture: WebGLTexture, width: number) {
   const framebuffer = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
@@ -108,6 +132,38 @@ describe("PaintedVolumeTexture", () => {
       }
     });
   });
+
+  it.each([
+    ["word-aligned", 0],
+    ["unaligned", 1],
+  ] as const)(
+    "writes 255 coverage under every non-zero class, %s input",
+    (_name, byteOffset) => {
+      webglTest((gl) => {
+        const texture = new PaintedVolumeTexture(gl, new FakeLogger());
+        try {
+          texture.allocate(SIZE);
+          // Classes whose high bit is clear or set, and zeros between them.
+          const classes = [0, 1, 0x7f, 0x80, 0, 0xff, 0, 0, 2, 0, 0x81, 1];
+          const buffer = new Uint8Array(classes.length + byteOffset);
+          buffer.set(classes, byteOffset);
+          texture.uploadBox(
+            { x0: 0, y0: 0, z0: 1, x1: 3, y1: 2, z1: 1 },
+            buffer.subarray(byteOffset),
+          );
+          expect(
+            readCoverageLayer(gl, texture.coverageTexture!, SIZE, 1),
+          ).toEqual(classes.map((segmentClass) => (segmentClass ? 255 : 0)));
+          expect(
+            readCoverageLayer(gl, texture.coverageTexture!, SIZE, 0),
+          ).toEqual(new Array(12).fill(0));
+          expect(gl.getError()).toBe(gl.NO_ERROR);
+        } finally {
+          texture.dispose();
+        }
+      });
+    },
+  );
 
   it("restores the unpack alignment it changes", () => {
     webglTest((gl) => {

@@ -11,7 +11,7 @@
 /**
  * @file The window the preview keeps clear under the 3D brush cursor.
  *
- * The cursor ellipsoid sits in the stroke plane, where the preview's cubes
+ * The cursor ellipsoid sits in the stroke plane, where the preview's surface
  * would hide it; instead of moving the cursor, the preview leaves out the
  * cells the brush would paint on the cursor's z (plan §3.11). The footprint is
  * the brush's own: `brushStampAnchor` + `brushRadiusSquared`, measured on the

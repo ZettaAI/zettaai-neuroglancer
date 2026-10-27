@@ -55,6 +55,8 @@ type Triple = readonly [number, number, number];
 const FRAMEBUFFER_SIZE = 64;
 const CENTER_PIXEL = FRAMEBUFFER_SIZE / 2;
 const PIXELS_PER_TEXEL = 8;
+/** The pixel nearest the centre of texel 4 along x or y under `VIEW_DOWN_Z`. */
+const TEXEL_4_CENTER_PIXEL = 4 * PIXELS_PER_TEXEL + PIXELS_PER_TEXEL / 2;
 const CUBE_TEXTURE: Triple = [8, 8, 8];
 
 const CLASS_A = 1;
@@ -363,18 +365,25 @@ describe("painted-volume ray march", () => {
     });
   });
 
-  it("puts the texel in the same place under an orthographic view", () => {
+  it("draws a lone texel as a rounded blob inside its own footprint", () => {
     webglTest((gl) => {
       withSource(
         gl,
         { texels: [{ texel: [4, 4, 3], segmentClass: CLASS_A }] },
         (source) => {
           const rendered = render(gl, source, VIEW_DOWN_Z);
-          expect(pixel(rendered, CENTER_PIXEL, CENTER_PIXEL)).toEqual(COLOR_A);
-          // Exactly the texel's 8 × 8 pixels, no more.
-          expect(countPixels(rendered, COLOR_A)).toBe(64);
-          expect(pixel(rendered, 31, 32)).toEqual(BACKGROUND);
-          expect(pixel(rendered, 40, 32)).toEqual(BACKGROUND);
+          expect(
+            pixel(rendered, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL),
+          ).toEqual(COLOR_A);
+          // The half-coverage surface rounds the texel's corners off, and
+          // never reaches past its 8 × 8 pixels.
+          expect(countPixels(rendered, COLOR_A)).toBeGreaterThan(16);
+          expect(countPixels(rendered, COLOR_A)).toBeLessThan(64);
+          expect(pixel(rendered, CENTER_PIXEL, CENTER_PIXEL)).toEqual(
+            BACKGROUND,
+          );
+          expect(pixel(rendered, 31, TEXEL_4_CENTER_PIXEL)).toEqual(BACKGROUND);
+          expect(pixel(rendered, 40, TEXEL_4_CENTER_PIXEL)).toEqual(BACKGROUND);
         },
       );
     });
@@ -447,17 +456,25 @@ describe("painted-volume ray march", () => {
         { texels: [{ texel: [4, 4, 3], segmentClass: CLASS_A }] },
         (source) => {
           const rendered = render(gl, source, VIEW_DOWN_Z);
-          // The texel's top face is at display z = 4 × 8.
+          // Trilinear coverage under this pixel is lateral × (1 − |z − 3.5|);
+          // the surface is where it falls to one half.
+          const pixelCenterTexel =
+            (TEXEL_4_CENTER_PIXEL + 0.5) / PIXELS_PER_TEXEL;
+          const lateral = (1 - Math.abs(pixelCenterTexel - 4.5)) ** 2;
+          const surfaceZ = 3.5 + (1 - 0.5 / lateral);
           const hit = vec3.transformMat4(
             vec3.create(),
-            vec3.fromValues(CENTER_PIXEL + 0.5, CENTER_PIXEL + 0.5, 32),
+            vec3.fromValues(
+              TEXEL_4_CENTER_PIXEL + 0.5,
+              TEXEL_4_CENTER_PIXEL + 0.5,
+              surfaceZ * PIXELS_PER_TEXEL,
+            ),
             VIEW_DOWN_Z,
           );
           const hitDepth = (hit[2] + 1) / 2;
-          expect(zAt(rendered, CENTER_PIXEL, CENTER_PIXEL)).toBeCloseTo(
-            1 - hitDepth,
-            5,
-          );
+          expect(
+            zAt(rendered, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL),
+          ).toBeCloseTo(1 - hitDepth, 4);
         },
       );
     });
@@ -543,34 +560,29 @@ describe("painted-volume ray march", () => {
     });
   });
 
-  it("lights each face by its normal", () => {
+  it("lights the surface by its coverage-gradient normal", () => {
     webglTest((gl) => {
-      withSource(
-        gl,
-        { texels: [{ texel: [4, 4, 3], segmentClass: CLASS_A }] },
-        (source) => {
-          const facingLight = render(gl, source, VIEW_DOWN_Z, {
-            light: {
-              lightDirection: [0, 0, -1],
-              ambientLighting: 0,
-              directionalLighting: 1,
-            },
-          });
-          expect(pixel(facingLight, CENTER_PIXEL, CENTER_PIXEL)).toEqual(
-            COLOR_A,
-          );
-          const grazingLight = render(gl, source, VIEW_DOWN_Z, {
-            light: {
-              lightDirection: [1, 0, 0],
-              ambientLighting: 0,
-              directionalLighting: 1,
-            },
-          });
-          expect(pixel(grazingLight, CENTER_PIXEL, CENTER_PIXEL)).toEqual([
-            0, 0, 0, 255,
-          ]);
-        },
-      );
+      // A whole layer: its top surface is flat, so its normal is exactly +z.
+      withSource(gl, { texels: slab(2, 3, CLASS_A) }, (source) => {
+        const facingLight = render(gl, source, VIEW_DOWN_Z, {
+          light: {
+            lightDirection: [0, 0, -1],
+            ambientLighting: 0,
+            directionalLighting: 1,
+          },
+        });
+        expect(pixel(facingLight, CENTER_PIXEL, CENTER_PIXEL)).toEqual(COLOR_A);
+        const grazingLight = render(gl, source, VIEW_DOWN_Z, {
+          light: {
+            lightDirection: [1, 0, 0],
+            ambientLighting: 0,
+            directionalLighting: 1,
+          },
+        });
+        expect(pixel(grazingLight, CENTER_PIXEL, CENTER_PIXEL)).toEqual([
+          0, 0, 0, 255,
+        ]);
+      });
     });
   });
 });
@@ -662,7 +674,9 @@ describe("PaintedVolumeRenderLayer", () => {
           source,
           renderContext(perspectivePanelEmit),
         );
-        expect(pixel(rendered, CENTER_PIXEL, CENTER_PIXEL)).toEqual(COLOR_A);
+        expect(
+          pixel(rendered, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL),
+        ).toEqual(COLOR_A);
       });
     });
   });

@@ -55,7 +55,10 @@ import type {
 import { PaintedVolumeBaselineCache } from "#src/editing/painted_volume/painted_volume_baseline_cache.js";
 import { paintedVolumeCursorFootprint } from "#src/editing/painted_volume/painted_volume_cursor_window.js";
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
-import { planPaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
+import {
+  PAINTED_VOLUME_BYTES_PER_TEXEL,
+  planPaintedVolumeExtent,
+} from "#src/editing/painted_volume/painted_volume_extent.js";
 import type {
   PaintedVolumeFrameState,
   PaintedVolumeGpu,
@@ -368,7 +371,7 @@ class PaintedVolumeTextureSync extends RefCounted {
     return {
       kind: "live",
       fill: this.fill.progress.value,
-      textureBytes: sizeX * sizeY * sizeZ,
+      textureBytes: sizeX * sizeY * sizeZ * PAINTED_VOLUME_BYTES_PER_TEXEL,
       factor: this.extent.factor,
     };
   }

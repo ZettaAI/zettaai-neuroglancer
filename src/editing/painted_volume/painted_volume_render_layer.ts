@@ -11,14 +11,16 @@
 /**
  * @file Ray-marched painted-volume preview for the 3-D perspective panel.
  *
- * Draws every occupied texel of the class texture as an opaque, face-lit cube.
- * The geometry is only a proxy: the back faces of the occupied box (front faces
- * culled, so a camera inside the box still gets fragments). Each fragment
- * rebuilds its view ray from the inverse model-view-projection, clips it to
- * the box and walks it texel by texel (Amanatides–Woo DDA), so a one-texel
- * layer can never be stepped over. Working in texel indices, with the
- * texel → display matrix folded into the projection, makes anisotropic voxels
- * come out right for free.
+ * Draws the occupied texels as one smooth, opaque surface: where the linearly
+ * filtered coverage texture crosses one half, lit by the coverage gradient as
+ * a mesh is lit by its normals. The geometry is only a proxy: the back faces
+ * of the occupied box (front faces culled, so a camera inside the box still
+ * gets fragments). Each fragment rebuilds its view ray from the inverse
+ * model-view-projection, clips it to the box and walks it texel by texel
+ * (Amanatides–Woo DDA), sampling the coverage twice per texel and bisecting
+ * the first crossing; the colour is the class of the texel just inside the
+ * surface. Working in texel indices, with the texel → display matrix folded
+ * into the projection, makes anisotropic voxels come out right for free.
  *
  * The layer draws in the opaque pass and writes the hit's depth itself, so
  * meshes and slice planes occlude it — and are occluded by it — through the
@@ -81,6 +83,7 @@ export interface PaintedVolumeView {
 }
 
 const OCCUPANCY_SAMPLER = Symbol("paintedVolumeOccupancy");
+const COVERAGE_SAMPLER = Symbol("paintedVolumeCoverage");
 const PALETTE_SAMPLER = Symbol("paintedVolumePalette");
 const BOX_VERTEX_COUNT = 36;
 
@@ -123,13 +126,46 @@ vec2 intersectOccupiedBox(vec3 origin, vec3 ray, out int entryAxis) {
 }
 `;
 
+const glsl_coverage = `
+// Interpolated coverage at a point in texel units (texel i spans [i, i + 1)).
+float coverageAt(vec3 point) {
+  return texture(uCoverage, point / uTextureSize).r;
+}
+
+// Ray parameter of the surface between tOutside (coverage below one half) and
+// tInside (at or above it), by bisection.
+float refineCrossing(vec3 origin, vec3 ray, float tOutside, float tInside) {
+  for (int i = 0; i < 6; ++i) {
+    float tMiddle = 0.5 * (tOutside + tInside);
+    if (coverageAt(origin + ray * tMiddle) >= 0.5) {
+      tInside = tMiddle;
+    } else {
+      tOutside = tMiddle;
+    }
+  }
+  return tInside;
+}
+
+// Outward surface normal in texel units: down the coverage gradient. Where the
+// gradient vanishes, faces the ray.
+vec3 surfaceNormal(vec3 point, vec3 ray) {
+  vec3 gradient = vec3(
+      coverageAt(point + vec3(0.5, 0.0, 0.0)) -
+          coverageAt(point - vec3(0.5, 0.0, 0.0)),
+      coverageAt(point + vec3(0.0, 0.5, 0.0)) -
+          coverageAt(point - vec3(0.0, 0.5, 0.0)),
+      coverageAt(point + vec3(0.0, 0.0, 0.5)) -
+          coverageAt(point - vec3(0.0, 0.0, 0.5)));
+  if (dot(gradient, gradient) < 1.0e-8) return -ray;
+  return -gradient;
+}
+`;
+
 const glsl_shadeHit = `
-// Face-lit colour (as the mesh shader lights) and the hit's own depth, which
+// Lit colour (as the mesh shader lights) and the hit's own depth, which
 // replaces the proxy face's depth both in the depth buffer and in out_z.
-void shadeHit(vec3 rgb, int faceAxis, ivec3 stepDirection, vec3 hitPoint) {
-  vec3 faceNormal = vec3(0.0);
-  faceNormal[faceAxis] = -float(stepDirection[faceAxis]);
-  vec3 normal = normalize(uNormalToDisplay * faceNormal);
+void shadeHit(vec3 rgb, vec3 texelNormal, vec3 hitPoint) {
+  vec3 normal = normalize(uNormalToDisplay * texelNormal);
   float lighting = abs(dot(normal, uLightDirection.xyz)) + uLightDirection.w;
   vec4 hitClip = uModelViewProjection * vec4(hitPoint, 1.0);
   float depth = (hitClip.z / hitClip.w + 1.0) * 0.5;
@@ -139,6 +175,27 @@ void shadeHit(vec3 rgb, int faceAxis, ivec3 stepDirection, vec3 hitPoint) {
   emit(vec4(rgb * lighting, 1.0), 0u);
   float zValue = 1.0 - depth;
   out_z = vec4(zValue, zValue, zValue, 1.0);
+}
+
+// Shade the surface at hitPoint and return true, unless its texel is empty,
+// hidden or under the cursor window — then the march goes on.
+bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
+                  ivec3 lastTexel) {
+  vec3 outward = normalize(texelNormal);
+  // A step inward lands in an occupied texel even where the surface rounds a
+  // concave corner through an empty one.
+  ivec3 texel = clamp(ivec3(floor(hitPoint - outward * 0.5)), firstTexel,
+                      lastTexel);
+  uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
+  if (segmentClass == 0u) {
+    texel = clamp(ivec3(floor(hitPoint)), firstTexel, lastTexel);
+    segmentClass = texelFetch(uOccupancy, texel, 0).r;
+  }
+  if (segmentClass == 0u || cursorHidesTexel(texel)) return false;
+  vec4 color = texelFetch(uPalette, ivec2(int(segmentClass), 0), 0);
+  if (color.a == 0.0) return false;
+  shadeHit(color.rgb, texelNormal, hitPoint);
+  return true;
 }
 `;
 
@@ -163,18 +220,11 @@ ivec3 stepDirection = ivec3(sign(ray));
 ivec3 firstTexel = ivec3(uBoxLo);
 ivec3 lastTexel = ivec3(uBoxHi) - 1;
 ivec3 texel = clamp(ivec3(floor(nearPoint + ray * tStart)), firstTexel, lastTexel);
-int faceAxis = entryAxis;
 if (span.x > 0.0) {
   // The start point lies on the entry face, where floor() is ambiguous: take
   // the texel just inside the face rather than nudging the point inward.
   texel[entryAxis] = stepDirection[entryAxis] > 0 ? firstTexel[entryAxis]
                                                   : lastTexel[entryAxis];
-} else {
-  // Camera inside the box: no entry face; light as if facing the ray.
-  vec3 rayMagnitude = abs(ray);
-  faceAxis = rayMagnitude.x >= rayMagnitude.y
-      ? (rayMagnitude.x >= rayMagnitude.z ? 0 : 2)
-      : (rayMagnitude.y >= rayMagnitude.z ? 1 : 2);
 }
 
 // Axis-aligned rays are the common case: a zero component never steps.
@@ -187,15 +237,36 @@ for (int axis = 0; axis < 3; ++axis) {
   tNextBoundary[axis] = (boundary - nearPoint[axis]) / ray[axis];
 }
 
+// Coverage is sampled at the middle and the far end of every texel the ray
+// crosses; the first rise past one half is bisected to the surface.
 float tHit = tStart;
+float tPrevious = tStart;
+float coveragePrevious = coverageAt(nearPoint + ray * tStart);
+if (coveragePrevious >= 0.5 && span.x > 0.0) {
+  // The surface is cut by the box face itself (at the texture's edge).
+  vec3 faceNormal = vec3(0.0);
+  faceNormal[entryAxis] = -float(stepDirection[entryAxis]);
+  if (shadeSurface(nearPoint + ray * tStart, faceNormal, firstTexel,
+                   lastTexel)) {
+    return;
+  }
+}
 for (int i = 0; i < uMaxSteps; ++i) {
-  uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
-  if (segmentClass != 0u && !cursorHidesTexel(texel)) {
-    vec4 color = texelFetch(uPalette, ivec2(int(segmentClass), 0), 0);
-    if (color.a > 0.0) {
-      shadeHit(color.rgb, faceAxis, stepDirection, nearPoint + ray * tHit);
-      return;
+  float tCellEnd = min(min(tNextBoundary.x, tNextBoundary.y), tNextBoundary.z);
+  tCellEnd = min(tCellEnd, tEnd);
+  for (int sampleIndex = 0; sampleIndex < 2; ++sampleIndex) {
+    float t = sampleIndex == 0 ? 0.5 * (tHit + tCellEnd) : tCellEnd;
+    float coverage = coverageAt(nearPoint + ray * t);
+    if (coverage >= 0.5 && coveragePrevious < 0.5) {
+      float tSurface = refineCrossing(nearPoint, ray, tPrevious, t);
+      vec3 hitPoint = nearPoint + ray * tSurface;
+      if (shadeSurface(hitPoint, surfaceNormal(hitPoint, ray), firstTexel,
+                       lastTexel)) {
+        return;
+      }
     }
+    tPrevious = t;
+    coveragePrevious = coverage;
   }
   int axis = tNextBoundary.x < tNextBoundary.y
       ? (tNextBoundary.x < tNextBoundary.z ? 0 : 2)
@@ -205,7 +276,6 @@ for (int i = 0; i < uMaxSteps; ++i) {
   texel[axis] += stepDirection[axis];
   if (texel[axis] < firstTexel[axis] || texel[axis] > lastTexel[axis]) break;
   tNextBoundary[axis] += tDelta[axis];
-  faceAxis = axis;
 }
 discard;
 `;
@@ -215,6 +285,7 @@ export function buildPaintedVolumeShader(gl: GL): ShaderProgram {
   const builder = new ShaderBuilder(gl);
   defineVertexId(builder);
   builder.addTextureSampler("usampler3D", "uOccupancy", OCCUPANCY_SAMPLER);
+  builder.addTextureSampler("sampler3D", "uCoverage", COVERAGE_SAMPLER);
   builder.addTextureSampler("sampler2D", "uPalette", PALETTE_SAMPLER);
   builder.addUniform("highp mat4", "uModelViewProjection");
   builder.addUniform("highp mat4", "uInvModelViewProjection");
@@ -224,6 +295,7 @@ export function buildPaintedVolumeShader(gl: GL): ShaderProgram {
   builder.addUniform("highp vec4", "uLightDirection");
   builder.addUniform("highp int", "uMaxSteps");
   builder.addUniform("highp vec3", "uTextureOrigin");
+  builder.addUniform("highp vec3", "uTextureSize");
   builder.addUniform("highp vec3", "uFactor");
   builder.addUniform("bool", "uCursorActive");
   builder.addUniform("highp vec3", "uCursorAnchorVoxel");
@@ -242,6 +314,7 @@ gl_Position.z = 0.0;
   builder.addFragmentCode(glsl_brushFootprintContains);
   builder.addFragmentCode(glsl_cursorHidesTexel);
   builder.addFragmentCode(glsl_intersectOccupiedBox);
+  builder.addFragmentCode(glsl_coverage);
   builder.addFragmentCode(glsl_shadeHit);
   builder.setFragmentMain(glsl_marchMain);
   return builder.build();
@@ -276,6 +349,7 @@ export class PaintedVolumeRenderer extends RefCounted {
 
     shader.bind();
     source.texture.bind(shader.textureUnit(OCCUPANCY_SAMPLER));
+    source.texture.bindCoverage(shader.textureUnit(COVERAGE_SAMPLER));
     source.palette.bind(shader.textureUnit(PALETTE_SAMPLER));
     this.setViewUniforms(view);
     this.setVolumeUniforms(source, occupiedBox);
@@ -353,6 +427,7 @@ export class PaintedVolumeRenderer extends RefCounted {
     );
     // A ray crosses at most one boundary per texel along each axis.
     const [sizeX, sizeY, sizeZ] = textureSize;
+    gl.uniform3f(shader.uniform("uTextureSize"), sizeX, sizeY, sizeZ);
     gl.uniform1i(shader.uniform("uMaxSteps"), sizeX + sizeY + sizeZ + 3);
     gl.uniform3f(
       shader.uniform("uTextureOrigin"),

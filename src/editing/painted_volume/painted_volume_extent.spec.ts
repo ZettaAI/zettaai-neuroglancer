@@ -114,13 +114,14 @@ describe("planPaintedVolumeExtent", () => {
   });
 
   it("grows x and y, not z, to fit the memory budget", () => {
-    // 1024 x 1024 x 64 at factor 1 is 64 MiB; a 16 MiB budget needs (2, 2, 1).
+    // 1024 x 1024 x 64 at factor 1 is 128 MiB at two bytes per texel; a
+    // 32 MiB budget needs (2, 2, 1).
     const extent = planPaintedVolumeExtent(
       boundsOf([0, 0, 0], [1024, 1024, 64]),
       [64, 64, 64],
       ORIGIN,
       2048,
-      16 * MEBIBYTE,
+      32 * MEBIBYTE,
     );
     expect(extent).toEqual({
       textureOrigin: [0, 0, 0],
@@ -136,7 +137,7 @@ describe("planPaintedVolumeExtent", () => {
       [2, 2, 64],
       ORIGIN,
       2048,
-      512 * 1024,
+      1024 * 1024,
     );
     expect(extent?.factor).toEqual([2, 2, 2]);
     expect(extent?.textureSize).toEqual([32, 32, 512]);
