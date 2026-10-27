@@ -102,7 +102,8 @@ export class PaintedVolumeSegmentPalette {
   /**
    * Recompute every class colour from the layer's current colouring, as the
    * mesh layer colours its objects; classes whose segment is not in `shown`
-   * become transparent.
+   * become transparent. Signals `changed` only when a colour did change, so a
+   * hover or selection event that moves no colour costs no upload or redraw.
    */
   refreshColors(
     displayState: SegmentationDisplayState,
@@ -112,18 +113,26 @@ export class PaintedVolumeSegmentPalette {
       displayState.segmentationGroupState.value,
     );
     const colorByRawId = displayState.baseSegmentColoring.value;
+    let anyChanged = false;
     for (const [id, segmentClass] of this.classById) {
       const colorId = colorByRawId ? id : equivalences.get(id);
+      // getObjectColor premultiplies by the colour's alpha, which the mesh
+      // layer blends with; the preview is opaque, so it takes the colour
+      // itself, and a colour of alpha 0 hides the segment as it hides its mesh.
       const color = getObjectColor(displayState, colorId);
-      this.writeColor(
-        segmentClass,
-        colorByte(color[0]),
-        colorByte(color[1]),
-        colorByte(color[2]),
-        shown.has(id) ? OPAQUE : TRANSPARENT,
-      );
+      const alpha = color[3];
+      const isDrawn = shown.has(id) && alpha > 0;
+      const unpremultiply = alpha > 0 ? 1 / alpha : 0;
+      anyChanged =
+        this.writeColor(
+          segmentClass,
+          colorByte(color[0] * unpremultiply),
+          colorByte(color[1] * unpremultiply),
+          colorByte(color[2] * unpremultiply),
+          isDrawn ? OPAQUE : TRANSPARENT,
+        ) || anyChanged;
     }
-    this.changed.dispatch();
+    if (anyChanged) this.changed.dispatch();
   }
 
   private assignClass(id: bigint): number {
@@ -142,12 +151,19 @@ export class PaintedVolumeSegmentPalette {
     green: number,
     blue: number,
     alpha: number,
-  ): void {
+  ): boolean {
     const offset = segmentClass * RGBA_CHANNELS;
-    this.colors[offset] = red;
-    this.colors[offset + 1] = green;
-    this.colors[offset + 2] = blue;
-    this.colors[offset + 3] = alpha;
+    const { colors } = this;
+    const changed =
+      colors[offset] !== red ||
+      colors[offset + 1] !== green ||
+      colors[offset + 2] !== blue ||
+      colors[offset + 3] !== alpha;
+    colors[offset] = red;
+    colors[offset + 1] = green;
+    colors[offset + 2] = blue;
+    colors[offset + 3] = alpha;
+    return changed;
   }
 }
 

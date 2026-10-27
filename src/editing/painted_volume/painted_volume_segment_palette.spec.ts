@@ -193,12 +193,30 @@ describe("PaintedVolumeSegmentPalette colours", () => {
     expect(rgbaOfClass(palette, segmentClass)).not.toEqual(plain);
   });
 
-  it("signals changed after refreshing", () => {
+  it("signals changed only when a refresh changed a colour", () => {
     const fake = makeFakeSegmentationDisplayState();
     const palette = new PaintedVolumeSegmentPalette();
+    classOfId(palette, 5n);
     const listener = vi.fn();
     palette.changed.add(listener);
     palette.refreshColors(fake.displayState, SHOW_ALL);
     expect(listener).toHaveBeenCalledTimes(1);
+    palette.refreshColors(fake.displayState, SHOW_ALL);
+    expect(listener).toHaveBeenCalledTimes(1);
+    fake.saturation.value = 0.5;
+    palette.refreshColors(fake.displayState, SHOW_ALL);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("draws a stated colour of partial alpha at full strength, not darkened", () => {
+    // getObjectColor premultiplies by alpha for the mesh layer's blending; the
+    // preview is opaque, as the mesh layer keeps such a segment opaque and
+    // dithers it.
+    const fake = makeFakeSegmentationDisplayState();
+    fake.segmentStatedColors.set(5n, 0x80ff8040n);
+    const palette = new PaintedVolumeSegmentPalette();
+    const segmentClass = classOfId(palette, 5n);
+    palette.refreshColors(fake.displayState, SHOW_ALL);
+    expect(rgbaOfClass(palette, segmentClass)).toEqual([0x40, 0x80, 0xff, 255]);
   });
 });

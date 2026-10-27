@@ -696,6 +696,40 @@ describe("PaintedVolumePreview: shown segments", () => {
     expect(harness.gpu.uploads).toHaveLength(0);
   });
 
+  it("uploads the palette once per selection change", async () => {
+    const datasource = new FakeDatasource();
+    datasource.setVoxel([1, 1, 0], SELECTED);
+    const harness = makeHarness({ datasource });
+    await harness.idle();
+    const paletteUploads = harness.gpu.paletteUploads;
+
+    harness.segments.visibleSegments.delete(SELECTED);
+    expect(harness.gpu.paletteUploads).toBe(paletteUploads + 1);
+  });
+
+  it("does not re-upload the palette for a hover that changes no colour", async () => {
+    const datasource = new FakeDatasource();
+    datasource.setVoxel([1, 1, 0], SELECTED);
+    const harness = makeHarness({ datasource });
+    await harness.idle();
+    const paletteUploads = harness.gpu.paletteUploads;
+
+    harness.segments.segmentSelectionState.set(OTHER);
+    harness.segments.segmentSelectionState.set(null);
+    expect(harness.gpu.paletteUploads).toBe(paletteUploads);
+  });
+
+  it("recolours a segment when its stated colour is set", async () => {
+    const datasource = new FakeDatasource();
+    datasource.setVoxel([1, 1, 0], SELECTED);
+    const harness = makeHarness({ datasource });
+    await harness.idle();
+    const selectedClass = harness.gpu.classAt([1, 1, 0]);
+
+    harness.segments.segmentStatedColors.set(SELECTED, 0x00ff8040n);
+    expect(harness.gpu.rgbOfClass(selectedClass)).toEqual([0x40, 0x80, 0xff]);
+  });
+
   it("onDatasourceRefetched redraws the region from the new bytes", async () => {
     const datasource = new FakeDatasource();
     datasource.setVoxel([1, 1, 0], SELECTED);

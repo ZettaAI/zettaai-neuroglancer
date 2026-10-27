@@ -84,7 +84,11 @@ export function makeFakeSegmentationDisplayState(): FakeSegmentationDisplayState
     hoverHighlight,
     hoverHighlightSuppressed: new WatchableValue(false),
     highlightColor: new WatchableValue<vec4 | undefined>(undefined),
-    segmentStatedColors: new WatchableValue(segmentStatedColors),
+    // Production's IndirectTrackableValue forwards the map's own changes.
+    segmentStatedColors: {
+      value: segmentStatedColors,
+      changed: segmentStatedColors.changed,
+    },
     objectAlpha,
   } as unknown as SegmentationDisplayStateWithAlpha;
 
