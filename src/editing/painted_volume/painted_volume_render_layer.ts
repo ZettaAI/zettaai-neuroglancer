@@ -146,16 +146,32 @@ float refineCrossing(vec3 origin, vec3 ray, float tOutside, float tInside) {
   return tInside;
 }
 
-// Outward surface normal in texel units: down the coverage gradient. Where the
-// gradient vanishes, faces the ray.
+// Outward surface normal in texel units: down the coverage gradient, taken
+// one texel either side and averaged over the four neighbours across each
+// axis. A one-texel stencil would follow every voxel step of a stroke's edge
+// and light it in stripes; this one smooths the normal as a mesh's averaged
+// vertex normals do. Where the gradient vanishes, faces the ray.
+float coverageDifference(vec3 point, vec3 along, vec3 acrossA, vec3 acrossB) {
+  float difference = 0.0;
+  for (int i = 0; i < 5; ++i) {
+    vec3 offset = i == 0 ? vec3(0.0)
+        : i == 1 ? acrossA
+        : i == 2 ? -acrossA
+        : i == 3 ? acrossB
+        : -acrossB;
+    difference += coverageAt(point + along + offset) -
+        coverageAt(point - along + offset);
+  }
+  return difference;
+}
+
 vec3 surfaceNormal(vec3 point, vec3 ray) {
-  vec3 gradient = vec3(
-      coverageAt(point + vec3(0.5, 0.0, 0.0)) -
-          coverageAt(point - vec3(0.5, 0.0, 0.0)),
-      coverageAt(point + vec3(0.0, 0.5, 0.0)) -
-          coverageAt(point - vec3(0.0, 0.5, 0.0)),
-      coverageAt(point + vec3(0.0, 0.0, 0.5)) -
-          coverageAt(point - vec3(0.0, 0.0, 0.5)));
+  const vec3 unitX = vec3(1.0, 0.0, 0.0);
+  const vec3 unitY = vec3(0.0, 1.0, 0.0);
+  const vec3 unitZ = vec3(0.0, 0.0, 1.0);
+  vec3 gradient = vec3(coverageDifference(point, unitX, unitY, unitZ),
+                       coverageDifference(point, unitY, unitX, unitZ),
+                       coverageDifference(point, unitZ, unitX, unitY));
   if (dot(gradient, gradient) < 1.0e-8) return -ray;
   return -gradient;
 }
