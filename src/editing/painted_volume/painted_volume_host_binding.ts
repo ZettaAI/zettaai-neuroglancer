@@ -15,7 +15,9 @@
  * session is open. The host keeps only calls into this binding at its
  * lifecycle points (open, teardown, reset, datasource reload); the reactions —
  * the toggle, attaching the render layer to its segmentation layer, and
- * re-attaching when that layer is removed and added again — live here.
+ * re-attaching when that layer is removed and added again — live here. It
+ * also folds the previews' statuses into the one `summary` the topbar toggle
+ * shows (plan §9.1).
  *
  * The binding talks to the host through `PaintedVolumeHostPort` only, so it
  * can be specified with fakes.
@@ -24,8 +26,11 @@
 import type { LayerId } from "@zettaai/edit-session";
 
 import type { PaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_preview.js";
+import type { PaintedVolumePreviewSummary } from "#src/editing/painted_volume/painted_volume_preview_summary.js";
+import { summarizePaintedVolumePreviews } from "#src/editing/painted_volume/painted_volume_preview_summary.js";
 import type { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
+import { WatchableValue } from "#src/trackable_value.js";
 import { RefCounted } from "#src/util/disposable.js";
 import type { NullarySignal } from "#src/util/signal.js";
 
@@ -55,9 +60,13 @@ interface BoundPreview {
   readonly preview: PaintedVolumeBoundPreview;
   userLayer: PaintedVolumeUserLayer | undefined;
   detach: (() => void) | undefined;
+  readonly stopWatchingStatus: () => void;
 }
 
 export class PaintedVolumeHostBinding extends RefCounted {
+  /** What the topbar toggle shows; `off` while the toggle is off. */
+  readonly summary: WatchableValueInterface<PaintedVolumePreviewSummary>;
+  private readonly summaryValue: WatchableValue<PaintedVolumePreviewSummary>;
   private readonly bound = new Map<LayerId, BoundPreview>();
   /** `addRenderLayer` and its disposer both dispatch `layersChanged`. */
   private reattaching = false;
@@ -66,6 +75,8 @@ export class PaintedVolumeHostBinding extends RefCounted {
 
   constructor(private readonly port: PaintedVolumeHostPort) {
     super();
+    this.summaryValue = new WatchableValue(this.currentSummary());
+    this.summary = this.summaryValue;
     this.registerDisposer(port.enabled.changed.add(() => this.sync()));
     this.registerDisposer(() => this.releaseAll());
   }
@@ -81,6 +92,7 @@ export class PaintedVolumeHostBinding extends RefCounted {
   sync(): void {
     if (!this.port.enabled.value) {
       this.releaseAll();
+      this.updateSummary();
       return;
     }
     const sessionLayerIds = new Set(this.port.sessionLayerIds());
@@ -95,11 +107,15 @@ export class PaintedVolumeHostBinding extends RefCounted {
         preview,
         userLayer: undefined,
         detach: undefined,
+        stopWatchingStatus: preview.status.changed.add(() =>
+          this.updateSummary(),
+        ),
       };
       this.bound.set(layerId, entry);
       this.attach(layerId, entry);
     }
     if (this.bound.size > 0) this.watchLayers();
+    this.updateSummary();
   }
 
   /** Detach and dispose `layerId`'s preview; the next `sync` builds a new one. */
@@ -107,9 +123,11 @@ export class PaintedVolumeHostBinding extends RefCounted {
     const entry = this.bound.get(layerId);
     if (entry === undefined) return;
     this.bound.delete(layerId);
+    entry.stopWatchingStatus();
     this.detach(entry);
     entry.preview.dispose();
     if (this.bound.size === 0) this.unwatchLayers();
+    this.updateSummary();
   }
 
   releaseAll(): void {
@@ -120,6 +138,19 @@ export class PaintedVolumeHostBinding extends RefCounted {
     for (const { preview } of this.bound.values()) {
       preview.onDatasourceRefetched();
     }
+  }
+
+  private currentSummary(): PaintedVolumePreviewSummary {
+    return summarizePaintedVolumePreviews(
+      this.port.enabled.value,
+      [...this.bound.values()].map(({ preview }) => preview.status.value),
+    );
+  }
+
+  private updateSummary(): void {
+    // `release` runs during dispose, after which nobody reads the summary.
+    if (this.wasDisposed) return;
+    this.summaryValue.value = this.currentSummary();
   }
 
   private watchLayers(): void {

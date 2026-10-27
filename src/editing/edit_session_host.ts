@@ -115,6 +115,7 @@ import type { PaintedVolumeHostPort } from "#src/editing/painted_volume/painted_
 import { PaintedVolumeHostBinding } from "#src/editing/painted_volume/painted_volume_host_binding.js";
 import type { LockedLayerRegion } from "#src/editing/painted_volume/painted_volume_memory_budget.js";
 import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volume_occupancy.js";
+import type { PaintedVolumePreviewSummary } from "#src/editing/painted_volume/painted_volume_preview_summary.js";
 import type { PaintedVolumeSessionInputs } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import { createSessionPaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
@@ -4250,6 +4251,19 @@ export class EditSessionHost extends RefCounted {
   setAutomerge(enabled: boolean): void {
     const prev = this.editPreferences.value.value ?? {};
     this.editPreferences.value.value = { ...prev, automerge: enabled };
+  }
+
+  /**
+   * The topbar's 3D-preview toggle (TM-490). Unlike `setAutomerge` it is not
+   * written to `editPreferences`: the choice is not remembered (Q3).
+   */
+  setPaintedVolumePreviewEnabled(enabled: boolean): void {
+    this.paintedVolumePreviewEnabled.value = enabled;
+  }
+
+  /** What the 3D-preview toggle shows across the session's layers. */
+  get paintedVolumePreviewSummary(): WatchableValueInterface<PaintedVolumePreviewSummary> {
+    return this.paintedVolumeBinding.summary;
   }
 
   private handleOpenFailure(err: unknown): void {

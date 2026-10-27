@@ -92,6 +92,7 @@ import {
   buildTexelToDisplayMatrix,
   chunkBoxToTexelBox,
 } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
+import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
 import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import type { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import {
@@ -140,6 +141,8 @@ export interface PaintedVolumePreviewOptions {
   readonly budgetBytes: number;
   readonly logger: Logger;
   readonly voxelBudgetPerFrame?: number;
+  /** Wall-clock cap on one frame's region-fill work. */
+  readonly fillFrameBudgetMs?: number;
   readonly maxReadsInFlight?: number;
   readonly baselineCacheLimits?: BaselineCacheLimits;
 }
@@ -162,10 +165,19 @@ export type PaintedVolumePreviewStatus =
     };
 
 /**
- * Plan §3.12: a 1024×1024×64 region in ~17 frames. A starting point, tuned by
- * the PR #4 perf test.
+ * Plan §3.12: a 1024×1024×64 region in ~17 frames. The composite kernel runs
+ * at ~6 ns per voxel (`edit_painted_volume.perf.ts`), ~25 ms at this budget.
  */
 export const DEFAULT_VOXEL_BUDGET_PER_FRAME = 4 * 1024 * 1024;
+
+/**
+ * Plan §9.3: no region-fill frame over 50 ms. Voxels alone cannot bound a
+ * frame: taking a landed chunk starts the next read, whose synchronous part
+ * decodes a resident chunk on this frame (~9 ms for 512×512 uint64). The perf
+ * test measured 72 ms frames under the voxel budget alone; this leaves room
+ * for one more chunk past the cap.
+ */
+export const DEFAULT_FILL_FRAME_BUDGET_MS = 24;
 
 export class PaintedVolumePreview extends RefCounted {
   readonly status: WatchableValueInterface<PaintedVolumePreviewStatus>;
@@ -242,6 +254,7 @@ class PaintedVolumeTextureSync extends RefCounted {
   private readonly chunkSize: Triple;
   private readonly regionChunkIds: readonly ChunkId[];
   private readonly voxelBudgetPerFrame: number;
+  private readonly fillFrameBudgetMs: number;
 
   private readonly palette = new PaintedVolumeSegmentPalette();
   private readonly pending = new PaintedVolumePendingChanges();
@@ -277,6 +290,8 @@ class PaintedVolumeTextureSync extends RefCounted {
     );
     this.voxelBudgetPerFrame =
       options.voxelBudgetPerFrame ?? DEFAULT_VOXEL_BUDGET_PER_FRAME;
+    this.fillFrameBudgetMs =
+      options.fillFrameBudgetMs ?? DEFAULT_FILL_FRAME_BUDGET_MS;
     this.brushValue = BigInt(options.brushSegment.getState().activeValue);
     this.shown = paintedVolumeShownSegments(
       options.displayState,
@@ -459,9 +474,17 @@ class PaintedVolumeTextureSync extends RefCounted {
   private flush(): void {
     const classCountBefore = this.palette.classCount;
     const deltaVoxels = this.applyPendingChanges(this.voxelBudgetPerFrame);
+    const fillStart = paintProfiler.enabled ? performance.now() : 0;
     const fillVoxels = this.applyLandedChunks(
       this.voxelBudgetPerFrame - deltaVoxels,
     );
+    // One call per frame of fill work: `maxMs` is the worst frame (§9.3).
+    if (paintProfiler.enabled && fillVoxels > 0) {
+      paintProfiler.record(
+        "7.preview.regionFill",
+        performance.now() - fillStart,
+      );
+    }
     // New classes have no colour until the palette is refreshed.
     if (this.palette.classCount !== classCountBefore) this.refreshColors();
     this.frame.occupiedBox = this.occupied.occupiedBox;
@@ -507,7 +530,10 @@ class PaintedVolumeTextureSync extends RefCounted {
 
   private applyLandedChunks(voxelBudget: number): number {
     let spentVoxels = 0;
-    while (spentVoxels < voxelBudget) {
+    const deadline = performance.now() + this.fillFrameBudgetMs;
+    for (let taken = 0; spentVoxels < voxelBudget; ++taken) {
+      // The first chunk is always taken, so a fill makes progress every frame.
+      if (taken > 0 && performance.now() >= deadline) break;
       const chunk = this.fill.takeReady();
       if (chunk === undefined) break;
       spentVoxels += this.applyLandedChunk(chunk);
@@ -540,6 +566,8 @@ class PaintedVolumeTextureSync extends RefCounted {
     box: ChunkVoxelBox,
     chunkTexelBox: TexelBox,
   ): void {
+    const profiling = paintProfiler.enabled;
+    const occupancyStart = profiling ? performance.now() : 0;
     const write = writeOccupancyForBox(
       chunk,
       box,
@@ -548,11 +576,21 @@ class PaintedVolumeTextureSync extends RefCounted {
       this.palette,
       this.scratch,
     );
+    if (profiling) {
+      paintProfiler.record(
+        "7.preview.occupancy",
+        performance.now() - occupancyStart,
+      );
+    }
     if (write === undefined) return;
     if (write.bytes.buffer !== this.scratch?.buffer) {
       this.scratch = write.bytes;
     }
+    const uploadStart = profiling ? performance.now() : 0;
     this.gpu.uploadBox(write.texelBox, write.bytes);
+    if (profiling) {
+      paintProfiler.record("7.preview.upload", performance.now() - uploadStart);
+    }
     // An empty sub-box says nothing about the rest of the chunk.
     const occupied =
       write.occupied ||
