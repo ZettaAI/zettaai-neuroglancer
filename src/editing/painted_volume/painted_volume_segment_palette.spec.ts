@@ -15,6 +15,7 @@ import {
   PaintedVolumeSegmentPalette,
 } from "#src/editing/painted_volume/painted_volume_segment_palette.js";
 import type { PaintedVolumeShownSegments } from "#src/editing/painted_volume/painted_volume_shown_segments.js";
+import { getObjectColor } from "#src/segmentation_display_state/frontend.js";
 import { makeFakeSegmentationDisplayState } from "#tests/editing/fakes/fake_segmentation_display_state.js";
 
 const SHOW_ALL: PaintedVolumeShownSegments = { has: (id) => id !== 0n };
@@ -173,6 +174,23 @@ describe("PaintedVolumeSegmentPalette colours", () => {
     expect(red).toBe(green);
     expect(green).toBe(blue);
     expect(alpha).toBe(255);
+  });
+
+  it("highlights the hovered segment as its mesh is highlighted", () => {
+    const fake = makeFakeSegmentationDisplayState();
+    const palette = new PaintedVolumeSegmentPalette();
+    const segmentClass = classOfId(palette, 5n);
+    palette.refreshColors(fake.displayState, SHOW_ALL);
+    const plain = rgbaOfClass(palette, segmentClass);
+
+    fake.segmentSelectionState.set(5n);
+    palette.refreshColors(fake.displayState, SHOW_ALL);
+    const meshColor = getObjectColor(fake.displayState, 5n);
+    expect(rgbaOfClass(palette, segmentClass)).toEqual([
+      ...[0, 1, 2].map((channel) => Math.round(meshColor[channel] * 255)),
+      255,
+    ]);
+    expect(rgbaOfClass(palette, segmentClass)).not.toEqual(plain);
   });
 
   it("signals changed after refreshing", () => {

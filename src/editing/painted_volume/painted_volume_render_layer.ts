@@ -68,6 +68,8 @@ export interface PaintedVolumeRenderSource {
   readonly occupiedBox: TexelBox | undefined;
   /** `undefined` while the cursor is hidden. */
   readonly cursorFootprint: PaintedVolumeCursorFootprint | undefined;
+  /** `false` hides the layer, as a 3D opacity of 0 hides meshes. */
+  readonly visible: boolean;
 }
 
 /** Per-frame view inputs, as the perspective panel provides them. */
@@ -262,6 +264,7 @@ export class PaintedVolumeRenderer extends RefCounted {
   /** Draw into the bound framebuffer; GL state it changes is restored. */
   draw(source: PaintedVolumeRenderSource, view: PaintedVolumeView): void {
     const { occupiedBox, texelToDisplay } = source;
+    if (!source.visible) return;
     if (occupiedBox === undefined || texelToDisplay === undefined) return;
     if (source.texture.texture === undefined) return;
     const { gl, shader } = this;

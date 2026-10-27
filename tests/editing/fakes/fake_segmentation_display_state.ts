@@ -16,16 +16,17 @@
  */
 
 import { SegmentColorHash } from "#src/segment_color.js";
-import type { SegmentationDisplayState } from "#src/segmentation_display_state/frontend.js";
+import type { SegmentationDisplayStateWithAlpha } from "#src/segmentation_display_state/frontend.js";
+import { SegmentSelectionState } from "#src/segmentation_display_state/frontend.js";
 import { SharedDisjointUint64Sets } from "#src/shared_disjoint_sets.js";
 import { trackableAlphaValue } from "#src/trackable_alpha.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import { Uint64Map } from "#src/uint64_map.js";
 import { Uint64Set } from "#src/uint64_set.js";
-import type { vec3 } from "#src/util/geom.js";
+import type { vec3, vec4 } from "#src/util/geom.js";
 
 export interface FakeSegmentationDisplayState {
-  readonly displayState: SegmentationDisplayState;
+  readonly displayState: SegmentationDisplayStateWithAlpha;
   readonly visibleSegments: Uint64Set;
   readonly segmentEquivalences: SharedDisjointUint64Sets;
   readonly temporaryVisibleSegments: Uint64Set;
@@ -35,6 +36,9 @@ export interface FakeSegmentationDisplayState {
   readonly segmentColorHash: SegmentColorHash;
   readonly saturation: WatchableValue<number>;
   readonly baseSegmentColoring: WatchableValue<boolean>;
+  readonly segmentSelectionState: SegmentSelectionState;
+  readonly hoverHighlight: WatchableValue<boolean>;
+  readonly objectAlpha: WatchableValue<number>;
 }
 
 export function makeFakeSegmentationDisplayState(): FakeSegmentationDisplayState {
@@ -50,6 +54,9 @@ export function makeFakeSegmentationDisplayState(): FakeSegmentationDisplayState
   const segmentColorHash = new SegmentColorHash(0);
   const saturation = trackableAlphaValue(1);
   const baseSegmentColoring = new WatchableValue(false);
+  const segmentSelectionState = new SegmentSelectionState();
+  const hoverHighlight = new WatchableValue(true);
+  const objectAlpha = trackableAlphaValue(1);
 
   const groupState = {
     visibleSegments,
@@ -73,7 +80,13 @@ export function makeFakeSegmentationDisplayState(): FakeSegmentationDisplayState
     tempSegmentStatedColors2d: new WatchableValue(tempSegmentStatedColors2d),
     saturation,
     baseSegmentColoring,
-  } as unknown as SegmentationDisplayState;
+    segmentSelectionState,
+    hoverHighlight,
+    hoverHighlightSuppressed: new WatchableValue(false),
+    highlightColor: new WatchableValue<vec4 | undefined>(undefined),
+    segmentStatedColors: new WatchableValue(segmentStatedColors),
+    objectAlpha,
+  } as unknown as SegmentationDisplayStateWithAlpha;
 
   return {
     displayState,
@@ -86,5 +99,8 @@ export function makeFakeSegmentationDisplayState(): FakeSegmentationDisplayState
     segmentColorHash,
     saturation,
     baseSegmentColoring,
+    segmentSelectionState,
+    hoverHighlight,
+    objectAlpha,
   };
 }

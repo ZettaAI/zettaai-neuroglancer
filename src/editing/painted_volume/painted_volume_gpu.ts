@@ -42,6 +42,7 @@ export interface PaintedVolumeFrameState {
   texelToDisplay: mat4 | undefined;
   occupiedBox: TexelBox | undefined;
   cursorFootprint: PaintedVolumeCursorFootprint | undefined;
+  visible: boolean;
 }
 
 export interface PaintedVolumeGpu {
@@ -80,6 +81,9 @@ export function paintedVolumeGpuFactory(
       },
       get cursorFootprint() {
         return frame.cursorFootprint;
+      },
+      get visible() {
+        return frame.visible;
       },
     });
     return {

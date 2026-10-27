@@ -28,7 +28,7 @@ export interface PaintedVolumeToggleDescription {
 }
 
 const WHAT_IS_SHOWN =
-  "Shows the selected segments and the brush segment in the 3D panel.";
+  "Shows the selected segments in the 3D panel, like their meshes.";
 const VIEW_HINTS =
   "To see inside, hide the slices: untick “Show cross sections in 3-d” " +
   "in the settings.\n" +

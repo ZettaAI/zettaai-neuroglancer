@@ -18,15 +18,15 @@
  *
  * The palette only grows: texels written earlier must keep pointing at their
  * colour, so a segment that stops being shown keeps its class and turns
- * transparent instead. Colours follow the 2D layer: the mapped id (or the raw
- * id under `baseSegmentColoring`) through `getBaseObjectColor`, blended toward
- * white by `1 - saturation` (Q15).
+ * transparent instead. Colours are the mesh layer's: `getObjectColor` of the
+ * mapped id (or the raw id under `baseSegmentColoring`), so saturation and the
+ * hover highlight match the segment's mesh.
  */
 
 import type { PaintedVolumeShownSegments } from "#src/editing/painted_volume/painted_volume_shown_segments.js";
 import { getSegmentEquivalences } from "#src/segmentation_display_state/base.js";
 import type { SegmentationDisplayState } from "#src/segmentation_display_state/frontend.js";
-import { getBaseObjectColor } from "#src/segmentation_display_state/frontend.js";
+import { getObjectColor } from "#src/segmentation_display_state/frontend.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 export const PAINTED_VOLUME_EMPTY_CLASS = 0;
@@ -100,8 +100,9 @@ export class PaintedVolumeSegmentPalette {
   }
 
   /**
-   * Recompute every class colour from the layer's current colouring; classes
-   * whose segment is not in `shown` become transparent.
+   * Recompute every class colour from the layer's current colouring, as the
+   * mesh layer colours its objects; classes whose segment is not in `shown`
+   * become transparent.
    */
   refreshColors(
     displayState: SegmentationDisplayState,
@@ -111,16 +112,14 @@ export class PaintedVolumeSegmentPalette {
       displayState.segmentationGroupState.value,
     );
     const colorByRawId = displayState.baseSegmentColoring.value;
-    const saturation = displayState.saturation.value;
-    const color = new Float32Array(RGBA_CHANNELS);
     for (const [id, segmentClass] of this.classById) {
       const colorId = colorByRawId ? id : equivalences.get(id);
-      getBaseObjectColor(displayState, colorId, color);
+      const color = getObjectColor(displayState, colorId);
       this.writeColor(
         segmentClass,
-        saturatedChannel(color[0], saturation),
-        saturatedChannel(color[1], saturation),
-        saturatedChannel(color[2], saturation),
+        colorByte(color[0]),
+        colorByte(color[1]),
+        colorByte(color[2]),
         shown.has(id) ? OPAQUE : TRANSPARENT,
       );
     }
@@ -152,7 +151,7 @@ export class PaintedVolumeSegmentPalette {
   }
 }
 
-/** One colour channel blended toward white as the 2D shader does, as a byte. */
-function saturatedChannel(channel: number, saturation: number): number {
-  return Math.round((channel * saturation + (1 - saturation)) * 255);
+/** One `getObjectColor` channel as a byte. */
+function colorByte(channel: number): number {
+  return Math.round(channel * 255);
 }

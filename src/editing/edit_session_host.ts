@@ -4095,7 +4095,7 @@ export class EditSessionHost extends RefCounted {
 
   /**
    * Everything a preview of `layerId` needs, or `undefined` until the session,
-   * its frozen region, the painting tools and the brush cursor all exist.
+   * its frozen region and the brush cursor all exist.
    */
   private paintedVolumeInputsFor(
     layerId: LayerId,
@@ -4103,7 +4103,6 @@ export class EditSessionHost extends RefCounted {
     const session = this.activeSession.value;
     const regions = this.sessionRegions;
     const entry = this.perLayer.get(layerId);
-    const brushSegment = this.paintingTools?.state;
     const cursor = this.cursorState;
     // `R_preview`: the brush's default resolution (plan §3.10).
     const resolution = this._sessionResolutionsByLayer.get(layerId)?.[0];
@@ -4112,7 +4111,6 @@ export class EditSessionHost extends RefCounted {
       session === undefined ||
       regions === undefined ||
       entry?.mirror === undefined ||
-      brushSegment === undefined ||
       cursor === undefined ||
       resolution === undefined ||
       userLayer === undefined
@@ -4146,7 +4144,6 @@ export class EditSessionHost extends RefCounted {
         // Segmentation is integer-typed: the float view never reaches here.
         return buffer.asView() as BaselineVoxelView;
       },
-      brushSegment,
       cursor,
     };
   }

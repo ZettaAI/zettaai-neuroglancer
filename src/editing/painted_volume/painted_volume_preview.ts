@@ -13,16 +13,16 @@
  *
  * Keeps a class texture of the session region equal to the composite the 2D
  * layer draws — datasource baseline where nothing is patched, the patch
- * elsewhere — restricted to the shown segments (selected ∪ brush segment,
- * §3.12). Three kinds of work feed it:
+ * elsewhere — restricted to the segments whose meshes NG would draw (§3.12).
+ * Three kinds of work feed it:
  *
- * - a full recompute of the region (on creation, a selection or brush-segment
- *   change, `clearAll`, a datasource refetch), read in the background by
+ * - a full recompute of the region (on creation, a selection change,
+ *   `clearAll`, a datasource refetch), read in the background by
  *   `PaintedVolumeRegionFill`;
  * - stroke deltas from `LocalPatchStore.chunkChanged`, recorded synchronously
  *   and composited against cached baselines;
- * - view-only changes (colours, display scale, the cursor window), which never
- *   touch the texture.
+ * - view-only changes (colours, the hover highlight, 3D opacity, display
+ *   scale, the cursor window), which never touch the texture.
  *
  * Texture work runs on the preview's own animation frame within a voxel
  * budget and reschedules itself while work remains — `store.changed` is not a
@@ -99,7 +99,11 @@ import {
   onTemporaryVisibleSegmentsStateChanged,
   onVisibleSegmentsStateChanged,
 } from "#src/segmentation_display_state/base.js";
-import type { SegmentationDisplayState } from "#src/segmentation_display_state/frontend.js";
+import type {
+  SegmentationDisplayState,
+  SegmentationDisplayStateWithAlpha,
+} from "#src/segmentation_display_state/frontend.js";
+import { registerCallbackWhenSegmentationDisplayStateChanged } from "#src/segmentation_display_state/frontend.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue, registerNestedSync } from "#src/trackable_value.js";
 import type { DebouncedFunction } from "#src/util/animation_frame_debounce.js";
@@ -107,15 +111,8 @@ import { animationFrameDebounce } from "#src/util/animation_frame_debounce.js";
 import { RefCounted } from "#src/util/disposable.js";
 import type { vec3 } from "#src/util/geom.js";
 import { mat4 } from "#src/util/geom.js";
-import type { NullarySignal } from "#src/util/signal.js";
 
 type Triple = readonly [number, number, number];
-
-/** The brush segment, as `PaintingState` exposes it. */
-export interface PaintedVolumeBrushSegmentSource {
-  readonly changed: NullarySignal;
-  getState(): { readonly activeValue: number | bigint };
-}
 
 /** The `BrushCursorState` watchables the cursor window reads. */
 export interface PaintedVolumeCursorSource {
@@ -132,10 +129,9 @@ export interface PaintedVolumePreviewOptions {
   readonly regionBounds: SessionVoxelBounds;
   readonly metadata: LayerMetadata;
   readonly store: LocalPatchStore;
-  readonly displayState: SegmentationDisplayState;
+  readonly displayState: SegmentationDisplayStateWithAlpha;
   readonly displayInfo: WatchableValueInterface<DisplayDimensionRenderInfo>;
   readonly readBaseline: PaintedVolumeBaselineReader;
-  readonly brushSegment: PaintedVolumeBrushSegmentSource;
   readonly cursor: PaintedVolumeCursorSource;
   readonly maxTextureDim: number;
   readonly budgetBytes: number;
@@ -197,6 +193,7 @@ export class PaintedVolumePreview extends RefCounted {
       texelToDisplay: undefined,
       occupiedBox: undefined,
       cursorFootprint: undefined,
+      visible: true,
     };
     const gpu = options.createGpu(frame);
     if (!gpu.allocate(extent.textureSize)) {
@@ -265,7 +262,6 @@ class PaintedVolumeTextureSync extends RefCounted {
   private readonly fill: PaintedVolumeRegionFill;
   private readonly scheduleFlush: DebouncedFunction;
 
-  private brushValue: bigint;
   private shown: PaintedVolumeShownSegments;
   private cursorFrame: CursorVoxelFrame | undefined;
   private scratch: Uint8Array | undefined;
@@ -292,11 +288,7 @@ class PaintedVolumeTextureSync extends RefCounted {
       options.voxelBudgetPerFrame ?? DEFAULT_VOXEL_BUDGET_PER_FRAME;
     this.fillFrameBudgetMs =
       options.fillFrameBudgetMs ?? DEFAULT_FILL_FRAME_BUDGET_MS;
-    this.brushValue = BigInt(options.brushSegment.getState().activeValue);
-    this.shown = paintedVolumeShownSegments(
-      options.displayState,
-      this.brushValue,
-    );
+    this.shown = paintedVolumeShownSegments(options.displayState);
 
     this.scheduleFlush = animationFrameDebounce(() => this.flush());
     this.baselines = new PaintedVolumeBaselineCache(
@@ -321,6 +313,7 @@ class PaintedVolumeTextureSync extends RefCounted {
     });
     this.subscribe();
     this.updateViewPlacement();
+    this.updateVisibility();
     this.uploadPalette();
     this.startFullRecompute();
   }
@@ -332,8 +325,7 @@ class PaintedVolumeTextureSync extends RefCounted {
   }
 
   private subscribe(): void {
-    const { store, displayState, displayInfo, brushSegment, cursor } =
-      this.options;
+    const { store, displayState, displayInfo, cursor } = this.options;
     this.registerDisposer(
       store.chunkChanged.add((change) => this.onPatchChanged(change)),
     );
@@ -341,13 +333,19 @@ class PaintedVolumeTextureSync extends RefCounted {
     this.registerDisposer(
       displayInfo.changed.add(() => this.updateViewPlacement()),
     );
-    this.registerDisposer(
-      brushSegment.changed.add(() => this.onBrushStateChanged()),
-    );
     watchSegmentSelection(this, displayState, () =>
       this.onShownSegmentsChanged(),
     );
-    watchSegmentColors(this, displayState, () => this.refreshColors());
+    // The mesh layer's own redraw triggers, so colours and the hover highlight
+    // follow it exactly; they only re-upload the palette.
+    registerCallbackWhenSegmentationDisplayStateChanged(
+      displayState,
+      this,
+      () => this.refreshColors(),
+    );
+    this.registerDisposer(
+      displayState.objectAlpha.changed.add(() => this.updateVisibility()),
+    );
     this.registerDisposer(this.palette.changed.add(() => this.uploadPalette()));
     for (const watchable of [
       cursor.visible,
@@ -406,23 +404,13 @@ class PaintedVolumeTextureSync extends RefCounted {
     this.scheduleFlush();
   }
 
-  private onBrushStateChanged(): void {
-    const brushValue = BigInt(this.options.brushSegment.getState().activeValue);
-    if (brushValue === this.brushValue) return;
-    this.brushValue = brushValue;
-    this.onShownSegmentsChanged();
-  }
-
   /**
    * Segments that left the set vanish at once through the palette; the texels
    * are rewritten by a full recompute that keeps the old content on screen
    * until each chunk is redone, so nothing blinks (§3.12).
    */
   private onShownSegmentsChanged(): void {
-    this.shown = paintedVolumeShownSegments(
-      this.options.displayState,
-      this.brushValue,
-    );
+    this.shown = paintedVolumeShownSegments(this.options.displayState);
     this.refreshColors();
     this.startFullRecompute();
   }
@@ -435,6 +423,12 @@ class PaintedVolumeTextureSync extends RefCounted {
 
   private refreshColors(): void {
     this.palette.refreshColors(this.options.displayState, this.shown);
+  }
+
+  /** Like the mesh layer, draw nothing at a 3D opacity of 0. */
+  private updateVisibility(): void {
+    this.frame.visible = this.options.displayState.objectAlpha.value > 0;
+    this.gpu.requestRedraw();
   }
 
   private uploadPalette(): void {
@@ -638,33 +632,5 @@ function watchSegmentSelection(
       if (!isInitialRun) callback();
       isInitialRun = false;
     }, displayState.segmentationGroupState),
-  );
-}
-
-/** Everything `getBaseObjectColor` and the saturation blend read. */
-function watchSegmentColors(
-  context: RefCounted,
-  displayState: SegmentationDisplayState,
-  callback: () => void,
-): void {
-  let isInitialRun = true;
-  context.registerDisposer(
-    registerNestedSync((nested, colorGroupState) => {
-      nested.registerDisposer(
-        colorGroupState.segmentColorHash.changed.add(callback),
-      );
-      nested.registerDisposer(
-        colorGroupState.segmentDefaultColor.changed.add(callback),
-      );
-      nested.registerDisposer(
-        colorGroupState.segmentStatedColors.changed.add(callback),
-      );
-      if (!isInitialRun) callback();
-      isInitialRun = false;
-    }, displayState.segmentationColorGroupState),
-  );
-  context.registerDisposer(displayState.saturation.changed.add(callback));
-  context.registerDisposer(
-    displayState.baseSegmentColoring.changed.add(callback),
   );
 }

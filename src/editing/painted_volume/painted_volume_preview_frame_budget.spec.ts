@@ -33,7 +33,6 @@ import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import type { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { vec3 } from "#src/util/geom.js";
-import { NullarySignal } from "#src/util/signal.js";
 import { FakeLogger } from "#tests/editing/fakes/fake_logger.js";
 import { makeFakeSegmentationDisplayState } from "#tests/editing/fakes/fake_segmentation_display_state.js";
 import type { FrameQueue } from "#tests/editing/harness/frame_queue.js";
@@ -119,10 +118,6 @@ function makePreview(fillFrameBudgetMs: number): PaintedVolumePreview {
     } as unknown as DisplayDimensionRenderInfo),
     readBaseline: (_chunkId: ChunkId): Promise<BaselineVoxelView> =>
       Promise.resolve(new Uint32Array(CHUNK_VOLUME)),
-    brushSegment: {
-      changed: new NullarySignal(),
-      getState: () => ({ activeValue: 7 }),
-    },
     cursor: {
       visible: new WatchableValue(false),
       worldCenter: new WatchableValue<vec3 | undefined>(undefined),

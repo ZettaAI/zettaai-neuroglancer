@@ -2,11 +2,29 @@
 
 While an edit session is open, the **3D preview** toggle in the topbar (the cube
 icon next to "Center view on edit region") shows the edited voxels in the 3D
-panel as cubes, live, with no meshing. It shows **every voxel of the selected
-segments plus the brush segment** in the session region: the datasource
-baseline where nothing is painted, the session's patches everywhere else. This
-is the same composite the 2D layer draws. The preview exists only for edit
-sessions and never saves meshes.
+panel as cubes, live, with no meshing. It shows **every voxel of the segments
+whose meshes NG would draw** in the session region: the datasource baseline
+where nothing is painted, the session's patches everywhere else. This is the
+same composite the 2D layer draws. The preview exists only for edit sessions
+and never saves meshes.
+
+## Same rules as meshes
+
+The preview follows the mesh layer instead of rules of its own:
+
+- **Which segments:** the objects `forEachVisibleSegment` yields, so the
+  selection, the temporary visible set and the equivalence policy apply as they
+  do to meshes. The brush segment gets no exception: paint with a segment that
+  is not selected and the stroke shows in 2D but not in 3D, like its mesh.
+- **Colour:** `getObjectColor` of the mapped id (the raw id under
+  `baseSegmentColoring`), so saturation and the hover highlight match.
+- **When colours update:** `registerCallbackWhenSegmentationDisplayStateChanged`,
+  the mesh layer's own triggers. A colour or hover change re-uploads the 1 KiB
+  palette and never touches the volume texture.
+- **3D opacity 0** hides the preview, as it hides meshes.
+
+Still different: the preview is drawn opaque at any 3D opacity above 0, has no
+silhouette mode and cannot be picked in 3D (see "Why an opaque pass").
 
 The toggle is off on every load, and the choice is not remembered. All code
 lives in `src/editing/painted_volume/`.

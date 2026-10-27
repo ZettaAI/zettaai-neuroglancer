@@ -163,6 +163,7 @@ function withSource(
       ),
       occupiedBox: scene.occupiedBox ?? wholeTexture(textureSize),
       cursorFootprint: scene.cursorFootprint,
+      visible: true,
     });
   } finally {
     palette.dispose();

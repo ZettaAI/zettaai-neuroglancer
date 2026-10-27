@@ -34,7 +34,7 @@ describe("describePaintedVolumeToggle", () => {
     expect(description.tooltip).toMatch(/^Show painted voxels in 3D/);
     expect(description.tooltip).toContain("3D panel");
     expect(description.tooltip).toContain(
-      "selected segments and the brush segment",
+      "selected segments in the 3D panel, like their meshes",
     );
   });
 

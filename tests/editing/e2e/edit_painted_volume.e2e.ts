@@ -20,9 +20,10 @@
  *
  * - the region is ONE z slice thick, so the 3D view from above shows exactly
  *   that slice — an erased disk is a hole, not hidden behind other slices;
- * - the brush paints segment 99, which the fixture does not contain, because
- *   the preview shows the brush segment whole (§3.12) and a fixture id would
- *   light up the region before the stroke;
+ * - the brush paints segment 99, which the fixture does not contain, and the
+ *   scenario selects it: the preview shows exactly the segments whose meshes
+ *   would be drawn, so an unselected brush segment would stay invisible, and a
+ *   selected fixture id would light up the region before the stroke;
  * - 3D slices are hidden (`showSlices: false`), so the 2D overlay on the slice
  *   plane cannot pass for the preview; step 8 shows them on purpose;
  * - strokes are real mouse input on the xy panel, at a known voxel: the
@@ -78,7 +79,14 @@ const SETTLE_TIMEOUT_MS = 30_000;
 
 const SCENARIO: Scenario = {
   name: "painted-volume xy-3d",
-  layers: [{ fixtureId: TARGET, role: "target", writable: true }],
+  layers: [
+    {
+      fixtureId: TARGET,
+      role: "target",
+      writable: true,
+      segments: [BRUSH_SEGMENT],
+    },
+  ],
   regionSize: REGION_SIZE,
   layout: "xy-3d",
   // Looking straight down z: the region's single slice faces the camera.
@@ -166,7 +174,7 @@ test.describe("live 3D painted-volume preview", () => {
     previewOn = await panelPixels(page, "3d");
     expect(
       changedPixels(previewOff, previewOn),
-      "nothing is selected and the brush segment is not in the fixture",
+      "only the brush segment is selected, and it is not in the fixture",
     ).toBeLessThanOrEqual(SAME_PICTURE_PIXELS);
 
     // The session opens on the cursor tool, where a drag pans the view.

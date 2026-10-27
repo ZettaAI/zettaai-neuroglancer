@@ -30,7 +30,6 @@ import type { DisplayDimensionRenderInfo } from "#src/navigation_state.js";
 import type { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type { vec3 } from "#src/util/geom.js";
-import { NullarySignal } from "#src/util/signal.js";
 import { FakeLogger } from "#tests/editing/fakes/fake_logger.js";
 import type { FakeSegmentationDisplayState } from "#tests/editing/fakes/fake_segmentation_display_state.js";
 import { makeFakeSegmentationDisplayState } from "#tests/editing/fakes/fake_segmentation_display_state.js";
@@ -56,7 +55,8 @@ const REGION_CHUNK_COUNT = 4;
 
 const SELECTED = 5n;
 const OTHER = 9n;
-const BRUSH = 7;
+/** A selected segment the tests paint with. */
+const PAINTED = 7n;
 
 const METADATA: LayerMetadata = {
   layerId: "labels" as LayerId,
@@ -161,6 +161,12 @@ class FakeGpu implements PaintedVolumeGpu {
   alphaOfClass(segmentClass: number): number {
     return this.palette[segmentClass * 4 + 3];
   }
+
+  rgbOfClass(segmentClass: number): number[] {
+    return Array.from(
+      this.palette.subarray(segmentClass * 4, segmentClass * 4 + 3),
+    );
+  }
 }
 
 interface ManualRead {
@@ -211,18 +217,6 @@ class FakeDatasource {
   };
 }
 
-class FakeBrushSegment {
-  readonly changed = new NullarySignal();
-  activeValue: number | bigint = BRUSH;
-  getState() {
-    return { activeValue: this.activeValue };
-  }
-  set(value: number | bigint): void {
-    this.activeValue = value;
-    this.changed.dispatch();
-  }
-}
-
 function makeDisplayInfo(scaleZ = 40e-9): DisplayDimensionRenderInfo {
   return {
     displayRank: 3,
@@ -238,7 +232,6 @@ interface Harness {
   readonly store: LocalPatchStore;
   readonly datasource: FakeDatasource;
   readonly segments: FakeSegmentationDisplayState;
-  readonly brush: FakeBrushSegment;
   readonly cursor: {
     visible: WatchableValue<boolean>;
     worldCenter: WatchableValue<vec3 | undefined>;
@@ -279,8 +272,7 @@ function makeHarness(setup: HarnessSetup = {}): Harness {
   const datasource = setup.datasource ?? new FakeDatasource();
   const store = setup.store ?? new LocalPatchStore();
   const segments = makeFakeSegmentationDisplayState();
-  segments.visibleSegments.add(SELECTED);
-  const brush = new FakeBrushSegment();
+  segments.visibleSegments.add([SELECTED, PAINTED]);
   const cursor = {
     visible: new WatchableValue(false),
     worldCenter: new WatchableValue<vec3 | undefined>(undefined),
@@ -302,7 +294,6 @@ function makeHarness(setup: HarnessSetup = {}): Harness {
     displayState: segments.displayState,
     displayInfo,
     readBaseline: datasource.read,
-    brushSegment: brush,
     cursor,
     maxTextureDim: 2048,
     budgetBytes: 1 << 20,
@@ -315,7 +306,6 @@ function makeHarness(setup: HarnessSetup = {}): Harness {
     store,
     datasource,
     segments,
-    brush,
     cursor,
     displayInfo,
     logger,
@@ -414,7 +404,7 @@ describe("PaintedVolumePreview: region fill", () => {
     datasource.setVoxel([1, 1, 0], SELECTED);
     const store = new LocalPatchStore();
     const chunk = store.source.getOrCreateChunk([1, 1, 0], CHUNK_SIZE);
-    chunk.data[localIndexOf([6, 6, 0])] = BigInt(BRUSH);
+    chunk.data[localIndexOf([6, 6, 0])] = PAINTED;
     chunk.patched[localIndexOf([6, 6, 0])] = 1;
     const { gpu, idle } = makeHarness({ datasource, store });
     await idle();
@@ -470,10 +460,10 @@ describe("PaintedVolumePreview: unavailable", () => {
 });
 
 describe("PaintedVolumePreview: painting", () => {
-  it("draws a stroke of the brush segment", async () => {
+  it("draws a stroke of a selected segment", async () => {
     const harness = makeHarness();
     await harness.idle();
-    harness.paint([2, 3, 1], BigInt(BRUSH));
+    harness.paint([2, 3, 1], PAINTED);
     await harness.idle();
     expect(harness.gpu.classAt([2, 3, 1])).not.toBe(0);
     expect(harness.gpu.alphaOfClass(harness.gpu.classAt([2, 3, 1]))).toBe(255);
@@ -537,7 +527,7 @@ describe("PaintedVolumePreview: painting", () => {
     const harness = makeHarness({ datasource });
     await harness.idle();
     harness.paint([2, 3, 1], 0n);
-    harness.paint([6, 6, 0], BigInt(BRUSH));
+    harness.paint([6, 6, 0], PAINTED);
     await harness.idle();
 
     harness.store.clearAll();
@@ -550,8 +540,8 @@ describe("PaintedVolumePreview: painting", () => {
     const harness = makeHarness();
     await harness.idle();
     harness.gpu.uploads = [];
-    harness.paint([1, 1, 0], BigInt(BRUSH));
-    harness.paint([2, 3, 1], BigInt(BRUSH));
+    harness.paint([1, 1, 0], PAINTED);
+    harness.paint([2, 3, 1], PAINTED);
     await harness.idle();
     expect(harness.gpu.uploads).toEqual([
       { x0: 1, y0: 1, z0: 0, x1: 2, y1: 3, z1: 1 },
@@ -572,7 +562,7 @@ describe("PaintedVolumePreview: painting", () => {
     ] as Triple[]) {
       const position = chunkPositionOf(voxel);
       const chunk = harness.store.source.getOrCreateChunk(position, CHUNK_SIZE);
-      chunk.data[localIndexOf(voxel)] = BigInt(BRUSH);
+      chunk.data[localIndexOf(voxel)] = PAINTED;
       chunk.patched[localIndexOf(voxel)] = 1;
       harness.store.noteChunkMutated(position);
     }
@@ -592,7 +582,7 @@ describe("PaintedVolumePreview: painting", () => {
     const harness = makeHarness();
     await harness.idle();
     const position: Triple = [0, 0, 0];
-    const data = new BigUint64Array(CHUNK_VOLUME).fill(BigInt(BRUSH));
+    const data = new BigUint64Array(CHUNK_VOLUME).fill(PAINTED);
     harness.store.writeFullChunk(position, CHUNK_SIZE, data);
     harness.store.flushImmediately();
     await harness.idle();
@@ -604,7 +594,7 @@ describe("PaintedVolumePreview: painting", () => {
     await harness.idle();
     harness.gpu.uploads = [];
     const reads = harness.datasource.readCountByKey.get("3,0,0") ?? 0;
-    harness.paint([13, 1, 0], BigInt(BRUSH));
+    harness.paint([13, 1, 0], PAINTED);
     await harness.idle();
     expect(harness.gpu.uploads).toHaveLength(0);
     expect(harness.datasource.readCountByKey.get("3,0,0") ?? 0).toBe(reads);
@@ -614,9 +604,9 @@ describe("PaintedVolumePreview: painting", () => {
     const harness = makeHarness();
     await harness.idle();
     const readsAfterFill = harness.datasource.readCountByKey.get("0,0,0")!;
-    harness.paint([1, 1, 0], BigInt(BRUSH));
+    harness.paint([1, 1, 0], PAINTED);
     await harness.idle();
-    harness.paint([2, 1, 0], BigInt(BRUSH));
+    harness.paint([2, 1, 0], PAINTED);
     await harness.idle();
     expect(harness.datasource.readCountByKey.get("0,0,0")).toBe(
       readsAfterFill + 1,
@@ -644,23 +634,47 @@ describe("PaintedVolumePreview: shown segments", () => {
     expect(harness.gpu.alphaOfClass(harness.gpu.classAt([6, 6, 1]))).toBe(255);
   });
 
-  it("shows the new brush segment when the brush value changes", async () => {
-    const datasource = new FakeDatasource();
-    datasource.setVoxel([6, 6, 1], OTHER);
-    const harness = makeHarness({ datasource });
+  it("does not draw a stroke of an unselected segment, as its mesh is not drawn", async () => {
+    const harness = makeHarness();
+    await harness.idle();
+    harness.paint([6, 6, 1], OTHER);
     await harness.idle();
     expect(harness.gpu.classAt([6, 6, 1])).toBe(0);
 
-    harness.brush.set(OTHER);
+    harness.segments.visibleSegments.add(OTHER);
     await harness.idle();
     expect(harness.gpu.classAt([6, 6, 1])).not.toBe(0);
   });
 
-  it("does not recompute when the brush state changes but not its value", async () => {
-    const harness = makeHarness();
+  it("highlights the hovered segment like its mesh, without recomputing", async () => {
+    const datasource = new FakeDatasource();
+    datasource.setVoxel([1, 1, 0], SELECTED);
+    const harness = makeHarness({ datasource });
     await harness.idle();
+    const selectedClass = harness.gpu.classAt([1, 1, 0]);
+    const before = harness.gpu.rgbOfClass(selectedClass);
     harness.gpu.uploads = [];
-    harness.brush.changed.dispatch();
+
+    harness.segments.segmentSelectionState.set(SELECTED);
+    expect(harness.gpu.rgbOfClass(selectedClass)).not.toEqual(before);
+    harness.segments.segmentSelectionState.set(null);
+    expect(harness.gpu.rgbOfClass(selectedClass)).toEqual(before);
+    await harness.idle();
+    expect(harness.gpu.uploads).toHaveLength(0);
+  });
+
+  it("draws nothing at a 3D opacity of 0, without recomputing", async () => {
+    const datasource = new FakeDatasource();
+    datasource.setVoxel([1, 1, 0], SELECTED);
+    const harness = makeHarness({ datasource });
+    await harness.idle();
+    expect(harness.gpu.frame.visible).toBe(true);
+    harness.gpu.uploads = [];
+
+    harness.segments.objectAlpha.value = 0;
+    expect(harness.gpu.frame.visible).toBe(false);
+    harness.segments.objectAlpha.value = 0.5;
+    expect(harness.gpu.frame.visible).toBe(true);
     await harness.idle();
     expect(harness.gpu.uploads).toHaveLength(0);
   });
@@ -684,7 +698,7 @@ describe("PaintedVolumePreview: shown segments", () => {
     datasource.setVoxel([1, 1, 0], SELECTED);
     const harness = makeHarness({ datasource });
     await harness.idle();
-    harness.paint([2, 2, 0], BigInt(BRUSH));
+    harness.paint([2, 2, 0], PAINTED);
     await harness.idle();
 
     datasource.setVoxel([1, 1, 0], 0n);
@@ -696,7 +710,7 @@ describe("PaintedVolumePreview: shown segments", () => {
     expect(harness.gpu.classAt([2, 2, 0])).not.toBe(0);
 
     // The painted chunk's cached baseline was dropped too.
-    harness.paint([0, 0, 0], BigInt(BRUSH));
+    harness.paint([0, 0, 0], PAINTED);
     await harness.idle();
     expect(harness.gpu.classAt([1, 1, 0])).toBe(0);
   });
@@ -717,7 +731,7 @@ describe("PaintedVolumePreview: occupied box", () => {
       z1: 1,
     });
 
-    harness.paint([6, 6, 0], BigInt(BRUSH));
+    harness.paint([6, 6, 0], PAINTED);
     await harness.idle();
     expect(harness.gpu.frame.occupiedBox).toEqual({
       x0: 0,
@@ -745,14 +759,13 @@ describe("PaintedVolumePreview: occupied box", () => {
     expect(harness.gpu.frame.occupiedBox).toBeUndefined();
   });
 
-  it("is empty once nothing is selected and the brush is 0", async () => {
+  it("is empty once nothing is selected", async () => {
     const datasource = new FakeDatasource();
     datasource.setVoxel([1, 1, 0], SELECTED);
     const harness = makeHarness({ datasource });
     await harness.idle();
 
-    harness.segments.visibleSegments.delete(SELECTED);
-    harness.brush.set(0);
+    harness.segments.visibleSegments.clear();
     await harness.idle();
     expect(harness.gpu.frame.occupiedBox).toBeUndefined();
   });
@@ -804,7 +817,7 @@ describe("PaintedVolumePreview: dispose", () => {
 
     expect(datasource.manualReads[0].signal.aborted).toBe(true);
     expect(harness.gpu.disposed).toBe(true);
-    harness.paint([1, 1, 0], BigInt(BRUSH));
+    harness.paint([1, 1, 0], PAINTED);
     await harness.idle();
     expect(harness.gpu.uploads).toHaveLength(0);
     harness.store.dispose();
