@@ -100,3 +100,36 @@ export function sampleLayerBilinear(
     fx * fy * at(x0 + 1, y0 + 1)
   );
 }
+
+/**
+ * GL's trilinear filtering of the whole R8 distance texture (layers as
+ * `readEncodedDistanceLayer` returns them) at texel coordinates `point`, with
+ * clamp-to-edge.
+ */
+export function sampleVolumeTrilinear(
+  layers: readonly (readonly number[])[],
+  width: number,
+  height: number,
+  point: readonly [number, number, number],
+): number {
+  const [x, y, z] = point;
+  const clampLayer = (i: number) => Math.max(0, Math.min(layers.length - 1, i));
+  const w = z - 0.5;
+  const lowerLayer = Math.floor(w);
+  const fraction = w - lowerLayer;
+  const lower = sampleLayerBilinear(
+    layers[clampLayer(lowerLayer)],
+    width,
+    height,
+    x,
+    y,
+  );
+  const upper = sampleLayerBilinear(
+    layers[clampLayer(lowerLayer + 1)],
+    width,
+    height,
+    x,
+    y,
+  );
+  return (1 - fraction) * lower + fraction * upper;
+}

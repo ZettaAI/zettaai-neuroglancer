@@ -52,6 +52,7 @@ import { FakeLogger } from "#tests/editing/fakes/fake_logger.js";
 import {
   readEncodedDistanceLayer,
   sampleLayerBilinear,
+  sampleVolumeTrilinear,
 } from "#tests/editing/harness/painted_volume_distance_reference.js";
 
 type Triple = readonly [number, number, number];
@@ -332,6 +333,59 @@ function viewProjection(
 const VIEW_DOWN_Z = orthographicView([32, 32, 1000], [32, 32, 0], [0, 1, 0]);
 const Y_UP: Triple = [0, 1, 0];
 const Z_UP: Triple = [0, 0, 1];
+
+/**
+ * `FILTER_WEIGHT_PRECISION` for each of the three axes trilinear filtering
+ * weighs along.
+ */
+const TRILINEAR_WEIGHT_PRECISION = 3 * FILTER_WEIGHT_PRECISION;
+/** Reference march step, in texels: far finer than the field changes. */
+const REFERENCE_STEP = 1 / 256;
+
+/**
+ * Highest field value along the ray through pixel (x, y)'s centre, within the
+ * cube texture, under the default display scale: what decides whether any
+ * surface lies on that ray.
+ */
+function peakFieldAlongPixelRay(
+  viewProjectionMat: mat4,
+  x: number,
+  y: number,
+  field: (point: [number, number, number]) => number,
+): number {
+  const inverse = mat4.invert(mat4.create(), viewProjectionMat)!;
+  const ndcX = ((x + 0.5) / FRAMEBUFFER_SIZE) * 2 - 1;
+  const ndcY = ((y + 0.5) / FRAMEBUFFER_SIZE) * 2 - 1;
+  const [near, far] = [-1, 1].map((ndcZ) => {
+    const display = vec3.transformMat4(
+      vec3.create(),
+      vec3.fromValues(ndcX, ndcY, ndcZ),
+      inverse,
+    );
+    return vec3.scale(display, display, 1 / PIXELS_PER_TEXEL);
+  });
+  // Clip the ray (parameter 0 at near, 1 at far) to the texture box.
+  let enter = 0;
+  let exit = 1;
+  for (let axis = 0; axis < 3; ++axis) {
+    const delta = far[axis] - near[axis];
+    if (delta === 0) {
+      if (near[axis] < 0 || near[axis] > CUBE_TEXTURE[axis]) return 0;
+      continue;
+    }
+    const low = (0 - near[axis]) / delta;
+    const high = (CUBE_TEXTURE[axis] - near[axis]) / delta;
+    enter = Math.max(enter, Math.min(low, high));
+    exit = Math.min(exit, Math.max(low, high));
+  }
+  const step = REFERENCE_STEP / vec3.distance(near, far);
+  let peak = 0;
+  for (let t = enter; t <= exit; t += step) {
+    const point = vec3.lerp(vec3.create(), near, far, t);
+    peak = Math.max(peak, field([point[0], point[1], point[2]]));
+  }
+  return peak;
+}
 
 describe("painted-volume shader", () => {
   it("compiles and links against the panel emitter", () => {
@@ -644,6 +698,91 @@ describe("painted-volume ray march", () => {
       });
     });
   });
+
+  it("draws a one-slice line seen obliquely exactly where its field is inside", () => {
+    webglTest((gl) => {
+      // A one-texel line along y on slice 3: its surface is a lens only about
+      // a fifth of a texel thick in z at the rim, which a march sampling too
+      // sparsely steps over at 45°.
+      const texels: PlacedTexel[] = [];
+      for (let y = 0; y < CUBE_TEXTURE[1]; ++y) {
+        texels.push({ texel: [4, y, 3], segmentClass: CLASS_A });
+      }
+      withSource(gl, { texels }, (source) => {
+        const view = orthographicView(
+          [36 + 1000, 32, 28 + 1000],
+          [36, 32, 28],
+          Y_UP,
+        );
+        const rendered = render(gl, source, view);
+        const [width, height, depth] = CUBE_TEXTURE;
+        const layers = Array.from({ length: depth }, (_, layer) =>
+          readEncodedDistanceLayer(
+            gl,
+            source.texture.distanceTexture!,
+            width,
+            height,
+            layer,
+          ),
+        );
+        let drawn = 0;
+        let undecided = 0;
+        for (let y = 0; y < FRAMEBUFFER_SIZE; ++y) {
+          for (let x = 0; x < FRAMEBUFFER_SIZE; ++x) {
+            const peak = peakFieldAlongPixelRay(view, x, y, (point) =>
+              sampleVolumeTrilinear(layers, width, height, point),
+            );
+            if (Math.abs(peak - 0.5) < TRILINEAR_WEIGHT_PRECISION) {
+              ++undecided;
+              continue;
+            }
+            const expected = peak >= 0.5 ? COLOR_A : BACKGROUND;
+            if (peak >= 0.5) ++drawn;
+            expect(pixel(rendered, x, y), `pixel ${x}, ${y}`).toEqual(expected);
+          }
+        }
+        expect(drawn).toBeGreaterThan(0);
+        expect(undecided).toBeLessThan(drawn);
+      });
+    });
+  });
+
+  it("draws what is ahead when the camera is inside a painted solid", () => {
+    webglTest((gl) => {
+      const texels: PlacedTexel[] = [];
+      for (let z = 0; z < CUBE_TEXTURE[2]; ++z) {
+        texels.push(...slab(2, z, CLASS_A));
+      }
+      withSource(gl, { texels }, (source) => {
+        // Eye at texel (4.5, 4.5, 4.5), deep inside the solid, looking down −z.
+        const rendered = render(
+          gl,
+          source,
+          perspectiveView([36, 36, 36], [36, 36, 0], Y_UP, 0.1, 1000),
+        );
+        expect(pixel(rendered, CENTER_PIXEL, CENTER_PIXEL)).toEqual(COLOR_A);
+        expect(countPixels(rendered, COLOR_A)).toBe(
+          FRAMEBUFFER_SIZE * FRAMEBUFFER_SIZE,
+        );
+      });
+    });
+  });
+
+  it("draws a shown class fused under a transparent one", () => {
+    webglTest((gl) => {
+      // No empty slice between them: one solid, half of it hidden.
+      const scene: Scene = {
+        texels: [...slab(2, 3, CLASS_A), ...slab(2, 2, CLASS_B)],
+        transparentClasses: [CLASS_A],
+      };
+      withSource(gl, scene, (source) => {
+        const rendered = render(gl, source, VIEW_DOWN_Z);
+        expect(countPixels(rendered, COLOR_B)).toBe(
+          FRAMEBUFFER_SIZE * FRAMEBUFFER_SIZE,
+        );
+      });
+    });
+  });
 });
 
 describe("painted-volume cursor window", () => {
@@ -657,6 +796,23 @@ describe("painted-volume cursor window", () => {
   it("skips the cursor's footprint on its own z and draws what is below", () => {
     webglTest((gl) => {
       withSource(gl, { texels: layers, cursorFootprint }, (source) => {
+        const rendered = render(gl, source, VIEW_DOWN_Z);
+        const under = (x: number, y: number) =>
+          pixel(rendered, texelPixel(x), texelPixel(y));
+        expect(under(4, 4)).toEqual(COLOR_B);
+        expect(under(5, 4)).toEqual(COLOR_B);
+        expect(under(4, 3)).toEqual(COLOR_B);
+        expect(under(5, 5)).toEqual(COLOR_A);
+        expect(under(0, 0)).toEqual(COLOR_A);
+      });
+    });
+  });
+
+  it("draws the texel under the footprint when the stack below is contiguous", () => {
+    webglTest((gl) => {
+      // Class B fills z = 2, right under class A at z = 3: one solid.
+      const stack = [...slab(2, 3, CLASS_A), ...slab(2, 2, CLASS_B)];
+      withSource(gl, { texels: stack, cursorFootprint }, (source) => {
         const rendered = render(gl, source, VIEW_DOWN_Z);
         const under = (x: number, y: number) =>
           pixel(rendered, texelPixel(x), texelPixel(y));

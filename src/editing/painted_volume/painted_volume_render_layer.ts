@@ -197,6 +197,15 @@ void shadeHit(vec3 rgb, vec3 texelNormal, vec3 hitPoint) {
   out_z = vec4(zValue, zValue, zValue, 1.0);
 }
 
+// The palette colour of a texel of segmentClass, unless it is empty, hidden
+// or under the cursor window.
+bool drawnColor(ivec3 texel, uint segmentClass, out vec3 rgb) {
+  if (segmentClass == 0u || cursorHidesTexel(texel)) return false;
+  vec4 color = texelFetch(uPalette, ivec2(int(segmentClass), 0), 0);
+  rgb = color.rgb;
+  return color.a != 0.0;
+}
+
 // Shade the surface at hitPoint and return true, unless its texel is empty,
 // hidden or under the cursor window — then the march goes on.
 bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
@@ -217,10 +226,9 @@ bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
       segmentClass = texelFetch(uOccupancy, texel, 0).r;
     }
   }
-  if (segmentClass == 0u || cursorHidesTexel(texel)) return false;
-  vec4 color = texelFetch(uPalette, ivec2(int(segmentClass), 0), 0);
-  if (color.a == 0.0) return false;
-  shadeHit(color.rgb, texelNormal, hitPoint);
+  vec3 rgb;
+  if (!drawnColor(texel, segmentClass, rgb)) return false;
+  shadeHit(rgb, texelNormal, hitPoint);
   return true;
 }
 `;
@@ -264,24 +272,59 @@ for (int axis = 0; axis < 3; ++axis) {
 }
 
 // The field is sampled at the middle and the far end of every texel the ray
-// crosses; the first rise past one half is bisected to the surface.
+// crosses, and where the ray crosses the texel's slice centre; the first rise
+// past one half is bisected to the surface.
 float tHit = tStart;
 float tPrevious = tStart;
 float distancePrevious = distanceAt(nearPoint + ray * tStart);
-if (distancePrevious >= 0.5 && span.x > 0.0) {
-  // The surface is cut by the box face itself.
-  vec3 faceNormal = vec3(0.0);
-  faceNormal[entryAxis] = -float(stepDirection[entryAxis]);
-  if (shadeSurface(nearPoint + ray * tStart, faceNormal, firstTexel,
-                   lastTexel)) {
-    return;
+// Inside the surface the field cannot rise again, so when the ray starts
+// inside it or passes a surface that is not drawn (cursor window, hidden
+// class), each texel's own class decides until the ray leaves, drawn on the
+// face it enters through, as its cube was.
+bool insideUndrawn = false;
+vec3 cellNormal = -ray;
+if (distancePrevious >= 0.5) {
+  if (span.x > 0.0) {
+    // The surface is cut by the box face itself.
+    cellNormal = vec3(0.0);
+    cellNormal[entryAxis] = -float(stepDirection[entryAxis]);
+    if (shadeSurface(nearPoint + ray * tStart, cellNormal, firstTexel,
+                     lastTexel)) {
+      return;
+    }
   }
+  insideUndrawn = true;
 }
 for (int i = 0; i < uMaxSteps; ++i) {
+  if (insideUndrawn) {
+    vec3 rgb;
+    if (drawnColor(texel, texelFetch(uOccupancy, texel, 0).r, rgb)) {
+      shadeHit(rgb, cellNormal, nearPoint + ray * tHit);
+      return;
+    }
+  }
   float tCellEnd = min(min(tNextBoundary.x, tNextBoundary.y), tNextBoundary.z);
   tCellEnd = min(tCellEnd, tEnd);
-  for (int sampleIndex = 0; sampleIndex < 2; ++sampleIndex) {
-    float t = sampleIndex == 0 ? 0.5 * (tHit + tCellEnd) : tCellEnd;
+  // A one-slice stroke's rim is a lens a fraction of a texel thick around
+  // the slice centre, where the field peaks in z: an oblique ray sampled
+  // only at the middle and the end of the texel steps over it.
+  float tMiddle = 0.5 * (tHit + tCellEnd);
+  float tSliceCentre = ray.z == 0.0
+      ? -1.0
+      : (float(texel.z) + 0.5 - nearPoint.z) / ray.z;
+  bool crossesSliceCentre = tSliceCentre > tHit && tSliceCentre < tCellEnd;
+  for (int sampleIndex = 0; sampleIndex < 3; ++sampleIndex) {
+    float t;
+    if (sampleIndex == 2) {
+      t = tCellEnd;
+    } else if (crossesSliceCentre) {
+      t = sampleIndex == 0 ? min(tMiddle, tSliceCentre)
+                           : max(tMiddle, tSliceCentre);
+    } else if (sampleIndex == 0) {
+      t = tMiddle;
+    } else {
+      continue;
+    }
     float distance = distanceAt(nearPoint + ray * t);
     if (distance >= 0.5 && distancePrevious < 0.5) {
       float tSurface = refineCrossing(nearPoint, ray, tPrevious, t);
@@ -290,6 +333,9 @@ for (int i = 0; i < uMaxSteps; ++i) {
                        lastTexel)) {
         return;
       }
+      insideUndrawn = true;
+    } else if (distance < 0.5) {
+      insideUndrawn = false;
     }
     tPrevious = t;
     distancePrevious = distance;
@@ -302,6 +348,8 @@ for (int i = 0; i < uMaxSteps; ++i) {
   texel[axis] += stepDirection[axis];
   if (texel[axis] < firstTexel[axis] || texel[axis] > lastTexel[axis]) break;
   tNextBoundary[axis] += tDelta[axis];
+  cellNormal = vec3(0.0);
+  cellNormal[axis] = -float(stepDirection[axis]);
 }
 discard;
 `;
