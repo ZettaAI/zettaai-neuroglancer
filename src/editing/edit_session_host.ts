@@ -111,6 +111,12 @@ import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // where the mirror subscribes to `session.dirty` chunk events for `layerId`
 // and writes the resulting overlay bytes into `store.writeFullChunk(...)`.
 import { PatchMirror } from "#src/editing/overlay/patch_mirror.js";
+import type { PaintedVolumeHostPort } from "#src/editing/painted_volume/painted_volume_host_binding.js";
+import { PaintedVolumeHostBinding } from "#src/editing/painted_volume/painted_volume_host_binding.js";
+import type { LockedLayerRegion } from "#src/editing/painted_volume/painted_volume_memory_budget.js";
+import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volume_occupancy.js";
+import type { PaintedVolumeSessionInputs } from "#src/editing/painted_volume/painted_volume_session_preview.js";
+import { createSessionPaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 // Side-effect: attaches `window.__editPaintBench` for the Playwright paint
 // benchmark (a dev tool, like `window.__paintProfiler` — only does work when
@@ -1018,6 +1024,13 @@ export class EditSessionHost extends RefCounted {
 
   // -- Per-session machinery (cleared on session end) -----------------------
   private readonly perLayer = new Map<LayerId, PerLayerMachinery>();
+  /**
+   * Live 3D preview of the painted volume (TM-490). Off on every load and not
+   * remembered across sessions (Q3).
+   */
+  readonly paintedVolumePreviewEnabled = new WatchableValue<boolean>(false);
+  /** One painted-volume preview per writable session layer, while enabled. */
+  private readonly paintedVolumeBinding: PaintedVolumeHostBinding;
   private readonly _activeRegionByLayer = new Map<
     LayerId,
     WatchableValue<ActiveRegion | undefined>
@@ -1162,6 +1175,9 @@ export class EditSessionHost extends RefCounted {
       }),
     );
     this.registerDisposer(() => clearBackendEndpoint());
+    this.paintedVolumeBinding = this.registerDisposer(
+      new PaintedVolumeHostBinding(this.paintedVolumePort()),
+    );
 
     // Standalone / dev fallback (TM-349): if the bundle was built with the
     // `NEUROGLANCER_ZETTA_BACKEND_URL` define, register that endpoint now so
@@ -1295,6 +1311,9 @@ export class EditSessionHost extends RefCounted {
       );
       this.hotkeyBinder = new EditSessionHotkeyBinder(this, this.viewer);
       this.attachCursorOverlays(config);
+      // `attachPerLayer` runs unawaited, so its mirrors and these tools can
+      // land in either order; whichever comes last builds the 3D preview.
+      this.paintedVolumeBinding.sync();
       // Restore persisted tool parameters (TM-315) now that the tools + UI
       // are wired: patches the painting family config + keybind overrides,
       // validated against the session layers (stale bindings dropped). The
@@ -2152,6 +2171,9 @@ export class EditSessionHost extends RefCounted {
     // page is reloaded. Re-deriving the mask as "what this session changed"
     // lets everything else render from the chunk that comes back.
     if (evicted > 0) void this.resyncPatchesAfterRefetch(scopes);
+    // The 3D preview composites the same datasource bytes; nothing evicted,
+    // nothing to redraw.
+    if (evicted > 0) this.paintedVolumeBinding.onDatasourceRefetched();
     return evicted;
   }
 
@@ -2634,6 +2656,7 @@ export class EditSessionHost extends RefCounted {
     this.committedRegions.delete(layerId);
     const entry = this.perLayer.get(layerId);
     if (entry === undefined) return;
+    this.paintedVolumeBinding.release(layerId);
     if (entry.mirror !== undefined) {
       try {
         entry.mirror.dispose();
@@ -3596,6 +3619,7 @@ export class EditSessionHost extends RefCounted {
           this.recomputeActiveRegions(),
         );
     }
+    this.paintedVolumeBinding.sync();
   }
 
   /**
@@ -4042,6 +4066,107 @@ export class EditSessionHost extends RefCounted {
     for (const id of ids) selected.add(id);
   }
 
+  /** The host as the painted-volume binding sees it (TM-490). */
+  private paintedVolumePort(): PaintedVolumeHostPort {
+    const layerManager = () => this.viewer.layerManager;
+    return {
+      enabled: this.paintedVolumePreviewEnabled,
+      get layersChanged() {
+        return layerManager().layersChanged;
+      },
+      sessionLayerIds: () => this.paintedVolumeSessionLayerIds(),
+      findUserLayer: (layerId) => this.findSegmentationUserLayer(layerId),
+      createPreview: (layerId) => {
+        const inputs = this.paintedVolumeInputsFor(layerId);
+        return inputs === undefined
+          ? undefined
+          : createSessionPaintedVolumePreview(inputs);
+      },
+    };
+  }
+
+  /** Writable layers with a live mirror, i.e. painted in the open session. */
+  private paintedVolumeSessionLayerIds(): LayerId[] {
+    return [...this.perLayer]
+      .filter(([, entry]) => entry.mirror !== undefined)
+      .map(([layerId]) => layerId);
+  }
+
+  /**
+   * Everything a preview of `layerId` needs, or `undefined` until the session,
+   * its frozen region, the painting tools and the brush cursor all exist.
+   */
+  private paintedVolumeInputsFor(
+    layerId: LayerId,
+  ): PaintedVolumeSessionInputs | undefined {
+    const session = this.activeSession.value;
+    const regions = this.sessionRegions;
+    const entry = this.perLayer.get(layerId);
+    const brushSegment = this.paintingTools?.state;
+    const cursor = this.cursorState;
+    // `R_preview`: the brush's default resolution (plan §3.10).
+    const resolution = this._sessionResolutionsByLayer.get(layerId)?.[0];
+    const userLayer = this.findSegmentationUserLayer(layerId);
+    if (
+      session === undefined ||
+      regions === undefined ||
+      entry?.mirror === undefined ||
+      brushSegment === undefined ||
+      cursor === undefined ||
+      resolution === undefined ||
+      userLayer === undefined
+    ) {
+      return undefined;
+    }
+    const metadata = session.baseline.perLayer.get(layerId)?.metadata;
+    const regionBounds = regions.boundsFor(layerId, resolution);
+    if (metadata === undefined || regionBounds === undefined) return undefined;
+    return {
+      gl: this.viewer.display.gl,
+      logger: this.logger,
+      gpuMemoryLimitBytes:
+        this.viewer.chunkManager.chunkQueueManager.capacities.gpuMemory
+          .sizeLimit.value,
+      lockedRegions: this.paintedVolumeLockedRegions(session, regions),
+      resolution,
+      regionBounds,
+      metadata,
+      store: entry.patchStore,
+      displayState: userLayer.displayState,
+      displayInfo: this.viewer.displayDimensionRenderInfo,
+      readBaseline: async (chunkId, signal) => {
+        const buffer = await this.chunkSource.readDatasourceBaseline(
+          layerId,
+          resolution,
+          chunkId,
+          ChunkIdFactory.toCoord(chunkId),
+          signal,
+        );
+        // Segmentation is integer-typed: the float view never reaches here.
+        return buffer.asView() as BaselineVoxelView;
+      },
+      brushSegment,
+      cursor,
+    };
+  }
+
+  /** Every locked `(layer, resolution)` region, for the preview's GPU budget. */
+  private paintedVolumeLockedRegions(
+    session: EditSession,
+    regions: SessionRegionSnapshot,
+  ): LockedLayerRegion[] {
+    const locked: LockedLayerRegion[] = [];
+    for (const [layerId, resolutions] of this._sessionResolutionsByLayer) {
+      const metadata = session.baseline.perLayer.get(layerId)?.metadata;
+      if (metadata === undefined) continue;
+      for (const resolution of resolutions) {
+        const bounds = regions.boundsFor(layerId, resolution);
+        if (bounds !== undefined) locked.push({ metadata, resolution, bounds });
+      }
+    }
+    return locked;
+  }
+
   private findSegmentationUserLayer(
     layerId: LayerId,
   ): SegmentationUserLayer | undefined {
@@ -4222,6 +4347,9 @@ export class EditSessionHost extends RefCounted {
    */
   private commitTeardown(): void {
     this.tearDownSessionTools();
+    // The 3D preview lives as long as the mirror: the next open builds a new
+    // one for its own region (TM-490, Q16).
+    this.paintedVolumeBinding.releaseAll();
     for (const entry of this.perLayer.values()) {
       if (entry.mirror !== undefined) {
         try {
@@ -4335,6 +4463,7 @@ export class EditSessionHost extends RefCounted {
     for (const watchable of this.patchOverlayByLayer.values()) {
       watchable.value = undefined;
     }
+    this.paintedVolumeBinding.releaseAll();
     for (const entry of this.perLayer.values()) {
       if (entry.mirror !== undefined) {
         try {

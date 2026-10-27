@@ -62,6 +62,14 @@ export class PaintedVolumeSegmentPalette {
     );
   }
 
+  /**
+   * Segments holding their own class. A new class has no colour until the next
+   * `refreshColors`, so the owner refreshes when this grows.
+   */
+  get classCount(): number {
+    return this.classById.size;
+  }
+
   /** True once some segment got the overflow class instead of its own. */
   get hasOverflowed(): boolean {
     return this.overflowed;

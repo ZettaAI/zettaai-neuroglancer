@@ -77,6 +77,15 @@ describe("PaintedVolumeSegmentPalette classes", () => {
     expect(palette.hasOverflowed).toBe(true);
     expect(classOfId(palette, 17n)).toBe(17);
   });
+
+  it("counts the segments holding their own class", () => {
+    const palette = new PaintedVolumeSegmentPalette();
+    expect(palette.classCount).toBe(0);
+    classOfId(palette, 5n);
+    classOfId(palette, 5n);
+    classOfId(palette, 9n);
+    expect(palette.classCount).toBe(2);
+  });
 });
 
 describe("PaintedVolumeSegmentPalette colours", () => {
