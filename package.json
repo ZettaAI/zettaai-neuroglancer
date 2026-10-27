@@ -161,6 +161,7 @@
     "#src/editing/ui/session_entry/session_entry.js": "./src/editing/ui/session_entry/session_entry.tsx",
     "#src/editing/ui/session_entry/bbox_picker.js": "./src/editing/ui/session_entry/bbox_picker.tsx",
     "#src/widget/listbox_dropdown.js": "./src/widget/listbox_dropdown.tsx",
+    "#src/datasource/calcada/annotation_tables/annotation_tables_panel.js": "./src/datasource/calcada/annotation_tables/annotation_tables_panel.tsx",
     "#src/datasource/calcada/branch_picker.js": "./src/datasource/calcada/react/branch_picker.tsx",
     "#src/datasource/calcada/labeled_timestamp_picker.js": "./src/datasource/calcada/react/labeled_timestamp_picker.tsx",
     "#src/editing/ui/session_entry/resolution_picker.js": "./src/editing/ui/session_entry/resolution_picker.tsx",
