@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { paintedVolumeShownSegments } from "#src/editing/painted_volume/painted_volume_shown_segments.js";
 import { forEachVisibleSegment } from "#src/segmentation_display_state/base.js";
+import { VisibleSegmentEquivalencePolicy } from "#src/segmentation_graph/segment_id.js";
 import { makeFakeSegmentationDisplayState } from "#tests/editing/fakes/fake_segmentation_display_state.js";
 
 describe("paintedVolumeShownSegments", () => {
@@ -79,5 +80,49 @@ describe("paintedVolumeShownSegments", () => {
     const shown = paintedVolumeShownSegments(fake.displayState);
     const answers = [5n, 5n, 6n, 6n, 5n].map((id) => shown.has(id));
     expect(answers).toEqual([true, true, false, false, true]);
+  });
+
+  it("shows the members of a visible root under NONREPRESENTATIVE_EXCLUDED", () => {
+    // Graph-backed layers: the mesh object is the root, the voxels hold its
+    // supervoxels.
+    const fake = makeFakeSegmentationDisplayState();
+    fake.segmentEquivalences.disjointSets.visibleSegmentEquivalencePolicy.value =
+      VisibleSegmentEquivalencePolicy.NONREPRESENTATIVE_EXCLUDED;
+    fake.segmentEquivalences.link(3n, 11n);
+    fake.visibleSegments.add(fake.segmentEquivalences.get(11n));
+    const shown = paintedVolumeShownSegments(fake.displayState);
+    expect(shown.has(3n)).toBe(true);
+    expect(shown.has(11n)).toBe(true);
+    expect(shown.has(12n)).toBe(false);
+  });
+
+  it.each([
+    ["MIN_REPRESENTATIVE", VisibleSegmentEquivalencePolicy.MIN_REPRESENTATIVE],
+    ["MAX_REPRESENTATIVE", VisibleSegmentEquivalencePolicy.MAX_REPRESENTATIVE],
+    [
+      "MAX_REPRESENTATIVE | REPRESENTATIVE_EXCLUDED",
+      VisibleSegmentEquivalencePolicy.MAX_REPRESENTATIVE |
+        VisibleSegmentEquivalencePolicy.REPRESENTATIVE_EXCLUDED,
+    ],
+  ])("shows exactly the mesh layer's objects under %s", (_name, policy) => {
+    const fake = makeFakeSegmentationDisplayState();
+    fake.segmentEquivalences.disjointSets.visibleSegmentEquivalencePolicy.value =
+      policy;
+    const highBitMember = 0x8000000000000005n;
+    fake.segmentEquivalences.link(3n, 11n);
+    fake.segmentEquivalences.link(11n, highBitMember);
+    fake.visibleSegments.add([fake.segmentEquivalences.get(11n), 20n]);
+    const meshObjects = new Set<bigint>();
+    forEachVisibleSegment(
+      fake.displayState.segmentationGroupState.value,
+      (objectId) => meshObjects.add(objectId),
+    );
+    const shown = paintedVolumeShownSegments(fake.displayState);
+    for (const id of [
+      ...Array.from({ length: 25 }, (_, i) => BigInt(i + 1)),
+      highBitMember,
+    ]) {
+      expect(shown.has(id), `id ${id}`).toBe(meshObjects.has(id));
+    }
   });
 });
