@@ -43,7 +43,7 @@ export interface PaintedVolumeExtent {
   readonly textureSize: [number, number, number];
 }
 
-/** GPU bytes per texel: one class byte and one coverage byte. */
+/** GPU bytes per texel: one class byte and one distance byte. */
 export const PAINTED_VOLUME_BYTES_PER_TEXEL = 2;
 
 /**

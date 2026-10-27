@@ -23,6 +23,7 @@ import {
 import type { GL } from "#src/webgl/context.js";
 import { webglTest } from "#src/webgl/testing.js";
 import { FakeLogger } from "#tests/editing/fakes/fake_logger.js";
+import { referenceEncodedDistances } from "#tests/editing/harness/painted_volume_distance_reference.js";
 
 type Triple = readonly [number, number, number];
 
@@ -52,8 +53,8 @@ function readClassLayer(
   return Array.from({ length: width * height }, (_, i) => pixels[i * 4]);
 }
 
-/** Read one z layer of the R8 coverage texture, row-major, x fastest. */
-function readCoverageLayer(
+/** Read one z layer of the R8 distance texture, row-major, x fastest. */
+function readDistanceLayer(
   gl: GL,
   texture: WebGLTexture,
   size: Triple,
@@ -91,6 +92,33 @@ function readPaletteRow(gl: GL, texture: WebGLTexture, width: number) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.deleteFramebuffer(framebuffer);
   return pixels;
+}
+
+/** Reference bytes of one slice's distances (see the shared reference model). */
+function expectedDistanceBytes(
+  classes: readonly number[],
+  width: number,
+  height: number,
+): number[] {
+  return referenceEncodedDistances(
+    classes.map((segmentClass) => segmentClass !== 0),
+    width,
+    height,
+  ).map((encoded) => encoded * 255);
+}
+
+/**
+ * Float → unorm8 conversion may round either way (GLES 3.0 §2.1.6), so each
+ * byte is the reference value rounded down or up — nothing looser.
+ */
+function expectBytesWithinRounding(actual: number[], expected: number[]) {
+  expect(actual.length).toBe(expected.length);
+  actual.forEach((byte, index) => {
+    expect(
+      [Math.floor(expected[index]), Math.ceil(expected[index])],
+      `texel ${index}`,
+    ).toContain(byte);
+  });
 }
 
 describe("PaintedVolumeTexture", () => {
@@ -133,37 +161,103 @@ describe("PaintedVolumeTexture", () => {
     });
   });
 
-  it.each([
-    ["word-aligned", 0],
-    ["unaligned", 1],
-  ] as const)(
-    "writes 255 coverage under every non-zero class, %s input",
-    (_name, byteOffset) => {
-      webglTest((gl) => {
-        const texture = new PaintedVolumeTexture(gl, new FakeLogger());
-        try {
-          texture.allocate(SIZE);
-          // Classes whose high bit is clear or set, and zeros between them.
-          const classes = [0, 1, 0x7f, 0x80, 0, 0xff, 0, 0, 2, 0, 0x81, 1];
-          const buffer = new Uint8Array(classes.length + byteOffset);
-          buffer.set(classes, byteOffset);
-          texture.uploadBox(
-            { x0: 0, y0: 0, z0: 1, x1: 3, y1: 2, z1: 1 },
-            buffer.subarray(byteOffset),
-          );
-          expect(
-            readCoverageLayer(gl, texture.coverageTexture!, SIZE, 1),
-          ).toEqual(classes.map((segmentClass) => (segmentClass ? 255 : 0)));
-          expect(
-            readCoverageLayer(gl, texture.coverageTexture!, SIZE, 0),
-          ).toEqual(new Array(12).fill(0));
-          expect(gl.getError()).toBe(gl.NO_ERROR);
-        } finally {
-          texture.dispose();
-        }
-      });
-    },
-  );
+  it("stores each texel's signed in-slice distance to the outline", () => {
+    webglTest((gl) => {
+      const texture = new PaintedVolumeTexture(gl, new FakeLogger());
+      try {
+        texture.allocate(SIZE);
+        const classes = [0, 1, 1, 0, 0, 3, 1, 0, 0, 0, 0, 2];
+        texture.uploadBox(
+          { x0: 0, y0: 0, z0: 1, x1: 3, y1: 2, z1: 1 },
+          Uint8Array.from(classes),
+        );
+        expectBytesWithinRounding(
+          readDistanceLayer(gl, texture.distanceTexture!, SIZE, 1),
+          expectedDistanceBytes(classes, SIZE[0], SIZE[1]),
+        );
+        // The other slice was not written: it stays fully outside.
+        expect(
+          readDistanceLayer(gl, texture.distanceTexture!, SIZE, 0),
+        ).toEqual(new Array(12).fill(0));
+        expect(gl.getError()).toBe(gl.NO_ERROR);
+      } finally {
+        texture.dispose();
+      }
+    });
+  });
+
+  it("updates distances past the written box, within the range", () => {
+    webglTest((gl) => {
+      const size: Triple = [12, 1, 1];
+      const texture = new PaintedVolumeTexture(gl, new FakeLogger());
+      try {
+        texture.allocate(size);
+        texture.uploadBox(
+          { x0: 5, y0: 0, z0: 0, x1: 5, y1: 0, z1: 0 },
+          Uint8Array.of(1),
+        );
+        const classes = new Array(12).fill(0);
+        classes[5] = 1;
+        expectBytesWithinRounding(
+          readDistanceLayer(gl, texture.distanceTexture!, size, 0),
+          expectedDistanceBytes(classes, 12, 1),
+        );
+      } finally {
+        texture.dispose();
+      }
+    });
+  });
+
+  it("uploads without a GL error after the bound 3-D texture was deleted", () => {
+    webglTest((gl) => {
+      // A preview torn down leaves its deleted texture bound on some unit;
+      // the next preview's uploads must not touch it.
+      const previous = new PaintedVolumeTexture(gl, new FakeLogger());
+      previous.allocate(SIZE);
+      for (let unit = 0; unit < 4; ++unit) previous.bind(unit);
+      previous.dispose();
+      const texture = new PaintedVolumeTexture(gl, new FakeLogger());
+      try {
+        texture.allocate(SIZE);
+        texture.uploadBox(
+          { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 },
+          Uint8Array.of(1),
+        );
+        expect(gl.getError()).toBe(gl.NO_ERROR);
+      } finally {
+        gl.activeTexture(gl.TEXTURE0);
+        texture.dispose();
+      }
+    });
+  });
+
+  it("leaves the GL state it does not own as it was", () => {
+    webglTest((gl) => {
+      const texture = new PaintedVolumeTexture(gl, new FakeLogger());
+      try {
+        texture.allocate(SIZE);
+        gl.viewport(1, 2, 3, 4);
+        gl.enable(gl.DEPTH_TEST);
+        gl.enable(gl.BLEND);
+        gl.activeTexture(gl.TEXTURE3);
+        texture.uploadBox(
+          { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 },
+          Uint8Array.of(1),
+        );
+        expect(Array.from(gl.getParameter(gl.VIEWPORT))).toEqual([1, 2, 3, 4]);
+        expect(gl.isEnabled(gl.DEPTH_TEST)).toBe(true);
+        expect(gl.isEnabled(gl.BLEND)).toBe(true);
+        expect(gl.getParameter(gl.ACTIVE_TEXTURE)).toBe(gl.TEXTURE3);
+        expect(gl.getParameter(gl.FRAMEBUFFER_BINDING)).toBeNull();
+        expect(gl.getError()).toBe(gl.NO_ERROR);
+      } finally {
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
+        gl.activeTexture(gl.TEXTURE0);
+        texture.dispose();
+      }
+    });
+  });
 
   it("restores the unpack alignment it changes", () => {
     webglTest((gl) => {

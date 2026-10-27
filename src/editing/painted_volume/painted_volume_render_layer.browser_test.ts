@@ -49,6 +49,10 @@ import {
 } from "#src/webgl/offscreen.js";
 import { webglTest } from "#src/webgl/testing.js";
 import { FakeLogger } from "#tests/editing/fakes/fake_logger.js";
+import {
+  readEncodedDistanceLayer,
+  sampleLayerBilinear,
+} from "#tests/editing/harness/painted_volume_distance_reference.js";
 
 type Triple = readonly [number, number, number];
 
@@ -57,6 +61,11 @@ const CENTER_PIXEL = FRAMEBUFFER_SIZE / 2;
 const PIXELS_PER_TEXEL = 8;
 /** The pixel nearest the centre of texel 4 along x or y under `VIEW_DOWN_Z`. */
 const TEXEL_4_CENTER_PIXEL = 4 * PIXELS_PER_TEXEL + PIXELS_PER_TEXEL / 2;
+/**
+ * GPUs may filter with 8-bit fractional weights; closer than this to the
+ * surface, a pixel can fall either way.
+ */
+const FILTER_WEIGHT_PRECISION = 1 / 256;
 const CUBE_TEXTURE: Triple = [8, 8, 8];
 
 const CLASS_A = 1;
@@ -365,25 +374,47 @@ describe("painted-volume ray march", () => {
     });
   });
 
-  it("draws a lone texel as a rounded blob inside its own footprint", () => {
+  it("draws a lone texel exactly where its distance field is inside", () => {
     webglTest((gl) => {
       withSource(
         gl,
         { texels: [{ texel: [4, 4, 3], segmentClass: CLASS_A }] },
         (source) => {
           const rendered = render(gl, source, VIEW_DOWN_Z);
-          expect(
-            pixel(rendered, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL),
-          ).toEqual(COLOR_A);
-          // The half-coverage surface rounds the texel's corners off, and
-          // never reaches past its 8 × 8 pixels.
-          expect(countPixels(rendered, COLOR_A)).toBeGreaterThan(16);
-          expect(countPixels(rendered, COLOR_A)).toBeLessThan(64);
-          expect(pixel(rendered, CENTER_PIXEL, CENTER_PIXEL)).toEqual(
-            BACKGROUND,
+          const [width, height] = CUBE_TEXTURE;
+          const slice = readEncodedDistanceLayer(
+            gl,
+            source.texture.distanceTexture!,
+            width,
+            height,
+            3,
           );
-          expect(pixel(rendered, 31, TEXEL_4_CENTER_PIXEL)).toEqual(BACKGROUND);
-          expect(pixel(rendered, 40, TEXEL_4_CENTER_PIXEL)).toEqual(BACKGROUND);
+          // Straight down, every ray samples the middle of slice 3, where the
+          // field peaks (the slices around it are far outside), so a pixel is
+          // drawn exactly when slice 3's filtered field under it is inside.
+          let undecided = 0;
+          for (let y = 0; y < FRAMEBUFFER_SIZE; ++y) {
+            for (let x = 0; x < FRAMEBUFFER_SIZE; ++x) {
+              const field = sampleLayerBilinear(
+                slice,
+                width,
+                height,
+                (x + 0.5) / PIXELS_PER_TEXEL,
+                (y + 0.5) / PIXELS_PER_TEXEL,
+              );
+              if (Math.abs(field - 0.5) < FILTER_WEIGHT_PRECISION) {
+                ++undecided;
+                continue;
+              }
+              expect(pixel(rendered, x, y), `pixel ${x}, ${y}`).toEqual(
+                field >= 0.5 ? COLOR_A : BACKGROUND,
+              );
+            }
+          }
+          // Only pixel centres the outline passes nearly through are skipped;
+          // by the texel's symmetry they come in groups of 8.
+          expect(undecided).toBeLessThanOrEqual(16);
+          expect(countPixels(rendered, COLOR_A)).toBeGreaterThan(0);
         },
       );
     });
@@ -456,12 +487,27 @@ describe("painted-volume ray march", () => {
         { texels: [{ texel: [4, 4, 3], segmentClass: CLASS_A }] },
         (source) => {
           const rendered = render(gl, source, VIEW_DOWN_Z);
-          // Trilinear coverage under this pixel is lateral × (1 − |z − 3.5|);
-          // the surface is where it falls to one half.
-          const pixelCenterTexel =
+          // The field is linear in z between the centres of slice 3 (inside)
+          // and slice 4 (outside); the surface is its half-way crossing.
+          const [width, height] = CUBE_TEXTURE;
+          const texelCoordinate =
             (TEXEL_4_CENTER_PIXEL + 0.5) / PIXELS_PER_TEXEL;
-          const lateral = (1 - Math.abs(pixelCenterTexel - 4.5)) ** 2;
-          const surfaceZ = 3.5 + (1 - 0.5 / lateral);
+          const [inside, above] = [3, 4].map((layer) =>
+            sampleLayerBilinear(
+              readEncodedDistanceLayer(
+                gl,
+                source.texture.distanceTexture!,
+                width,
+                height,
+                layer,
+              ),
+              width,
+              height,
+              texelCoordinate,
+              texelCoordinate,
+            ),
+          );
+          const surfaceZ = 3.5 + (inside - 0.5) / (inside - above);
           const hit = vec3.transformMat4(
             vec3.create(),
             vec3.fromValues(
@@ -474,7 +520,7 @@ describe("painted-volume ray march", () => {
           const hitDepth = (hit[2] + 1) / 2;
           expect(
             zAt(rendered, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL),
-          ).toBeCloseTo(1 - hitDepth, 4);
+          ).toBeCloseTo(1 - hitDepth, 5);
         },
       );
     });
@@ -560,10 +606,23 @@ describe("painted-volume ray march", () => {
     });
   });
 
-  it("lights the surface by its coverage-gradient normal", () => {
+  it("lights the surface by its distance-gradient normal", () => {
     webglTest((gl) => {
-      // A whole layer: its top surface is flat, so its normal is exactly +z.
-      withSource(gl, { texels: slab(2, 3, CLASS_A) }, (source) => {
+      // A whole layer, 16 texels wide: at its centre every texel the normal
+      // samples is past the distance range from the layer's edges, so the top
+      // is flat and its normal is exactly +z.
+      const texels: PlacedTexel[] = [];
+      for (let x = 0; x < 16; ++x) {
+        for (let y = 0; y < 16; ++y) {
+          texels.push({ texel: [x, y, 3], segmentClass: CLASS_A });
+        }
+      }
+      const scene: Scene = {
+        textureSize: [16, 16, 8],
+        texels,
+        scale: [4, 4, PIXELS_PER_TEXEL],
+      };
+      withSource(gl, scene, (source) => {
         const facingLight = render(gl, source, VIEW_DOWN_Z, {
           light: {
             lightDirection: [0, 0, -1],

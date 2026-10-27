@@ -29,26 +29,46 @@ that touch share one surface; only their colours tell them apart.
 
 ## Smooth surface
 
-Next to the R8UI class texture sits an R8 coverage texture: 255 where the
-class is non-zero, 0 elsewhere, sampled with linear filtering. The ray march
-still walks texel by texel (DDA), samples the coverage at the middle and the
-far end of each texel, and bisects the first rise past one half. The normal is
-the coverage gradient, so the surface is lit as a mesh is; the colour is the
-class of the texel just inside it.
+Next to the R8UI class texture sits an R8 **per-slice signed distance field**
+(`painted_volume_distance_field.ts`): for each texel, the distance within its
+z slice to the nearest texel of the other kind, signed positive inside,
+clamped to ±4 texels, sampled with linear filtering. The surface is where the
+field crosses zero:
 
-Costs: two bytes per texel instead of one, so the memory budget downsamples a
-region at half the size it did; the coverage bytes are derived on upload, four
-at a time. Measured with `npm run perf` (SwiftShader, so CPU only):
+- in xy the crossing runs between texel centres, so a stroke's voxel staircase
+  becomes a smooth outline;
+- in z, interpolating two slices' distances morphs one outline into the next
+  (shape-based interpolation), so slices join in slopes instead of steps;
+- a one-texel-thin stroke keeps a crossing, so nothing thin disappears (a blur
+  would erase it).
 
-|                         | upload before | upload after |
-| ----------------------- | ------------- | ------------ |
-| brush 51                | 0.62 ms       | 0.70 ms      |
-| brush 251               | 0.75 ms       | 1.05 ms      |
-| brush 1025              | 1.59 ms       | 4.3 ms       |
-| worst region-fill frame | 34.8 ms       | 38–40 ms     |
+The ray march still walks texel by texel (DDA), samples the field at the
+middle and the far end of each texel, and bisects the first crossing (10
+halvings). The normal is the field's gradient averaged over a 3 × 3
+neighbourhood, so the surface is lit as a mesh's averaged normals light it.
+The colour is the class of the nearest occupied texel inward from the hit, in
+either slice the hit lies between.
 
-Smoothing is trilinear only: a lone voxel becomes a rounded blob inside its
-own footprint, and the steps between slices become slopes, not curves.
+The field is computed on the CPU from a mirror of which texels are occupied,
+over each uploaded box grown by the range in x and y: a row sweep per kind,
+then the nearest over the rows within range; texels whose window holds none
+of the other kind are written as saturated without the search. Rendering the
+field on the GPU instead (a 3-D texture layer at a time) cost ~15 ms per
+stroke on Metal and was dropped.
+
+Costs: two GPU bytes per texel instead of one (the memory budget downsamples
+a region at half the size it did) and one CPU byte per texel for the mirror.
+Measured with `npm run perf`, worst call per stroke:
+
+|                         | occupancy | upload before | upload after |
+| ----------------------- | --------- | ------------- | ------------ |
+| brush 51                | 0.14 ms   | ~0.02 ms      | 0.07 ms      |
+| brush 251               | 1.8 ms    | ~0.02 ms      | 0.5 ms       |
+| brush 1025              | 3.3 ms    | ~0.02 ms      | 3.6 ms       |
+| worst region-fill frame | —         | 34.8 ms       | ~40 ms       |
+
+The distance work costs about what the occupancy kernel already does, and
+only on very large brushes.
 
 The toggle is off on every load, and the choice is not remembered. All code
 lives in `src/editing/painted_volume/`.

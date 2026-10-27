@@ -12,14 +12,15 @@
  * @file Ray-marched painted-volume preview for the 3-D perspective panel.
  *
  * Draws the occupied texels as one smooth, opaque surface: where the linearly
- * filtered coverage texture crosses one half, lit by the coverage gradient as
- * a mesh is lit by its normals. The geometry is only a proxy: the back faces
+ * filtered per-slice distance field crosses zero (one half, encoded), lit by
+ * its gradient as a mesh is lit by its normals. Interpolating the field
+ * between slices joins them in slopes (`painted_volume_distance_field.ts`). The geometry is only a proxy: the back faces
  * of the occupied box (front faces culled, so a camera inside the box still
  * gets fragments). Each fragment rebuilds its view ray from the inverse
  * model-view-projection, clips it to the box and walks it texel by texel
- * (Amanatides–Woo DDA), sampling the coverage twice per texel and bisecting
- * the first crossing; the colour is the class of the texel just inside the
- * surface. Working in texel indices, with the texel → display matrix folded
+ * (Amanatides–Woo DDA), sampling the field twice per texel and bisecting
+ * the first crossing; the colour is the class of the nearest occupied texel
+ * inward from the surface. Working in texel indices, with the texel → display matrix folded
  * into the projection, makes anisotropic voxels come out right for free.
  *
  * The layer draws in the opaque pass and writes the hit's depth itself, so
@@ -30,6 +31,7 @@
  * footprint are skipped, so the cursor drawn in that plane is not buried.
  */
 
+import { PAINTED_VOLUME_DISTANCE_RANGE } from "#src/editing/painted_volume/painted_volume_distance_field.js";
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
 import type {
@@ -83,7 +85,7 @@ export interface PaintedVolumeView {
 }
 
 const OCCUPANCY_SAMPLER = Symbol("paintedVolumeOccupancy");
-const COVERAGE_SAMPLER = Symbol("paintedVolumeCoverage");
+const DISTANCE_SAMPLER = Symbol("paintedVolumeDistance");
 const PALETTE_SAMPLER = Symbol("paintedVolumePalette");
 const BOX_VERTEX_COUNT = 36;
 
@@ -126,18 +128,20 @@ vec2 intersectOccupiedBox(vec3 origin, vec3 ray, out int entryAxis) {
 }
 `;
 
-const glsl_coverage = `
-// Interpolated coverage at a point in texel units (texel i spans [i, i + 1)).
-float coverageAt(vec3 point) {
-  return texture(uCoverage, point / uTextureSize).r;
+const glsl_distance = `
+// Interpolated encoded distance at a point in texel units (texel i spans
+// [i, i + 1)): at or above one half is inside.
+float distanceAt(vec3 point) {
+  return texture(uDistance, point / uTextureSize).r;
 }
 
-// Ray parameter of the surface between tOutside (coverage below one half) and
-// tInside (at or above it), by bisection.
+// Ray parameter of the surface between tOutside (field below one half) and
+// tInside (at or above it), by bisection: 10 halvings of at most half a texel
+// put it within 1/2048 texel.
 float refineCrossing(vec3 origin, vec3 ray, float tOutside, float tInside) {
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 10; ++i) {
     float tMiddle = 0.5 * (tOutside + tInside);
-    if (coverageAt(origin + ray * tMiddle) >= 0.5) {
+    if (distanceAt(origin + ray * tMiddle) >= 0.5) {
       tInside = tMiddle;
     } else {
       tOutside = tMiddle;
@@ -146,12 +150,12 @@ float refineCrossing(vec3 origin, vec3 ray, float tOutside, float tInside) {
   return tInside;
 }
 
-// Outward surface normal in texel units: down the coverage gradient, taken
+// Outward surface normal in texel units: down the field's gradient, taken
 // one texel either side and averaged over the four neighbours across each
 // axis. A one-texel stencil would follow every voxel step of a stroke's edge
 // and light it in stripes; this one smooths the normal as a mesh's averaged
 // vertex normals do. Where the gradient vanishes, faces the ray.
-float coverageDifference(vec3 point, vec3 along, vec3 acrossA, vec3 acrossB) {
+float distanceDifference(vec3 point, vec3 along, vec3 acrossA, vec3 acrossB) {
   float difference = 0.0;
   for (int i = 0; i < 5; ++i) {
     vec3 offset = i == 0 ? vec3(0.0)
@@ -159,8 +163,8 @@ float coverageDifference(vec3 point, vec3 along, vec3 acrossA, vec3 acrossB) {
         : i == 2 ? -acrossA
         : i == 3 ? acrossB
         : -acrossB;
-    difference += coverageAt(point + along + offset) -
-        coverageAt(point - along + offset);
+    difference += distanceAt(point + along + offset) -
+        distanceAt(point - along + offset);
   }
   return difference;
 }
@@ -169,9 +173,9 @@ vec3 surfaceNormal(vec3 point, vec3 ray) {
   const vec3 unitX = vec3(1.0, 0.0, 0.0);
   const vec3 unitY = vec3(0.0, 1.0, 0.0);
   const vec3 unitZ = vec3(0.0, 0.0, 1.0);
-  vec3 gradient = vec3(coverageDifference(point, unitX, unitY, unitZ),
-                       coverageDifference(point, unitY, unitX, unitZ),
-                       coverageDifference(point, unitZ, unitX, unitY));
+  vec3 gradient = vec3(distanceDifference(point, unitX, unitY, unitZ),
+                       distanceDifference(point, unitY, unitX, unitZ),
+                       distanceDifference(point, unitZ, unitX, unitY));
   if (dot(gradient, gradient) < 1.0e-8) return -ray;
   return -gradient;
 }
@@ -198,14 +202,20 @@ void shadeHit(vec3 rgb, vec3 texelNormal, vec3 hitPoint) {
 bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
                   ivec3 lastTexel) {
   vec3 outward = normalize(texelNormal);
-  // A step inward lands in an occupied texel even where the surface rounds a
-  // concave corner through an empty one.
-  ivec3 texel = clamp(ivec3(floor(hitPoint - outward * 0.5)), firstTexel,
-                      lastTexel);
+  // Between slices the surface can lie up to the distance range sideways from
+  // the occupied texels it was morphed from: walk inward in half texels,
+  // looking in both slices the point lies between.
+  ivec3 texel = clamp(ivec3(floor(hitPoint)), firstTexel, lastTexel);
   uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
-  if (segmentClass == 0u) {
-    texel = clamp(ivec3(floor(hitPoint)), firstTexel, lastTexel);
-    segmentClass = texelFetch(uOccupancy, texel, 0).r;
+  for (int step = 0; step <= 2 * ${PAINTED_VOLUME_DISTANCE_RANGE} + 1 &&
+                     segmentClass == 0u;
+       ++step) {
+    vec3 point = hitPoint - outward * (0.5 * float(step));
+    ivec3 below = ivec3(floor(point - vec3(0.0, 0.0, 0.5)));
+    for (int layer = 0; layer < 2 && segmentClass == 0u; ++layer) {
+      texel = clamp(below + ivec3(0, 0, layer), firstTexel, lastTexel);
+      segmentClass = texelFetch(uOccupancy, texel, 0).r;
+    }
   }
   if (segmentClass == 0u || cursorHidesTexel(texel)) return false;
   vec4 color = texelFetch(uPalette, ivec2(int(segmentClass), 0), 0);
@@ -253,13 +263,13 @@ for (int axis = 0; axis < 3; ++axis) {
   tNextBoundary[axis] = (boundary - nearPoint[axis]) / ray[axis];
 }
 
-// Coverage is sampled at the middle and the far end of every texel the ray
+// The field is sampled at the middle and the far end of every texel the ray
 // crosses; the first rise past one half is bisected to the surface.
 float tHit = tStart;
 float tPrevious = tStart;
-float coveragePrevious = coverageAt(nearPoint + ray * tStart);
-if (coveragePrevious >= 0.5 && span.x > 0.0) {
-  // The surface is cut by the box face itself (at the texture's edge).
+float distancePrevious = distanceAt(nearPoint + ray * tStart);
+if (distancePrevious >= 0.5 && span.x > 0.0) {
+  // The surface is cut by the box face itself.
   vec3 faceNormal = vec3(0.0);
   faceNormal[entryAxis] = -float(stepDirection[entryAxis]);
   if (shadeSurface(nearPoint + ray * tStart, faceNormal, firstTexel,
@@ -272,8 +282,8 @@ for (int i = 0; i < uMaxSteps; ++i) {
   tCellEnd = min(tCellEnd, tEnd);
   for (int sampleIndex = 0; sampleIndex < 2; ++sampleIndex) {
     float t = sampleIndex == 0 ? 0.5 * (tHit + tCellEnd) : tCellEnd;
-    float coverage = coverageAt(nearPoint + ray * t);
-    if (coverage >= 0.5 && coveragePrevious < 0.5) {
+    float distance = distanceAt(nearPoint + ray * t);
+    if (distance >= 0.5 && distancePrevious < 0.5) {
       float tSurface = refineCrossing(nearPoint, ray, tPrevious, t);
       vec3 hitPoint = nearPoint + ray * tSurface;
       if (shadeSurface(hitPoint, surfaceNormal(hitPoint, ray), firstTexel,
@@ -282,7 +292,7 @@ for (int i = 0; i < uMaxSteps; ++i) {
       }
     }
     tPrevious = t;
-    coveragePrevious = coverage;
+    distancePrevious = distance;
   }
   int axis = tNextBoundary.x < tNextBoundary.y
       ? (tNextBoundary.x < tNextBoundary.z ? 0 : 2)
@@ -301,7 +311,7 @@ export function buildPaintedVolumeShader(gl: GL): ShaderProgram {
   const builder = new ShaderBuilder(gl);
   defineVertexId(builder);
   builder.addTextureSampler("usampler3D", "uOccupancy", OCCUPANCY_SAMPLER);
-  builder.addTextureSampler("sampler3D", "uCoverage", COVERAGE_SAMPLER);
+  builder.addTextureSampler("sampler3D", "uDistance", DISTANCE_SAMPLER);
   builder.addTextureSampler("sampler2D", "uPalette", PALETTE_SAMPLER);
   builder.addUniform("highp mat4", "uModelViewProjection");
   builder.addUniform("highp mat4", "uInvModelViewProjection");
@@ -330,7 +340,7 @@ gl_Position.z = 0.0;
   builder.addFragmentCode(glsl_brushFootprintContains);
   builder.addFragmentCode(glsl_cursorHidesTexel);
   builder.addFragmentCode(glsl_intersectOccupiedBox);
-  builder.addFragmentCode(glsl_coverage);
+  builder.addFragmentCode(glsl_distance);
   builder.addFragmentCode(glsl_shadeHit);
   builder.setFragmentMain(glsl_marchMain);
   return builder.build();
@@ -365,7 +375,7 @@ export class PaintedVolumeRenderer extends RefCounted {
 
     shader.bind();
     source.texture.bind(shader.textureUnit(OCCUPANCY_SAMPLER));
-    source.texture.bindCoverage(shader.textureUnit(COVERAGE_SAMPLER));
+    source.texture.bindDistance(shader.textureUnit(DISTANCE_SAMPLER));
     source.palette.bind(shader.textureUnit(PALETTE_SAMPLER));
     this.setViewUniforms(view);
     this.setVolumeUniforms(source, occupiedBox);
