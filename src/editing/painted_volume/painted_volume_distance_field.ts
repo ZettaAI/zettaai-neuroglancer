@@ -75,19 +75,26 @@ export class PaintedVolumeDistanceField {
     this.occupied = new Uint8Array(size[0] * size[1] * size[2]);
   }
 
+  /** True when this field mirrors a texture of `size` texels. */
+  hasSize(size: Triple): boolean {
+    return size.every((extent, axis) => extent === this.size[axis]);
+  }
+
   /** Every texel empty again. */
   clear(): void {
     this.occupied.fill(0);
   }
 
-  /** Mirror class `bytes` (x fastest) written into the inclusive `texelBox`. */
+  /**
+   * Mirror class `bytes` (x fastest) written into the inclusive `texelBox`.
+   * Hot path: runs over every texel of every upload, a whole region on fill.
+   */
   writeClasses(texelBox: TexelBox, bytes: Uint8Array): void {
-    const [sizeX, sizeY] = this.size;
     const boxWidth = texelBox.x1 - texelBox.x0 + 1;
     let source = 0;
     for (let z = texelBox.z0; z <= texelBox.z1; ++z) {
       for (let y = texelBox.y0; y <= texelBox.y1; ++y) {
-        const rowStart = (z * sizeY + y) * sizeX + texelBox.x0;
+        const rowStart = this.rowOffset(z, y) + texelBox.x0;
         for (let x = 0; x < boxWidth; ++x) {
           this.occupied[rowStart + x] = bytes[source++] === 0 ? 0 : 1;
         }
@@ -212,12 +219,12 @@ export class PaintedVolumeDistanceField {
     windowLeavesTexture: boolean,
     windows: WindowCounts,
   ): void {
-    const [sizeX, sizeY] = this.size;
+    const sizeY = this.size[1];
     const { occupied, rowsToOccupied, rowsToEmpty } = this;
     const { nearOccupied, nearEmpty } = windows;
     const width = box.x1 - box.x0 + 1;
     const ownRow = (y - rowsFirst) * width;
-    const sliceRow = (z * sizeY + y) * sizeX + box.x0;
+    const sliceRow = this.rowOffset(z, y) + box.x0;
     for (let column = 0; column < width; ++column) {
       const inside = occupied[sliceRow + column] !== 0;
       if (inside) {
@@ -267,8 +274,8 @@ export class PaintedVolumeDistanceField {
     x1: number,
     rowOffset: number,
   ): void {
-    const [sizeX, sizeY] = this.size;
-    const sliceRow = (z * sizeY + y) * sizeX;
+    const sizeX = this.size[0];
+    const sliceRow = this.rowOffset(z, y);
     const { occupied, rowsToOccupied, rowsToEmpty } = this;
     // Integer sentinels far past the range keep the arithmetic in small ints.
     let lastOccupied = x0 - FAR;
@@ -303,6 +310,12 @@ export class PaintedVolumeDistanceField {
       }
       if (toEmpty < rowsToEmpty[column]) rowsToEmpty[column] = toEmpty;
     }
+  }
+
+  /** Index in `occupied` of texel (0, y, z). */
+  private rowOffset(z: number, y: number): number {
+    const [sizeX, sizeY] = this.size;
+    return (z * sizeY + y) * sizeX;
   }
 
   private ensureRowBuffers(length: number): void {

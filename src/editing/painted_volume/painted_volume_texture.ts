@@ -62,6 +62,9 @@ export class PaintedVolumeTexture {
 
   /** (Re)allocate zeroed storage of `size` texels; `false` when the GPU refused. */
   allocate(size: Triple): boolean {
+    // `clear` reallocates at the same size: keep the CPU mirror and zero it
+    // rather than dropping a texture-sized array for the collector.
+    const previousField = this.distanceField;
     this.release();
     const { gl } = this;
     drainErrors(gl);
@@ -81,7 +84,12 @@ export class PaintedVolumeTexture {
     this.texture_ = texture;
     this.distanceTexture_ = distance;
     this.size_ = [size[0], size[1], size[2]];
-    this.distanceField = new PaintedVolumeDistanceField(this.size_);
+    if (previousField?.hasSize(this.size_)) {
+      previousField.clear();
+      this.distanceField = previousField;
+    } else {
+      this.distanceField = new PaintedVolumeDistanceField(this.size_);
+    }
     return true;
   }
 

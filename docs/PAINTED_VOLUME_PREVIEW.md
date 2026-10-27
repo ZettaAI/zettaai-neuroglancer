@@ -12,15 +12,19 @@ and never saves meshes.
 
 The preview follows the mesh layer instead of rules of its own:
 
-- **Which segments:** the objects `forEachVisibleSegment` yields, so the
-  selection, the temporary visible set and the equivalence policy apply as they
-  do to meshes. The brush segment gets no exception: paint with a segment that
+- **Which segments:** the voxels of the objects `forEachVisibleSegment` yields,
+  so the selection, the temporary visible set and the equivalence policy apply
+  as they do to meshes. Each voxel id is answered through its representative
+  (under `NONREPRESENTATIVE_EXCLUDED` the mesh is the root, the voxels hold its
+  members), without enumerating large agglomerated sets. The brush segment gets no exception: paint with a segment that
   is not selected and the stroke shows in 2D but not in 3D, like its mesh.
 - **Colour:** `getObjectColor` of the mapped id (the raw id under
   `baseSegmentColoring`), so saturation and the hover highlight match.
 - **When colours update:** `registerCallbackWhenSegmentationDisplayStateChanged`,
   the mesh layer's own triggers. A colour or hover change re-uploads the 1 KiB
-  palette and never touches the volume texture.
+  palette, only when some colour actually moved, and never touches the volume
+  texture. `getObjectColor` is premultiplied by the colour's alpha; the opaque
+  preview takes the colour itself (a stated colour of alpha 0 hides it).
 - **3D opacity 0** hides the preview, as it hides meshes.
 
 Still different: the preview is drawn opaque at any 3D opacity above 0, has no
@@ -43,8 +47,15 @@ field crosses zero:
   would erase it).
 
 The ray march still walks texel by texel (DDA), samples the field at the
-middle and the far end of each texel, and bisects the first crossing (10
-halvings). The normal is the field's gradient averaged over a 3 × 3
+middle and the far end of each texel and where the ray crosses the texel's
+slice centre, and bisects the first crossing (10 halvings). The slice-centre
+sample matters for one-slice strokes: their rim is a lens a fraction of a
+texel thick around that plane, which an oblique ray would otherwise step over.
+Where a hit is not drawn (cursor window, hidden class) or the camera starts
+inside the surface, the field cannot rise again before the ray leaves, so each
+texel's own class decides until then, drawn on the face it enters through as
+its cube was: painting over a stack hides only the cursor's z, and a shown
+segment fused under a hidden one stays visible. The normal is the field's gradient averaged over a 3 × 3
 neighbourhood, so the surface is lit as a mesh's averaged normals light it.
 The colour is the class of the nearest occupied texel inward from the hit, in
 either slice the hit lies between.
@@ -57,7 +68,8 @@ field on the GPU instead (a 3-D texture layer at a time) cost ~15 ms per
 stroke on Metal and was dropped.
 
 Costs: two GPU bytes per texel instead of one (the memory budget downsamples
-a region at half the size it did) and one CPU byte per texel for the mirror.
+a region at half the size it did) and one CPU byte per texel for the mirror,
+which the GPU budget does not count (it is JS heap, kept and zeroed on clear).
 Measured with `npm run perf`, worst call per stroke:
 
 |                         | occupancy | upload before | upload after |

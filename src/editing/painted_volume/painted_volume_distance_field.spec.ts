@@ -138,4 +138,11 @@ describe("PaintedVolumeDistanceField", () => {
       referenceBytes(new Array(36).fill(false), size, box),
     );
   });
+
+  it("tells whether it mirrors a texture of a given size", () => {
+    const field = new PaintedVolumeDistanceField([6, 5, 4]);
+    expect(field.hasSize([6, 5, 4])).toBe(true);
+    expect(field.hasSize([6, 5, 3])).toBe(false);
+    expect(field.hasSize([5, 6, 4])).toBe(false);
+  });
 });
