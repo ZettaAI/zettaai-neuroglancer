@@ -102,6 +102,7 @@ class FakeSession {
   readonly rootsNote = new WatchableValue<string | undefined>(undefined);
   readonly nextPage = vi.fn<(table: string) => void>();
   readonly previousPage = vi.fn<(table: string) => void>();
+  readonly select = vi.fn<(item: DrawnAnnotation) => void>();
   readonly moveTo = vi.fn<(item: DrawnAnnotation) => void>();
   private readonly color = SWATCH_COLOR;
 
@@ -427,7 +428,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
     expect(listRange()).toBe("51–100 of 120");
   });
 
-  it("jumps to an annotation when its row is clicked", async () => {
+  it("selects on click and moves on right-click", async () => {
     const { connection, session } = makeConnection(
       [synapses, nuclei],
       [],
@@ -437,7 +438,15 @@ describe("CalcadaAnnotationTablesPanel", () => {
     session.drawn.value = [drawnAnnotation("synapses", 1n), target];
     await mountPanel(connection);
     listRows()[1].click();
+    expect(session.select).toHaveBeenCalledExactlyOnceWith(target);
+    expect(session.moveTo).not.toHaveBeenCalled();
+    const rightClick = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+    });
+    listRows()[1].dispatchEvent(rightClick);
     expect(session.moveTo).toHaveBeenCalledExactlyOnceWith(target);
+    expect(rightClick.defaultPrevented).toBe(true);
   });
 
   it("shows a table's error in red", async () => {

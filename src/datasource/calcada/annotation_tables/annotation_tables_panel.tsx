@@ -52,6 +52,7 @@ import {
 } from "@/components/ui/popover";
 
 export const ANNOTATION_LIST_PAGE_SIZE = 50;
+export const ANNOTATION_ROW_HINT = "Click to select, right-click to move to it";
 
 const THOUSANDS_GROUP = /\B(?=(\d{3})+$)/g;
 const formatCount = (count: number) =>
@@ -84,6 +85,7 @@ export interface AnnotationTablesPanelConnection {
     refreshTables(): void;
     nextPage(table: string): void;
     previousPage(table: string): void;
+    select(item: DrawnAnnotation): void;
     moveTo(item: DrawnAnnotation): void;
   };
 }
@@ -269,11 +271,13 @@ function TableStatusLine({
 function AnnotationRow({
   item,
   color,
-  onPick,
+  onSelect,
+  onMove,
 }: {
   item: DrawnAnnotation;
   color: vec3;
-  onPick: () => void;
+  onSelect: () => void;
+  onMove: () => void;
 }) {
   const { annotation } = item;
   return (
@@ -281,7 +285,12 @@ function AnnotationRow({
       <button
         type="button"
         className="calcada-annotations-row"
-        onClick={onPick}
+        title={ANNOTATION_ROW_HINT}
+        onClick={onSelect}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onMove();
+        }}
       >
         <span className="calcada-annotations-row-header">
           <Swatch color={color} />
@@ -308,11 +317,13 @@ function AnnotationRow({
 function AnnotationList({
   drawn,
   tableColor,
-  onPick,
+  onSelect,
+  onMove,
 }: {
   drawn: DrawnAnnotation[];
   tableColor: (name: string) => vec3;
-  onPick: (item: DrawnAnnotation) => void;
+  onSelect: (item: DrawnAnnotation) => void;
+  onMove: (item: DrawnAnnotation) => void;
 }) {
   const [listPage, setListPage] = useState(0);
   const lastPage = Math.max(
@@ -356,7 +367,8 @@ function AnnotationList({
             key={`${item.table}:${item.layerId}`}
             item={item}
             color={tableColor(item.table)}
-            onPick={() => onPick(item)}
+            onSelect={() => onSelect(item)}
+            onMove={() => onMove(item)}
           />
         ))}
       </ul>
@@ -466,7 +478,8 @@ export function CalcadaAnnotationTablesPanel({
         key={shownPages}
         drawn={drawn}
         tableColor={tableColor}
-        onPick={(item) => session.moveTo(item)}
+        onSelect={(item) => session.select(item)}
+        onMove={(item) => session.moveTo(item)}
       />
     </div>
   );

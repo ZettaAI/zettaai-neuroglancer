@@ -5822,10 +5822,10 @@ void main() {
               color,
               properties,
             ),
-          moveToAnnotation: (annotationState, annotation) => {
-            layer.selectAnnotation(annotationState, annotation.id, true);
-            moveToAnnotation(layer, annotation, annotationState);
-          },
+          selectAnnotation: (annotationState, annotation) =>
+            layer.selectAnnotation(annotationState, annotation.id, true),
+          moveToAnnotation: (annotationState, annotation) =>
+            moveToAnnotation(layer, annotation, annotationState),
           scheduleFrame: (callback) => requestAnimationFrame(callback),
         },
         state.annotationTables,

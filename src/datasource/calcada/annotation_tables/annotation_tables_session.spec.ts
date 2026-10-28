@@ -532,6 +532,7 @@ function startSession(
   const graphEdited = new Signal<
     (oldRoots: Iterable<bigint>, newRoots: Iterable<bigint>) => void
   >();
+  const selectAnnotation = vi.fn();
   const moveToAnnotation = vi.fn();
   const connection: AnnotationTablesConnection = {
     httpSource: {
@@ -554,6 +555,7 @@ function startSession(
       layerStates.set(table, layerState);
       return layerState;
     },
+    selectAnnotation,
     moveToAnnotation,
     scheduleFrame: (callback) => frames.push(callback),
   };
@@ -577,6 +579,7 @@ function startSession(
     sources,
     drawnIds,
     layerStates,
+    selectAnnotation,
     moveToAnnotation,
     visibleSegments,
     graphEdited,
@@ -916,22 +919,35 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(session.drawn.value[0].layerId).toBe("syn:7");
   });
 
-  it("moves to a drawn annotation only while its table is selected", async () => {
+  it("selects or moves to a drawn annotation only while its table is selected", async () => {
     const graph = fakeGraph(["syn"]);
-    const { session, state, layerStates, moveToAnnotation } = startSession(
-      graph,
-      { ticked: ["syn"], visible: [10n] },
-    );
+    const { session, state, layerStates, selectAnnotation, moveToAnnotation } =
+      startSession(graph, { ticked: ["syn"], visible: [10n] });
     await settle();
     const [item] = session.drawn.value;
+    const drawnItem = expect.objectContaining({ id: item.layerId });
+    session.select(item);
+    expect(selectAnnotation).toHaveBeenCalledWith(
+      layerStates.get("syn"),
+      drawnItem,
+    );
+    expect(moveToAnnotation).not.toHaveBeenCalled();
+    selectAnnotation.mockClear();
     session.moveTo(item);
+    expect(selectAnnotation).toHaveBeenCalledWith(
+      layerStates.get("syn"),
+      drawnItem,
+    );
     expect(moveToAnnotation).toHaveBeenCalledWith(
       layerStates.get("syn"),
-      expect.objectContaining({ id: item.layerId }),
+      drawnItem,
     );
     state.untick("syn");
+    selectAnnotation.mockClear();
     moveToAnnotation.mockClear();
+    session.select(item);
     session.moveTo(item);
+    expect(selectAnnotation).not.toHaveBeenCalled();
     expect(moveToAnnotation).not.toHaveBeenCalled();
   });
 

@@ -334,6 +334,7 @@ export interface AnnotationTablesConnection {
     color: vec3,
     properties: AnnotationPropertySpec[],
   ): AnnotationLayerState;
+  selectAnnotation(state: AnnotationLayerState, annotation: Annotation): void;
   moveToAnnotation(state: AnnotationLayerState, annotation: Annotation): void;
   /** Runs the callback before the next frame is drawn. */
   scheduleFrame(callback: () => void): void;
@@ -443,14 +444,27 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (moved.length > 0) this.turnPage(table, moved);
   }
 
-  moveTo({ table, layerId }: DrawnAnnotation) {
-    if (!this.state.ticked.includes(table)) return;
+  select(item: DrawnAnnotation) {
+    const found = this.findDrawn(item);
+    if (found === undefined) return;
+    this.connection.selectAnnotation(found.layerState, found.annotation);
+  }
+
+  moveTo(item: DrawnAnnotation) {
+    const found = this.findDrawn(item);
+    if (found === undefined) return;
+    this.connection.selectAnnotation(found.layerState, found.annotation);
+    this.connection.moveToAnnotation(found.layerState, found.annotation);
+  }
+
+  private findDrawn({ table, layerId }: DrawnAnnotation) {
+    if (!this.state.ticked.includes(table)) return undefined;
     const layerState = this.layerStates.get(table);
     const annotation = (
       layerState?.source as AnnotationSource | undefined
     )?.get(layerId);
-    if (layerState === undefined || annotation === undefined) return;
-    this.connection.moveToAnnotation(layerState, annotation);
+    if (layerState === undefined || annotation === undefined) return undefined;
+    return { layerState, annotation };
   }
 
   private windowsOf(table: string): PageWindows {
