@@ -9,10 +9,10 @@
  */
 
 /**
- * @file One status for the 3D-preview toggle across every session layer.
+ * @file One status for the 3D preview across every session layer.
  *
- * The toggle is session-wide while previews are per layer; this folds their
- * statuses into what the topbar shows (plan §9.1).
+ * Previews are per layer; this folds their statuses into one: whether the
+ * region is filled, or why a layer cannot show.
  */
 
 import type {
@@ -24,8 +24,7 @@ import type { RegionFillProgress } from "#src/editing/painted_volume/painted_vol
 type Triple = readonly [number, number, number];
 
 export type PaintedVolumePreviewSummary =
-  | { readonly kind: "off" }
-  /** Enabled, but no preview exists yet (no session, or tools still wiring). */
+  /** No preview exists yet (no session, or tools still wiring). */
   | { readonly kind: "waiting" }
   | {
       readonly kind: "unavailable";
@@ -40,17 +39,15 @@ export type PaintedVolumePreviewSummary =
     };
 
 export function summarizePaintedVolumePreviews(
-  enabled: boolean,
   statuses: Iterable<PaintedVolumePreviewStatus>,
 ): PaintedVolumePreviewSummary {
-  if (!enabled) return { kind: "off" };
   let done = 0;
   let total = 0;
   let failed = 0;
   let textureBytes = 0;
   let factor: Triple | undefined;
   for (const status of statuses) {
-    // One layer that cannot preview makes the toggle say so.
+    // One layer that cannot preview makes the summary say so.
     if (status.kind === "unavailable") return status;
     done += status.fill.done;
     total += status.fill.total;

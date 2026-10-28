@@ -141,12 +141,15 @@ test.afterAll(async () => {
   await fakeGcs?.[Symbol.asyncDispose]?.();
 });
 
-test("region fill on toggle", async () => {
+test("region fill after clearing the session's edits", async () => {
   test.skip(setupError !== undefined, `setup failed: ${setupError}`);
+  // The preview fills the region when the session opens; clearing every
+  // patch makes it refill the whole region, which is the same work.
+  await strokeAcrossPanel(page);
   const measurement = await measure(page, "region fill", async () => {
-    await page
-      .getByRole("button", { name: "Show painted voxels in 3D" })
-      .click();
+    await page.evaluate(() =>
+      (globalThis as any).__editPaintBenchClearTarget(),
+    );
     await waitForRegionFilled(page);
   });
   await report(measurement);
@@ -161,39 +164,28 @@ test("region fill on toggle", async () => {
   );
 });
 
-for (const previewEnabled of [true, false]) {
-  test.describe(`stroke, preview ${previewEnabled ? "on" : "off"}`, () => {
-    for (const size of STROKE_SIZES) {
-      test(`brush ${size}`, async () => {
-        test.skip(setupError !== undefined, `setup failed: ${setupError}`);
-        await setPreviewEnabled(page, previewEnabled);
-        await setBrushRadius(page, (size - 1) / 2);
-        await clearPatches(page);
-        const measurement = await measure(
-          page,
-          `brush ${size}, preview ${previewEnabled ? "on" : "off"}`,
-          () => strokeAcrossPanel(page),
-        );
-        await report(measurement);
-        const occupancy = measurement.buckets["7.preview.occupancy"];
-        const upload = measurement.buckets["7.preview.upload"];
-        if (!previewEnabled) {
-          expect(occupancy, "the preview worked while off").toBeUndefined();
-          return;
-        }
-        expect(occupancy?.calls ?? 0, "no occupancy recorded").toBeGreaterThan(
-          0,
-        );
-        console.log(
-          `[preview-perf] brush ${size}: occupancy ` +
-            `${occupancy.totalMs.toFixed(2)} ms + upload ` +
-            `${(upload?.totalMs ?? 0).toFixed(2)} ms ` +
-            `(target ≤ 2 ms for a typical stroke)`,
-        );
-      });
-    }
-  });
-}
+test.describe("stroke", () => {
+  for (const size of STROKE_SIZES) {
+    test(`brush ${size}`, async () => {
+      test.skip(setupError !== undefined, `setup failed: ${setupError}`);
+      await setBrushRadius(page, (size - 1) / 2);
+      await clearPatches(page);
+      const measurement = await measure(page, `brush ${size}`, () =>
+        strokeAcrossPanel(page),
+      );
+      await report(measurement);
+      const occupancy = measurement.buckets["7.preview.occupancy"];
+      const upload = measurement.buckets["7.preview.upload"];
+      expect(occupancy?.calls ?? 0, "no occupancy recorded").toBeGreaterThan(0);
+      console.log(
+        `[preview-perf] brush ${size}: occupancy ` +
+          `${occupancy.totalMs.toFixed(2)} ms + upload ` +
+          `${(upload?.totalMs ?? 0).toFixed(2)} ms ` +
+          `(target ≤ 2 ms for a typical stroke)`,
+      );
+    });
+  }
+});
 
 // --- Page helpers -------------------------------------------------------
 
@@ -284,15 +276,6 @@ async function waitForRegionFilled(page: Page): Promise<void> {
     )
     .toBe("filled");
   await nextFrames(page, 2);
-}
-
-async function setPreviewEnabled(page: Page, enabled: boolean): Promise<void> {
-  await page.evaluate((value) => {
-    (globalThis as any).viewer.editSessionHost.setPaintedVolumePreviewEnabled(
-      value,
-    );
-  }, enabled);
-  if (enabled) await waitForRegionFilled(page);
 }
 
 async function setBrushRadius(page: Page, radius: number): Promise<void> {

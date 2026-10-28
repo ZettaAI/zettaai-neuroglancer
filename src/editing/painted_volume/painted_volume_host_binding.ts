@@ -11,13 +11,12 @@
 /**
  * @file Ties painted-volume previews to the edit-session host (plan §3.9, §8.2).
  *
- * One preview per writable session layer, alive while the toggle is on and the
- * session is open. The host keeps only calls into this binding at its
- * lifecycle points (open, teardown, reset, datasource reload); the reactions —
- * the toggle, attaching the render layer to its segmentation layer, and
- * re-attaching when that layer is removed and added again — live here. It
- * also folds the previews' statuses into the one `summary` the topbar toggle
- * shows (plan §9.1).
+ * One preview per writable session layer, alive while the session is open.
+ * The host keeps only calls into this binding at its lifecycle points (open,
+ * teardown, reset, datasource reload); the reactions — attaching the render
+ * layer to its segmentation layer, and re-attaching when that layer is
+ * removed and added again — live here. It also folds the previews' statuses
+ * into one `summary`.
  *
  * The binding talks to the host through `PaintedVolumeHostPort` only, so it
  * can be specified with fakes.
@@ -46,7 +45,6 @@ export interface PaintedVolumeUserLayer {
 }
 
 export interface PaintedVolumeHostPort {
-  readonly enabled: WatchableValueInterface<boolean>;
   /** The layer manager's `layersChanged`; read only once a preview exists. */
   readonly layersChanged: NullarySignal;
   /** Writable layers of the open session that have patch machinery. */
@@ -64,7 +62,7 @@ interface BoundPreview {
 }
 
 export class PaintedVolumeHostBinding extends RefCounted {
-  /** What the topbar toggle shows; `off` while the toggle is off. */
+  /** The previews' statuses folded into one. */
   readonly summary: WatchableValueInterface<PaintedVolumePreviewSummary>;
   private readonly summaryValue: WatchableValue<PaintedVolumePreviewSummary>;
   private readonly bound = new Map<LayerId, BoundPreview>();
@@ -77,7 +75,6 @@ export class PaintedVolumeHostBinding extends RefCounted {
     super();
     this.summaryValue = new WatchableValue(this.currentSummary());
     this.summary = this.summaryValue;
-    this.registerDisposer(port.enabled.changed.add(() => this.sync()));
     this.registerDisposer(() => this.releaseAll());
   }
 
@@ -86,15 +83,10 @@ export class PaintedVolumeHostBinding extends RefCounted {
   }
 
   /**
-   * Bring the previews in line with the toggle and the session: create what is
-   * missing, drop what no longer belongs. Safe to call at any time.
+   * Bring the previews in line with the session: create what is missing,
+   * drop what no longer belongs. Safe to call at any time.
    */
   sync(): void {
-    if (!this.port.enabled.value) {
-      this.releaseAll();
-      this.updateSummary();
-      return;
-    }
     const sessionLayerIds = new Set(this.port.sessionLayerIds());
     for (const layerId of this.bound.keys()) {
       if (!sessionLayerIds.has(layerId)) this.release(layerId);
@@ -142,7 +134,6 @@ export class PaintedVolumeHostBinding extends RefCounted {
 
   private currentSummary(): PaintedVolumePreviewSummary {
     return summarizePaintedVolumePreviews(
-      this.port.enabled.value,
       [...this.bound.values()].map(({ preview }) => preview.status.value),
     );
   }

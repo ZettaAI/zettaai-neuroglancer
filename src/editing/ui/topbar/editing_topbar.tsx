@@ -10,12 +10,10 @@
 
 import "#src/editing/ui/editing_theme.css";
 import "#src/editing/ui/topbar/editing_topbar.css";
-import "#src/editing/painted_volume/painted_volume_preview_toggle.css";
 
 import type { EditSession } from "@zettaai/edit-session";
 import type { LucideIcon } from "lucide-preact";
 import {
-  Box,
   Eraser,
   GitMerge,
   Layers,
@@ -42,7 +40,6 @@ import {
   formatKeyIdentifier,
   keyboardEventToIdentifier,
 } from "#src/editing/keybind_event.js";
-import { describePaintedVolumeToggle } from "#src/editing/painted_volume/painted_volume_toggle_description.js";
 import type { SaveConflictError } from "#src/editing/reconcile/save_conflict_refusal.js";
 import { canCombine } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
@@ -658,7 +655,6 @@ function ActiveTopbarControls({
         >
           <LocateFixed size={TOOL_ICON_SIZE} aria-hidden="true" />
         </button>
-        <PaintedVolumePreviewToggle host={host} />
       </div>
 
       <div class="neuroglancer-editing-topbar-divider" />
@@ -776,56 +772,5 @@ function ActiveTopbarControls({
         onCancel={() => setReloadNotice(undefined)}
       />
     </>
-  );
-}
-
-export type PaintedVolumePreviewToggleHost = Pick<
-  EditSessionHost,
-  | "paintedVolumePreviewEnabled"
-  | "paintedVolumePreviewSummary"
-  | "setPaintedVolumePreviewEnabled"
->;
-
-/**
- * The 3D-preview toggle (TM-490, plan §9.1). State comes from the host's
- * watchables and the click goes to a host method; every word it says comes
- * from `describePaintedVolumeToggle`. The tooltip sits on a wrapper so it
- * still shows while the button is disabled, like the Edit / Exit button's.
- */
-export function PaintedVolumePreviewToggle({
-  host,
-}: {
-  host: PaintedVolumePreviewToggleHost;
-}) {
-  const enabled = useWatchable(host.paintedVolumePreviewEnabled);
-  const summary = useWatchable(host.paintedVolumePreviewSummary);
-  const description = describePaintedVolumeToggle(summary);
-  const toggle = useCallback(() => {
-    host.setPaintedVolumePreviewEnabled(!enabled);
-  }, [host, enabled]);
-  return (
-    <span
-      class="neuroglancer-painted-volume-toggle"
-      data-tooltip={description.tooltip}
-    >
-      <button
-        type="button"
-        class={
-          "neuroglancer-editing-topbar-icon-button" +
-          (description.pressed ? " active" : "")
-        }
-        aria-label="Show painted voxels in 3D"
-        aria-pressed={description.pressed}
-        disabled={description.disabled}
-        onClick={toggle}
-      >
-        <Box size={TOOL_ICON_SIZE} aria-hidden="true" />
-      </button>
-      {description.downsampleLabel !== undefined && (
-        <span class="neuroglancer-painted-volume-toggle-downsample">
-          {description.downsampleLabel}
-        </span>
-      )}
-    </span>
   );
 }

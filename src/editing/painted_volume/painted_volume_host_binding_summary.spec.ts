@@ -48,12 +48,10 @@ class FakePreview implements PaintedVolumeBoundPreview {
 }
 
 function setUp(initial: PaintedVolumePreviewStatus = liveStatus(0, 4)) {
-  const enabled = new WatchableValue(false);
   const sessionLayerIds = new Set<LayerId>([LABELS]);
   const previews = new Map<LayerId, FakePreview>();
   let canCreate = true;
   const port: PaintedVolumeHostPort = {
-    enabled,
     layersChanged: new NullarySignal(),
     sessionLayerIds: () => sessionLayerIds,
     findUserLayer: () => undefined,
@@ -66,7 +64,6 @@ function setUp(initial: PaintedVolumePreviewStatus = liveStatus(0, 4)) {
   };
   const binding = new PaintedVolumeHostBinding(port);
   return {
-    enabled,
     sessionLayerIds,
     previews,
     binding,
@@ -77,32 +74,30 @@ function setUp(initial: PaintedVolumePreviewStatus = liveStatus(0, 4)) {
 }
 
 describe("PaintedVolumeHostBinding.summary", () => {
-  it("is off until the toggle is switched on", () => {
+  it("waits until the host syncs it", () => {
     const { binding } = setUp();
-    expect(binding.summary.value).toEqual({ kind: "off" });
+    expect(binding.summary.value).toEqual({ kind: "waiting" });
   });
 
-  it("follows the toggle to the live preview and back", () => {
-    const { binding, enabled } = setUp(liveStatus(1, 4));
-    enabled.value = true;
+  it("follows the live preview once synced", () => {
+    const { binding } = setUp(liveStatus(1, 4));
+    binding.sync();
     expect(binding.summary.value).toMatchObject({
       kind: "live",
       fill: { done: 1, total: 4 },
     });
-    enabled.value = false;
-    expect(binding.summary.value).toEqual({ kind: "off" });
   });
 
   it("waits while the host cannot build a preview yet", () => {
-    const { binding, enabled, blockCreation } = setUp();
+    const { binding, blockCreation } = setUp();
     blockCreation();
-    enabled.value = true;
+    binding.sync();
     expect(binding.summary.value).toEqual({ kind: "waiting" });
   });
 
   it("re-summarizes when a preview's status moves, and announces it", () => {
-    const { binding, enabled, previews } = setUp(liveStatus(0, 4));
-    enabled.value = true;
+    const { binding, previews } = setUp(liveStatus(0, 4));
+    binding.sync();
     let announcements = 0;
     binding.summary.changed.add(() => ++announcements);
     previews.get(LABELS)!.status.value = liveStatus(3, 4);
@@ -111,11 +106,11 @@ describe("PaintedVolumeHostBinding.summary", () => {
   });
 
   it("surfaces an unavailable preview", () => {
-    const { binding, enabled } = setUp({
+    const { binding } = setUp({
       kind: "unavailable",
       reason: "region-too-large",
     });
-    enabled.value = true;
+    binding.sync();
     expect(binding.summary.value).toEqual({
       kind: "unavailable",
       reason: "region-too-large",
@@ -123,11 +118,9 @@ describe("PaintedVolumeHostBinding.summary", () => {
   });
 
   it("drops a released layer from the sum and stops listening to it", () => {
-    const { binding, enabled, sessionLayerIds, previews } = setUp(
-      liveStatus(1, 2),
-    );
+    const { binding, sessionLayerIds, previews } = setUp(liveStatus(1, 2));
     sessionLayerIds.add(SECOND);
-    enabled.value = true;
+    binding.sync();
     expect(binding.summary.value).toMatchObject({ fill: { total: 4 } });
     const released = previews.get(SECOND)!;
     binding.release(SECOND);
@@ -140,8 +133,8 @@ describe("PaintedVolumeHostBinding.summary", () => {
   });
 
   it("returns to waiting after the session's previews are released", () => {
-    const { binding, enabled } = setUp();
-    enabled.value = true;
+    const { binding } = setUp();
+    binding.sync();
     binding.releaseAll();
     expect(binding.summary.value).toEqual({ kind: "waiting" });
   });

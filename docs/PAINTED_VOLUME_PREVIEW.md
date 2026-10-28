@@ -1,8 +1,8 @@
 # Live 3D painted-volume preview (TM-490)
 
-While an edit session is open, the **3D preview** toggle in the topbar (the cube
-icon next to "Center view on edit region") shows the edited voxels in the 3D
-panel as a smooth surface, live, with no meshing. It shows **every voxel of the segments
+While an edit session is open, the 3D panel shows the edited voxels as a
+smooth surface, live, with no meshing. There is no switch: the preview is on
+for every session. It shows **every voxel of the segments
 whose meshes NG would draw** in the session region: the datasource baseline
 where nothing is painted, the session's patches everywhere else. This is the
 same composite the 2D layer draws. The preview exists only for edit sessions
@@ -82,8 +82,11 @@ Measured with `npm run perf`, worst call per stroke:
 The distance work costs about what the occupancy kernel already does, and
 only on very large brushes.
 
-The toggle is off on every load, and the choice is not remembered. All code
-lives in `src/editing/painted_volume/`.
+The preview has no toggle: it is built when the session opens and costs its
+texture memory and the region fill for every session, also in layouts without
+a 3D panel (where nothing is drawn). A region that cannot be previewed (too
+large, or the GPU refused the texture) is logged. All code lives in
+`src/editing/painted_volume/`.
 
 ## Data flow
 
@@ -97,7 +100,7 @@ datasource baseline ──read──────────┘                 
 ```
 
 - **`PaintedVolumeHostBinding`** creates one preview per writable session layer
-  while the toggle is on, attaches its render layer to the segmentation layer,
+  while the session is open, attaches its render layer to the segmentation layer,
   and releases it at teardown, commit, discard and layer removal. The host
   only calls the binding at its lifecycle points.
 - **`PaintedVolumePreview`** keeps the texture equal to the composite. A full

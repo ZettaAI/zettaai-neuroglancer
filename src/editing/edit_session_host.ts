@@ -1026,11 +1026,9 @@ export class EditSessionHost extends RefCounted {
   // -- Per-session machinery (cleared on session end) -----------------------
   private readonly perLayer = new Map<LayerId, PerLayerMachinery>();
   /**
-   * Live 3D preview of the painted volume (TM-490). Off on every load and not
-   * remembered across sessions (Q3).
+   * Live 3D preview of the painted volume (TM-490): one per writable session
+   * layer, for as long as the session is open.
    */
-  readonly paintedVolumePreviewEnabled = new WatchableValue<boolean>(false);
-  /** One painted-volume preview per writable session layer, while enabled. */
   private readonly paintedVolumeBinding: PaintedVolumeHostBinding;
   private readonly _activeRegionByLayer = new Map<
     LayerId,
@@ -4071,7 +4069,6 @@ export class EditSessionHost extends RefCounted {
   private paintedVolumePort(): PaintedVolumeHostPort {
     const layerManager = () => this.viewer.layerManager;
     return {
-      enabled: this.paintedVolumePreviewEnabled,
       get layersChanged() {
         return layerManager().layersChanged;
       },
@@ -4251,14 +4248,9 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
-   * The topbar's 3D-preview toggle (TM-490). Unlike `setAutomerge` it is not
-   * written to `editPreferences`: the choice is not remembered (Q3).
+   * The session's 3D previews folded into one status (fill progress, or why
+   * one cannot show); read by the e2e and perf suites.
    */
-  setPaintedVolumePreviewEnabled(enabled: boolean): void {
-    this.paintedVolumePreviewEnabled.value = enabled;
-  }
-
-  /** What the 3D-preview toggle shows across the session's layers. */
   get paintedVolumePreviewSummary(): WatchableValueInterface<PaintedVolumePreviewSummary> {
     return this.paintedVolumeBinding.summary;
   }

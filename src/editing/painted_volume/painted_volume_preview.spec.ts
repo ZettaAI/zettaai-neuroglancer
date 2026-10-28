@@ -430,12 +430,19 @@ describe("PaintedVolumePreview: region fill", () => {
 });
 
 describe("PaintedVolumePreview: unavailable", () => {
-  it("reports a region no allowed downsampling fits, and allocates nothing", () => {
-    const { preview, gpu } = makeHarness({ options: { budgetBytes: 0 } });
+  it("reports and logs a region no allowed downsampling fits, and allocates nothing", () => {
+    const { preview, gpu, logger } = makeHarness({
+      options: { budgetBytes: 0 },
+    });
     expect(preview.status.value).toEqual({
       kind: "unavailable",
       reason: "region-too-large",
     });
+    expect(
+      logger.logs.some(
+        (log) => log.level === "warn" && log.message.includes("too large"),
+      ),
+    ).toBe(true);
     expect(gpu).toBeUndefined();
     expect(preview.renderLayer).toBeUndefined();
   });

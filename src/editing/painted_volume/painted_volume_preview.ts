@@ -186,6 +186,13 @@ export class PaintedVolumePreview extends RefCounted {
     super();
     const extent = planExtent(options);
     if (extent === undefined) {
+      // No control shows the preview's state, so the log is where it says why
+      // the 3D panel stays empty.
+      options.logger.warn(
+        "editing",
+        "3D preview: the session region is too large to preview at any allowed downsampling",
+        { budgetBytes: options.budgetBytes },
+      );
       this.status = new WatchableValue<PaintedVolumePreviewStatus>(
         unavailable("region-too-large"),
       );

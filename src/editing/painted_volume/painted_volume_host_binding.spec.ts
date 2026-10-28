@@ -80,7 +80,6 @@ class FakeUserLayer implements PaintedVolumeUserLayer {
 }
 
 function makeHost() {
-  const enabled = new WatchableValue(false);
   const layersChanged = new NullarySignal();
   const userLayers = new Map<LayerId, FakeUserLayer>([
     [LABELS, new FakeUserLayer(layersChanged)],
@@ -90,7 +89,6 @@ function makeHost() {
   let ready = true;
   let previewsAvailable = true;
   const port: PaintedVolumeHostPort = {
-    enabled,
     layersChanged,
     sessionLayerIds: () => sessionLayers,
     findUserLayer: (layerId) => userLayers.get(layerId),
@@ -105,7 +103,6 @@ function makeHost() {
   const binding = new PaintedVolumeHostBinding(port);
   return {
     binding,
-    enabled,
     layersChanged,
     userLayers,
     sessionLayers,
@@ -120,15 +117,14 @@ function makeHost() {
 }
 
 describe("PaintedVolumeHostBinding", () => {
-  it("creates nothing while the preview is off", () => {
+  it("creates nothing until the host syncs it", () => {
     const host = makeHost();
-    host.binding.sync();
     expect(host.created).toHaveLength(0);
   });
 
-  it("turning it on creates a preview per session layer and attaches it", () => {
+  it("sync creates a preview per session layer and attaches it", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     expect(host.created.map((preview) => preview.layerId)).toEqual([LABELS]);
     const preview = host.created[0];
     expect(host.userLayers.get(LABELS)!.attached.has(preview.layer)).toBe(true);
@@ -136,11 +132,11 @@ describe("PaintedVolumeHostBinding", () => {
     expect(host.binding.previewFor(LABELS)).toBe(preview);
   });
 
-  it("turning it off detaches and disposes every preview", () => {
+  it("releaseAll detaches and disposes every preview", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     const preview = host.created[0];
-    host.enabled.value = false;
+    host.binding.releaseAll();
     expect(host.userLayers.get(LABELS)!.attached.size).toBe(0);
     expect(preview.disposed).toBe(true);
     expect(preview.layer.references).toBe(0);
@@ -150,7 +146,7 @@ describe("PaintedVolumeHostBinding", () => {
   it("waits until the host can build the preview, then a later sync creates it", () => {
     const host = makeHost();
     host.setReady(false);
-    host.enabled.value = true;
+    host.binding.sync();
     expect(host.created).toHaveLength(0);
     host.setReady(true);
     host.binding.sync();
@@ -162,7 +158,7 @@ describe("PaintedVolumeHostBinding", () => {
   it("keeps an unavailable preview without attaching it", () => {
     const host = makeHost();
     host.setPreviewsAvailable(false);
-    host.enabled.value = true;
+    host.binding.sync();
     expect(host.created).toHaveLength(1);
     expect(host.userLayers.get(LABELS)!.attached.size).toBe(0);
     expect(host.binding.previewFor(LABELS)).toBe(host.created[0]);
@@ -170,7 +166,7 @@ describe("PaintedVolumeHostBinding", () => {
 
   it("re-attaches to a layer that was removed and added again", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     const preview = host.created[0];
     const oldLayer = host.userLayers.get(LABELS)!;
 
@@ -186,7 +182,7 @@ describe("PaintedVolumeHostBinding", () => {
 
   it("detaches while the layer is gone and attaches when it returns", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     const preview = host.created[0];
     host.userLayers.delete(LABELS);
     host.layersChanged.dispatch();
@@ -202,7 +198,7 @@ describe("PaintedVolumeHostBinding", () => {
     const host = makeHost();
     host.sessionLayers.add(SECOND);
     host.userLayers.set(SECOND, new FakeUserLayer(host.layersChanged));
-    host.enabled.value = true;
+    host.binding.sync();
     const [labels, second] = host.created;
 
     host.binding.release(LABELS);
@@ -217,7 +213,7 @@ describe("PaintedVolumeHostBinding", () => {
 
   it("drops previews of layers no longer in the session on sync", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     const preview = host.created[0];
     host.sessionLayers.clear();
     host.binding.sync();
@@ -226,7 +222,7 @@ describe("PaintedVolumeHostBinding", () => {
 
   it("forwards a datasource refetch to every preview", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     host.binding.onDatasourceRefetched();
     expect(host.created[0].refetches).toBe(1);
   });
@@ -235,22 +231,24 @@ describe("PaintedVolumeHostBinding", () => {
     const host = makeHost();
     const add = vi.spyOn(host.layersChanged, "add");
     const remove = vi.spyOn(host.layersChanged, "remove");
+    host.sessionLayers.clear();
     host.binding.sync();
     expect(add).not.toHaveBeenCalled();
-    host.enabled.value = true;
+    host.sessionLayers.add(LABELS);
+    host.binding.sync();
     expect(add).toHaveBeenCalledTimes(1);
-    host.enabled.value = false;
+    host.binding.releaseAll();
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
   it("disposing the binding releases everything and stops listening", () => {
     const host = makeHost();
-    host.enabled.value = true;
+    host.binding.sync();
     const preview = host.created[0];
     host.binding.dispose();
     expect(preview.disposed).toBe(true);
-    host.enabled.value = false;
-    host.enabled.value = true;
+    host.layersChanged.dispatch();
+    expect(host.userLayers.get(LABELS)!.attached.size).toBe(0);
     expect(host.created).toHaveLength(1);
   });
 });

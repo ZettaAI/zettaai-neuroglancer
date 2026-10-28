@@ -11,9 +11,9 @@
 /**
  * Live 3D painted-volume preview e2e (TM-490, plan §9.2).
  *
- * One `xy-3d` page walks the preview through its life: toggle on, stroke,
- * undo, select a segment, erase part of it, deselect, slices shown, toggle
- * off, session closed. Each step compares the 3D panel's pixels before and
+ * One `xy-3d` page walks the preview through its life: region filled on
+ * session open, stroke, undo, select a segment, erase part of it, deselect,
+ * slices shown, session closed. Each step compares the 3D panel's pixels before and
  * after, so what is asserted is what a tracer sees.
  *
  * The scene is chosen so that pixels mean one thing:
@@ -162,20 +162,13 @@ test.describe("live 3D painted-volume preview", () => {
     await fakeGcs?.[Symbol.asyncDispose]?.();
   });
 
-  let previewOff: PanelPixels;
   let previewOn: PanelPixels;
-  let afterStroke: PanelPixels;
 
   test("1. a stroke in xy shows up in the 3D panel", async () => {
     test.skip(setupError !== undefined, setupError);
-    previewOff = await panelPixels(page, "3d");
-    await clickToggle(page);
+    // The preview is on for every session: it fills the region on open.
     await waitForRegionFilled(page);
     previewOn = await panelPixels(page, "3d");
-    expect(
-      changedPixels(previewOff, previewOn),
-      "only the brush segment is selected, and it is not in the fixture",
-    ).toBeLessThanOrEqual(SAME_PICTURE_PIXELS);
 
     // The session opens on the cursor tool, where a drag pans the view.
     await selectTool(page, "painting.brush");
@@ -189,7 +182,6 @@ test.describe("live 3D painted-volume preview", () => {
         },
       )
       .toBeGreaterThan(STROKE_PIXELS);
-    afterStroke = await panelPixels(page, "3d");
     await shoot(page, "1-stroke");
   });
 
@@ -257,7 +249,7 @@ test.describe("live 3D painted-volume preview", () => {
       .toBeLessThanOrEqual(SAME_PICTURE_PIXELS);
   });
 
-  test("8. a slice plane through the stroke (behaviour recorded, Q18)", async () => {
+  test("6. a slice plane through the stroke (behaviour recorded, Q18)", async () => {
     test.skip(setupError !== undefined, setupError);
     await strokeAtVoxel(page, regionCenter());
     await expect
@@ -268,33 +260,14 @@ test.describe("live 3D painted-volume preview", () => {
         },
       )
       .toBeGreaterThan(STROKE_PIXELS);
-    afterStroke = await panelPixels(page, "3d");
     await setSlicesShown(page, true);
     await nextFrames(page);
-    await shoot(page, "8-slice-through-stroke");
+    await shoot(page, "6-slice-through-stroke");
     await setSlicesShown(page, false);
   });
 
-  test("6. turning the toggle off takes the preview away", async () => {
+  test("7. closing and discarding the session leaves no GL errors", async () => {
     test.skip(setupError !== undefined, setupError);
-    await clickToggle(page);
-    await expect
-      .poll(
-        async () => changedPixels(previewOff, await panelPixels(page, "3d")),
-        {
-          timeout: SETTLE_TIMEOUT_MS,
-        },
-      )
-      .toBeLessThanOrEqual(SAME_PICTURE_PIXELS);
-    expect(changedPixels(afterStroke, previewOff)).toBeGreaterThan(
-      STROKE_PIXELS,
-    );
-  });
-
-  test("7. opening, closing and discarding leaves no GL errors", async () => {
-    test.skip(setupError !== undefined, setupError);
-    await clickToggle(page);
-    await waitForRegionFilled(page);
     await page.evaluate(async () => {
       await (globalThis as any).viewer.editSessionHost.discardActive();
     });
@@ -311,16 +284,6 @@ test.describe("live 3D painted-volume preview", () => {
 
 function regionCenter(): readonly [number, number] {
   return [REGION_LO[0] + REGION_SIZE[0] / 2, REGION_LO[1] + REGION_SIZE[1] / 2];
-}
-
-function toggleButton(page: Page) {
-  return page.getByRole("button", { name: "Show painted voxels in 3D" });
-}
-
-/** Click the toggle, then move off it so its tooltip leaves the 3D panel. */
-async function clickToggle(page: Page): Promise<void> {
-  await toggleButton(page).click();
-  await page.mouse.move(0, 0);
 }
 
 /** `xy-3d` lays the panels out in a row: xy on the left, 3D on the right. */

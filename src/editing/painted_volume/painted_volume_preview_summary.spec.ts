@@ -31,21 +31,15 @@ function live(
 }
 
 describe("summarizePaintedVolumePreviews", () => {
-  it("is off while the toggle is off, whatever previews linger", () => {
-    expect(summarizePaintedVolumePreviews(false, [live(1, 4)])).toEqual({
-      kind: "off",
-    });
-  });
-
-  it("waits while enabled with nothing built yet", () => {
-    expect(summarizePaintedVolumePreviews(true, [])).toEqual({
+  it("waits with nothing built yet", () => {
+    expect(summarizePaintedVolumePreviews([])).toEqual({
       kind: "waiting",
     });
   });
 
   it("passes one live preview through", () => {
     expect(
-      summarizePaintedVolumePreviews(true, [
+      summarizePaintedVolumePreviews([
         live(2, 8, { textureBytes: 4096, factor: [2, 2, 1] }),
       ]),
     ).toEqual({
@@ -58,7 +52,7 @@ describe("summarizePaintedVolumePreviews", () => {
 
   it("sums fill and texture bytes across layers and keeps the coarsest factor per axis", () => {
     expect(
-      summarizePaintedVolumePreviews(true, [
+      summarizePaintedVolumePreviews([
         live(1, 4, { failed: 1, textureBytes: 100, factor: [2, 1, 1] }),
         live(3, 6, { textureBytes: 50, factor: [1, 4, 1] }),
       ]),
@@ -72,7 +66,7 @@ describe("summarizePaintedVolumePreviews", () => {
 
   it("reports the first unavailable preview over any live one", () => {
     expect(
-      summarizePaintedVolumePreviews(true, [
+      summarizePaintedVolumePreviews([
         live(1, 1),
         { kind: "unavailable", reason: "texture-allocation-failed" },
         { kind: "unavailable", reason: "region-too-large" },
