@@ -13,6 +13,8 @@ import { CalcadaAnnotationTablesPanel } from "#src/datasource/calcada/annotation
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { Tab } from "#src/widget/tab_view.js";
 
+export const ANNOTATION_TABLES_TAB_LABEL = "Tables";
+
 export class CalcadaAnnotationTablesTab extends Tab {
   constructor(connection: AnnotationTablesPanelConnection) {
     super();

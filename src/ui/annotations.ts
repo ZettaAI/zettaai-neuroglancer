@@ -225,7 +225,7 @@ function setLayerPosition(
   layer.setLayerPosition(chunkTransform.modelTransform, layerPosition);
 }
 
-const moveToAnnotation = (
+export const moveToAnnotation = (
   layer: UserLayer,
   annotation: Annotation,
   state: AnnotationLayerState,

@@ -28,6 +28,7 @@ const TABLE: AnnotationTableInfo = {
   description: "",
   voxelResolution: [4, 4, 40],
   points: ["pre", "post"],
+  properties: {},
 };
 
 const toLayer = (nm: [number, number, number]) =>
@@ -50,15 +51,18 @@ const response = (
   annotations: SegmentAnnotation[],
 ): SegmentAnnotations => ({
   rootId,
-  tables: new Map([["syn", { annotations, truncated: false }]]),
+  tables: new Map([["syn", { annotations }]]),
 });
 
-const render = (...responses: SegmentAnnotations[]) =>
+const renderRows = (...responses: SegmentAnnotations[]) =>
   toLayerAnnotations(
     new Map(responses.map((r) => [r.rootId, r])),
     TABLE,
     toLayer,
   );
+
+const render = (...responses: SegmentAnnotations[]) =>
+  renderRows(...responses).flatMap(({ annotations }) => annotations);
 
 describe("toLayerAnnotations", () => {
   it("draws a one-point row as a point scaled by the table resolution", () => {
@@ -121,6 +125,19 @@ describe("toLayerAnnotations", () => {
     expect(annotations[0].relatedSegments).toEqual([
       BigUint64Array.of(10n, 20n),
     ]);
+  });
+
+  it("pairs each drawn row with the annotations it became", () => {
+    const shared = row(7n, [
+      point("pre", [0, 0, 0], 10n),
+      point("post", [1, 1, 1], 20n),
+    ]);
+    const rows = renderRows(
+      response(10n, [shared, row(8n, [])]),
+      response(20n, [shared]),
+    );
+    expect(rows.map(({ row: drawn }) => drawn.id)).toEqual([7n]);
+    expect(rows[0].annotations.map(({ id }) => id)).toEqual(["syn:7"]);
   });
 
   it("ignores roots that are not visible and falls back to the fetched root", () => {

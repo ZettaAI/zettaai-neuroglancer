@@ -1620,13 +1620,33 @@
   font-weight: 600;
 }
 
-.calcada-annotations-tables {
+.calcada-annotations-picker {
+  min-width: 0;
+}
+
+/* The chip input's intrinsic width is a browser default wider than the panel. */
+.calcada-annotations-picker input {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 3em;
+}
+
+.calcada-annotations-chip {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.calcada-annotations-tables,
+.calcada-annotations-rows {
   display: flex;
   flex-direction: column;
-  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.calcada-annotations-tables {
+  gap: 8px;
 }
 
 .calcada-annotations-table {
@@ -1636,16 +1656,14 @@
   min-width: 0;
 }
 
-.calcada-annotations-table-header {
+.calcada-annotations-table-header,
+.calcada-annotations-row-header,
+.calcada-annotations-pager {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-}
-
-.calcada-annotations-table-header input {
-  flex: 0 0 auto;
-  width: auto;
-  margin: 0;
+  min-width: 0;
 }
 
 .calcada-annotations-swatch {
@@ -1657,28 +1675,97 @@
 }
 
 .calcada-annotations-table-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.calcada-annotations-table-schema,
-.calcada-annotations-table-description {
-  padding-left: 22px;
+.calcada-annotations-table-schema {
+  margin-left: auto;
   opacity: 0.7;
+}
+
+.calcada-annotations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-annotations-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.calcada-annotations-row:hover {
+  background: rgb(255 255 255 / 8%);
+}
+
+.calcada-annotations-row-id,
+.calcada-annotations-row-position {
+  font-family: monospace;
   overflow-wrap: anywhere;
 }
 
-.calcada-annotations-table-count {
-  padding-left: 22px;
+.calcada-annotations-row-position {
+  padding-left: 16px;
+  opacity: 0.8;
 }
 
 .calcada-annotations-error {
-  padding-left: 22px;
   color: rgb(240 90 90);
   overflow-wrap: anywhere;
 }
 
 .calcada-annotations-empty {
   opacity: 0.7;
+}
+
+.calcada-annotations-filtered {
+  opacity: 0.7;
+}
+
+.calcada-annotations-filter {
+  width: 22rem;
+  max-width: calc(100vw - 16px);
+  font-size: 12px;
+}
+
+.calcada-annotations-filter-editor,
+.calcada-annotations-filter-rows,
+.calcada-annotations-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.calcada-annotations-filter-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.calcada-annotations-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-annotations-filter-value {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 4em;
 }

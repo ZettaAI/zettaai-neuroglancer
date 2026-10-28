@@ -8,7 +8,11 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import type { Annotation } from "#src/annotation/index.js";
+import type {
+  Annotation,
+  AnnotationReference,
+  AnnotationSource,
+} from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 import type {
   AnnotationTableInfo,
@@ -67,18 +71,24 @@ function relatedRoots(
     : BigUint64Array.from(roots);
 }
 
+export interface LayerRow {
+  row: SegmentAnnotation;
+  annotations: Annotation[];
+}
+
+/** Each row once across roots, with the layer annotations it is drawn as. */
 export function toLayerAnnotations(
   byRoot: Map<bigint, SegmentAnnotations>,
   table: AnnotationTableInfo,
   toLayer: ToLayer,
-): Annotation[] {
+): LayerRow[] {
   const place = ({ position }: SegmentAnnotationPoint) =>
     toLayer([
       position[0] * table.voxelResolution[0],
       position[1] * table.voxelResolution[1],
       position[2] * table.voxelResolution[2],
     ]);
-  const annotations: Annotation[] = [];
+  const layerRows: LayerRow[] = [];
   for (const pending of dedupeRows(byRoot, table.name).values()) {
     const { row } = pending;
     if (row.points.length === 0) continue;
@@ -87,31 +97,75 @@ export function toLayerAnnotations(
       properties: [row.value],
     };
     const id = `${table.name}:${row.id}`;
+    let annotations: Annotation[];
     if (row.points.length === LINE_POINT_COUNT) {
-      annotations.push({
-        ...common,
-        id,
-        type: AnnotationType.LINE,
-        pointA: place(row.points[0]),
-        pointB: place(row.points[1]),
-      });
-    } else if (row.points.length === SINGLE_POINT_COUNT) {
-      annotations.push({
-        ...common,
-        id,
-        type: AnnotationType.POINT,
-        point: place(row.points[0]),
-      });
-    } else {
-      row.points.forEach((point, index) =>
-        annotations.push({
+      annotations = [
+        {
           ...common,
-          id: `${id}:${index}`,
+          id,
+          type: AnnotationType.LINE,
+          pointA: place(row.points[0]),
+          pointB: place(row.points[1]),
+        },
+      ];
+    } else if (row.points.length === SINGLE_POINT_COUNT) {
+      annotations = [
+        {
+          ...common,
+          id,
           type: AnnotationType.POINT,
-          point: place(point),
-        }),
-      );
+          point: place(row.points[0]),
+        },
+      ];
+    } else {
+      annotations = row.points.map((point, index) => ({
+        ...common,
+        id: `${id}:${index}`,
+        type: AnnotationType.POINT,
+        point: place(point),
+      }));
+    }
+    layerRows.push({ row, annotations });
+  }
+  return layerRows;
+}
+
+function withReference(
+  source: AnnotationSource,
+  id: string,
+  use: (reference: AnnotationReference) => void,
+) {
+  const reference = source.getReference(id);
+  try {
+    use(reference);
+  } finally {
+    reference.dispose();
+  }
+}
+
+/**
+ * Makes the source hold exactly these annotations through per-annotation
+ * add, update and delete, which NG's own annotation list follows; `clear()`
+ * announces nothing it could follow.
+ */
+export function syncAnnotationSource(
+  source: AnnotationSource,
+  annotations: readonly Annotation[],
+) {
+  const wanted = new Map(
+    annotations.map((annotation) => [annotation.id, annotation]),
+  );
+  for (const { id } of [...source]) {
+    const annotation = wanted.get(id);
+    withReference(source, id, (reference) =>
+      annotation === undefined
+        ? source.delete(reference)
+        : source.update(reference, annotation),
+    );
+  }
+  for (const annotation of annotations) {
+    if (source.get(annotation.id) === undefined) {
+      source.add(annotation, true).dispose();
     }
   }
-  return annotations;
 }

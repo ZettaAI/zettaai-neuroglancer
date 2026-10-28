@@ -41,7 +41,10 @@ import { WithParameters } from "#src/chunk_manager/frontend.js";
 import { makeIdentityTransform } from "#src/coordinate_transform.js";
 import { CalcadaAnnotationTablesSession } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
-import { CalcadaAnnotationTablesTab } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
+import {
+  ANNOTATION_TABLES_TAB_LABEL,
+  CalcadaAnnotationTablesTab,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
 import type {
   ChunkedGraphChunkSource as ChunkedGraphChunkSourceInterface,
   ChunkedGraphChunkSpecification,
@@ -315,6 +318,7 @@ import {
   AnnotationLayerView,
   makeAnnotationListElement,
   MergedAnnotationStates,
+  moveToAnnotation,
   PlaceLineTool,
 } from "#src/ui/annotations.js";
 import { getDefaultAnnotationListBindings } from "#src/ui/default_input_event_bindings.js";
@@ -5291,7 +5295,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       getter: () => new CalcadaTraceTab(this),
     });
     layer.tabs.add(CALCADA_ANNOTATIONS_TAB_ID, {
-      label: "Annotations",
+      label: ANNOTATION_TABLES_TAB_LABEL,
       order: -18,
       getter: () => new CalcadaAnnotationTablesTab(this),
     });
@@ -5818,6 +5822,11 @@ void main() {
               color,
               properties,
             ),
+          moveToAnnotation: (annotationState, annotation) => {
+            layer.selectAnnotation(annotationState, annotation.id, true);
+            moveToAnnotation(layer, annotation, annotationState);
+          },
+          scheduleFrame: (callback) => requestAnimationFrame(callback),
         },
         state.annotationTables,
       ),
