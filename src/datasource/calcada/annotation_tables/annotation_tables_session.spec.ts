@@ -1431,6 +1431,29 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(drawnIds("syn")).toEqual([10n, 20n, 30n]);
   });
 
+  it("redraws what arrived once the last missing root counts zero", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) => (root === 10n ? [row(root, root)] : []),
+    });
+    graph.hold = (read, scope) =>
+      (read === "points" && scope === 10n) ||
+      (read === "count" && scope === 20n);
+    const { drawnIds, visibleSegments } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    visibleSegments.add(20n);
+    await settle();
+    const [points, count] = graph.held;
+    points();
+    await settle();
+    expect(drawnIds("syn")).toEqual([]);
+    count();
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n]);
+  });
+
   it("redraws what arrived once the last missing root fails", async () => {
     const graph = fakeGraph(["syn"]);
     graph.hold = (read) => read === "points";

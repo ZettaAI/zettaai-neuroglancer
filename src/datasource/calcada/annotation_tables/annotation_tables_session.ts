@@ -1034,10 +1034,10 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
             coords,
           ),
         (query) => fetchTableCount(fetchOkImpl, baseUrl, query, coords),
-      ).then(
-        (counts) => (tables) =>
-          acceptAnnotationCounts(this.cache, { key, tables }, counts),
-      );
+      ).then((counts) => (tables) => {
+        acceptAnnotationCounts(this.cache, { key, tables }, counts);
+        this.invalidateSettled(tables);
+      });
     }
     return readScope(
       root,
