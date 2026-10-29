@@ -45,6 +45,7 @@ import {
   ANNOTATION_TABLES_TAB_LABEL,
   CalcadaAnnotationTablesTab,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
+import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import type {
   ChunkedGraphChunkSource as ChunkedGraphChunkSourceInterface,
   ChunkedGraphChunkSpecification,
@@ -316,10 +317,14 @@ import {
 } from "#src/trackable_value.js";
 import {
   AnnotationLayerView,
+  annotationListDimensions,
+  annotationListGridTemplate,
   makeAnnotationListElement,
   MergedAnnotationStates,
   moveToAnnotation,
   PlaceLineTool,
+  renderAnnotationListHeader,
+  selectedListAnnotation,
 } from "#src/ui/annotations.js";
 import { getDefaultAnnotationListBindings } from "#src/ui/default_input_event_bindings.js";
 import { SidePanelManager } from "#src/ui/side_panel.js";
@@ -1188,6 +1193,8 @@ function getGraphLoadedSubsource(layer: SegmentationUserLayer) {
   return undefined;
 }
 
+const ASSOCIATED_SEGMENTS_RELATIONSHIP = "associated segments";
+
 function makeColoredAnnotationState(
   layer: SegmentationUserLayer,
   loadedSubsource: LoadedDataSubsource,
@@ -1195,20 +1202,54 @@ function makeColoredAnnotationState(
   color: vec3,
   properties: AnnotationPropertySpec[] = [],
 ) {
-  const { subsourceEntry } = loadedSubsource;
-  const source = new LocalAnnotationSource(
-    loadedSubsource.loadedDataSource.transform,
-    new WatchableValue(properties),
-    ["associated segments"],
+  return makeAnnotationStateForSource(
+    layer,
+    loadedSubsource,
+    subsubsourceId,
+    color,
+    new LocalAnnotationSource(
+      loadedSubsource.loadedDataSource.transform,
+      new WatchableValue(properties),
+      [ASSOCIATED_SEGMENTS_RELATIONSHIP],
+    ),
   );
+}
 
+/** The entry, and its column widths, that `AnnotationLayerView` would show. */
+function makeTableListElement(
+  layer: SegmentationUserLayer,
+  state: AnnotationLayerState,
+  annotation: Annotation,
+) {
+  const { globalDimensionIndices, localDimensionIndices } =
+    annotationListDimensions(layer, [state]);
+  return makeAnnotationListElement(
+    layer,
+    annotation,
+    state,
+    annotationListGridTemplate(
+      globalDimensionIndices.length + localDimensionIndices.length,
+    ),
+    globalDimensionIndices,
+    localDimensionIndices,
+  );
+}
+
+function makeAnnotationStateForSource(
+  layer: SegmentationUserLayer,
+  loadedSubsource: LoadedDataSubsource,
+  subsubsourceId: string,
+  color: vec3,
+  source: LocalAnnotationSource,
+) {
+  const { subsourceEntry } = loadedSubsource;
   const displayState = new AnnotationDisplayState();
   displayState.color.value.set(color);
   // prop_<name>() resolves against this list, not the one the source carries;
   // unset, any shader naming a property fails to parse and falls back to plain.
-  displayState.annotationProperties.value = properties;
+  displayState.annotationProperties.value = source.properties.value;
 
-  displayState.relationshipStates.set("associated segments", {
+  displayState.relationshipStates.set(ASSOCIATED_SEGMENTS_RELATIONSHIP, {
     segmentationState: new WatchableValue(layer.displayState),
     showMatches: new TrackableBoolean(false),
   });
@@ -1290,6 +1331,8 @@ const CALCADA_OVERVIEW_JSON_KEY = "candidateOverview";
 const PROOFREAD_SEGMENT_JSON_KEY = "proofreadSegment";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
 const ANNOTATION_TABLES_JSON_KEY = "annotationTables";
+const ANNOTATION_TABLES_EXCLUDED_SEGMENTS_JSON_KEY =
+  "annotationTablesExcludedSegments";
 
 // Debugging more than a handful of segments at once is N whole-segment queries,
 // each up to ~10K pieces. The cap keeps an accidental "select everything" from
@@ -1690,6 +1733,8 @@ class CalcadaState extends RefCounted implements Trackable {
       [PROOFREAD_SEGMENT_JSON_KEY]: this.proofreadSegment.toJSON(),
       [CALCADA_BRANCH_JSON_KEY]: this.branchId.toJSON(),
       [ANNOTATION_TABLES_JSON_KEY]: this.annotationTables.toJSON(),
+      [ANNOTATION_TABLES_EXCLUDED_SEGMENTS_JSON_KEY]:
+        this.annotationTables.excludedSegmentsToJSON(),
     };
   }
 
@@ -1724,6 +1769,11 @@ class CalcadaState extends RefCounted implements Trackable {
     verifyOptionalObjectProperty(x, ANNOTATION_TABLES_JSON_KEY, (value) => {
       this.annotationTables.restoreState(value);
     });
+    verifyOptionalObjectProperty(
+      x,
+      ANNOTATION_TABLES_EXCLUDED_SEGMENTS_JSON_KEY,
+      (value) => this.annotationTables.restoreExcludedSegments(value),
+    );
   }
 }
 
@@ -5801,6 +5851,27 @@ void main() {
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
     );
+    const listCoordinatesChanged = new NullarySignal();
+    for (const coordinateSpace of [
+      layer.manager.root.coordinateSpace,
+      layer.localCoordinateSpace,
+    ]) {
+      this.registerDisposer(
+        coordinateSpace.changed.add(listCoordinatesChanged.dispatch),
+      );
+    }
+    const { selectionState } = layer.manager.root;
+    const selectedTableAnnotation = this.registerDisposer(
+      makeCachedLazyDerivedWatchableValue(
+        (selection) =>
+          selectedListAnnotation(
+            layer,
+            layer.annotationStates.states,
+            selection,
+          ),
+        selectionState,
+      ),
+    );
     this.annotationTablesSession = this.registerDisposer(
       new CalcadaAnnotationTablesSession(
         {
@@ -5814,23 +5885,52 @@ void main() {
               nanometres,
               loadedSubsource.loadedDataSource.transform.value.inputSpace,
             ),
-          makeAnnotationState: (subsubsourceId, color, properties) =>
-            makeColoredAnnotationState(
-              layer,
-              loadedSubsource,
-              subsubsourceId,
-              color,
-              properties,
-            ),
+          makeAnnotationState: (subsubsourceId, color, properties, options) => {
+            const source = new CalcadaTableAnnotationSource(
+              loadedSubsource.loadedDataSource.transform,
+              new WatchableValue(properties),
+              [ASSOCIATED_SEGMENTS_RELATIONSHIP],
+              options,
+            );
+            return {
+              source,
+              layerState: makeAnnotationStateForSource(
+                layer,
+                loadedSubsource,
+                subsubsourceId,
+                color,
+                source,
+              ),
+            };
+          },
           selectAnnotation: (annotationState, annotation) =>
             layer.selectAnnotation(annotationState, annotation.id, true),
           moveToAnnotation: (annotationState, annotation) =>
             moveToAnnotation(layer, annotation, annotationState),
+          makeListElement: (annotationState, annotation) =>
+            makeTableListElement(layer, annotationState, annotation),
+          renderListHeader: (annotationState, header, columnWidths) =>
+            renderAnnotationListHeader(
+              header,
+              layer,
+              annotationListDimensions(layer, [annotationState]),
+              columnWidths,
+            ),
+          selectedAnnotation: selectedTableAnnotation,
+          listCoordinatesChanged,
+          clearHover: () => {
+            layer.annotationDisplayState.hoverState.value = undefined;
+          },
           scheduleFrame: (callback) => requestAnimationFrame(callback),
         },
         state.annotationTables,
       ),
     );
+    layer.displayState.annotationExcludedSegments.value =
+      state.annotationTables.excludedSegments;
+    this.registerDisposer(() => {
+      layer.displayState.annotationExcludedSegments.value = undefined;
+    });
     this.pointPlacement = this.registerDisposer(
       new PointPlacement(layer.manager.root.display, viewerPanelKind),
     );

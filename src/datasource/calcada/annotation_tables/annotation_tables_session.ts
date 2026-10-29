@@ -13,46 +13,60 @@ import type { AnnotationLayerState } from "#src/annotation/annotation_layer_stat
 import type {
   Annotation,
   AnnotationPropertySpec,
-  AnnotationSource,
 } from "#src/annotation/index.js";
+import type {
+  FetchedTablePoints,
+  LayerRow,
+} from "#src/datasource/calcada/annotation_tables/annotation_render.js";
 import {
-  FIRST_PAGE,
-  PageWindows,
-} from "#src/datasource/calcada/annotation_tables/annotation_page_windows.js";
-import type { LayerRow } from "#src/datasource/calcada/annotation_tables/annotation_render.js";
-import {
+  COORDINATES_PER_POSITION,
+  annotationRowId,
   colorForTable,
-  syncAnnotationSource,
   toLayerAnnotations,
 } from "#src/datasource/calcada/annotation_tables/annotation_render.js";
 import type {
-  AnnotationTableFilter,
+  AnnotationReadCoordinates,
   AnnotationTableInfo,
+  AnnotationTableQuery,
   SchemaCache,
   SegmentAnnotation,
-  SegmentAnnotations,
+  TablePoints,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
   MAX_TABLES_PER_SEGMENT_REQUEST,
-  fetchSegmentAnnotations,
+  deleteAnnotationRows,
+  fetchAnnotationRows,
+  fetchSegmentCounts,
+  fetchSegmentPoints,
+  fetchTableCount,
+  fetchTablePoints,
   listAnnotationTables,
   retryOnceIfUnauthorized,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import type { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
+import type {
+  CalcadaTableAnnotationSource,
+  TableAnnotationSourceOptions,
+} from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import type { HttpSource } from "#src/datasource/calcada/base.js";
 import { hasExplicitTimestamp } from "#src/datasource/calcada/graph_coordinates.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import type {
+  AnnotationListColumnWidths,
+  SelectedListAnnotation,
+} from "#src/ui/annotations.js";
 import type { Uint64Set } from "#src/uint64_set.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
 import type { ReadonlySignal } from "#src/util/signal.js";
+import { Signal } from "#src/util/signal.js";
 
 export const MAX_ANNOTATION_ROOTS = 50;
-/** Drawn per table per root, and sent as the page `limit`. */
-export const ANNOTATIONS_PER_PAGE = 1000;
+/** Rows summed over every selected table and every scope it is read in. */
+export const MAX_DRAWN_ANNOTATIONS = 1_000_000;
 export const MAX_ANNOTATION_REQUESTS_IN_FLIGHT = 4;
 export const ANNOTATION_TABLE_SUBSUBSOURCE_PREFIX = "calcadaAnnotationTable:";
 
@@ -67,39 +81,58 @@ const VALUE_PROPERTY: AnnotationPropertySpec = {
   default: 0,
 };
 
-export interface GraphCoordinates {
-  branchId: number;
-  timestamp: number;
+const THOUSANDS_GROUP = /\B(?=(\d{3})+$)/g;
+
+const EMPTY_TABLE_POINTS: TablePoints = Object.freeze({
+  ids: [],
+  values: new Float64Array(),
+  roots: [],
+  points: [],
+});
+
+export type AnnotationFetchPhase = "count" | "points";
+
+/** What one cache entry is read for: a root's segment tables, or one whole table. */
+export interface AnnotationScope {
+  key: string;
+  /** Absent for a whole-table read. */
+  root: bigint | undefined;
+  tables: readonly string[];
 }
 
 export interface AnnotationFetchRequest {
   key: string;
-  root: bigint;
+  root: bigint | undefined;
   tables: string[];
+  phase: AnnotationFetchPhase;
 }
 
-export interface AnnotationFetchPlan {
-  requests: AnnotationFetchRequest[];
-  prune: string[];
+export interface AnnotationScopeEntry {
+  counts: Map<string, number>;
+  points: Map<string, TablePoints>;
+}
+
+export interface AnnotationTotals {
+  /** Every count is known or has failed. */
+  complete: boolean;
+  total: number;
+  byTable: Map<string, number>;
 }
 
 export interface AnnotationTableStatus {
   table: string;
   annotations: number;
   fetchedRoots: number;
-  /** 1-based: the deepest page any of the table's roots is on. */
-  page: number;
-  hasNext: boolean;
-  hasPrevious: boolean;
   error?: string;
   note?: string;
 }
 
 export interface DrawnAnnotation {
   table: string;
-  annotation: SegmentAnnotation;
   /** The id of its (first) annotation in the table's annotation state. */
   layerId: string;
+  id: bigint;
+  value: number;
 }
 
 export interface AnnotationFetchFailure {
@@ -109,11 +142,37 @@ export interface AnnotationFetchFailure {
   message: string;
 }
 
+export interface TableAnnotationState {
+  layerState: AnnotationLayerState;
+  source: CalcadaTableAnnotationSource;
+}
+
+interface SelectedDetails {
+  table: string;
+  layerId: string;
+  description: string;
+}
+
+export function formatCount(count: number): string {
+  return String(count).replace(THOUSANDS_GROUP, " ");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function annotationCacheKey(
-  { branchId, timestamp }: GraphCoordinates,
+  { branchId, timestamp }: AnnotationReadCoordinates,
   root: bigint,
 ): string {
   return `${branchId}|${timestamp}|${root}`;
+}
+
+export function wholeTableCacheKey(
+  { branchId, timestamp }: AnnotationReadCoordinates,
+  table: string,
+): string {
+  return `${branchId}|${timestamp}|table:${table}`;
 }
 
 function compareIds(a: bigint, b: bigint): number {
@@ -137,8 +196,8 @@ export function visibleAnnotationRoots(
 }
 
 /**
- * Per table, the message of each root whose fetch failed: one root's later
- * success must not hide another root's failure.
+ * Per table, the message of each scope whose fetch failed: one scope's later
+ * success must not hide another scope's failure.
  */
 export class RootFailures {
   private readonly byTable = new Map<string, Map<string, string>>();
@@ -147,6 +206,10 @@ export class RootFailures {
     const failures = this.byTable.get(table) ?? new Map<string, string>();
     failures.set(key, message);
     this.byTable.set(table, failures);
+  }
+
+  has(table: string, key: string): boolean {
+    return this.byTable.get(table)?.has(key) ?? false;
   }
 
   clear(table: string, key: string) {
@@ -176,51 +239,194 @@ export function visibleRootsNote(visibleCount: number): string | undefined {
     : undefined;
 }
 
-export function planAnnotationFetches(input: {
+export function annotationScopes(input: {
   visibleRoots: Iterable<bigint>;
-  ticked: readonly string[];
-  coords: GraphCoordinates;
-  cache: ReadonlyMap<string, SegmentAnnotations>;
-  pending: ReadonlyMap<string, ReadonlyMap<string, number>>;
-  freeSlots: number;
-}): AnnotationFetchPlan {
-  const { ticked, coords, cache, pending, freeSlots } = input;
-  const roots = visibleAnnotationRoots(input.visibleRoots, (root) => {
-    const key = annotationCacheKey(coords, root);
-    return cache.has(key) || pending.has(key);
-  });
-  const wanted = new Set(roots.map((root) => annotationCacheKey(coords, root)));
-  const prune = [...new Set([...cache.keys(), ...pending.keys()])].filter(
-    (key) => !wanted.has(key),
+  segmentTables: readonly string[];
+  wholeTables: readonly string[];
+  coords: AnnotationReadCoordinates;
+  isHeld: (key: string) => boolean;
+}): AnnotationScope[] {
+  const { segmentTables, wholeTables, coords, isHeld } = input;
+  const roots = visibleAnnotationRoots(input.visibleRoots, (root) =>
+    isHeld(annotationCacheKey(coords, root)),
   );
-  const requests: AnnotationFetchRequest[] = [];
-  for (const root of roots) {
-    const key = annotationCacheKey(coords, root);
-    const tables = ticked.filter(
-      (table) =>
-        !cache.get(key)?.tables.has(table) && !pending.get(key)?.has(table),
-    );
-    for (const group of chunk(tables, MAX_TABLES_PER_SEGMENT_REQUEST)) {
-      if (requests.length >= freeSlots) return { requests, prune };
-      requests.push({ key, root, tables: group });
-    }
-  }
-  return { requests, prune };
+  return [
+    ...roots.map((root) => ({
+      key: annotationCacheKey(coords, root),
+      root,
+      tables: segmentTables,
+    })),
+    ...wholeTables.map((table) => ({
+      key: wholeTableCacheKey(coords, table),
+      root: undefined,
+      tables: [table],
+    })),
+  ];
 }
 
-export function acceptAnnotationResponse(
-  cache: Map<string, SegmentAnnotations>,
-  request: AnnotationFetchRequest,
-  response: SegmentAnnotations,
-) {
-  const stored = cache.get(request.key) ?? {
-    rootId: response.rootId,
-    tables: new Map(),
-  };
-  for (const table of request.tables) {
-    stored.tables.set(table, response.tables.get(table) ?? { annotations: [] });
+export function prunedAnnotationKeys(
+  scopes: readonly AnnotationScope[],
+  cache: ReadonlyMap<string, AnnotationScopeEntry>,
+  pending: ReadonlyMap<string, ReadonlyMap<string, number>>,
+): string[] {
+  const wanted = new Set(scopes.map(({ key }) => key));
+  return [...new Set([...cache.keys(), ...pending.keys()])].filter(
+    (key) => !wanted.has(key),
+  );
+}
+
+/** Counts summed per table in `tables` order; a failed count adds nothing. */
+export function annotationTotals(
+  scopes: readonly AnnotationScope[],
+  tables: readonly string[],
+  cache: ReadonlyMap<string, AnnotationScopeEntry>,
+  hasFailed: (table: string, key: string) => boolean,
+): AnnotationTotals {
+  let complete = true;
+  let total = 0;
+  const byTable = new Map<string, number>();
+  for (const table of tables) {
+    let tableTotal = 0;
+    for (const { key, tables: scopeTables } of scopes) {
+      if (!scopeTables.includes(table)) continue;
+      const count = cache.get(key)?.counts.get(table);
+      if (count === undefined) {
+        if (!hasFailed(table, key)) complete = false;
+        continue;
+      }
+      tableTotal += count;
+    }
+    byTable.set(table, tableTotal);
+    total += tableTotal;
   }
-  cache.set(request.key, stored);
+  return { complete, total, byTable };
+}
+
+export function annotationLimitNote({
+  total,
+  byTable,
+}: AnnotationTotals): string | undefined {
+  if (total <= MAX_DRAWN_ANNOTATIONS) return undefined;
+  const tables = [...byTable]
+    .filter(([, count]) => count > 0)
+    .map(([table, count]) => `${table}: ${formatCount(count)}`)
+    .join(", ");
+  return `More than ${formatCount(MAX_DRAWN_ANNOTATIONS)} annotations in the selected tables (${tables}). Add a filter or deselect a table.`;
+}
+
+/** Counts first; points only once `pointsAllowed`, for what is counted. */
+export function planAnnotationFetches(input: {
+  scopes: readonly AnnotationScope[];
+  cache: ReadonlyMap<string, AnnotationScopeEntry>;
+  pending: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  freeSlots: number;
+  pointsAllowed: boolean;
+}): AnnotationFetchRequest[] {
+  const { scopes, cache, pending, freeSlots, pointsAllowed } = input;
+  const requests: AnnotationFetchRequest[] = [];
+  const plan = (
+    phase: AnnotationFetchPhase,
+    lacks: (entry: AnnotationScopeEntry | undefined, table: string) => boolean,
+  ) => {
+    for (const { key, root, tables } of scopes) {
+      const entry = cache.get(key);
+      const wanted = tables.filter(
+        (table) => lacks(entry, table) && !pending.get(key)?.has(table),
+      );
+      for (const group of chunk(wanted, MAX_TABLES_PER_SEGMENT_REQUEST)) {
+        if (requests.length >= freeSlots) return;
+        requests.push({ key, root, tables: group, phase });
+      }
+    }
+  };
+  plan("count", (entry, table) => !entry?.counts.has(table));
+  if (pointsAllowed) {
+    plan(
+      "points",
+      (entry, table) =>
+        entry !== undefined &&
+        entry.counts.has(table) &&
+        !entry.points.has(table),
+    );
+  }
+  return requests;
+}
+
+function scopeEntry(
+  cache: Map<string, AnnotationScopeEntry>,
+  key: string,
+): AnnotationScopeEntry {
+  let entry = cache.get(key);
+  if (entry === undefined) {
+    entry = { counts: new Map(), points: new Map() };
+    cache.set(key, entry);
+  }
+  return entry;
+}
+
+/** A table the server left out counts zero; a zero count needs no points. */
+export function acceptAnnotationCounts(
+  cache: Map<string, AnnotationScopeEntry>,
+  { key, tables }: { key: string; tables: readonly string[] },
+  counts: ReadonlyMap<string, number>,
+) {
+  const entry = scopeEntry(cache, key);
+  for (const table of tables) {
+    const count = counts.get(table) ?? 0;
+    entry.counts.set(table, count);
+    if (count === 0) entry.points.set(table, EMPTY_TABLE_POINTS);
+  }
+}
+
+/** The rows received replace the count, so the limit is checked against them. */
+export function acceptAnnotationPoints(
+  cache: Map<string, AnnotationScopeEntry>,
+  { key, tables }: { key: string; tables: readonly string[] },
+  points: ReadonlyMap<string, TablePoints>,
+) {
+  const entry = scopeEntry(cache, key);
+  for (const table of tables) {
+    const received = points.get(table) ?? EMPTY_TABLE_POINTS;
+    entry.points.set(table, received);
+    entry.counts.set(table, received.ids.length);
+  }
+}
+
+export function withoutAnnotationRow(
+  points: TablePoints,
+  rowId: bigint,
+): TablePoints | undefined {
+  const index = points.ids.indexOf(rowId);
+  if (index === -1) return undefined;
+  const isKept = (_: unknown, rowIndex: number) => rowIndex !== index;
+  return {
+    ids: points.ids.filter(isKept),
+    values: points.values.filter(isKept),
+    roots: points.roots,
+    points: points.points.map(({ name, positions, rootIndex }) => ({
+      name,
+      positions: positions.filter(
+        (_, offset) => Math.floor(offset / COORDINATES_PER_POSITION) !== index,
+      ),
+      rootIndex: rootIndex.filter(isKept),
+    })),
+  };
+}
+
+/** Drops a deleted row from every scope of its table. */
+export function removeAnnotationRow(
+  cache: ReadonlyMap<string, AnnotationScopeEntry>,
+  table: string,
+  rowId: bigint,
+) {
+  for (const entry of cache.values()) {
+    const points = entry.points.get(table);
+    const remaining =
+      points === undefined ? undefined : withoutAnnotationRow(points, rowId);
+    if (remaining === undefined) continue;
+    entry.points.set(table, remaining);
+    entry.counts.set(table, remaining.ids.length);
+  }
 }
 
 /**
@@ -232,7 +438,7 @@ export function classifyAnnotationError(
   requested: readonly string[],
   explicitTimestamp: boolean,
 ): AnnotationFetchFailure {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   if (
     error instanceof AnnotationTableForbidden ||
     error instanceof AnnotationTableMissing
@@ -249,48 +455,66 @@ export function classifyAnnotationError(
   return { untick: [], absent: [], failed: [...requested], message };
 }
 
-export function cachedAnnotationsByRoot(
-  cache: ReadonlyMap<string, SegmentAnnotations>,
-  coords: GraphCoordinates,
-  visibleRoots: Iterable<bigint>,
-): Map<bigint, SegmentAnnotations> {
-  const byRoot = new Map<bigint, SegmentAnnotations>();
-  const isCached = (root: bigint) =>
-    cache.has(annotationCacheKey(coords, root));
-  for (const root of visibleAnnotationRoots(visibleRoots, isCached)) {
-    const cached = cache.get(annotationCacheKey(coords, root));
-    if (cached !== undefined) byRoot.set(root, cached);
-  }
-  return byRoot;
+/** Every scope of the table has its points or has failed. */
+export function tablePointsSettled(
+  table: string,
+  scopes: readonly AnnotationScope[],
+  cache: ReadonlyMap<string, AnnotationScopeEntry>,
+  hasFailed: (table: string, key: string) => boolean,
+): boolean {
+  return scopes.every(
+    ({ key, tables }) =>
+      !tables.includes(table) ||
+      cache.get(key)?.points.has(table) === true ||
+      hasFailed(table, key),
+  );
+}
+
+/** The scopes' fetched points of one table, as the renderer takes them. */
+export function fetchedTablePoints(
+  table: string,
+  scopes: readonly AnnotationScope[],
+  cache: ReadonlyMap<string, AnnotationScopeEntry>,
+): FetchedTablePoints[] {
+  return scopes.flatMap(({ key, root, tables }) => {
+    const points = tables.includes(table)
+      ? cache.get(key)?.points.get(table)
+      : undefined;
+    return points === undefined ? [] : [{ fetchedUnder: root, points }];
+  });
 }
 
 export function annotationTableStatus(input: {
   table: string;
-  byRoot: ReadonlyMap<bigint, SegmentAnnotations>;
+  fetched: readonly FetchedTablePoints[];
   annotations: number;
-  windows?: PageWindows;
   error?: string;
   note?: string;
 }): AnnotationTableStatus {
-  const { table, byRoot, annotations, windows, error, note } = input;
-  let fetchedRoots = 0;
-  let hasNext = false;
-  for (const response of byRoot.values()) {
-    const fetched = response.tables.get(table);
-    if (fetched === undefined) continue;
-    fetchedRoots++;
-    if (fetched.nextCursor !== undefined) hasNext = true;
-  }
+  const { table, fetched, annotations, error, note } = input;
   return {
     table,
     annotations,
-    fetchedRoots,
-    page: windows?.page ?? FIRST_PAGE,
-    hasNext,
-    hasPrevious: windows?.hasPrevious ?? false,
+    fetchedRoots: fetched.filter(
+      ({ fetchedUnder }) => fetchedUnder !== undefined,
+    ).length,
     ...(error === undefined ? {} : { error }),
     ...(note === undefined ? {} : { note }),
   };
+}
+
+/** The row's payload, one `<field>: <value>` line each, then its id. */
+export function describeAnnotationRow({
+  id,
+  payload,
+}: SegmentAnnotation): string {
+  return [
+    ...Object.entries(payload).map(
+      ([field, value]) =>
+        `${field}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+    ),
+    `id: ${id}`,
+  ].join("\n");
 }
 
 /**
@@ -318,6 +542,25 @@ export function assignColorSlots(
   return slots;
 }
 
+async function readScope<T>(
+  root: bigint | undefined,
+  queries: AnnotationTableQuery[],
+  readSegment: (
+    root: bigint,
+    queries: AnnotationTableQuery[],
+  ) => Promise<Map<string, T>>,
+  readTable: (query: AnnotationTableQuery) => Promise<T>,
+): Promise<Map<string, T>> {
+  if (root !== undefined) return readSegment(root, queries);
+  return new Map(
+    await Promise.all(
+      queries.map(
+        async (query) => [query.table.name, await readTable(query)] as const,
+      ),
+    ),
+  );
+}
+
 export interface AnnotationTablesConnection {
   readonly httpSource: HttpSource;
   readonly branchId: WatchableValueInterface<number>;
@@ -333,9 +576,27 @@ export interface AnnotationTablesConnection {
     subsubsourceId: string,
     color: vec3,
     properties: AnnotationPropertySpec[],
-  ): AnnotationLayerState;
+    options: TableAnnotationSourceOptions,
+  ): TableAnnotationState;
   selectAnnotation(state: AnnotationLayerState, annotation: Annotation): void;
   moveToAnnotation(state: AnnotationLayerState, annotation: Annotation): void;
+  /** NG's list entry for the annotation, and its column widths. */
+  makeListElement(
+    state: AnnotationLayerState,
+    annotation: Annotation,
+  ): [HTMLElement, number[]];
+  /** NG's list header row for the state's entries. */
+  renderListHeader(
+    state: AnnotationLayerState,
+    header: HTMLElement,
+    columnWidths: AnnotationListColumnWidths,
+  ): void;
+  readonly selectedAnnotation: WatchableValueInterface<
+    SelectedListAnnotation | undefined
+  >;
+  /** List entries show positions in these coordinates. */
+  readonly listCoordinatesChanged: ReadonlySignal<() => void>;
+  clearHover(): void;
   /** Runs the callback before the next frame is drawn. */
   scheduleFrame(callback: () => void): void;
 }
@@ -348,14 +609,25 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   readonly drawn = new WatchableValue<DrawnAnnotation[]>([]);
   readonly listError = new WatchableValue<string | undefined>(undefined);
   readonly rootsNote = new WatchableValue<string | undefined>(undefined);
+  /** Set while the selected tables hold more than MAX_DRAWN_ANNOTATIONS. */
+  readonly limitNote = new WatchableValue<string | undefined>(undefined);
+  /** The counts of the tables in view, whether drawn or not. */
+  readonly totals = new WatchableValue<AnnotationTotals>({
+    complete: true,
+    total: 0,
+    byTable: new Map(),
+  });
+  /** A drawn annotation's list entry changed in place. */
+  readonly annotationUpdated = new Signal<
+    (table: string, layerId: string) => void
+  >();
   private readonly schemas: SchemaCache = new Map();
-  private readonly cache = new Map<string, SegmentAnnotations>();
+  private readonly cache = new Map<string, AnnotationScopeEntry>();
   // Per cache key, the request each table was last asked in: in flight, or
   // failed and not to be retried until something changes. An answer counts
   // only for the tables still marked with its request.
   private readonly pending = new Map<string, Map<string, number>>();
-  private readonly windows = new Map<string, PageWindows>();
-  private readonly layerStates = new Map<string, AnnotationLayerState>();
+  private readonly layerStates = new Map<string, TableAnnotationState>();
   private readonly rendered = new Map<string, number>();
   private readonly drawnByTable = new Map<string, DrawnAnnotation[]>();
   // Redrawn together once per frame: a burst of answers rebuilds each table
@@ -368,11 +640,13 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   private readonly absent = new Set<string>();
   private colorSlots = new Map<string, number>();
   private shownTables: readonly string[] = [];
-  private shownFilters = new Map<string, AnnotationTableFilter | undefined>();
+  private shownQueries = new Map<string, unknown>();
+  private details: SelectedDetails | undefined;
+  private lastSelect = 0;
   private lastRequest = 0;
   private tablesToken = 0;
   private running = 0;
-  private coords: GraphCoordinates;
+  private coords: AnnotationReadCoordinates;
   private readonly refetch = this.registerCancellable(
     debounce(() => this.fetchVisible(), VISIBLE_SEGMENTS_DEBOUNCE_MS),
   );
@@ -418,72 +692,156 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       },
       (error: unknown) => {
         if (token !== this.tablesToken || this.wasDisposed) return;
-        this.listError.value = `Could not list annotation tables: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
+        this.listError.value = `Could not list annotation tables: ${errorMessage(
+          error,
+        )}`;
       },
     );
   }
 
-  /** Moves every root of the table that has more onto its next page. */
-  nextPage(table: string) {
-    const next = new Map<string, string>();
-    for (const [root, cached] of this.visibleCached()) {
-      const cursor = cached.tables.get(table)?.nextCursor;
-      if (cursor !== undefined) {
-        next.set(annotationCacheKey(this.coords, root), cursor);
-      }
-    }
-    if (next.size === 0) return;
-    this.windowsOf(table).advance(next);
-    this.turnPage(table, next.keys());
-  }
-
-  previousPage(table: string) {
-    const moved = this.windows.get(table)?.back() ?? [];
-    if (moved.length > 0) this.turnPage(table, moved);
-  }
-
+  /** Selects it and reads the row's payload into the annotation's description. */
   select(item: DrawnAnnotation) {
     const found = this.findDrawn(item);
     if (found === undefined) return;
     this.connection.selectAnnotation(found.layerState, found.annotation);
+    void this.readDetails(item);
   }
 
   moveTo(item: DrawnAnnotation) {
     const found = this.findDrawn(item);
     if (found === undefined) return;
-    this.connection.selectAnnotation(found.layerState, found.annotation);
+    this.select(item);
     this.connection.moveToAnnotation(found.layerState, found.annotation);
+  }
+
+  /** NG's own annotation list entry for it, and its column widths. */
+  makeListElement(item: DrawnAnnotation): [HTMLElement, number[]] | undefined {
+    const found = this.findDrawn(item);
+    if (found === undefined) return undefined;
+    return this.connection.makeListElement(found.layerState, found.annotation);
+  }
+
+  /** NG's list header for the item's entry; false once its table is unticked. */
+  renderListHeader(
+    item: DrawnAnnotation,
+    header: HTMLElement,
+    columnWidths: AnnotationListColumnWidths,
+  ): boolean {
+    const found = this.findDrawn(item);
+    if (found === undefined) return false;
+    this.connection.renderListHeader(found.layerState, header, columnWidths);
+    return true;
+  }
+
+  isSelected({ table, layerId }: DrawnAnnotation): boolean {
+    const selected = this.connection.selectedAnnotation.value;
+    return (
+      selected?.annotationId === layerId &&
+      selected.annotationLayerState === this.layerStates.get(table)?.layerState
+    );
+  }
+
+  get annotationSelectionChanged(): ReadonlySignal<() => void> {
+    return this.connection.selectedAnnotation.changed;
+  }
+
+  get listCoordinatesChanged(): ReadonlySignal<() => void> {
+    return this.connection.listCoordinatesChanged;
+  }
+
+  clearHover() {
+    this.connection.clearHover();
+  }
+
+  tableColor(name: string): vec3 {
+    return colorForTable(this.colorSlots.get(name) ?? 0);
   }
 
   private findDrawn({ table, layerId }: DrawnAnnotation) {
     if (!this.state.ticked.includes(table)) return undefined;
-    const layerState = this.layerStates.get(table);
-    const annotation = (
-      layerState?.source as AnnotationSource | undefined
-    )?.get(layerId);
-    if (layerState === undefined || annotation === undefined) return undefined;
-    return { layerState, annotation };
+    const tableState = this.layerStates.get(table);
+    const annotation = tableState?.source.get(layerId);
+    if (tableState === undefined || annotation === undefined) return undefined;
+    return { layerState: tableState.layerState, annotation };
   }
 
-  private windowsOf(table: string): PageWindows {
-    let windows = this.windows.get(table);
-    if (windows === undefined) {
-      windows = new PageWindows();
-      this.windows.set(table, windows);
+  private async readDetails({ table, layerId, id }: DrawnAnnotation) {
+    const info = this.tableInfo(table);
+    if (info === undefined) return;
+    const selectId = ++this.lastSelect;
+    const coords = this.coords;
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    let rows: SegmentAnnotation[];
+    try {
+      rows = await fetchAnnotationRows(
+        fetchOkImpl,
+        baseUrl,
+        info,
+        [id],
+        coords,
+        this.schemas,
+      );
+    } catch {
+      return;
     }
-    return windows;
+    const stale =
+      this.wasDisposed ||
+      selectId !== this.lastSelect ||
+      coords !== this.coords;
+    if (stale || rows.length === 0) return;
+    this.details = {
+      table,
+      layerId,
+      description: describeAnnotationRow(rows[0]),
+    };
+    this.showDetails(table);
   }
 
-  private turnPage(table: string, keys: Iterable<string>) {
-    for (const key of keys) {
-      this.cache.get(key)?.tables.delete(table);
-      this.pending.get(key)?.delete(table);
-      this.rootFailures.clear(table, key);
+  /** A redraw replaces the annotation objects; the selected one keeps its description. */
+  private showDetails(name: string) {
+    const { details } = this;
+    if (details?.table !== name) return;
+    this.layerStates
+      .get(name)
+      ?.source.setDescription(details.layerId, details.description);
+    this.annotationUpdated.dispatch(name, details.layerId);
+  }
+
+  private isReadonly(name: string): boolean {
+    return (
+      !(this.tableInfo(name)?.canWrite ?? false) ||
+      hasExplicitTimestamp(this.coords)
+    );
+  }
+
+  /**
+   * Server first; then the row leaves every cached scope of the table. Answers
+   * for the table still on their way may hold it, so they are retired and
+   * asked again.
+   */
+  private async deleteRow(name: string, annotation: Annotation) {
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    const rowId = annotationRowId(name, annotation.id);
+    try {
+      await deleteAnnotationRows(fetchOkImpl, baseUrl, name, [rowId]);
+    } catch (error) {
+      this.errors.set(name, errorMessage(error));
+      this.publishStatus();
+      throw error;
     }
-    this.invalidate([table]);
+    if (this.wasDisposed) return;
+    this.errors.delete(name);
+    removeAnnotationRow(this.cache, name, rowId);
+    this.retireInFlight(name);
+    this.invalidate([name]);
     this.fetchVisible();
+  }
+
+  /** A failed request keeps its mark: it is not retried until something changes. */
+  private retireInFlight(name: string) {
+    for (const [key, asked] of this.pending) {
+      if (!this.rootFailures.has(name, key)) asked.delete(name);
+    }
   }
 
   /** Only live: a table deleted since may still be there at the timestamp. */
@@ -498,7 +856,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (unlisted.length > 0) this.state.untick(...unlisted);
   }
 
-  private currentCoordinates(): GraphCoordinates {
+  private currentCoordinates(): AnnotationReadCoordinates {
     return {
       branchId: this.connection.branchId.value,
       timestamp: this.connection.timestamp.value ?? 0,
@@ -516,9 +874,9 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.coords = coords;
     this.cache.clear();
     this.pending.clear();
-    this.windows.clear();
     this.rootFailures.reset();
     this.absent.clear();
+    this.details = undefined;
     for (const table of this.state.ticked) this.errors.delete(table);
     this.invalidate(this.state.ticked);
     this.fetchVisible();
@@ -542,29 +900,37 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.cache.delete(key);
     this.pending.delete(key);
     this.rootFailures.dropRoot(key);
-    for (const windows of this.windows.values()) windows.forget(key);
   }
 
-  /** Back to nothing fetched for the table: no page, no request, no failure. */
+  /** Back to nothing fetched for the table, in any scope: no request, no failure. */
   private forgetTable(name: string) {
-    for (const cached of this.cache.values()) cached.tables.delete(name);
+    for (const entry of this.cache.values()) {
+      entry.counts.delete(name);
+      entry.points.delete(name);
+    }
     for (const asked of this.pending.values()) asked.delete(name);
-    this.windows.delete(name);
     this.rootFailures.dropTable(name);
+  }
+
+  private queryOf(name: string) {
+    return {
+      filter: this.state.filterOf(name),
+      wholeTable: this.state.wholeTableOf(name),
+    };
   }
 
   private selectionChanged() {
     const { ticked } = this.state;
     const unticked = this.shownTables.filter((name) => !ticked.includes(name));
     const added = ticked.filter((name) => !this.shownTables.includes(name));
-    const refiltered = ticked.filter(
+    const requeried = ticked.filter(
       (name) =>
         !added.includes(name) &&
-        !isEqual(this.shownFilters.get(name), this.state.filterOf(name)),
+        !isEqual(this.shownQueries.get(name), this.queryOf(name)),
     );
     this.shownTables = ticked;
-    this.shownFilters = new Map(
-      ticked.map((name) => [name, this.state.filterOf(name)]),
+    this.shownQueries = new Map(
+      ticked.map((name) => [name, this.queryOf(name)]),
     );
     this.colorSlots = assignColorSlots(this.colorSlots, ticked);
     for (const name of unticked) {
@@ -574,17 +940,16 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       this.stale.delete(name);
       this.clearAnnotations(name);
     }
-    for (const name of refiltered) {
+    for (const name of requeried) {
       this.forgetTable(name);
       this.errors.delete(name);
     }
     for (const name of added) {
       this.errors.delete(name);
-      this.annotationState(name).displayState.color.value = vec3.clone(
-        this.tableColor(name),
-      );
+      this.annotationState(name).layerState.displayState.color.value =
+        vec3.clone(this.tableColor(name));
     }
-    if (refiltered.length > 0) this.invalidate(refiltered);
+    if (requeried.length > 0) this.invalidate(requeried);
     this.publishDrawn();
     this.publishStatus();
     this.fetchVisible();
@@ -594,40 +959,115 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     return this.tables.value?.find((table) => table.name === name);
   }
 
-  private fetchVisible() {
-    if (this.wasDisposed || this.tables.value === undefined) return;
-    const ticked = this.state.ticked.filter(
+  private fetchableTables(): string[] {
+    return this.state.ticked.filter(
       (name) => this.tableInfo(name) !== undefined && !this.absent.has(name),
     );
-    const plan = planAnnotationFetches({
-      visibleRoots: this.connection.visibleSegments,
-      ticked,
+  }
+
+  private shownRoots(): bigint[] {
+    const { excludedSegments } = this.state;
+    return [...this.connection.visibleSegments].filter(
+      (root) => !excludedSegments.has(root),
+    );
+  }
+
+  private scopes(): AnnotationScope[] {
+    const tables = this.fetchableTables();
+    return annotationScopes({
+      visibleRoots: this.shownRoots(),
+      segmentTables: tables.filter((name) => !this.state.wholeTableOf(name)),
+      wholeTables: tables.filter((name) => this.state.wholeTableOf(name)),
       coords: this.coords,
+      isHeld: (key) => this.cache.has(key) || this.pending.has(key),
+    });
+  }
+
+  private fetchVisible() {
+    if (this.wasDisposed || this.tables.value === undefined) return;
+    const scopes = this.scopes();
+    const pruned = prunedAnnotationKeys(scopes, this.cache, this.pending);
+    for (const key of pruned) this.forgetRoot(key);
+    if (pruned.length > 0) this.invalidate(this.state.ticked);
+    const totals = annotationTotals(
+      scopes,
+      this.fetchableTables(),
+      this.cache,
+      this.hasFailed,
+    );
+    this.totals.value = totals;
+    this.showLimit(annotationLimitNote(totals));
+    const requests = planAnnotationFetches({
+      scopes,
       cache: this.cache,
       pending: this.pending,
       freeSlots: MAX_ANNOTATION_REQUESTS_IN_FLIGHT - this.running,
+      pointsAllowed: totals.complete && totals.total <= MAX_DRAWN_ANNOTATIONS,
     });
-    for (const key of plan.prune) this.forgetRoot(key);
-    if (plan.prune.length > 0) this.invalidate(this.state.ticked);
-    for (const request of plan.requests) void this.send(request);
+    for (const request of requests) void this.send(request);
     this.publishStatus();
+  }
+
+  private showLimit(note: string | undefined) {
+    if (note === this.limitNote.value) return;
+    this.limitNote.value = note;
+    this.invalidate(this.state.ticked);
+  }
+
+  private read(
+    request: AnnotationFetchRequest,
+    queries: AnnotationTableQuery[],
+    coords: AnnotationReadCoordinates,
+  ): Promise<(tables: readonly string[]) => void> {
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    const { key, root } = request;
+    if (request.phase === "count") {
+      return readScope(
+        root,
+        queries,
+        (segment, segmentQueries) =>
+          fetchSegmentCounts(
+            fetchOkImpl,
+            baseUrl,
+            segment,
+            segmentQueries,
+            coords,
+          ),
+        (query) => fetchTableCount(fetchOkImpl, baseUrl, query, coords),
+      ).then(
+        (counts) => (tables) =>
+          acceptAnnotationCounts(this.cache, { key, tables }, counts),
+      );
+    }
+    return readScope(
+      root,
+      queries,
+      (segment, segmentQueries) =>
+        fetchSegmentPoints(
+          fetchOkImpl,
+          baseUrl,
+          segment,
+          segmentQueries,
+          coords,
+        ),
+      (query) => fetchTablePoints(fetchOkImpl, baseUrl, query, coords),
+    ).then((points) => (tables) => {
+      acceptAnnotationPoints(this.cache, { key, tables }, points);
+      this.invalidateSettled(tables);
+    });
   }
 
   private async send(request: AnnotationFetchRequest) {
     const requestId = ++this.lastRequest;
-    const coords = this.coords;
     const asked = this.pending.get(request.key) ?? new Map<string, number>();
     for (const table of request.tables) asked.set(table, requestId);
     this.pending.set(request.key, asked);
     const queries = request.tables.map((name) => ({
       table: this.tableInfo(name)!,
       filter: this.state.filterOf(name),
-      afterId: this.windows.get(name)?.cursor(request.key),
-      limit: ANNOTATIONS_PER_PAGE,
     }));
-    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
-    // Forgetting a root, a table or a page drops its mark, which retires any
-    // answer still on its way for it.
+    // Forgetting a root or a table drops its mark, which retires any answer
+    // still on its way for it.
     const stillAsked = () =>
       this.wasDisposed
         ? []
@@ -636,23 +1076,15 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
           );
     this.running++;
     try {
-      const response = await fetchSegmentAnnotations(
-        fetchOkImpl,
-        baseUrl,
-        request.root,
-        queries,
-        coords,
-        this.schemas,
-      );
+      const accept = await this.read(request, queries, this.coords);
       const tables = stillAsked();
       if (tables.length > 0) {
-        acceptAnnotationResponse(this.cache, { ...request, tables }, response);
+        accept(tables);
         for (const table of tables) {
           asked.delete(table);
           this.errors.delete(table);
           this.rootFailures.clear(table, request.key);
         }
-        this.invalidate(tables);
       }
     } catch (error) {
       const tables = stillAsked();
@@ -688,31 +1120,29 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     for (const table of failed) {
       this.rootFailures.record(table, request.key, message);
     }
+    this.invalidateSettled(failed);
     this.publishStatus();
   }
 
-  private annotationState(name: string): AnnotationLayerState {
-    let layerState = this.layerStates.get(name);
-    if (layerState === undefined) {
-      layerState = this.connection.makeAnnotationState(
+  private annotationState(name: string): TableAnnotationState {
+    let tableState = this.layerStates.get(name);
+    if (tableState === undefined) {
+      tableState = this.connection.makeAnnotationState(
         ANNOTATION_TABLE_SUBSUBSOURCE_PREFIX + name,
         this.tableColor(name),
         [VALUE_PROPERTY],
+        {
+          isReadonly: () => this.isReadonly(name),
+          onDelete: (annotation) => this.deleteRow(name, annotation),
+        },
       );
-      this.layerStates.set(name, layerState);
+      this.layerStates.set(name, tableState);
     }
-    return layerState;
-  }
-
-  tableColor(name: string): vec3 {
-    return colorForTable(this.colorSlots.get(name) ?? 0);
+    return tableState;
   }
 
   private clearAnnotations(name: string) {
-    const layerState = this.layerStates.get(name);
-    if (layerState !== undefined) {
-      syncAnnotationSource(layerState.source as AnnotationSource, []);
-    }
+    this.layerStates.get(name)?.source.replaceAll([]);
   }
 
   private nanometresToSource = (nanometres: [number, number, number]) => {
@@ -723,14 +1153,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     return point;
   };
 
-  private visibleCached(): Map<bigint, SegmentAnnotations> {
-    return cachedAnnotationsByRoot(
-      this.cache,
-      this.coords,
-      this.connection.visibleSegments,
-    );
-  }
-
   private invalidate(names: readonly string[]) {
     for (const name of names) this.stale.add(name);
     if (this.frameRequested) return;
@@ -738,45 +1160,67 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.connection.scheduleFrame(() => this.redrawStale());
   }
 
+  /** A table is redrawn once all of its points are in, not once per answer. */
+  private invalidateSettled(names: readonly string[]) {
+    const scopes = this.scopes();
+    const settled = names.filter((name) =>
+      tablePointsSettled(name, scopes, this.cache, this.hasFailed),
+    );
+    if (settled.length > 0) this.invalidate(settled);
+  }
+
+  private hasFailed = (table: string, key: string) =>
+    this.rootFailures.has(table, key);
+
   private redrawStale() {
     this.frameRequested = false;
     if (this.wasDisposed) return;
-    const byRoot = this.visibleCached();
+    const scopes = this.scopes();
+    const visibleRoots = new Set(this.connection.visibleSegments);
     for (const name of this.stale) {
-      if (this.state.ticked.includes(name)) this.redraw(name, byRoot);
+      if (this.state.ticked.includes(name)) {
+        this.redraw(name, scopes, visibleRoots);
+      }
     }
     this.stale.clear();
     this.publishDrawn();
     this.publishStatus();
   }
 
-  private redraw(name: string, byRoot: Map<bigint, SegmentAnnotations>) {
+  private redraw(
+    name: string,
+    scopes: readonly AnnotationScope[],
+    visibleRoots: ReadonlySet<bigint>,
+  ) {
     const info = this.tableInfo(name);
     let layerRows: LayerRow[] = [];
-    if (info !== undefined) {
+    if (info !== undefined && this.limitNote.value === undefined) {
       try {
-        layerRows = toLayerAnnotations(byRoot, info, this.nanometresToSource);
-      } catch (error) {
-        this.errors.set(
-          name,
-          error instanceof Error ? error.message : String(error),
+        layerRows = toLayerAnnotations(
+          fetchedTablePoints(name, scopes, this.cache),
+          info,
+          this.nanometresToSource,
+          visibleRoots,
         );
+      } catch (error) {
+        this.errors.set(name, errorMessage(error));
       }
     }
-    syncAnnotationSource(
-      this.annotationState(name).source as AnnotationSource,
+    this.annotationState(name).source.replaceAll(
       layerRows.flatMap(({ annotations }) => annotations),
     );
+    this.showDetails(name);
     this.rendered.set(name, layerRows.length);
     this.drawnByTable.set(
       name,
       layerRows
-        .map(({ row, annotations }) => ({
+        .map(({ id, value, annotations }) => ({
           table: name,
-          annotation: row,
           layerId: annotations[0].id,
+          id,
+          value,
         }))
-        .sort((a, b) => compareIds(a.annotation.id, b.annotation.id)),
+        .sort((a, b) => compareIds(a.id, b.id)),
     );
   }
 
@@ -795,12 +1239,8 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     return unlistedTick ? TABLE_UNLISTED_NOTE : undefined;
   }
 
-  private visibleRootsNote(): string | undefined {
-    return visibleRootsNote(new Set(this.connection.visibleSegments).size);
-  }
-
   private publishStatus() {
-    const byRoot = this.visibleCached();
+    const scopes = this.scopes();
     const { ticked } = this.state;
     const untickedErrors = [...this.errors.keys()].filter(
       (name) => !ticked.includes(name),
@@ -808,14 +1248,15 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.status.value = [...ticked, ...untickedErrors].map((name) =>
       annotationTableStatus({
         table: name,
-        byRoot,
+        fetched: fetchedTablePoints(name, scopes, this.cache),
         annotations: this.rendered.get(name) ?? 0,
-        windows: this.windows.get(name),
         error: this.errors.get(name) ?? this.rootFailures.messageFor(name),
         note: this.tableNote(name),
       }),
     );
     this.rootsNote.value =
-      ticked.length > 0 ? this.visibleRootsNote() : undefined;
+      ticked.length > 0
+        ? visibleRootsNote(this.shownRoots().length)
+        : undefined;
   }
 }

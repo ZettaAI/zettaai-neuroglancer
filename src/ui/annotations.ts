@@ -58,7 +58,11 @@ import {
   SELECT_NEXT_ANNOTATION_TOOL_ID,
   SELECT_PREVIOUS_ANNOTATION_TOOL_ID,
 } from "#src/layer/annotation/tool_state.js";
-import type { MouseSelectionState, UserLayer } from "#src/layer/index.js";
+import type {
+  MouseSelectionState,
+  PersistentViewerSelectionState,
+  UserLayer,
+} from "#src/layer/index.js";
 import type { LoadedDataSubsource } from "#src/layer/layer_data_source.js";
 import type { ChunkTransformParameters } from "#src/render_coordinate_transform.js";
 import { getChunkPositionFromCombinedGlobalLocalPositions } from "#src/render_coordinate_transform.js";
@@ -193,6 +197,180 @@ export class MergedAnnotationStates
       this.changed.dispatch();
     };
   }
+}
+
+const ANNOTATION_LIST_COLUMN_PADDING = 2;
+
+const annotationListColumnWidthProperty = (column: number) =>
+  `--neuroglancer-column-${column}-width`;
+
+export interface AnnotationListDimensions {
+  globalDimensionIndices: number[];
+  localDimensionIndices: number[];
+}
+
+/** The global and local dimensions that any of the states renders into. */
+export function annotationListDimensions(
+  layer: Borrowed<UserLayerWithAnnotations>,
+  states: readonly AnnotationLayerState[],
+): AnnotationListDimensions {
+  const localCoordinateSpace = layer.localCoordinateSpace.value;
+  const globalCoordinateSpace = layer.manager.root.coordinateSpace.value;
+  const globalDimensionIndices: number[] = [];
+  const localDimensionIndices: number[] = [];
+  for (
+    let globalDim = 0, globalRank = globalCoordinateSpace.rank;
+    globalDim < globalRank;
+    ++globalDim
+  ) {
+    if (
+      states.some((state) => {
+        const transform = state.transform.value;
+        if (transform.error !== undefined) return false;
+        return transform.globalToRenderLayerDimensions[globalDim] !== -1;
+      })
+    ) {
+      globalDimensionIndices.push(globalDim);
+    }
+  }
+  for (
+    let localDim = 0, localRank = localCoordinateSpace.rank;
+    localDim < localRank;
+    ++localDim
+  ) {
+    if (
+      states.some((state) => {
+        const transform = state.transform.value;
+        if (transform.error !== undefined) return false;
+        return transform.localToRenderLayerDimensions[localDim] !== -1;
+      })
+    ) {
+      localDimensionIndices.push(localDim);
+    }
+  }
+  return { globalDimensionIndices, localDimensionIndices };
+}
+
+export function annotationListGridTemplate(dimensionCount: number): string {
+  let gridTemplate = "[symbol] 2ch";
+  for (let i = 0; i < dimensionCount; ++i) {
+    gridTemplate += ` [dim] var(${annotationListColumnWidthProperty(i)})`;
+  }
+  return gridTemplate + " [edit] 2ch [delete] 2ch";
+}
+
+/** The widest entry of each column so far, set on an ancestor of the entries. */
+export class AnnotationListColumnWidths {
+  private readonly widths: number[] = [];
+
+  constructor(private readonly element: HTMLElement) {}
+
+  widen(column: number, width: number) {
+    width += ANNOTATION_LIST_COLUMN_PADDING;
+    const { widths } = this;
+    if (widths[column] > width) {
+      // False if `widths[column] === undefined`.
+      return;
+    }
+    widths[column] = width;
+    this.element.style.setProperty(
+      annotationListColumnWidthProperty(column),
+      `${width}ch`,
+    );
+  }
+
+  reset() {
+    this.widths.length = 0;
+  }
+}
+
+/**
+ * Fills the list's header row with a name and scale per dimension, in the
+ * list's columns, and returns the grid template the entries share.
+ */
+export function renderAnnotationListHeader(
+  headerRow: HTMLElement,
+  layer: Borrowed<UserLayerWithAnnotations>,
+  { globalDimensionIndices, localDimensionIndices }: AnnotationListDimensions,
+  columnWidths: AnnotationListColumnWidths,
+): string {
+  const symbolPlaceholder = document.createElement("div");
+  symbolPlaceholder.style.gridColumn = "symbol";
+
+  const deletePlaceholder = document.createElement("div");
+  deletePlaceholder.style.gridColumn = "delete";
+
+  removeChildren(headerRow);
+  headerRow.appendChild(symbolPlaceholder);
+  let i = 0;
+  const addDimension = (coordinateSpace: CoordinateSpace, dimIndex: number) => {
+    const dimWidget = document.createElement("div");
+    dimWidget.classList.add("neuroglancer-annotations-view-dimension");
+    const name = document.createElement("span");
+    name.classList.add("neuroglancer-annotations-view-dimension-name");
+    name.textContent = coordinateSpace.names[dimIndex];
+    const scale = document.createElement("scale");
+    scale.classList.add("neuroglancer-annotations-view-dimension-scale");
+    scale.textContent = formatScaleWithUnitAsString(
+      coordinateSpace.scales[dimIndex],
+      coordinateSpace.units[dimIndex],
+      { precision: 2 },
+    );
+    dimWidget.appendChild(name);
+    dimWidget.appendChild(scale);
+    dimWidget.style.gridColumn = `dim ${i + 1}`;
+    columnWidths.widen(
+      i,
+      scale.textContent.length + name.textContent.length + 3,
+    );
+    ++i;
+    headerRow.appendChild(dimWidget);
+  };
+  const globalCoordinateSpace = layer.manager.root.coordinateSpace.value;
+  for (const globalDim of globalDimensionIndices) {
+    addDimension(globalCoordinateSpace, globalDim);
+  }
+  const localCoordinateSpace = layer.localCoordinateSpace.value;
+  for (const localDim of localDimensionIndices) {
+    addDimension(localCoordinateSpace, localDim);
+  }
+  const editPlaceholder = document.createElement("div");
+  editPlaceholder.style.gridColumn = "edit";
+  headerRow.appendChild(editPlaceholder);
+  headerRow.appendChild(deletePlaceholder);
+  const gridTemplate = annotationListGridTemplate(i);
+  headerRow.style.gridTemplateColumns = gridTemplate;
+  return gridTemplate;
+}
+
+export interface SelectedListAnnotation {
+  annotationId: AnnotationId;
+  annotationLayerState: AnnotationLayerState;
+}
+
+/** The layer's selected annotation, when it belongs to one of the states. */
+export function selectedListAnnotation(
+  layer: Borrowed<UserLayerWithAnnotations>,
+  states: readonly AnnotationLayerState[],
+  selectionState: PersistentViewerSelectionState | undefined,
+): SelectedListAnnotation | undefined {
+  if (selectionState === undefined) return undefined;
+  const layerSelectionState = selectionState.layers.find(
+    (s) => s.layer === layer,
+  )?.state;
+  if (layerSelectionState === undefined) return undefined;
+  const { annotationId } = layerSelectionState;
+  if (annotationId === undefined) return undefined;
+  const annotationLayerState = states.find(
+    (x) =>
+      x.sourceIndex === layerSelectionState.annotationSourceIndex &&
+      (layerSelectionState.annotationSubsource === undefined ||
+        x.subsourceId === layerSelectionState.annotationSubsource) &&
+      (layerSelectionState.annotationSubsubsourceId === undefined ||
+        x.subsubsourceId === layerSelectionState.annotationSubsubsourceId),
+  );
+  if (annotationLayerState === undefined) return undefined;
+  return { annotationId, annotationLayerState };
 }
 
 function getCenterPosition(center: Float32Array, annotation: Annotation) {
@@ -411,44 +589,12 @@ export class AnnotationLayerView extends Tab {
   private localDimensionIndices: number[] = [];
   private curCoordinateSpaceGeneration = -1;
   private prevCoordinateSpaceGeneration = -1;
-  private columnWidths: number[] = [];
+  private columnWidths = new AnnotationListColumnWidths(this.element);
   private gridTemplate = "";
 
   private updateCoordinateSpace() {
-    const localCoordinateSpace = this.layer.localCoordinateSpace.value;
-    const globalCoordinateSpace = this.layer.manager.root.coordinateSpace.value;
-    const globalDimensionIndices: number[] = [];
-    const localDimensionIndices: number[] = [];
-    for (
-      let globalDim = 0, globalRank = globalCoordinateSpace.rank;
-      globalDim < globalRank;
-      ++globalDim
-    ) {
-      if (
-        this.annotationStates.states.some((state) => {
-          const transform = state.transform.value;
-          if (transform.error !== undefined) return false;
-          return transform.globalToRenderLayerDimensions[globalDim] !== -1;
-        })
-      ) {
-        globalDimensionIndices.push(globalDim);
-      }
-    }
-    for (
-      let localDim = 0, localRank = localCoordinateSpace.rank;
-      localDim < localRank;
-      ++localDim
-    ) {
-      if (
-        this.annotationStates.states.some((state) => {
-          const transform = state.transform.value;
-          if (transform.error !== undefined) return false;
-          return transform.localToRenderLayerDimensions[localDim] !== -1;
-        })
-      ) {
-        localDimensionIndices.push(localDim);
-      }
-    }
+    const { globalDimensionIndices, localDimensionIndices } =
+      annotationListDimensions(this.layer, this.annotationStates.states);
     this.localDimensionIndices = localDimensionIndices;
     this.globalDimensionIndices = globalDimensionIndices;
     ++this.curCoordinateSpaceGeneration;
@@ -462,25 +608,12 @@ export class AnnotationLayerView extends Tab {
     this.element.classList.add("neuroglancer-annotation-layer-view");
     this.selectedAnnotationState = makeCachedLazyDerivedWatchableValue(
       (selectionState, pin) => {
-        if (selectionState === undefined) return undefined;
-        const { layer } = this;
-        const layerSelectionState = selectionState.layers.find(
-          (s) => s.layer === layer,
-        )?.state;
-        if (layerSelectionState === undefined) return undefined;
-        const { annotationId } = layerSelectionState;
-        if (annotationId === undefined) return undefined;
-        const annotationLayerState = this.annotationStates.states.find(
-          (x) =>
-            x.sourceIndex === layerSelectionState.annotationSourceIndex &&
-            (layerSelectionState.annotationSubsource === undefined ||
-              x.subsourceId === layerSelectionState.annotationSubsource) &&
-            (layerSelectionState.annotationSubsubsourceId === undefined ||
-              x.subsubsourceId ===
-                layerSelectionState.annotationSubsubsourceId),
+        const selected = selectedListAnnotation(
+          this.layer,
+          this.annotationStates.states,
+          selectionState,
         );
-        if (annotationLayerState === undefined) return undefined;
-        return { annotationId, annotationLayerState, pin };
+        return selected === undefined ? undefined : { ...selected, pin };
       },
       layer.manager.root.selectionState,
       layer.manager.root.selectionState.pin,
@@ -926,7 +1059,7 @@ export class AnnotationLayerView extends Tab {
       localDimensionIndices,
     );
     for (const [column, width] of elementColumnWidths.entries()) {
-      this.setColumnWidth(column, width);
+      this.columnWidths.widen(column, width);
     }
     const selectionState = this.selectedAnnotationState.value;
     if (
@@ -939,21 +1072,6 @@ export class AnnotationLayerView extends Tab {
     return element;
   }
 
-  private setColumnWidth(column: number, width: number) {
-    // Padding
-    width += 2;
-    const { columnWidths } = this;
-    if (columnWidths[column] > width) {
-      // False if `columnWidths[column] === undefined`.
-      return;
-    }
-    columnWidths[column] = width;
-    this.element.style.setProperty(
-      `--neuroglancer-column-${column}-width`,
-      `${width}ch`,
-    );
-  }
-
   private updateView() {
     if (!this.visible) {
       return;
@@ -962,62 +1080,16 @@ export class AnnotationLayerView extends Tab {
       this.curCoordinateSpaceGeneration !== this.prevCoordinateSpaceGeneration
     ) {
       this.updated = false;
-      const { columnWidths } = this;
-      columnWidths.length = 0;
-      const { headerRow } = this;
-      const symbolPlaceholder = document.createElement("div");
-      symbolPlaceholder.style.gridColumn = "symbol";
-
-      const deletePlaceholder = document.createElement("div");
-      deletePlaceholder.style.gridColumn = "delete";
-
-      removeChildren(headerRow);
-      headerRow.appendChild(symbolPlaceholder);
-      let i = 0;
-      let gridTemplate = "[symbol] 2ch";
-      const addDimension = (
-        coordinateSpace: CoordinateSpace,
-        dimIndex: number,
-      ) => {
-        const dimWidget = document.createElement("div");
-        dimWidget.classList.add("neuroglancer-annotations-view-dimension");
-        const name = document.createElement("span");
-        name.classList.add("neuroglancer-annotations-view-dimension-name");
-        name.textContent = coordinateSpace.names[dimIndex];
-        const scale = document.createElement("scale");
-        scale.classList.add("neuroglancer-annotations-view-dimension-scale");
-        scale.textContent = formatScaleWithUnitAsString(
-          coordinateSpace.scales[dimIndex],
-          coordinateSpace.units[dimIndex],
-          { precision: 2 },
-        );
-        dimWidget.appendChild(name);
-        dimWidget.appendChild(scale);
-        dimWidget.style.gridColumn = `dim ${i + 1}`;
-        this.setColumnWidth(
-          i,
-          scale.textContent.length + name.textContent.length + 3,
-        );
-        gridTemplate += ` [dim] var(--neuroglancer-column-${i}-width)`;
-        ++i;
-        headerRow.appendChild(dimWidget);
-      };
-      const globalCoordinateSpace =
-        this.layer.manager.root.coordinateSpace.value;
-      for (const globalDim of this.globalDimensionIndices) {
-        addDimension(globalCoordinateSpace, globalDim);
-      }
-      const localCoordinateSpace = this.layer.localCoordinateSpace.value;
-      for (const localDim of this.localDimensionIndices) {
-        addDimension(localCoordinateSpace, localDim);
-      }
-      const editPlaceholder = document.createElement("div");
-      editPlaceholder.style.gridColumn = "edit";
-      headerRow.appendChild(editPlaceholder);
-      headerRow.appendChild(deletePlaceholder);
-      gridTemplate += " [edit] 2ch [delete] 2ch";
-      this.gridTemplate = gridTemplate;
-      headerRow.style.gridTemplateColumns = gridTemplate;
+      this.columnWidths.reset();
+      this.gridTemplate = renderAnnotationListHeader(
+        this.headerRow,
+        this.layer,
+        {
+          globalDimensionIndices: this.globalDimensionIndices,
+          localDimensionIndices: this.localDimensionIndices,
+        },
+        this.columnWidths,
+      );
       this.prevCoordinateSpaceGeneration = this.curCoordinateSpaceGeneration;
     }
     if (this.updated) {

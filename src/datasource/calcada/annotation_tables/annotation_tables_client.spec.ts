@@ -16,11 +16,18 @@ import type {
 import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
-  fetchSegmentAnnotations,
+  deleteAnnotationRows,
+  fetchAnnotationRows,
+  fetchSegmentCounts,
+  fetchSegmentPoints,
+  fetchTableCount,
+  fetchTablePoints,
   listAnnotationTables,
   retryOnceIfUnauthorized,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import { HttpError } from "#src/util/http_request.js";
+
+type FetchOkStub = Parameters<typeof fetchSegmentCounts>[0];
 
 const BASE = "https://host/segmentation/api/v1/table/g";
 const BIG_ID = "18446744073709551615";
@@ -54,6 +61,7 @@ const tableJson = (name: string, schemaType = "synapse", version = 2) => ({
   created: "2026-01-01T00:00:00Z",
   last_modified: "2026-01-01T00:00:00Z",
   valid: true,
+  access: { read: true, write: true, manage: false },
 });
 
 const schemaJson = (name: string, version: number, points: string[]) => ({
@@ -76,12 +84,11 @@ const info = (name: string, schemaName = "synapse"): AnnotationTableInfo => ({
   voxelResolution: [4, 4, 40],
   points: ["pre", "post"],
   properties: {},
+  canWrite: true,
 });
 
-const PAGE_LIMIT = 1000;
 const query = (name: string): AnnotationTableQuery => ({
   table: info(name),
-  limit: PAGE_LIMIT,
 });
 
 const row = (id: string, overrides: Record<string, unknown> = {}) => ({
@@ -125,6 +132,7 @@ describe("listAnnotationTables", () => {
         voxelResolution: [4, 4, 40],
         points: ["pre", "post"],
         properties: {},
+        canWrite: true,
       },
       expect.objectContaining({ name: "b", points: ["pre", "post"] }),
       expect.objectContaining({ name: "c", points: ["at"] }),
@@ -194,114 +202,55 @@ describe("listAnnotationTables", () => {
     ).toBe(false);
   });
 
+  it("reads canWrite from access", async () => {
+    const fetchOk = vi.fn(async (url: RequestInfo) =>
+      String(url).endsWith("/annotation/tables")
+        ? json({
+            tables: [
+              tableJson("a"),
+              {
+                ...tableJson("b"),
+                access: { read: true, write: false, manage: false },
+              },
+            ],
+          })
+        : json(schemaJson("synapse", 2, ["pre", "post"])),
+    );
+    const tables = await listAnnotationTables(fetchOk, BASE);
+    expect(tables.map((table) => table.canWrite)).toEqual([true, false]);
+  });
+
+  it("allows no write when an older server sends no access", async () => {
+    const { access: _access, ...withoutAccess } = tableJson("a");
+    const fetchOk = vi.fn(async (url: RequestInfo) =>
+      String(url).endsWith("/annotation/tables")
+        ? json({ tables: [withoutAccess] })
+        : json(schemaJson("synapse", 2, ["pre", "post"])),
+    );
+    const tables = await listAnnotationTables(fetchOk, BASE);
+    expect(tables.map((table) => table.canWrite)).toEqual([false]);
+  });
+
   it("rejects a malformed body", async () => {
     const fetchOk = vi.fn(async () => json({ nope: 1 }));
     await expect(listAnnotationTables(fetchOk, BASE)).rejects.toThrow();
   });
 });
 
-describe("fetchSegmentAnnotations", () => {
-  const body = (tables: unknown) => json({ root_id: BIG_ID, tables });
+describe("annotation rows", () => {
+  const coords = { branchId: 0, timestamp: 0 };
+  const rowsBody = (...rows: unknown[]) => json({ annotations: rows });
+  const readRows = (fetchOk: FetchOkStub) =>
+    fetchAnnotationRows(fetchOk, BASE, info("a"), [1n], coords);
 
-  it("posts tables with coordinates and parses ids above 2^53", async () => {
-    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
-      body({
-        a: { annotations: [row(BIG_ID)], truncated: false },
-        b: { annotations: [], truncated: true },
-      }),
+  it("parses ids above 2^53, the payload, role order and an absent root as 0", async () => {
+    const [annotation] = await readRows(
+      vi.fn(async () => rowsBody(row(BIG_ID))),
     );
-    const result = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      9007199254740993n,
-      [query("a"), query("b")],
-      { branchId: 3, timestamp: 1500 },
-    );
-    const [url, init] = fetchOk.mock.calls[0];
-    expect(String(url)).toBe(
-      `${BASE}/annotation/segment/9007199254740993/annotations?int64_as_str=1&timestamp=1.5&branch_id=3`,
-    );
-    expect(init?.method).toBe("POST");
-    expect(result.rootId).toBe(BigInt(BIG_ID));
-    expect(result.tables.get("b")).toEqual({ annotations: [] });
-    const [annotation] = result.tables.get("a")!.annotations;
     expect(annotation.id).toBe(18446744073709551615n);
     expect(annotation.value).toBe(0.5);
     expect(annotation.payload).toEqual({ kind: "x" });
-  });
-
-  it("sends each table's filter, cursor and limit in the body", async () => {
-    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
-      body({}),
-    );
-    const filter = {
-      filter_equal_dict: { kind: "x" },
-      filter_greater_dict: { size: 3 },
-    };
-    await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [{ ...query("a"), filter, afterId: BIG_ID }, query("b")],
-      { branchId: 0, timestamp: 0 },
-    );
-    expect(JSON.parse(String(fetchOk.mock.calls[0][1]?.body))).toEqual({
-      tables: {
-        a: { ...filter, after_id: BIG_ID, limit: PAGE_LIMIT },
-        b: { limit: PAGE_LIMIT },
-      },
-    });
-  });
-
-  it("reads the cursor of the next page", async () => {
-    const fetchOk = vi.fn(async () =>
-      body({
-        a: {
-          annotations: [row("1")],
-          truncated: true,
-          next_cursor: { after_id: BIG_ID },
-        },
-      }),
-    );
-    const result = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [query("a")],
-      {
-        branchId: 0,
-        timestamp: 0,
-      },
-    );
-    expect(result.tables.get("a")).toMatchObject({ nextCursor: BIG_ID });
-  });
-
-  it("omits default coordinates", async () => {
-    const fetchOk = vi.fn(async (_url: RequestInfo) => body({}));
-    await fetchSegmentAnnotations(fetchOk, BASE, 5n, [query("a")], {
-      branchId: 0,
-      timestamp: 0,
-    });
-    expect(String(fetchOk.mock.calls[0][0])).toBe(
-      `${BASE}/annotation/segment/5/annotations?int64_as_str=1`,
-    );
-  });
-
-  it("orders points by schema role and defaults an absent root to 0", async () => {
-    const fetchOk = vi.fn(async () =>
-      body({ a: { annotations: [row("1")], truncated: false } }),
-    );
-    const result = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [query("a")],
-      {
-        branchId: 0,
-        timestamp: 0,
-      },
-    );
-    expect(result.tables.get("a")!.annotations[0].points).toEqual([
+    expect(annotation.points).toEqual([
       { name: "pre", position: [1, 2, 3], pieceId: 8n, rootId: 0n },
       {
         name: "post",
@@ -313,133 +262,300 @@ describe("fetchSegmentAnnotations", () => {
   });
 
   it("uses the schema version a row was written under, cached per version", async () => {
-    const fetchOk = vi.fn(async (url: RequestInfo) => {
-      const u = String(url);
-      if (u.includes("/annotation/schemas/synapse?version=1")) {
-        return json(schemaJson("synapse", 1, ["post", "pre"]));
-      }
-      return body({
-        a: {
-          annotations: [
+    const fetchOk = vi.fn(async (url: RequestInfo) =>
+      String(url).includes("/annotation/schemas/synapse?version=1")
+        ? json(schemaJson("synapse", 1, ["post", "pre"]))
+        : rowsBody(
             row("1", { schema_version: 1 }),
             row("2", { schema_version: 1 }),
-          ],
-          truncated: false,
-        },
-      });
-    });
-    const result = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [query("a")],
-      {
-        branchId: 0,
-        timestamp: 0,
-      },
+          ),
     );
-    const [first, second] = result.tables.get("a")!.annotations;
+    const [first, second] = await readRows(fetchOk);
     expect(first.points.map((p) => p.name)).toEqual(["post", "pre"]);
     expect(second.points.map((p) => p.name)).toEqual(["post", "pre"]);
     expect(fetchOk).toHaveBeenCalledTimes(2);
   });
 
+  it("rejects a non-object point with the parser error", async () => {
+    await expect(
+      readRows(
+        vi.fn(async () => rowsBody(row("1", { points: { pre: null } }))),
+      ),
+    ).rejects.toThrow(/"pre"/);
+  });
+
+  it("rejects a malformed body", async () => {
+    await expect(
+      readRows(vi.fn(async () => rowsBody(row("1", { points: { pre: {} } })))),
+    ).rejects.toThrow();
+  });
+});
+
+describe("table errors", () => {
+  const countBoth = (fetchOk: FetchOkStub) =>
+    fetchSegmentCounts(fetchOk, BASE, 5n, [query("a"), query("b")], {
+      branchId: 0,
+      timestamp: 0,
+    });
+
   it("maps 403 to AnnotationTableForbidden naming the table", async () => {
-    const fetchOk = vi.fn(() =>
-      failing(403, 'no read permission on annotation table "b"'),
-    );
-    const error = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [query("a"), query("b")],
-      { branchId: 0, timestamp: 0 },
+    const error = await countBoth(
+      vi.fn(() => failing(403, 'no read permission on annotation table "b"')),
     ).catch((e) => e);
     expect(error).toBeInstanceOf(AnnotationTableForbidden);
     expect(error.table).toBe("b");
   });
 
   it("maps 404 to AnnotationTableMissing naming the table", async () => {
-    const fetchOk = vi.fn(() => failing(404, 'annotation table "a" not found'));
-    const error = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [query("a")],
-      {
-        branchId: 0,
-        timestamp: 0,
-      },
+    const error = await countBoth(
+      vi.fn(() => failing(404, 'annotation table "a" not found')),
     ).catch((e) => e);
     expect(error).toBeInstanceOf(AnnotationTableMissing);
     expect(error.table).toBe("a");
   });
 
   it("names the whole request when the 403 body has no table", async () => {
-    const fetchOk = vi.fn(() => failing(403, "forbidden"));
-    const error = await fetchSegmentAnnotations(
-      fetchOk,
-      BASE,
-      5n,
-      [query("a"), query("b")],
-      { branchId: 0, timestamp: 0 },
-    ).catch((e) => e);
+    const error = await countBoth(vi.fn(() => failing(403, "forbidden"))).catch(
+      (e) => e,
+    );
     expect(error).toBeInstanceOf(AnnotationTableForbidden);
     expect(error.table).toBe("a,b");
   });
 
+  it("rethrows a 404 that names no table, such as a route the server lacks", async () => {
+    const routeMissing = () =>
+      Promise.reject(
+        HttpError.fromResponse(
+          new Response("404 page not found", { status: 404 }),
+        ),
+      );
+    for (const fetchOk of [
+      vi.fn(routeMissing),
+      vi.fn(() => failing(404, "graph not found")),
+    ]) {
+      const error = await countBoth(fetchOk).catch((e) => e);
+      expect(error).toBeInstanceOf(HttpError);
+      expect(error).not.toBeInstanceOf(AnnotationTableMissing);
+    }
+  });
+
   it("rethrows other HTTP errors", async () => {
-    const fetchOk = vi.fn(() => failing(500, "boom"));
     await expect(
-      fetchSegmentAnnotations(fetchOk, BASE, 5n, [query("a")], {
-        branchId: 0,
-        timestamp: 0,
-      }),
+      countBoth(vi.fn(() => failing(500, "boom"))),
     ).rejects.toBeInstanceOf(HttpError);
   });
+});
 
-  it("returns an empty result without a request for no tables", async () => {
-    const fetchOk = vi.fn(async () => body({}));
-    const result = await fetchSegmentAnnotations(fetchOk, BASE, 5n, [], {
-      branchId: 0,
-      timestamp: 0,
+const COORDS = { branchId: 0, timestamp: 0 };
+
+const pointsJson = {
+  ids: [BIG_ID, "2"],
+  values: [0.5, 1],
+  roots: ["7", BIG_ID],
+  points: [
+    { name: "pre", positions: [1, 2, 3, -4, 5, 6], root_index: [0, -1] },
+  ],
+};
+
+describe("columnar points", () => {
+  it("parses columnar points", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ root_id: "5", tables: { a: pointsJson } }),
+    );
+    const result = await fetchSegmentPoints(
+      fetchOk,
+      BASE,
+      5n,
+      [query("a"), query("missing")],
+      { branchId: 3, timestamp: 1500 },
+    );
+    expect(String(fetchOk.mock.calls[0][0])).toBe(
+      `${BASE}/annotation/segment/5/points?timestamp=1.5&branch_id=3`,
+    );
+    expect([...result.keys()]).toEqual(["a"]);
+    const points = result.get("a")!;
+    expect(points.ids).toEqual([BigInt(BIG_ID), 2n]);
+    expect(points.values).toEqual(new Float64Array([0.5, 1]));
+    expect(points.roots).toEqual([7n, BigInt(BIG_ID)]);
+    expect(points.points).toHaveLength(1);
+    expect(points.points[0].name).toBe("pre");
+    expect(points.points[0].positions).toEqual(
+      new Int32Array([1, 2, 3, -4, 5, 6]),
+    );
+    expect(points.points[0].rootIndex).toEqual(new Int32Array([0, -1]));
+  });
+
+  it("parses the points of one table", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json(pointsJson),
+    );
+    const filter = { filter_equal_dict: { kind: "x" } };
+    const points = await fetchTablePoints(
+      fetchOk,
+      BASE,
+      { ...query("a"), filter },
+      COORDS,
+    );
+    expect(String(fetchOk.mock.calls[0][0])).toBe(
+      `${BASE}/annotation/tables/a/points`,
+    );
+    expect(JSON.parse(String(fetchOk.mock.calls[0][1]?.body))).toEqual(filter);
+    expect(points.points[0].rootIndex).toEqual(new Int32Array([0, -1]));
+  });
+
+  it("maps 403 on a count to AnnotationTableForbidden", async () => {
+    const fetchOk = vi.fn(() => failing(403, "forbidden"));
+    const error = await fetchTableCount(
+      fetchOk,
+      BASE,
+      query("a"),
+      COORDS,
+    ).catch((e) => e);
+    expect(error).toBeInstanceOf(AnnotationTableForbidden);
+    expect(error.table).toBe("a");
+  });
+});
+
+describe("counts", () => {
+  it("counts send the table filter", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ root_id: "5", tables: { a: { count: 3 }, b: { count: 0 } } }),
+    );
+    const filter = { filter_equal_dict: { kind: "x" } };
+    const counts = await fetchSegmentCounts(
+      fetchOk,
+      BASE,
+      5n,
+      [{ ...query("a"), filter }, query("b")],
+      COORDS,
+    );
+    expect(String(fetchOk.mock.calls[0][0])).toBe(
+      `${BASE}/annotation/segment/5/count`,
+    );
+    expect(JSON.parse(String(fetchOk.mock.calls[0][1]?.body))).toEqual({
+      tables: { a: filter, b: {} },
     });
+    expect(counts).toEqual(
+      new Map([
+        ["a", 3],
+        ["b", 0],
+      ]),
+    );
+  });
+
+  it("sends an empty object for a table without filter", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ count: 12 }),
+    );
+    expect(await fetchTableCount(fetchOk, BASE, query("a"), COORDS)).toBe(12);
+    expect(String(fetchOk.mock.calls[0][0])).toBe(
+      `${BASE}/annotation/tables/a/count`,
+    );
+    expect(JSON.parse(String(fetchOk.mock.calls[0][1]?.body))).toEqual({});
+  });
+});
+
+describe("parseTablePoints validation", () => {
+  it("rejects mismatched columns", async () => {
+    const mismatched = (overrides: Record<string, unknown>) =>
+      vi.fn(async () => json({ ...pointsJson, ...overrides }));
+    const fetchPoints = (fetchOk: ReturnType<typeof mismatched>) =>
+      fetchTablePoints(fetchOk, BASE, query("a"), COORDS);
+    await expect(fetchPoints(mismatched({ values: [1] }))).rejects.toThrow(
+      /values/,
+    );
+    await expect(
+      fetchPoints(
+        mismatched({ points: [{ ...pointsJson.points[0], positions: [1] }] }),
+      ),
+    ).rejects.toThrow(/pre.positions/);
+    await expect(
+      fetchPoints(
+        mismatched({
+          points: [{ ...pointsJson.points[0], root_index: [0, 2] }],
+        }),
+      ),
+    ).rejects.toThrow(/out of range/);
+  });
+});
+
+describe("fetchAnnotationRows", () => {
+  it("reads rows by id with coordinates", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo) =>
+      json({ annotations: [row("1")] }),
+    );
+    const rows = await fetchAnnotationRows(
+      fetchOk,
+      BASE,
+      info("a"),
+      [1n, BigInt(BIG_ID)],
+      { branchId: 3, timestamp: 1500 },
+    );
+    expect(String(fetchOk.mock.calls[0][0])).toBe(
+      `${BASE}/annotation/tables/a/annotations?int64_as_str=1&ids=1,${BIG_ID}&timestamp=1.5&branch_id=3`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(1n);
+    expect(rows[0].points.map((point) => point.name)).toEqual(["pre", "post"]);
+  });
+
+  it("returns no rows without a request for no ids", async () => {
+    const fetchOk = vi.fn(async () => json({ annotations: [] }));
+    expect(
+      await fetchAnnotationRows(fetchOk, BASE, info("a"), [], COORDS),
+    ).toEqual([]);
     expect(fetchOk).not.toHaveBeenCalled();
-    expect(result).toEqual({ rootId: 5n, tables: new Map() });
   });
 
-  it("rejects a non-object point with the parser error", async () => {
-    const fetchOk = vi.fn(async () =>
-      body({
-        a: {
-          annotations: [row("1", { points: { pre: null } })],
-          truncated: false,
-        },
-      }),
-    );
-    await expect(
-      fetchSegmentAnnotations(fetchOk, BASE, 5n, [query("a")], {
-        branchId: 0,
-        timestamp: 0,
-      }),
-    ).rejects.toThrow(/"pre"/);
+  it("maps 403 and 404 to the table errors", async () => {
+    const forbidden = await fetchAnnotationRows(
+      vi.fn(() => failing(403, "forbidden")),
+      BASE,
+      info("a"),
+      [1n],
+      COORDS,
+    ).catch((e) => e);
+    expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
+    expect(forbidden.table).toBe("a");
+    const missing = await fetchAnnotationRows(
+      vi.fn(() => failing(404, "annotation table not found")),
+      BASE,
+      info("a"),
+      [1n],
+      COORDS,
+    ).catch((e) => e);
+    expect(missing).toBeInstanceOf(AnnotationTableMissing);
+  });
+});
+
+describe("deleteAnnotationRows", () => {
+  it("maps 403 and 404 to the table errors", async () => {
+    const forbidden = await deleteAnnotationRows(
+      vi.fn(() => failing(403, "forbidden")),
+      BASE,
+      "a",
+      [1n],
+    ).catch((e) => e);
+    expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
+    expect(forbidden.table).toBe("a");
+    const missing = await deleteAnnotationRows(
+      vi.fn(() => failing(404, "annotation table not found")),
+      BASE,
+      "a",
+      [1n],
+    ).catch((e) => e);
+    expect(missing).toBeInstanceOf(AnnotationTableMissing);
   });
 
-  it("rejects a malformed body", async () => {
-    const fetchOk = vi.fn(async () =>
-      body({
-        a: {
-          annotations: [row("1", { points: { pre: {} } })],
-          truncated: false,
-        },
-      }),
+  it("delete sends ids as strings", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({}),
     );
-    await expect(
-      fetchSegmentAnnotations(fetchOk, BASE, 5n, [query("a")], {
-        branchId: 0,
-        timestamp: 0,
-      }),
-    ).rejects.toThrow();
+    await deleteAnnotationRows(fetchOk, BASE, "a", [BigInt(BIG_ID), 2n]);
+    const [url, init] = fetchOk.mock.calls[0];
+    expect(String(url)).toBe(`${BASE}/annotation/tables/a/annotations`);
+    expect(init?.method).toBe("DELETE");
+    expect(JSON.parse(String(init?.body))).toEqual({ ids: [BIG_ID, "2"] });
   });
 });
 

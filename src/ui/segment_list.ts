@@ -48,7 +48,11 @@ import {
   updatePropertyHistograms,
 } from "#src/segmentation_display_state/property_map.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
-import { observeWatchable, WatchableValue } from "#src/trackable_value.js";
+import {
+  observeWatchable,
+  registerNestedSync,
+  WatchableValue,
+} from "#src/trackable_value.js";
 import { getDefaultSelectBindings } from "#src/ui/default_input_event_bindings.js";
 import { SELECT_SEGMENTS_TOOLS_ID } from "#src/ui/segment_select_tools.js";
 import {
@@ -1623,6 +1627,19 @@ export class SegmentDisplayTab extends Tab {
               displayState.segmentationGroupState.value.selectedSegments.changed.add(
                 updateListItems,
               ),
+            );
+            context.registerDisposer(
+              registerNestedSync((nested, excludedSegments) => {
+                const header = list.header.firstElementChild;
+                if (header !== null) {
+                  listSource.segmentWidgetFactory.updateHeader(header);
+                }
+                if (excludedSegments !== undefined) {
+                  nested.registerDisposer(
+                    excludedSegments.changed.add(updateListItems),
+                  );
+                }
+              }, displayState.annotationExcludedSegments),
             );
             list.element.classList.add("neuroglancer-segment-list");
             list.element.classList.add("neuroglancer-preview-list");

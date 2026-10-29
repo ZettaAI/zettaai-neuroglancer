@@ -12,14 +12,15 @@ import { describe, expect, it } from "vitest";
 import { AnnotationType } from "#src/annotation/index.js";
 import {
   ANNOTATION_TABLE_COLORS,
+  annotationRowId,
   colorForTable,
   toLayerAnnotations,
 } from "#src/datasource/calcada/annotation_tables/annotation_render.js";
 import type {
   AnnotationTableInfo,
-  SegmentAnnotation,
-  SegmentAnnotations,
+  TablePoints,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
+import { UNBOUND_ROOT_INDEX } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 
 const TABLE: AnnotationTableInfo = {
   name: "syn",
@@ -29,45 +30,89 @@ const TABLE: AnnotationTableInfo = {
   voxelResolution: [4, 4, 40],
   points: ["pre", "post"],
   properties: {},
+  canWrite: false,
 };
 
 const toLayer = (nm: [number, number, number]) =>
   Float32Array.of(nm[0] / 2, nm[1] / 2, nm[2] / 2);
 
+interface TestPoint {
+  position: [number, number, number];
+  rootId?: bigint;
+}
+
+interface TestRow {
+  id: bigint;
+  value: number;
+  points: TestPoint[];
+}
+
 const point = (
-  name: string,
   position: [number, number, number],
-  rootId: bigint,
-) => ({ name, position, pieceId: 1n, rootId });
+  rootId?: bigint,
+): TestPoint => ({ position, rootId });
 
-const row = (
-  id: bigint,
-  points: ReturnType<typeof point>[],
-  value = 0.5,
-): SegmentAnnotation => ({ id, value, payload: {}, points });
-
-const response = (
-  rootId: bigint,
-  annotations: SegmentAnnotation[],
-): SegmentAnnotations => ({
-  rootId,
-  tables: new Map([["syn", { annotations }]]),
+const row = (id: bigint, points: TestPoint[], value = 0.5): TestRow => ({
+  id,
+  value,
+  points,
 });
 
-const renderRows = (...responses: SegmentAnnotations[]) =>
+function tablePoints(rows: TestRow[]): TablePoints {
+  const roots = [
+    ...new Set(
+      rows.flatMap(({ points }) =>
+        points.flatMap(({ rootId }) => (rootId === undefined ? [] : [rootId])),
+      ),
+    ),
+  ];
+  const columnCount = rows[0]?.points.length ?? 0;
+  return {
+    ids: rows.map(({ id }) => id),
+    values: Float64Array.from(rows.map(({ value }) => value)),
+    roots,
+    points: Array.from({ length: columnCount }, (_, column) => ({
+      name: `p${column}`,
+      positions: Int32Array.from(
+        rows.flatMap(({ points }) => points[column].position),
+      ),
+      rootIndex: Int32Array.from(rows, ({ points }) => {
+        const { rootId } = points[column];
+        return rootId === undefined
+          ? UNBOUND_ROOT_INDEX
+          : roots.indexOf(rootId);
+      }),
+    })),
+  };
+}
+
+const response = (fetchedUnder: bigint | undefined, rows: TestRow[]) => ({
+  fetchedUnder,
+  points: tablePoints(rows),
+});
+
+type Response = ReturnType<typeof response>;
+
+const renderRows = (responses: Response[], visibleRoots: bigint[] = []) =>
   toLayerAnnotations(
-    new Map(responses.map((r) => [r.rootId, r])),
+    responses,
     TABLE,
     toLayer,
+    new Set([
+      ...responses.flatMap(({ fetchedUnder }) =>
+        fetchedUnder === undefined ? [] : [fetchedUnder],
+      ),
+      ...visibleRoots,
+    ]),
   );
 
-const render = (...responses: SegmentAnnotations[]) =>
-  renderRows(...responses).flatMap(({ annotations }) => annotations);
+const render = (...responses: Response[]) =>
+  renderRows(responses).flatMap(({ annotations }) => annotations);
 
 describe("toLayerAnnotations", () => {
   it("draws a one-point row as a point scaled by the table resolution", () => {
     const [annotation] = render(
-      response(10n, [row(7n, [point("p", [1, 2, 3], 10n)])]),
+      response(10n, [row(7n, [point([1, 2, 3], 10n)])]),
     );
     expect(annotation.type).toBe(AnnotationType.POINT);
     expect(annotation.id).toBe("syn:7");
@@ -78,9 +123,7 @@ describe("toLayerAnnotations", () => {
 
   it("draws a two-point row as a line from role 0 to role 1", () => {
     const [annotation] = render(
-      response(10n, [
-        row(7n, [point("pre", [0, 0, 0], 10n), point("post", [2, 2, 1], 10n)]),
-      ]),
+      response(10n, [row(7n, [point([0, 0, 0], 10n), point([2, 2, 1], 10n)])]),
     );
     expect(annotation.type).toBe(AnnotationType.LINE);
     expect(annotation.id).toBe("syn:7");
@@ -92,9 +135,9 @@ describe("toLayerAnnotations", () => {
     const annotations = render(
       response(10n, [
         row(7n, [
-          point("a", [0, 0, 0], 10n),
-          point("b", [1, 0, 0], 10n),
-          point("c", [2, 0, 0], 10n),
+          point([0, 0, 0], 10n),
+          point([1, 0, 0], 10n),
+          point([2, 0, 0], 10n),
         ]),
       ]),
     );
@@ -106,6 +149,23 @@ describe("toLayerAnnotations", () => {
     expect(annotations.every((a) => a.type === AnnotationType.POINT)).toBe(
       true,
     );
+    expect(Array.from((annotations[2] as any).point)).toEqual([4, 0, 0]);
+  });
+
+  it("gives back the row id of each annotation it draws", () => {
+    const annotations = render(
+      response(10n, [row(7n, [point([0, 0, 0], 10n)])]),
+      response(10n, [
+        row(8n, [
+          point([0, 0, 0], 10n),
+          point([1, 0, 0], 10n),
+          point([2, 0, 0], 10n),
+        ]),
+      ]),
+    );
+    expect(
+      annotations.map(({ id }) => annotationRowId(TABLE.name, id)),
+    ).toEqual([7n, 8n, 8n, 8n]);
   });
 
   it("skips rows without points", () => {
@@ -113,10 +173,7 @@ describe("toLayerAnnotations", () => {
   });
 
   it("draws a cross-segment row once and relates it to both visible roots", () => {
-    const shared = row(7n, [
-      point("pre", [0, 0, 0], 10n),
-      point("post", [1, 1, 1], 20n),
-    ]);
+    const shared = row(7n, [point([0, 0, 0], 10n), point([1, 1, 1], 20n)]);
     const annotations = render(
       response(10n, [shared]),
       response(20n, [shared]),
@@ -127,30 +184,41 @@ describe("toLayerAnnotations", () => {
     ]);
   });
 
-  it("pairs each drawn row with the annotations it became", () => {
-    const shared = row(7n, [
-      point("pre", [0, 0, 0], 10n),
-      point("post", [1, 1, 1], 20n),
-    ]);
-    const rows = renderRows(
-      response(10n, [shared, row(8n, [])]),
-      response(20n, [shared]),
+  it("pairs each drawn row with its id, value and annotations", () => {
+    const shared = row(
+      7n,
+      [point([0, 0, 0], 10n), point([1, 1, 1], 20n)],
+      0.25,
     );
-    expect(rows.map(({ row: drawn }) => drawn.id)).toEqual([7n]);
+    const rows = renderRows([
+      response(10n, [shared, row(8n, [point([0, 0, 0]), point([1, 1, 1])])]),
+      response(20n, [shared]),
+    ]);
+    expect(rows.map(({ id, value }) => [id, value])).toEqual([
+      [7n, 0.25],
+      [8n, 0.5],
+    ]);
     expect(rows[0].annotations.map(({ id }) => id)).toEqual(["syn:7"]);
   });
 
   it("ignores roots that are not visible and falls back to the fetched root", () => {
     const [partner] = render(
-      response(10n, [
-        row(7n, [point("pre", [0, 0, 0], 10n), point("post", [1, 1, 1], 99n)]),
-      ]),
+      response(10n, [row(7n, [point([0, 0, 0], 10n), point([1, 1, 1], 99n)])]),
     );
     expect(partner.relatedSegments).toEqual([BigUint64Array.of(10n)]);
-    const [unresolved] = render(
-      response(10n, [row(8n, [point("p", [0, 0, 0], 0n)])]),
-    );
+    const [unresolved] = render(response(10n, [row(8n, [point([0, 0, 0])])]));
     expect(unresolved.relatedSegments).toEqual([BigUint64Array.of(10n)]);
+  });
+
+  it("whole-table rows relate to every root of their points", () => {
+    const [annotation, unbound] = render(
+      response(undefined, [
+        row(7n, [point([0, 0, 0], 10n), point([1, 1, 1], 99n)]),
+        row(8n, [point([0, 0, 0]), point([1, 1, 1])]),
+      ]),
+    );
+    expect(annotation.relatedSegments).toEqual([BigUint64Array.of(10n, 99n)]);
+    expect(unbound.relatedSegments).toEqual([BigUint64Array.of()]);
   });
 });
 

@@ -11,9 +11,12 @@
 import { cloneDeep, isEqual, isPlainObject, uniqBy } from "lodash-es";
 import type { AnnotationTableFilter } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import { ANNOTATION_FILTER_OPERATORS } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
+import { Uint64Set } from "#src/uint64_set.js";
 import { RefCounted } from "#src/util/disposable.js";
 import {
   expectArray,
+  parseUint64,
+  verifyBoolean,
   verifyObject,
   verifyObjectProperty,
   verifyOptionalObjectProperty,
@@ -27,10 +30,12 @@ export type { AnnotationTableFilter };
 interface SelectedTable {
   table: string;
   filter?: AnnotationTableFilter;
+  wholeTable?: true;
 }
 
 const TABLE_JSON_KEY = "table";
 const FILTER_JSON_KEY = "filter";
+const WHOLE_TABLE_JSON_KEY = "wholeTable";
 
 function parseFilter(value: unknown): AnnotationTableFilter {
   const filter = verifyObject(value);
@@ -59,14 +64,27 @@ function normalizeFilter(
 
 function parseSelectedTable(value: unknown): SelectedTable {
   if (typeof value === "string") return { table: value };
-  const filter = verifyOptionalObjectProperty(
-    value,
-    FILTER_JSON_KEY,
-    parseFilter,
-  );
   return {
     table: verifyObjectProperty(value, TABLE_JSON_KEY, verifyString),
-    ...(filter === undefined ? {} : { filter }),
+    filter: verifyOptionalObjectProperty(value, FILTER_JSON_KEY, parseFilter),
+    ...(verifyOptionalObjectProperty(
+      value,
+      WHOLE_TABLE_JSON_KEY,
+      verifyBoolean,
+    ) && { wholeTable: true }),
+  };
+}
+
+function normalizeSelectedTable({
+  table,
+  filter,
+  wholeTable,
+}: SelectedTable): SelectedTable {
+  const normalized = normalizeFilter(filter);
+  return {
+    table,
+    ...(normalized !== undefined && { filter: normalized }),
+    ...(wholeTable && { wholeTable }),
   };
 }
 
@@ -75,8 +93,17 @@ export class CalcadaAnnotationTablesState
   implements Trackable
 {
   readonly changed = new NullarySignal();
+  /** Roots whose annotations stay hidden; whole-table tables ignore it. */
+  readonly excludedSegments = new Uint64Set();
   private selected: readonly SelectedTable[] = [];
   private ticked_: readonly string[] = [];
+
+  constructor() {
+    super();
+    this.registerDisposer(
+      this.excludedSegments.changed.add(() => this.changed.dispatch()),
+    );
+  }
 
   /** Selected tables in selection order. */
   get ticked(): readonly string[] {
@@ -84,21 +111,23 @@ export class CalcadaAnnotationTablesState
   }
 
   filterOf(table: string): AnnotationTableFilter | undefined {
-    return this.selected.find((entry) => entry.table === table)?.filter;
+    return this.entryOf(table)?.filter;
   }
 
   setFilter(table: string, filter: AnnotationTableFilter | undefined) {
-    this.select(
-      this.selected.map((entry) =>
-        entry.table === table ? { table, filter } : entry,
-      ),
-    );
+    this.updateEntry(table, { filter });
+  }
+
+  wholeTableOf(table: string): boolean {
+    return this.entryOf(table)?.wholeTable ?? false;
+  }
+
+  setWholeTable(table: string, on: boolean) {
+    this.updateEntry(table, { wholeTable: on || undefined });
   }
 
   setTicked(names: readonly string[]) {
-    this.select(
-      names.map((table) => ({ table, filter: this.filterOf(table) })),
-    );
+    this.select(names.map((table) => this.entryOf(table) ?? { table }));
   }
 
   untick(...names: string[]) {
@@ -109,14 +138,21 @@ export class CalcadaAnnotationTablesState
     this.setTicked([]);
   }
 
+  private entryOf(table: string): SelectedTable | undefined {
+    return this.selected.find((entry) => entry.table === table);
+  }
+
+  private updateEntry(table: string, change: Partial<SelectedTable>) {
+    this.select(
+      this.selected.map((entry) =>
+        entry.table === table ? { ...entry, ...change } : entry,
+      ),
+    );
+  }
+
   private select(entries: readonly SelectedTable[]) {
     const unique = uniqBy(entries, ({ table }) => table).map(
-      ({ table, filter }) => {
-        const normalized = normalizeFilter(filter);
-        return normalized === undefined
-          ? { table }
-          : { table, filter: normalized };
-      },
+      normalizeSelectedTable,
     );
     if (isEqual(unique, this.selected)) return;
     this.selected = unique;
@@ -130,12 +166,27 @@ export class CalcadaAnnotationTablesState
       : this.selected.map((entry) => ({ ...entry }));
   }
 
-  /** Also accepts the earlier array of table names. */
+  /** Also accepts the earlier forms: table names, and entries without `wholeTable`. */
   restoreState(value: unknown) {
     if (value === undefined || value === null) {
       this.reset();
       return;
     }
     this.select(expectArray(value).map(parseSelectedTable));
+  }
+
+  excludedSegmentsToJSON(): string[] | undefined {
+    return this.excludedSegments.size === 0
+      ? undefined
+      : this.excludedSegments.toJSON();
+  }
+
+  restoreExcludedSegments(value: unknown) {
+    const roots =
+      value === undefined || value === null
+        ? []
+        : expectArray(value).map(parseUint64);
+    this.excludedSegments.clear();
+    this.excludedSegments.add(roots);
   }
 }

@@ -8,18 +8,14 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import type {
-  Annotation,
-  AnnotationReference,
-  AnnotationSource,
-} from "#src/annotation/index.js";
+import type { Annotation } from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 import type {
   AnnotationTableInfo,
-  SegmentAnnotation,
-  SegmentAnnotationPoint,
-  SegmentAnnotations,
+  TablePointColumn,
+  TablePoints,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
+import { UNBOUND_ROOT_INDEX } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import { vec3 } from "#src/util/geom.js";
 
 export const ANNOTATION_TABLE_COLORS: vec3[] = [
@@ -35,7 +31,20 @@ export const ANNOTATION_TABLE_COLORS: vec3[] = [
 
 const LINE_POINT_COUNT = 2;
 const SINGLE_POINT_COUNT = 1;
-const ABSENT_ROOT = 0n;
+export const COORDINATES_PER_POSITION = 3;
+const ANNOTATION_ID_SEPARATOR = ":";
+
+function rowAnnotationId(table: string, rowId: bigint): string {
+  return `${table}${ANNOTATION_ID_SEPARATOR}${rowId}`;
+}
+
+/** The table row a layer annotation of `table` was drawn from. */
+export function annotationRowId(table: string, annotationId: string): bigint {
+  const [rowId] = annotationId
+    .slice(table.length + ANNOTATION_ID_SEPARATOR.length)
+    .split(ANNOTATION_ID_SEPARATOR);
+  return BigInt(rowId);
+}
 
 export function colorForTable(index: number): vec3 {
   return ANNOTATION_TABLE_COLORS[index % ANNOTATION_TABLE_COLORS.length];
@@ -43,129 +52,109 @@ export function colorForTable(index: number): vec3 {
 
 type ToLayer = (nm: [number, number, number]) => Float32Array;
 
-interface PendingRow {
-  row: SegmentAnnotation;
-  fetchedUnder: bigint;
+export interface FetchedTablePoints {
+  fetchedUnder: bigint | undefined;
+  points: TablePoints;
 }
 
-function dedupeRows(byRoot: Map<bigint, SegmentAnnotations>, table: string) {
+export interface LayerRow {
+  id: bigint;
+  value: number;
+  annotations: Annotation[];
+}
+
+interface PendingRow {
+  response: FetchedTablePoints;
+  index: number;
+}
+
+function dedupeRows(tables: Iterable<FetchedTablePoints>) {
   const rows = new Map<bigint, PendingRow>();
-  for (const [root, response] of byRoot) {
-    for (const row of response.tables.get(table)?.annotations ?? []) {
-      if (!rows.has(row.id)) rows.set(row.id, { row, fetchedUnder: root });
-    }
+  for (const response of tables) {
+    response.points.ids.forEach((id, index) => {
+      if (!rows.has(id)) rows.set(id, { response, index });
+    });
   }
   return rows;
 }
 
 function relatedRoots(
-  { row, fetchedUnder }: PendingRow,
-  visible: Map<bigint, SegmentAnnotations>,
+  { response: { fetchedUnder, points }, index }: PendingRow,
+  visibleRoots: ReadonlySet<bigint>,
 ): BigUint64Array {
-  const roots = new Set<bigint>();
-  for (const { rootId } of row.points) {
-    if (rootId !== ABSENT_ROOT && visible.has(rootId)) roots.add(rootId);
+  const roots: bigint[] = [];
+  for (const { rootIndex } of points.points) {
+    const pointRootIndex = rootIndex[index];
+    if (pointRootIndex === UNBOUND_ROOT_INDEX) continue;
+    const root = points.roots[pointRootIndex];
+    const related = fetchedUnder === undefined || visibleRoots.has(root);
+    if (related && !roots.includes(root)) roots.push(root);
   }
-  return roots.size === 0
-    ? BigUint64Array.of(fetchedUnder)
-    : BigUint64Array.from(roots);
+  if (roots.length === 0 && fetchedUnder !== undefined) {
+    roots.push(fetchedUnder);
+  }
+  return BigUint64Array.from(roots);
 }
 
-export interface LayerRow {
-  row: SegmentAnnotation;
-  annotations: Annotation[];
-}
-
-/** Each row once across roots, with the layer annotations it is drawn as. */
+/**
+ * Each row once across responses, with the layer annotations it is drawn as.
+ * A response fetched for the whole table has no `fetchedUnder`.
+ */
 export function toLayerAnnotations(
-  byRoot: Map<bigint, SegmentAnnotations>,
+  tables: Iterable<FetchedTablePoints>,
   table: AnnotationTableInfo,
   toLayer: ToLayer,
+  visibleRoots: ReadonlySet<bigint>,
 ): LayerRow[] {
-  const place = ({ position }: SegmentAnnotationPoint) =>
-    toLayer([
-      position[0] * table.voxelResolution[0],
-      position[1] * table.voxelResolution[1],
-      position[2] * table.voxelResolution[2],
+  const [resolutionX, resolutionY, resolutionZ] = table.voxelResolution;
+  const place = ({ positions }: TablePointColumn, index: number) => {
+    const offset = index * COORDINATES_PER_POSITION;
+    return toLayer([
+      positions[offset] * resolutionX,
+      positions[offset + 1] * resolutionY,
+      positions[offset + 2] * resolutionZ,
     ]);
+  };
   const layerRows: LayerRow[] = [];
-  for (const pending of dedupeRows(byRoot, table.name).values()) {
-    const { row } = pending;
-    if (row.points.length === 0) continue;
+  for (const [rowId, pending] of dedupeRows(tables)) {
+    const { response, index } = pending;
+    const columns = response.points.points;
+    if (columns.length === 0) continue;
+    const value = response.points.values[index];
     const common = {
-      relatedSegments: [relatedRoots(pending, byRoot)],
-      properties: [row.value],
+      relatedSegments: [relatedRoots(pending, visibleRoots)],
+      properties: [value],
     };
-    const id = `${table.name}:${row.id}`;
+    const id = rowAnnotationId(table.name, rowId);
     let annotations: Annotation[];
-    if (row.points.length === LINE_POINT_COUNT) {
+    if (columns.length === LINE_POINT_COUNT) {
       annotations = [
         {
           ...common,
           id,
           type: AnnotationType.LINE,
-          pointA: place(row.points[0]),
-          pointB: place(row.points[1]),
+          pointA: place(columns[0], index),
+          pointB: place(columns[1], index),
         },
       ];
-    } else if (row.points.length === SINGLE_POINT_COUNT) {
+    } else if (columns.length === SINGLE_POINT_COUNT) {
       annotations = [
         {
           ...common,
           id,
           type: AnnotationType.POINT,
-          point: place(row.points[0]),
+          point: place(columns[0], index),
         },
       ];
     } else {
-      annotations = row.points.map((point, index) => ({
+      annotations = columns.map((column, pointIndex) => ({
         ...common,
-        id: `${id}:${index}`,
+        id: `${id}${ANNOTATION_ID_SEPARATOR}${pointIndex}`,
         type: AnnotationType.POINT,
-        point: place(point),
+        point: place(column, index),
       }));
     }
-    layerRows.push({ row, annotations });
+    layerRows.push({ id: rowId, value, annotations });
   }
   return layerRows;
-}
-
-function withReference(
-  source: AnnotationSource,
-  id: string,
-  use: (reference: AnnotationReference) => void,
-) {
-  const reference = source.getReference(id);
-  try {
-    use(reference);
-  } finally {
-    reference.dispose();
-  }
-}
-
-/**
- * Makes the source hold exactly these annotations through per-annotation
- * add, update and delete, which NG's own annotation list follows; `clear()`
- * announces nothing it could follow.
- */
-export function syncAnnotationSource(
-  source: AnnotationSource,
-  annotations: readonly Annotation[],
-) {
-  const wanted = new Map(
-    annotations.map((annotation) => [annotation.id, annotation]),
-  );
-  for (const { id } of [...source]) {
-    const annotation = wanted.get(id);
-    withReference(source, id, (reference) =>
-      annotation === undefined
-        ? source.delete(reference)
-        : source.update(reference, annotation),
-    );
-  }
-  for (const annotation of annotations) {
-    if (source.get(annotation.id) === undefined) {
-      source.add(annotation, true).dispose();
-    }
-  }
 }

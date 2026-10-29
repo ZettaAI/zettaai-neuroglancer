@@ -624,6 +624,10 @@ class SegmentationUserLayerDisplayState implements SegmentationDisplayState {
   honorTempStatedColorAlpha = new WatchableValue<boolean>(false);
   // See SegmentationDisplayState.unstatedFragmentsUseSegmentColor.
   unstatedFragmentsUseSegmentColor = new WatchableValue<boolean>(false);
+  // See SegmentationDisplayState.annotationExcludedSegments.
+  annotationExcludedSegments = new WatchableValue<Uint64Set | undefined>(
+    undefined,
+  );
   silhouetteRendering = new TrackableValue<number>(
     0,
     verifyFiniteNonNegativeFloat,

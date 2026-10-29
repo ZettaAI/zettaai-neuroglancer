@@ -1600,16 +1600,28 @@
 .calcada-annotations-tab {
   display: flex;
   flex-direction: column;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .calcada-annotations-panel {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
   padding: 8px;
   font-size: 12px;
+}
+
+/* Fixed above the list, but never more than half the tab: many selected
+   tables scroll here instead of squeezing the list away. */
+.calcada-annotations-controls {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50%;
+  overflow-y: auto;
 }
 
 .calcada-annotations-header {
@@ -1636,17 +1648,13 @@
   min-width: 0;
 }
 
-.calcada-annotations-tables,
-.calcada-annotations-rows {
+.calcada-annotations-tables {
   display: flex;
   flex-direction: column;
   margin: 0;
   padding: 0;
-  list-style: none;
-}
-
-.calcada-annotations-tables {
   gap: 8px;
+  list-style: none;
 }
 
 .calcada-annotations-table {
@@ -1657,7 +1665,6 @@
 }
 
 .calcada-annotations-table-header,
-.calcada-annotations-row-header,
 .calcada-annotations-pager {
   display: flex;
   flex-wrap: wrap;
@@ -1686,41 +1693,35 @@
   opacity: 0.7;
 }
 
-.calcada-annotations-list {
+.calcada-annotations-whole-table {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 4px;
-  min-width: 0;
-}
-
-.calcada-annotations-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  padding: 3px 4px;
-  border: 0;
-  border-radius: 3px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
   cursor: pointer;
 }
 
-.calcada-annotations-row:hover {
-  background: rgb(255 255 255 / 8%);
+.calcada-annotations-list-holder {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
-.calcada-annotations-row-id,
-.calcada-annotations-row-position {
-  font-family: monospace;
-  overflow-wrap: anywhere;
+.calcada-annotations-list-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
-.calcada-annotations-row-position {
-  padding-left: 16px;
-  opacity: 0.8;
+.calcada-annotations-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.calcada-annotations-list .neuroglancer-annotation-list-entry:hover {
+  background-color: #333;
 }
 
 .calcada-annotations-error {

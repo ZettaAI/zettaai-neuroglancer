@@ -9,29 +9,34 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   conditionCount,
   filterFields,
 } from "#src/datasource/calcada/annotation_tables/annotation_filter.js";
 import { AnnotationFilterEditor } from "#src/datasource/calcada/annotation_tables/annotation_filter_editor.js";
-import { FIRST_PAGE } from "#src/datasource/calcada/annotation_tables/annotation_page_windows.js";
 import type {
   AnnotationTableFilter,
   AnnotationTableInfo,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import type {
   AnnotationTableStatus,
+  AnnotationTotals,
   DrawnAnnotation,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
-import { ANNOTATIONS_PER_PAGE } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import { formatCount } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
+import { AnnotationListColumnWidths } from "#src/ui/annotations.js";
+import type { ArraySpliceOp } from "#src/util/array.js";
+import { RefCounted } from "#src/util/disposable.js";
 import type { vec3 } from "#src/util/geom.js";
-import type { NullarySignal } from "#src/util/signal.js";
+import type { ReadonlySignal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
+import type { VirtualListSource } from "#src/widget/virtual_list.js";
+import { VirtualList } from "#src/widget/virtual_list.js";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -51,15 +56,38 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 
-export const ANNOTATION_LIST_PAGE_SIZE = 50;
 export const ANNOTATION_ROW_HINT = "Click to select, right-click to move to it";
 
-const THOUSANDS_GROUP = /\B(?=(\d{3})+$)/g;
-const formatCount = (count: number) =>
-  String(count).replace(THOUSANDS_GROUP, " ");
-const PREVIOUS_SERVER_PAGE_LABEL = `Previous ${ANNOTATIONS_PER_PAGE}`;
-const NEXT_SERVER_PAGE_LABEL = `Next ${ANNOTATIONS_PER_PAGE}`;
+const SELECTED_ENTRY_CLASS = "neuroglancer-annotation-selected";
+
 const RGB_MAX = 255;
+
+export interface AnnotationTablesPanelSession {
+  readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
+  readonly status: WatchableValueInterface<AnnotationTableStatus[]>;
+  readonly drawn: WatchableValueInterface<DrawnAnnotation[]>;
+  readonly listError: WatchableValueInterface<string | undefined>;
+  readonly rootsNote: WatchableValueInterface<string | undefined>;
+  readonly limitNote: WatchableValueInterface<string | undefined>;
+  readonly totals: WatchableValueInterface<AnnotationTotals>;
+  tableColor(name: string): vec3;
+  refreshTables(): void;
+  select(item: DrawnAnnotation): void;
+  moveTo(item: DrawnAnnotation): void;
+  makeListElement(item: DrawnAnnotation): [HTMLElement, number[]] | undefined;
+  renderListHeader(
+    item: DrawnAnnotation,
+    header: HTMLElement,
+    columnWidths: AnnotationListColumnWidths,
+  ): boolean;
+  isSelected(item: DrawnAnnotation): boolean;
+  readonly annotationSelectionChanged: ReadonlySignal<() => void>;
+  readonly listCoordinatesChanged: ReadonlySignal<() => void>;
+  readonly annotationUpdated: ReadonlySignal<
+    (table: string, layerId: string) => void
+  >;
+  clearHover(): void;
+}
 
 /**
  * What the panel needs from the graph connection, stated structurally so this
@@ -73,21 +101,11 @@ export interface AnnotationTablesPanelConnection {
       setTicked(names: readonly string[]): void;
       filterOf(table: string): AnnotationTableFilter | undefined;
       setFilter(table: string, filter: AnnotationTableFilter | undefined): void;
+      wholeTableOf(table: string): boolean;
+      setWholeTable(table: string, on: boolean): void;
     };
   };
-  readonly annotationTablesSession: {
-    readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
-    readonly status: WatchableValueInterface<AnnotationTableStatus[]>;
-    readonly drawn: WatchableValueInterface<DrawnAnnotation[]>;
-    readonly listError: WatchableValueInterface<string | undefined>;
-    readonly rootsNote: WatchableValueInterface<string | undefined>;
-    tableColor(name: string): vec3;
-    refreshTables(): void;
-    nextPage(table: string): void;
-    previousPage(table: string): void;
-    select(item: DrawnAnnotation): void;
-    moveTo(item: DrawnAnnotation): void;
-  };
+  readonly annotationTablesSession: AnnotationTablesPanelSession;
 }
 
 function cssColor(color: vec3): string {
@@ -201,21 +219,26 @@ function FilterButton({
 function TableStatusLine({
   info,
   status,
+  counted,
   color,
   filter,
   onFilter,
-  onPrevious,
-  onNext,
+  wholeTable,
+  onWholeTable,
 }: {
   info: AnnotationTableInfo;
   status: AnnotationTableStatus | undefined;
+  /** Shown while none of the table is drawn: counting, or over the limit. */
+  counted: number;
   color: vec3;
   filter: AnnotationTableFilter | undefined;
   onFilter: (filter: AnnotationTableFilter | undefined) => void;
-  onPrevious: () => void;
-  onNext: () => void;
+  wholeTable: boolean;
+  onWholeTable: (on: boolean) => void;
 }) {
   const conditions = conditionCount(filter);
+  const drawn = status?.annotations ?? 0;
+  const shown = drawn > 0 ? drawn : counted;
   return (
     <li className="calcada-annotations-table">
       <div className="calcada-annotations-table-header">
@@ -228,38 +251,29 @@ function TableStatusLine({
           </span>
         )}
         <FilterButton info={info} filter={filter} onApply={onFilter} />
+        <label className="calcada-annotations-whole-table">
+          <input
+            type="checkbox"
+            checked={wholeTable}
+            onChange={(event) => onWholeTable(event.target.checked)}
+          />
+          Whole table
+        </label>
       </div>
       {status?.note !== undefined && (
         <div className="calcada-annotations-empty">{status.note}</div>
       )}
       {status !== undefined && status.note === undefined && (
-        <>
-          <div>
-            {status.annotations}{" "}
-            {status.annotations === 1 ? "annotation" : "annotations"} on{" "}
-            {status.fetchedRoots}{" "}
-            {status.fetchedRoots === 1 ? "segment" : "segments"}
-          </div>
-          <div className="calcada-annotations-pager">
-            <span>Page {status.page}</span>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!status.hasPrevious}
-              onClick={onPrevious}
-            >
-              {PREVIOUS_SERVER_PAGE_LABEL}
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!status.hasNext}
-              onClick={onNext}
-            >
-              {NEXT_SERVER_PAGE_LABEL}
-            </Button>
-          </div>
-        </>
+        <div>
+          {formatCount(shown)} {shown === 1 ? "annotation" : "annotations"}
+          {drawn > 0 && !wholeTable && (
+            <>
+              {" "}
+              on {status.fetchedRoots}{" "}
+              {status.fetchedRoots === 1 ? "segment" : "segments"}
+            </>
+          )}
+        </div>
       )}
       {status?.error !== undefined && (
         <div className="calcada-annotations-error">{status.error}</div>
@@ -268,112 +282,160 @@ function TableStatusLine({
   );
 }
 
-function AnnotationRow({
-  item,
-  color,
-  onSelect,
-  onMove,
-}: {
-  item: DrawnAnnotation;
-  color: vec3;
-  onSelect: () => void;
-  onMove: () => void;
-}) {
-  const { annotation } = item;
-  return (
-    <li>
-      <button
-        type="button"
-        className="calcada-annotations-row"
-        title={ANNOTATION_ROW_HINT}
-        onClick={onSelect}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          onMove();
-        }}
-      >
-        <span className="calcada-annotations-row-header">
-          <Swatch color={color} />
-          <span className="calcada-annotations-table-name">{item.table}</span>
-          <span className="calcada-annotations-row-id">
-            {String(annotation.id)}
-          </span>
-          <span>{String(annotation.value)}</span>
-        </span>
-        {annotation.points.map((point) => (
-          <span
-            key={point.name}
-            className="calcada-annotations-row-position"
-            title={point.name}
-          >
-            {point.position.join(", ")}
-          </span>
-        ))}
-      </button>
-    </li>
-  );
+type DrawnKey = Pick<DrawnAnnotation, "table" | "layerId">;
+
+const isSameDrawn = (a: DrawnKey, b: DrawnKey) =>
+  a.table === b.table && a.layerId === b.layerId;
+
+/** One splice from `before` to `after` that keeps their common ends; none if equal. */
+function drawnSplice(
+  before: readonly DrawnAnnotation[],
+  after: readonly DrawnAnnotation[],
+): ArraySpliceOp | undefined {
+  const shorter = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < shorter && isSameDrawn(before[prefix], after[prefix])) {
+    ++prefix;
+  }
+  let suffix = 0;
+  while (
+    suffix < shorter - prefix &&
+    isSameDrawn(
+      before[before.length - 1 - suffix],
+      after[after.length - 1 - suffix],
+    )
+  ) {
+    ++suffix;
+  }
+  const deleteCount = before.length - prefix - suffix;
+  const insertCount = after.length - prefix - suffix;
+  if (deleteCount === 0 && insertCount === 0) return undefined;
+  return { retainCount: prefix, deleteCount, insertCount };
 }
 
-function AnnotationList({
+/**
+ * NG's header row over NG's `VirtualList` of NG's own entries, the table's
+ * colour on each type symbol.
+ */
+class DrawnAnnotationListView extends RefCounted {
+  readonly element = document.createElement("div");
+  private readonly header = document.createElement("div");
+  private headerShown = false;
+  private items: readonly DrawnAnnotation[] = [];
+  private readonly source = {
+    length: 0,
+    render: (index: number) => this.render(this.items[index]),
+    changed: new Signal<(splices: ArraySpliceOp[]) => void>(),
+    renderChanged: new NullarySignal(),
+  } satisfies VirtualListSource;
+  private readonly list = this.registerDisposer(
+    new VirtualList({ source: this.source }),
+  );
+  private readonly columnWidths = new AnnotationListColumnWidths(this.element);
+
+  constructor(private readonly session: AnnotationTablesPanelSession) {
+    super();
+    this.element.className = "calcada-annotations-list-view";
+    this.header.className = "neuroglancer-annotation-list-header";
+    const { element } = this.list;
+    element.className = "calcada-annotations-list";
+    element.title = ANNOTATION_ROW_HINT;
+    element.addEventListener("mouseleave", () => session.clearHover());
+    this.element.append(this.header, element);
+    this.registerDisposer(
+      session.annotationSelectionChanged.add(() => this.showSelection()),
+    );
+    this.registerDisposer(
+      session.listCoordinatesChanged.add(() => {
+        this.columnWidths.reset();
+        this.headerShown = false;
+        this.source.renderChanged.dispatch();
+      }),
+    );
+    this.registerDisposer(
+      session.annotationUpdated.add((table, layerId) =>
+        this.rerender(table, layerId),
+      ),
+    );
+  }
+
+  show(items: readonly DrawnAnnotation[]) {
+    const splice = drawnSplice(this.items, items);
+    this.items = items;
+    this.source.length = items.length;
+    if (splice !== undefined) this.source.changed.dispatch([splice]);
+  }
+
+  private rerender(table: string, layerId: string) {
+    const index = this.items.findIndex((item) =>
+      isSameDrawn(item, { table, layerId }),
+    );
+    if (index === -1) return;
+    this.source.changed.dispatch([
+      { retainCount: index, deleteCount: 1, insertCount: 1 },
+    ]);
+  }
+
+  private showSelection() {
+    this.list.forEachRenderedItem((element, index) =>
+      element.classList.toggle(
+        SELECTED_ENTRY_CLASS,
+        this.session.isSelected(this.items[index]),
+      ),
+    );
+  }
+
+  private render(item: DrawnAnnotation): HTMLElement {
+    const { session } = this;
+    const entry = session.makeListElement(item);
+    if (entry === undefined) return document.createElement("div");
+    if (!this.headerShown) {
+      this.headerShown = session.renderListHeader(
+        item,
+        this.header,
+        this.columnWidths,
+      );
+    }
+    const [element, widths] = entry;
+    for (const [column, width] of widths.entries()) {
+      this.columnWidths.widen(column, width);
+    }
+    const icon = element.querySelector<HTMLElement>(
+      ".neuroglancer-annotation-icon",
+    );
+    if (icon !== null) {
+      icon.style.color = cssColor(session.tableColor(item.table));
+    }
+    element.classList.toggle(SELECTED_ENTRY_CLASS, session.isSelected(item));
+    element.addEventListener("click", () => session.select(item));
+    element.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      session.moveTo(item);
+    });
+    return element;
+  }
+}
+
+function DrawnAnnotationList({
+  session,
   drawn,
-  tableColor,
-  onSelect,
-  onMove,
 }: {
-  drawn: DrawnAnnotation[];
-  tableColor: (name: string) => vec3;
-  onSelect: (item: DrawnAnnotation) => void;
-  onMove: (item: DrawnAnnotation) => void;
+  session: AnnotationTablesPanelSession;
+  drawn: readonly DrawnAnnotation[];
 }) {
-  const [listPage, setListPage] = useState(0);
-  const lastPage = Math.max(
-    0,
-    Math.ceil(drawn.length / ANNOTATION_LIST_PAGE_SIZE) - 1,
-  );
-  if (listPage > lastPage) setListPage(lastPage);
-  if (drawn.length === 0) return null;
-  const page = Math.min(listPage, lastPage);
-  const start = page * ANNOTATION_LIST_PAGE_SIZE;
-  const shown = drawn.slice(start, start + ANNOTATION_LIST_PAGE_SIZE);
-  return (
-    <div className="calcada-annotations-list">
-      <div className="calcada-annotations-pager">
-        <span className="calcada-annotations-list-range">
-          {formatCount(start + 1)}–{formatCount(start + shown.length)} of{" "}
-          {formatCount(drawn.length)}
-        </span>
-        <Button
-          size="icon-xs"
-          variant="outline"
-          aria-label="Previous page"
-          disabled={page === 0}
-          onClick={() => setListPage((current) => current - 1)}
-        >
-          <ChevronLeftIcon />
-        </Button>
-        <Button
-          size="icon-xs"
-          variant="outline"
-          aria-label="Next page"
-          disabled={page === lastPage}
-          onClick={() => setListPage((current) => current + 1)}
-        >
-          <ChevronRightIcon />
-        </Button>
-      </div>
-      <ul className="calcada-annotations-rows">
-        {shown.map((item) => (
-          <AnnotationRow
-            key={`${item.table}:${item.layerId}`}
-            item={item}
-            color={tableColor(item.table)}
-            onSelect={() => onSelect(item)}
-            onMove={() => onMove(item)}
-          />
-        ))}
-      </ul>
-    </div>
-  );
+  const holder = useRef<HTMLDivElement>(null);
+  const view = useRef<DrawnAnnotationListView>(undefined);
+  useEffect(() => {
+    const created = new DrawnAnnotationListView(session);
+    holder.current!.appendChild(created.element);
+    view.current = created;
+    return () => {
+      created.dispose();
+      view.current = undefined;
+    };
+  }, [session]);
+  useEffect(() => view.current?.show(drawn), [session, drawn]);
+  return <div ref={holder} className="calcada-annotations-list-holder" />;
 }
 
 export function CalcadaAnnotationTablesPanel({
@@ -389,6 +451,8 @@ export function CalcadaAnnotationTablesPanel({
   const drawn = useWatchable(session.drawn);
   const listError = useWatchable(session.listError);
   const rootsNote = useWatchable(session.rootsNote);
+  const limitNote = useWatchable(session.limitNote);
+  const totals = useWatchable(session.totals);
   const infoByName = new Map(tables?.map((table) => [table.name, table]));
   const orphans = statuses.filter(
     (status) =>
@@ -396,91 +460,87 @@ export function CalcadaAnnotationTablesPanel({
       !infoByName.has(status.table),
   );
   const tableColor = (name: string) => session.tableColor(name);
-  const pageOf = (name: string) =>
-    statuses.find((status) => status.table === name)?.page ?? FIRST_PAGE;
-  const shownPages = annotationTables.ticked
-    .map(
-      (name) =>
-        `${name}@${pageOf(name)}${JSON.stringify(annotationTables.filterOf(name) ?? {})}`,
-    )
-    .join(" ");
   return (
     <div className="calcada-annotations-panel">
-      <div className="calcada-annotations-header">
-        <span>Annotation tables</span>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => session.refreshTables()}
-        >
-          Refresh
-        </Button>
-      </div>
-      {listError !== undefined && (
-        <div className="calcada-annotations-error">{listError}</div>
-      )}
-      {rootsNote !== undefined && (
-        <div className="calcada-annotations-empty">{rootsNote}</div>
-      )}
-      {orphans.map((status) =>
-        status.error !== undefined ? (
-          <div key={status.table} className="calcada-annotations-error">
-            {status.error}
+      <div className="calcada-annotations-controls">
+        <div className="calcada-annotations-header">
+          <span>Annotation tables</span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => session.refreshTables()}
+          >
+            Refresh
+          </Button>
+        </div>
+        {listError !== undefined && (
+          <div className="calcada-annotations-error">{listError}</div>
+        )}
+        {rootsNote !== undefined && (
+          <div className="calcada-annotations-empty">{rootsNote}</div>
+        )}
+        {orphans.map((status) =>
+          status.error !== undefined ? (
+            <div key={status.table} className="calcada-annotations-error">
+              {status.error}
+            </div>
+          ) : (
+            <div key={status.table} className="calcada-annotations-empty">
+              {status.table}: {status.note}
+            </div>
+          ),
+        )}
+        {tables === undefined ? (
+          listError === undefined && (
+            <div className="calcada-annotations-empty">
+              Loading annotation tables…
+            </div>
+          )
+        ) : tables.length === 0 ? (
+          <div className="calcada-annotations-empty">
+            No annotation tables on this graph
           </div>
         ) : (
-          <div key={status.table} className="calcada-annotations-empty">
-            {status.table}: {status.note}
-          </div>
-        ),
+          <>
+            <TablePicker
+              tables={tables}
+              ticked={annotationTables.ticked}
+              tableColor={tableColor}
+              onChange={(names) => annotationTables.setTicked(names)}
+            />
+            <ul className="calcada-annotations-tables">
+              {annotationTables.ticked.map((name) => {
+                const info = infoByName.get(name);
+                return (
+                  info !== undefined && (
+                    <TableStatusLine
+                      key={name}
+                      info={info}
+                      status={statuses.find((status) => status.table === name)}
+                      counted={totals.byTable.get(name) ?? 0}
+                      color={tableColor(name)}
+                      filter={annotationTables.filterOf(name)}
+                      onFilter={(filter) =>
+                        annotationTables.setFilter(name, filter)
+                      }
+                      wholeTable={annotationTables.wholeTableOf(name)}
+                      onWholeTable={(on) =>
+                        annotationTables.setWholeTable(name, on)
+                      }
+                    />
+                  )
+                );
+              })}
+            </ul>
+          </>
+        )}
+        {limitNote !== undefined && (
+          <div className="calcada-annotations-empty">{limitNote}</div>
+        )}
+      </div>
+      {limitNote === undefined && (
+        <DrawnAnnotationList session={session} drawn={drawn} />
       )}
-      {tables === undefined ? (
-        listError === undefined && (
-          <div className="calcada-annotations-empty">
-            Loading annotation tables…
-          </div>
-        )
-      ) : tables.length === 0 ? (
-        <div className="calcada-annotations-empty">
-          No annotation tables on this graph
-        </div>
-      ) : (
-        <>
-          <TablePicker
-            tables={tables}
-            ticked={annotationTables.ticked}
-            tableColor={tableColor}
-            onChange={(names) => annotationTables.setTicked(names)}
-          />
-          <ul className="calcada-annotations-tables">
-            {annotationTables.ticked.map((name) => {
-              const info = infoByName.get(name);
-              return (
-                info !== undefined && (
-                  <TableStatusLine
-                    key={name}
-                    info={info}
-                    status={statuses.find((status) => status.table === name)}
-                    color={tableColor(name)}
-                    filter={annotationTables.filterOf(name)}
-                    onFilter={(filter) =>
-                      annotationTables.setFilter(name, filter)
-                    }
-                    onPrevious={() => session.previousPage(name)}
-                    onNext={() => session.nextPage(name)}
-                  />
-                )
-              );
-            })}
-          </ul>
-        </>
-      )}
-      <AnnotationList
-        key={shownPages}
-        drawn={drawn}
-        tableColor={tableColor}
-        onSelect={(item) => session.select(item)}
-        onMove={(item) => session.moveTo(item)}
-      />
     </div>
   );
 }

@@ -15,12 +15,71 @@ import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation
 const SIZE_FILTER = { filter_greater_dict: { size: 10 } };
 
 describe("CalcadaAnnotationTablesState", () => {
-  it("restores the old array of table names", () => {
+  it("restores the 4b form and the string array", () => {
+    const fromNames = new CalcadaAnnotationTablesState();
+    fromNames.restoreState(["syn", "mark"]);
+    expect(fromNames.ticked).toEqual(["syn", "mark"]);
+    expect(fromNames.filterOf("syn")).toBeUndefined();
+    expect(fromNames.wholeTableOf("syn")).toBe(false);
+    expect(fromNames.toJSON()).toEqual([{ table: "syn" }, { table: "mark" }]);
+    const from4b = new CalcadaAnnotationTablesState();
+    from4b.restoreState([
+      { table: "syn", filter: SIZE_FILTER },
+      { table: "mark" },
+    ]);
+    expect(from4b.ticked).toEqual(["syn", "mark"]);
+    expect(from4b.filterOf("syn")).toEqual(SIZE_FILTER);
+    expect(from4b.wholeTableOf("syn")).toBe(false);
+    expect(from4b.wholeTableOf("mark")).toBe(false);
+  });
+
+  it("round-trips wholeTable and excludedSegments", () => {
+    const json = [
+      { table: "syn", filter: SIZE_FILTER, wholeTable: true },
+      { table: "mark" },
+    ];
     const state = new CalcadaAnnotationTablesState();
-    state.restoreState(["syn", "mark"]);
+    state.restoreState(json);
+    state.restoreExcludedSegments(["20", "10"]);
+    expect(state.wholeTableOf("syn")).toBe(true);
+    expect(state.wholeTableOf("mark")).toBe(false);
+    expect(state.toJSON()).toEqual(json);
+    expect(state.excludedSegmentsToJSON()).toEqual(["10", "20"]);
+    expect([...state.excludedSegments]).toEqual(
+      expect.arrayContaining([10n, 20n]),
+    );
+    const changed = vi.fn();
+    state.changed.add(changed);
+    state.setWholeTable("syn", false);
+    state.excludedSegments.delete(10n);
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(state.toJSON()).toEqual([
+      { table: "syn", filter: SIZE_FILTER },
+      { table: "mark" },
+    ]);
+    state.restoreExcludedSegments(undefined);
+    expect(state.excludedSegmentsToJSON()).toBeUndefined();
+  });
+
+  it("an excluded root that is no longer present is kept but harmless", () => {
+    const state = new CalcadaAnnotationTablesState();
+    state.restoreState([{ table: "syn" }]);
+    state.restoreExcludedSegments(["999"]);
+    state.setTicked(["syn", "mark"]);
+    expect(state.excludedSegmentsToJSON()).toEqual(["999"]);
     expect(state.ticked).toEqual(["syn", "mark"]);
-    expect(state.filterOf("syn")).toBeUndefined();
     expect(state.toJSON()).toEqual([{ table: "syn" }, { table: "mark" }]);
+  });
+
+  it("keeps wholeTable while its table stays ticked and drops it on untick", () => {
+    const state = new CalcadaAnnotationTablesState();
+    state.setTicked(["syn"]);
+    state.setWholeTable("syn", true);
+    state.setTicked([...state.ticked, "mark"]);
+    expect(state.wholeTableOf("syn")).toBe(true);
+    state.untick("syn");
+    state.setTicked([...state.ticked, "syn"]);
+    expect(state.wholeTableOf("syn")).toBe(false);
   });
 
   it("round-trips tables with filters in selection order", () => {

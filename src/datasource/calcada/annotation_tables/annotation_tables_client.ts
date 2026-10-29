@@ -14,7 +14,9 @@ import { HttpError } from "#src/util/http_request.js";
 import {
   expectArray,
   parseUint64,
+  verifyBoolean,
   verifyFiniteFloat,
+  verifyInt,
   verifyNonnegativeInt,
   verifyObject,
   verifyObjectProperty,
@@ -52,6 +54,7 @@ export interface AnnotationTableInfo {
   voxelResolution: [number, number, number];
   points: string[];
   properties: Record<string, AnnotationPropertyType>;
+  canWrite: boolean;
 }
 
 export interface SegmentAnnotationPoint {
@@ -71,21 +74,29 @@ export interface SegmentAnnotation {
 /** The server's cap on the tables one segment request may name. */
 export const MAX_TABLES_PER_SEGMENT_REQUEST = 20;
 
-export interface SegmentTableAnnotations {
-  annotations: SegmentAnnotation[];
-  nextCursor?: string;
-}
-
-export interface SegmentAnnotations {
-  rootId: bigint;
-  tables: Map<string, SegmentTableAnnotations>;
-}
-
 export interface AnnotationTableQuery {
   table: AnnotationTableInfo;
   filter?: AnnotationTableFilter;
-  afterId?: string;
-  limit: number;
+}
+
+export interface AnnotationReadCoordinates {
+  branchId: number;
+  timestamp: number;
+}
+
+export const UNBOUND_ROOT_INDEX = -1;
+
+export interface TablePointColumn {
+  name: string;
+  positions: Int32Array;
+  rootIndex: Int32Array;
+}
+
+export interface TablePoints {
+  ids: bigint[];
+  values: Float64Array;
+  roots: bigint[];
+  points: TablePointColumn[];
 }
 
 interface AnnotationSchema {
@@ -113,19 +124,32 @@ const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const HTTP_NOT_FOUND = 404;
 const QUOTED_TABLE_NAME = /annotation table "([^"]+)"/;
+const UNNAMED_TABLE_MISSING = "annotation table not found";
 
-async function errorTableName(
-  error: HttpError,
-  requested: string[],
-): Promise<string> {
+async function errorMessageOf(error: HttpError): Promise<string> {
   try {
     const body = await error.response?.json();
-    const named = QUOTED_TABLE_NAME.exec(body?.message ?? body?.error ?? "");
-    if (named) return named[1];
+    return body?.message ?? body?.error ?? "";
   } catch {
-    // The body is not the server's JSON error; the whole request is at fault.
+    // Not the server's JSON error, e.g. a route this server does not have.
+    return "";
   }
-  return requested.join(",");
+}
+
+function namedTable(message: string): string | undefined {
+  return QUOTED_TABLE_NAME.exec(message)?.[1];
+}
+
+/**
+ * A 404 is a missing table only when the server says so; any other 404, such
+ * as a route an older server lacks, is an ordinary failure.
+ */
+function missingTable(
+  message: string,
+  requested: string[],
+): string | undefined {
+  if (message === UNNAMED_TABLE_MISSING) return requested.join(",");
+  return namedTable(message);
 }
 
 function parseVec3(value: unknown): [number, number, number] {
@@ -257,6 +281,13 @@ export async function listAnnotationTables(
         ],
         points,
         properties,
+        // Older servers send no access; they then allow no delete here.
+        canWrite: verifyOptionalObjectProperty(
+          row,
+          "access",
+          (access) => verifyObjectProperty(access, "write", verifyBoolean),
+          false,
+        ),
       };
     }),
   );
@@ -312,75 +343,240 @@ async function parseAnnotation(
   };
 }
 
-function queryBody({ filter, afterId, limit }: AnnotationTableQuery) {
-  return {
-    ...filter,
-    ...(afterId === undefined ? {} : { after_id: afterId }),
-    limit,
-  };
-}
-
-function parseNextCursor(cursor: unknown): string {
-  return verifyObjectProperty(cursor, "after_id", verifyString);
-}
-
-export async function fetchSegmentAnnotations(
+async function fetchTableOk(
   fetchOk: FetchOk,
-  baseUrl: string,
-  root: bigint,
-  queries: AnnotationTableQuery[],
-  coords: { branchId: number; timestamp: number },
-  cache: SchemaCache = new Map(),
-): Promise<SegmentAnnotations> {
-  if (queries.length === 0) return { rootId: root, tables: new Map() };
-  const names = queries.map(({ table }) => table.name);
-  const url = appendCoordParams(
-    `${baseUrl}/annotation/segment/${root}/annotations?int64_as_str=1`,
-    coords,
-  );
-  let body: unknown;
+  url: string,
+  init: RequestInit | undefined,
+  tableNames: string[],
+): Promise<Response> {
   try {
-    body = await fetchOk(url, {
-      method: "POST",
-      body: JSON.stringify({
-        tables: Object.fromEntries(
-          queries.map((query) => [query.table.name, queryBody(query)]),
-        ),
-      }),
-    }).then((response) => response.json());
+    return await fetchOk(url, init);
   } catch (error) {
     if (error instanceof HttpError) {
       if (error.status === HTTP_FORBIDDEN) {
-        throw new AnnotationTableForbidden(await errorTableName(error, names));
+        throw new AnnotationTableForbidden(
+          namedTable(await errorMessageOf(error)) ?? tableNames.join(","),
+        );
       }
       if (error.status === HTTP_NOT_FOUND) {
-        throw new AnnotationTableMissing(await errorTableName(error, names));
+        const missing = missingTable(await errorMessageOf(error), tableNames);
+        if (missing !== undefined) throw new AnnotationTableMissing(missing);
       }
     }
     throw error;
   }
-  const rawTables = verifyObjectProperty(body, "tables", verifyObject);
-  const result: SegmentAnnotations = {
-    rootId: verifyObjectProperty(body, "root_id", parseUint64),
-    tables: new Map(),
+}
+
+async function postForJson(
+  fetchOk: FetchOk,
+  url: string,
+  body: unknown,
+  tableNames: string[],
+): Promise<unknown> {
+  const response = await fetchTableOk(
+    fetchOk,
+    url,
+    { method: "POST", body: JSON.stringify(body) },
+    tableNames,
+  );
+  return response.json();
+}
+
+function segmentBody(queries: AnnotationTableQuery[]) {
+  return {
+    tables: Object.fromEntries(
+      queries.map(({ table, filter }) => [table.name, { ...filter }]),
+    ),
   };
+}
+
+function parseInt32Column(value: unknown): Int32Array {
+  return Int32Array.from(expectArray(value), verifyInt);
+}
+
+function parseTablePointColumn(column: unknown): TablePointColumn {
+  return {
+    name: verifyObjectProperty(column, "name", verifyString),
+    positions: verifyObjectProperty(column, "positions", parseInt32Column),
+    rootIndex: verifyObjectProperty(column, "root_index", parseInt32Column),
+  };
+}
+
+function requireLength(column: string, actual: number, expected: number) {
+  if (actual !== expected) {
+    throw new Error(
+      `Points column ${column} has ${actual} entries, expected ${expected}`,
+    );
+  }
+}
+
+function parseTablePoints(raw: unknown): TablePoints {
+  const ids = expectArray(verifyObjectProperty(raw, "ids", (v) => v)).map(
+    parseUint64,
+  );
+  const values = Float64Array.from(
+    expectArray(verifyObjectProperty(raw, "values", (v) => v)),
+    verifyFiniteFloat,
+  );
+  const roots = expectArray(verifyObjectProperty(raw, "roots", (v) => v)).map(
+    parseUint64,
+  );
+  const points = expectArray(verifyObjectProperty(raw, "points", (v) => v)).map(
+    parseTablePointColumn,
+  );
+  requireLength("values", values.length, ids.length);
+  for (const { name, positions, rootIndex } of points) {
+    requireLength(`${name}.positions`, positions.length, 3 * ids.length);
+    requireLength(`${name}.root_index`, rootIndex.length, ids.length);
+    if (
+      rootIndex.some(
+        (index) => index < UNBOUND_ROOT_INDEX || index >= roots.length,
+      )
+    ) {
+      throw new Error(`Points column ${name}.root_index is out of range`);
+    }
+  }
+  return { ids, values, roots, points };
+}
+
+function parseTableCount(raw: unknown): number {
+  return verifyObjectProperty(raw, "count", verifyNonnegativeInt);
+}
+
+async function postSegmentTables<T>(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  root: bigint,
+  endpoint: string,
+  queries: AnnotationTableQuery[],
+  coords: AnnotationReadCoordinates,
+  parseTable: (raw: unknown) => T,
+): Promise<Map<string, T>> {
+  const result = new Map<string, T>();
+  if (queries.length === 0) return result;
+  const body = await postForJson(
+    fetchOk,
+    appendCoordParams(
+      `${baseUrl}/annotation/segment/${root}/${endpoint}`,
+      coords,
+    ),
+    segmentBody(queries),
+    queries.map(({ table }) => table.name),
+  );
+  const rawTables = verifyObjectProperty(body, "tables", verifyObject);
   for (const { table } of queries) {
     const raw = rawTables[table.name];
-    if (raw === undefined) continue;
-    const rows = expectArray(
-      verifyObjectProperty(raw, "annotations", (v) => v),
-    );
-    const nextCursor = verifyOptionalObjectProperty(
-      raw,
-      "next_cursor",
-      parseNextCursor,
-    );
-    result.tables.set(table.name, {
-      annotations: await Promise.all(
-        rows.map((row) => parseAnnotation(row, table, fetchOk, baseUrl, cache)),
-      ),
-      ...(nextCursor === undefined ? {} : { nextCursor }),
-    });
+    if (raw !== undefined) result.set(table.name, parseTable(raw));
   }
   return result;
+}
+
+async function postTable<T>(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  endpoint: string,
+  { table, filter }: AnnotationTableQuery,
+  coords: AnnotationReadCoordinates,
+  parseBody: (raw: unknown) => T,
+): Promise<T> {
+  const body = await postForJson(
+    fetchOk,
+    appendCoordParams(
+      `${baseUrl}/annotation/tables/${encodeURIComponent(table.name)}/${endpoint}`,
+      coords,
+    ),
+    { ...filter },
+    [table.name],
+  );
+  return parseBody(body);
+}
+
+export function fetchSegmentCounts(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  root: bigint,
+  queries: AnnotationTableQuery[],
+  coords: AnnotationReadCoordinates,
+): Promise<Map<string, number>> {
+  return postSegmentTables(
+    fetchOk,
+    baseUrl,
+    root,
+    "count",
+    queries,
+    coords,
+    parseTableCount,
+  );
+}
+
+export function fetchSegmentPoints(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  root: bigint,
+  queries: AnnotationTableQuery[],
+  coords: AnnotationReadCoordinates,
+): Promise<Map<string, TablePoints>> {
+  return postSegmentTables(
+    fetchOk,
+    baseUrl,
+    root,
+    "points",
+    queries,
+    coords,
+    parseTablePoints,
+  );
+}
+
+export function fetchTableCount(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  query: AnnotationTableQuery,
+  coords: AnnotationReadCoordinates,
+): Promise<number> {
+  return postTable(fetchOk, baseUrl, "count", query, coords, parseTableCount);
+}
+
+export function fetchTablePoints(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  query: AnnotationTableQuery,
+  coords: AnnotationReadCoordinates,
+): Promise<TablePoints> {
+  return postTable(fetchOk, baseUrl, "points", query, coords, parseTablePoints);
+}
+
+export async function fetchAnnotationRows(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  table: AnnotationTableInfo,
+  ids: bigint[],
+  coords: AnnotationReadCoordinates,
+  cache: SchemaCache = new Map(),
+): Promise<SegmentAnnotation[]> {
+  if (ids.length === 0) return [];
+  const url = appendCoordParams(
+    `${baseUrl}/annotation/tables/${encodeURIComponent(table.name)}/annotations?int64_as_str=1&ids=${ids.join(",")}`,
+    coords,
+  );
+  const body = await fetchTableOk(fetchOk, url, undefined, [table.name]).then(
+    (response) => response.json(),
+  );
+  const rows = expectArray(verifyObjectProperty(body, "annotations", (v) => v));
+  return Promise.all(
+    rows.map((row) => parseAnnotation(row, table, fetchOk, baseUrl, cache)),
+  );
+}
+
+export async function deleteAnnotationRows(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  table: string,
+  ids: bigint[],
+): Promise<void> {
+  await fetchTableOk(
+    fetchOk,
+    `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
+    { method: "DELETE", body: JSON.stringify({ ids: ids.map(String) }) },
+    [table],
+  );
 }

@@ -10,102 +10,118 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
-import type { Annotation } from "#src/annotation/index.js";
-import { AnnotationSource } from "#src/annotation/index.js";
-import { PageWindows } from "#src/datasource/calcada/annotation_tables/annotation_page_windows.js";
+import {
+  makeCoordinateSpace,
+  makeIdentityTransform,
+  WatchableCoordinateSpaceTransform,
+} from "#src/coordinate_transform.js";
 import type {
   AnnotationTableFilter,
-  SegmentAnnotations,
+  TablePoints,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
   MAX_TABLES_PER_SEGMENT_REQUEST,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
-import type { AnnotationTablesConnection } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import type {
+  AnnotationScope,
+  AnnotationScopeEntry,
+  AnnotationTablesConnection,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import {
-  ANNOTATIONS_PER_PAGE,
   CalcadaAnnotationTablesSession,
   MAX_ANNOTATION_ROOTS,
+  MAX_DRAWN_ANNOTATIONS,
   RootFailures,
   TABLE_ABSENT_AT_TIMESTAMP_NOTE,
   TABLE_UNLISTED_NOTE,
   VISIBLE_SEGMENTS_DEBOUNCE_MS,
-  acceptAnnotationResponse,
+  acceptAnnotationCounts,
+  acceptAnnotationPoints,
   annotationCacheKey,
-  annotationTableStatus,
+  annotationLimitNote,
+  annotationScopes,
+  annotationTotals,
   assignColorSlots,
-  cachedAnnotationsByRoot,
   classifyAnnotationError,
+  describeAnnotationRow,
   planAnnotationFetches,
   visibleAnnotationRoots,
   visibleRootsNote,
+  wholeTableCacheKey,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
+import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import type {
+  AnnotationListColumnWidths,
+  SelectedListAnnotation,
+} from "#src/ui/annotations.js";
 import { Uint64Set } from "#src/uint64_set.js";
 import { vec3 } from "#src/util/geom.js";
 import { HttpError } from "#src/util/http_request.js";
 import { Signal } from "#src/util/signal.js";
 
 const MAIN = { branchId: 0, timestamp: 0 };
-const BRANCH = { branchId: 3, timestamp: 0 };
 
 const roots = (count: number) =>
   Array.from({ length: count }, (_, i) => BigInt(i + 1));
 
-const answer = (
-  rootId: bigint,
-  tables: Record<string, { rows?: number }>,
-): SegmentAnnotations => ({
-  rootId,
-  tables: new Map(
-    Object.entries(tables).map(([name, { rows = 1 }]) => [
-      name,
-      {
-        annotations: Array.from({ length: rows }, (_, i) => ({
-          id: BigInt(i),
-          value: 0,
-          payload: {},
-          points: [],
-        })),
-      },
-    ]),
-  ),
+const NO_POINTS: TablePoints = {
+  ids: [],
+  values: new Float64Array(),
+  roots: [],
+  points: [],
+};
+
+const entry = (
+  counts: Record<string, number>,
+  points: string[] = [],
+): AnnotationScopeEntry => ({
+  counts: new Map(Object.entries(counts)),
+  points: new Map(points.map((table) => [table, NO_POINTS])),
 });
+
+const rootScopes = (
+  visible: bigint[],
+  segmentTables: string[],
+  wholeTables: string[] = [],
+  isHeld: (key: string) => boolean = () => false,
+) =>
+  annotationScopes({
+    visibleRoots: visible,
+    segmentTables,
+    wholeTables,
+    coords: MAIN,
+    isHeld,
+  });
 
 const plan = (
   overrides: Partial<Parameters<typeof planAnnotationFetches>[0]> = {},
 ) =>
   planAnnotationFetches({
-    visibleRoots: [10n],
-    ticked: ["syn"],
-    coords: MAIN,
+    scopes: rootScopes([10n], ["syn"]),
     cache: new Map(),
     pending: new Map(),
     freeSlots: MAX_ANNOTATION_ROOTS,
+    pointsAllowed: true,
     ...overrides,
   });
 
-describe("planAnnotationFetches", () => {
-  it("asks once per new visible root for every ticked table", () => {
-    expect(plan({ visibleRoots: [10n, 20n], ticked: ["syn", "mark"] })).toEqual(
-      {
-        requests: [
-          { key: "0|0|10", root: 10n, tables: ["syn", "mark"] },
-          { key: "0|0|20", root: 20n, tables: ["syn", "mark"] },
-        ],
-        prune: [],
-      },
-    );
+describe("annotationScopes", () => {
+  it("is one scope per visible root for the segment tables, then one per whole table", () => {
+    expect(rootScopes([20n, 10n], ["syn"], ["mark"])).toEqual([
+      { key: "0|0|10", root: 10n, tables: ["syn"] },
+      { key: "0|0|20", root: 20n, tables: ["syn"] },
+      { key: "0|0|table:mark", root: undefined, tables: ["mark"] },
+    ]);
   });
 
   it("looks at no more than the first fifty visible roots", () => {
-    const { requests } = plan({
-      visibleRoots: roots(MAX_ANNOTATION_ROOTS + 7),
-    });
-    expect(requests).toHaveLength(MAX_ANNOTATION_ROOTS);
-    expect(requests.at(-1)?.root).toBe(BigInt(MAX_ANNOTATION_ROOTS));
+    const scopes = rootScopes(roots(MAX_ANNOTATION_ROOTS + 7), ["syn"]);
+    expect(scopes).toHaveLength(MAX_ANNOTATION_ROOTS);
+    expect(scopes.at(-1)?.root).toBe(BigInt(MAX_ANNOTATION_ROOTS));
   });
 
   it("keeps held roots in the capped subset and fills it by ascending id", () => {
@@ -117,19 +133,44 @@ describe("planAnnotationFetches", () => {
     expect(shown.slice(1)).toEqual(roots(MAX_ANNOTATION_ROOTS - 1));
   });
 
-  it("does not drop a cached root when more roots become visible", () => {
-    const cachedRoot = BigInt(MAX_ANNOTATION_ROOTS + 1);
-    const cache = new Map([
-      [annotationCacheKey(MAIN, cachedRoot), answer(cachedRoot, { syn: {} })],
-    ]);
-    const { requests, prune } = plan({
-      cache,
-      visibleRoots: roots(MAX_ANNOTATION_ROOTS + 1),
-    });
-    expect(prune).toEqual([]);
-    expect(requests.map((request) => request.root)).toEqual(
-      roots(MAX_ANNOTATION_ROOTS - 1),
+  it("keys the cache by branch, timestamp and root or table", () => {
+    expect(annotationCacheKey({ branchId: 2, timestamp: 1500 }, 7n)).toBe(
+      "2|1500|7",
     );
+    expect(wholeTableCacheKey({ branchId: 2, timestamp: 1500 }, "syn")).toBe(
+      "2|1500|table:syn",
+    );
+  });
+});
+
+describe("planAnnotationFetches", () => {
+  it("counts every scope before asking for points", () => {
+    expect(
+      plan({ scopes: rootScopes([10n, 20n], ["syn", "mark"], ["whole"]) }),
+    ).toEqual([
+      { key: "0|0|10", root: 10n, tables: ["syn", "mark"], phase: "count" },
+      { key: "0|0|20", root: 20n, tables: ["syn", "mark"], phase: "count" },
+      {
+        key: "0|0|table:whole",
+        root: undefined,
+        tables: ["whole"],
+        phase: "count",
+      },
+    ]);
+  });
+
+  it("asks for the points of what is counted and not yet read", () => {
+    const cache = new Map([["0|0|10", entry({ syn: 4, mark: 2 }, ["mark"])]]);
+    expect(plan({ cache, scopes: rootScopes([10n], ["syn", "mark"]) })).toEqual(
+      [{ key: "0|0|10", root: 10n, tables: ["syn"], phase: "points" }],
+    );
+    expect(
+      plan({
+        cache,
+        scopes: rootScopes([10n], ["syn", "mark"]),
+        pointsAllowed: false,
+      }),
+    ).toEqual([]);
   });
 
   it("splits a root's tables into groups the server accepts", () => {
@@ -137,8 +178,8 @@ describe("planAnnotationFetches", () => {
       { length: 2 * MAX_TABLES_PER_SEGMENT_REQUEST + 5 },
       (_, i) => `t${i}`,
     );
-    const { requests } = plan({ ticked });
-    expect(requests.map((request) => request.tables)).toEqual([
+    const scopes = rootScopes([10n], ticked);
+    expect(plan({ scopes }).map((request) => request.tables)).toEqual([
       ticked.slice(0, MAX_TABLES_PER_SEGMENT_REQUEST),
       ticked.slice(
         MAX_TABLES_PER_SEGMENT_REQUEST,
@@ -146,78 +187,110 @@ describe("planAnnotationFetches", () => {
       ),
       ticked.slice(2 * MAX_TABLES_PER_SEGMENT_REQUEST),
     ]);
-    expect(new Set(requests.map((request) => request.key))).toEqual(
-      new Set(["0|0|10"]),
-    );
-    expect(plan({ ticked, freeSlots: 2 }).requests).toHaveLength(2);
+    expect(plan({ scopes, freeSlots: 2 })).toHaveLength(2);
   });
 
   it("sends no more requests than there are free slots", () => {
-    expect(
-      plan({ visibleRoots: roots(10), freeSlots: 4 }).requests,
-    ).toHaveLength(4);
-    expect(plan({ visibleRoots: roots(10), freeSlots: 0 }).requests).toEqual(
-      [],
-    );
-  });
-
-  it("fetches only a newly ticked table for roots already cached", () => {
-    const cache = new Map([
-      [annotationCacheKey(MAIN, 10n), answer(10n, { syn: {} })],
-    ]);
-    expect(plan({ cache, ticked: ["syn", "mark"] }).requests).toEqual([
-      { key: "0|0|10", root: 10n, tables: ["mark"] },
-    ]);
+    const scopes = rootScopes(roots(10), ["syn"]);
+    expect(plan({ scopes, freeSlots: 4 })).toHaveLength(4);
+    expect(plan({ scopes, freeSlots: 0 })).toEqual([]);
   });
 
   it("does not ask again for what is already on its way", () => {
     const pending = new Map([["0|0|10", new Map([["syn", 1]])]]);
-    expect(plan({ pending }).requests).toEqual([]);
+    expect(plan({ pending })).toEqual([]);
+  });
+});
+
+describe("acceptAnnotationCounts and acceptAnnotationPoints", () => {
+  const request = { key: "0|0|10", tables: ["syn", "mark"] };
+
+  it("counts a table the server left out as zero, which needs no points", () => {
+    const cache = new Map<string, AnnotationScopeEntry>();
+    acceptAnnotationCounts(cache, request, new Map([["syn", 3]]));
+    const stored = cache.get("0|0|10")!;
+    expect(stored.counts).toEqual(
+      new Map([
+        ["syn", 3],
+        ["mark", 0],
+      ]),
+    );
+    expect([...stored.points.keys()]).toEqual(["mark"]);
   });
 
-  it("asks for nothing with no table ticked", () => {
-    expect(plan({ ticked: [] }).requests).toEqual([]);
+  it("adds the points of a table to what the scope already had", () => {
+    const cache = new Map([["0|0|10", entry({ syn: 1, mark: 1 }, ["syn"])]]);
+    acceptAnnotationPoints(
+      cache,
+      { key: "0|0|10", tables: ["mark"] },
+      new Map(),
+    );
+    expect([...cache.get("0|0|10")!.points.keys()]).toEqual(["syn", "mark"]);
   });
+});
 
-  it("prunes roots no longer visible and entries from another branch", () => {
+describe("annotationTotals and annotationLimitNote", () => {
+  const scopes: AnnotationScope[] = rootScopes([10n, 20n], ["syn"], ["mark"]);
+  const noFailures = () => false;
+
+  it("sums per table in the given order and is complete once all are known", () => {
     const cache = new Map([
-      [annotationCacheKey(MAIN, 10n), answer(10n, { syn: {} })],
-      [annotationCacheKey(MAIN, 20n), answer(20n, { syn: {} })],
-      [annotationCacheKey(BRANCH, 10n), answer(10n, { syn: {} })],
+      ["0|0|10", entry({ syn: 2 })],
+      ["0|0|20", entry({ syn: 3 })],
+      ["0|0|table:mark", entry({ mark: 7 })],
     ]);
-    expect(plan({ cache })).toEqual({
-      requests: [],
-      prune: ["0|0|20", "3|0|10"],
+    expect(
+      annotationTotals(scopes, ["mark", "syn"], cache, noFailures),
+    ).toEqual({
+      complete: true,
+      total: 12,
+      byTable: new Map([
+        ["mark", 7],
+        ["syn", 5],
+      ]),
     });
   });
 
-  it("keys the cache by branch, timestamp and root", () => {
-    expect(annotationCacheKey({ branchId: 2, timestamp: 1500 }, 7n)).toBe(
-      "2|1500|7",
+  it("is incomplete while a count is missing, unless that count failed", () => {
+    const cache = new Map([["0|0|10", entry({ syn: 2 })]]);
+    expect(annotationTotals(scopes, ["syn"], cache, noFailures).complete).toBe(
+      false,
+    );
+    expect(
+      annotationTotals(scopes, ["syn"], cache, (_, key) => key === "0|0|20")
+        .complete,
+    ).toBe(true);
+  });
+
+  it("names the tables only beyond the limit", () => {
+    const totals = (syn: number, mark: number) => ({
+      complete: true,
+      total: syn + mark,
+      byTable: new Map([
+        ["syn", syn],
+        ["mark", mark],
+        ["empty", 0],
+      ]),
+    });
+    expect(annotationLimitNote(totals(MAX_DRAWN_ANNOTATIONS, 0))).toBe(
+      undefined,
+    );
+    expect(annotationLimitNote(totals(600_000, 400_001))).toBe(
+      "More than 1 000 000 annotations in the selected tables (syn: 600 000, mark: 400 001). Add a filter or deselect a table.",
     );
   });
 });
 
-describe("acceptAnnotationResponse", () => {
-  const request = { key: "0|0|10", root: 10n, tables: ["syn", "mark"] };
-
-  it("stores a response and fills tables the server left out", () => {
-    const cache = new Map<string, SegmentAnnotations>();
-    acceptAnnotationResponse(cache, request, answer(10n, { syn: { rows: 2 } }));
-    const stored = cache.get("0|0|10")!;
-    expect(stored.tables.get("syn")?.annotations).toHaveLength(2);
-    expect(stored.tables.get("mark")).toEqual({ annotations: [] });
-  });
-
-  it("adds a newly fetched table to what the root already had", () => {
-    const cache = new Map([["0|0|10", answer(10n, { syn: {} })]]);
-    acceptAnnotationResponse(
-      cache,
-      { key: "0|0|10", root: 10n, tables: ["mark"] },
-      answer(10n, { mark: { rows: 3 } }),
-    );
-    const stored = cache.get("0|0|10")!;
-    expect([...stored.tables.keys()]).toEqual(["syn", "mark"]);
+describe("describeAnnotationRow", () => {
+  it("is one line per payload field, then the id", () => {
+    expect(
+      describeAnnotationRow({
+        id: 9007199254740993n,
+        value: 0,
+        payload: { tag: "soma", size: 3, flags: [1, 2] },
+        points: [],
+      }),
+    ).toBe("tag: soma\nsize: 3\nflags: [1,2]\nid: 9007199254740993");
   });
 });
 
@@ -294,60 +367,6 @@ describe("classifyAnnotationError", () => {
   });
 });
 
-describe("cachedAnnotationsByRoot", () => {
-  it("serves the visible roots of the current coordinates only", () => {
-    const cache = new Map([
-      [annotationCacheKey(MAIN, 10n), answer(10n, { syn: {} })],
-      [annotationCacheKey(MAIN, 20n), answer(20n, { syn: {} })],
-      [annotationCacheKey(BRANCH, 30n), answer(30n, { syn: {} })],
-    ]);
-    expect([
-      ...cachedAnnotationsByRoot(cache, MAIN, [10n, 30n, 40n]).keys(),
-    ]).toEqual([10n]);
-  });
-});
-
-describe("annotationTableStatus", () => {
-  it("counts the roots fetched for one table", () => {
-    const byRoot = new Map([
-      [10n, answer(10n, { syn: {}, mark: {} })],
-      [20n, answer(20n, { syn: {}, mark: {} })],
-      [30n, answer(30n, { mark: {} })],
-    ]);
-    expect(
-      annotationTableStatus({ table: "syn", byRoot, annotations: 5 }),
-    ).toEqual({
-      table: "syn",
-      annotations: 5,
-      fetchedRoots: 2,
-      page: 1,
-      hasNext: false,
-      hasPrevious: false,
-    });
-    expect(
-      annotationTableStatus({
-        table: "syn",
-        byRoot: new Map(),
-        annotations: 0,
-        error: "denied",
-      }),
-    ).toMatchObject({ fetchedRoots: 0, error: "denied" });
-  });
-
-  it("offers the next page while any root has a cursor, and the previous past page one", () => {
-    const byRoot = new Map([
-      [10n, answer(10n, { syn: {} })],
-      [20n, answer(20n, { syn: {} })],
-    ]);
-    byRoot.get(10n)!.tables.get("syn")!.nextCursor = "5";
-    const windows = new PageWindows();
-    windows.advance(new Map([["0|0|20", "1"]]));
-    expect(
-      annotationTableStatus({ table: "syn", byRoot, annotations: 2, windows }),
-    ).toMatchObject({ page: 2, hasNext: true, hasPrevious: true });
-  });
-});
-
 describe("assignColorSlots", () => {
   it("keeps a ticked table's colour and gives a new one the lowest free slot", () => {
     const first = assignColorSlots(new Map(), ["a", "b", "c"]);
@@ -406,11 +425,17 @@ describe("RootFailures", () => {
 });
 
 const HTTP_NOT_FOUND = 404;
+const HTTP_SERVER_ERROR = 500;
+const ROUTER_NOT_FOUND_BODY = "404 page not found";
 const EXPLICIT_TIMESTAMP_MS = 1_500;
-const SEGMENT_URL = /\/annotation\/segment\/(\d+)\/annotations\?/;
+const SEGMENT_URL = /\/annotation\/segment\/(\d+)\/(count|points)(?:\?|$)/;
+const TABLE_URL = /\/annotation\/tables\/([^/?]+)\/(count|points|annotations)/;
+const ROW_IDS = /[?&]ids=([\d,]+)/;
 const SIZE_FILTER = { filter_greater_dict: { size: 3 } };
+const POINT_NAMES = ["at", "to", "via"];
+const NO_ROOT_INDEX = -1;
 
-const tableRow = (name: string) => ({
+const tableRow = (name: string, canWrite: boolean) => ({
   table_name: name,
   schema_type: "mark",
   schema_version: 1,
@@ -419,17 +444,67 @@ const tableRow = (name: string) => ({
   voxel_resolution_y: 1,
   voxel_resolution_z: 1,
   reference_table: "",
+  access: { read: true, write: canWrite, manage: canWrite },
 });
 
 const jsonResponse = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200 });
 
-const POINT_NAMES = ["at", "to", "via"];
+const httpError = (status: number, message: string) =>
+  HttpError.fromResponse(new Response(JSON.stringify({ message }), { status }));
 
-const rowJson = (id: bigint, ...roots: bigint[]) => ({
+interface FakeRow {
+  id: bigint;
+  /** The root of each of its points, in role order. */
+  roots: bigint[];
+  payload?: Record<string, unknown>;
+}
+
+const row = (id: bigint, ...pointRoots: bigint[]): FakeRow => ({
+  id,
+  roots: pointRoots,
+});
+
+/** Undefined `root` is a whole-table read. */
+type RowsOf = (
+  root: bigint | undefined,
+  table: string,
+  filter: Record<string, unknown>,
+) => FakeRow[];
+
+type Endpoint = "count" | "points";
+type HeldRead = Endpoint | "rows";
+
+interface FakeRequest {
+  endpoint: Endpoint;
+  /** The root, or the table of a whole-table read. */
+  scope: bigint | string;
+  tables: string[];
+}
+
+function pointsJson(rows: FakeRow[]) {
+  const rowRoots = [...new Set(rows.flatMap(({ roots }) => roots))];
+  const columns = Math.max(0, ...rows.map(({ roots }) => roots.length));
+  return {
+    ids: rows.map(({ id }) => String(id)),
+    values: rows.map(() => 0),
+    roots: rowRoots.map(String),
+    points: POINT_NAMES.slice(0, columns).map((name, column) => ({
+      name,
+      positions: rows.flatMap(() => [1, 2, 3]),
+      root_index: rows.map(({ roots }) =>
+        roots[column] === undefined
+          ? NO_ROOT_INDEX
+          : rowRoots.indexOf(roots[column]),
+      ),
+    })),
+  };
+}
+
+const rowJson = ({ id, roots, payload = {} }: FakeRow) => ({
   id: String(id),
   value: 0,
-  payload: {},
+  payload,
   schema_version: 1,
   points: Object.fromEntries(
     roots.map((root, role) => [
@@ -439,76 +514,146 @@ const rowJson = (id: bigint, ...roots: bigint[]) => ({
   ),
 });
 
-type TableQuery = { after_id?: string } & Record<string, unknown>;
-type TablePage = { rows: unknown[]; next?: string };
-
-/** A graph whose tables answer one point per root, except those it lacks. */
+/** A graph whose tables answer one row per root, except those it lacks. */
 function fakeGraph(
   listed: string[],
-  lacking: string[] = [],
-  page: (root: bigint, table: string, query: TableQuery) => TablePage = (
-    root,
-  ) => ({ rows: [rowJson(root, root)] }),
+  options: {
+    lacking?: string[];
+    /** Endpoints this server predates: they answer the router's plain 404. */
+    lackingEndpoints?: Endpoint[];
+    rows?: RowsOf;
+    /** Overrides the row count a count request answers. */
+    countOf?: (root: bigint | undefined, table: string) => number | undefined;
+    canWrite?: boolean;
+  } = {},
 ) {
-  const segmentRequests: { root: bigint; tables: string[] }[] = [];
-  const segmentBodies: Record<string, TableQuery>[] = [];
+  const {
+    lacking = [],
+    lackingEndpoints = [],
+    rows: rowsOf = (root) => (root === undefined ? [] : [row(root, root)]),
+    countOf = () => undefined,
+    canWrite = false,
+  } = options;
+  const requests: FakeRequest[] = [];
+  const bodies: Record<string, unknown>[] = [];
   const held: (() => void)[] = [];
+  const deleted = new Set<bigint>();
+  const answeredRows = new Map<string, FakeRow>();
+  const deletes: { table: string; ids: string[] }[] = [];
+  const liveRows: RowsOf = (root, table, filter) =>
+    rowsOf(root, table, filter).filter(({ id }) => !deleted.has(id));
+  const answer = (
+    endpoint: Endpoint,
+    root: bigint | undefined,
+    table: string,
+    filter: Record<string, unknown>,
+  ) => {
+    const tableRows = liveRows(root, table, filter);
+    for (const answered of tableRows) {
+      answeredRows.set(String(answered.id), answered);
+    }
+    return endpoint === "count"
+      ? { count: countOf(root, table) ?? tableRows.length }
+      : pointsJson(tableRows);
+  };
   const graph = {
-    segmentRequests,
-    segmentBodies,
+    requests,
+    bodies,
     held,
-    holding: false,
+    deletes,
+    hold: (_read: HeldRead, _scope: bigint | string) => false,
+    failRows: false,
+    failPoints: false,
+    failDelete: false,
     fetchOkImpl: vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/annotation/tables")) {
-        return jsonResponse({ tables: listed.map(tableRow) });
+        return jsonResponse({
+          tables: listed.map((name) => tableRow(name, canWrite)),
+        });
       }
       if (url.includes("/annotation/schemas/")) {
         return jsonResponse({
           points: POINT_NAMES.map((name, role) => ({ name, role })),
         });
       }
-      const root = BigInt(SEGMENT_URL.exec(url)![1]);
-      const queries: Record<string, TableQuery> = JSON.parse(
-        String(init?.body),
-      ).tables;
-      const tables = Object.keys(queries);
-      segmentRequests.push({ root, tables });
-      segmentBodies.push(queries);
-      if (graph.holding) await new Promise<void>((done) => held.push(done));
-      const missing = tables.find((table) => lacking.includes(table));
-      if (missing !== undefined) {
+      const segment = SEGMENT_URL.exec(url);
+      const [, tableName, tableEndpoint] = TABLE_URL.exec(url) ?? [];
+      if (tableEndpoint === "annotations") {
+        return init?.method === "DELETE"
+          ? deleteRows(tableName, JSON.parse(String(init.body)).ids)
+          : readRows(tableName, url);
+      }
+      const endpoint = (segment?.[2] ?? tableEndpoint) as Endpoint;
+      if (lackingEndpoints.includes(endpoint)) {
         throw HttpError.fromResponse(
-          new Response(
-            JSON.stringify({
-              message: `annotation table "${missing}" not found`,
-            }),
-            { status: HTTP_NOT_FOUND },
-          ),
+          new Response(ROUTER_NOT_FOUND_BODY, { status: HTTP_NOT_FOUND }),
         );
       }
-      return jsonResponse({
-        root_id: String(root),
-        tables: Object.fromEntries(
-          tables.map((table) => {
-            const { rows, next } = page(root, table, queries[table]);
-            return [
-              table,
-              {
-                annotations: rows,
-                truncated: next !== undefined,
-                ...(next === undefined
-                  ? {}
-                  : { next_cursor: { after_id: next } }),
-              },
-            ];
-          }),
-        ),
-      });
+      const root = segment === null ? undefined : BigInt(segment[1]);
+      const body = JSON.parse(String(init?.body));
+      const filters: Record<string, Record<string, unknown>> = root ===
+      undefined
+        ? { [tableName]: body }
+        : body.tables;
+      const tables = Object.keys(filters);
+      requests.push({ endpoint, scope: root ?? tableName, tables });
+      bodies.push(filters);
+      const missing = tables.find((table) => lacking.includes(table));
+      const answers = Object.fromEntries(
+        tables.map((table) => [
+          table,
+          answer(endpoint, root, table, filters[table]),
+        ]),
+      );
+      if (graph.hold(endpoint, root ?? tableName)) {
+        await new Promise<void>((done) => held.push(done));
+      }
+      if (endpoint === "points" && graph.failPoints) {
+        throw httpError(HTTP_SERVER_ERROR, "boom");
+      }
+      if (missing !== undefined) {
+        throw httpError(
+          HTTP_NOT_FOUND,
+          `annotation table "${missing}" not found`,
+        );
+      }
+      return jsonResponse(
+        root === undefined
+          ? answers[tableName]
+          : { root_id: String(root), tables: answers },
+      );
     }),
+  };
+  const readRows = async (table: string, url: string) => {
+    const found = ROW_IDS.exec(url)![1]
+      .split(",")
+      .flatMap((id) => answeredRows.get(id) ?? []);
+    if (graph.hold("rows", table)) {
+      await new Promise<void>((done) => held.push(done));
+    }
+    if (graph.failRows) throw httpError(HTTP_SERVER_ERROR, "boom");
+    return jsonResponse({ annotations: found.map(rowJson) });
+  };
+  const deleteRows = (table: string, ids: string[]) => {
+    deletes.push({ table, ids });
+    if (graph.failDelete) throw new Error("delete refused");
+    for (const id of ids) deleted.add(BigInt(id));
+    return jsonResponse({});
   };
   return graph;
 }
+
+const identityTransform = () =>
+  new WatchableCoordinateSpaceTransform(
+    makeIdentityTransform(
+      makeCoordinateSpace({
+        names: ["x", "y", "z"],
+        units: ["m", "m", "m"],
+        scales: Float64Array.of(1, 1, 1),
+      }),
+    ),
+  );
 
 function startSession(
   graph: ReturnType<typeof fakeGraph>,
@@ -517,13 +662,15 @@ function startSession(
     visible: bigint[];
     timestamp?: number;
     filters?: Record<string, AnnotationTableFilter>;
+    wholeTables?: string[];
+    excluded?: bigint[];
   },
 ) {
   const visibleSegments = new Uint64Set();
   visibleSegments.add(options.visible);
-  const sources = new Map<string, AnnotationSource>();
+  const sources = new Map<string, CalcadaTableAnnotationSource>();
   const drawn = {
-    get: (table: string): Annotation[] | undefined => {
+    get: (table: string) => {
       const source = sources.get(table);
       return source === undefined ? undefined : [...source];
     },
@@ -534,6 +681,11 @@ function startSession(
   >();
   const selectAnnotation = vi.fn();
   const moveToAnnotation = vi.fn();
+  const makeListElement = vi.fn();
+  const renderListHeader = vi.fn();
+  const selectedAnnotation = new WatchableValue<
+    SelectedListAnnotation | undefined
+  >(undefined);
   const connection: AnnotationTablesConnection = {
     httpSource: {
       fetchOkImpl: graph.fetchOkImpl,
@@ -544,19 +696,34 @@ function startSession(
     visibleSegments,
     graphEdited,
     nanometresToSource: (nanometres) => Float32Array.from(nanometres),
-    makeAnnotationState: (subsubsourceId) => {
+    makeAnnotationState: (
+      subsubsourceId,
+      _color,
+      properties,
+      sourceOptions,
+    ) => {
       const table = subsubsourceId.split(":")[1];
-      const source = new AnnotationSource(SOURCE_RANK);
+      const source = new CalcadaTableAnnotationSource(
+        identityTransform(),
+        new WatchableValue(properties),
+        ["associated segments"],
+        sourceOptions,
+      );
       sources.set(table, source);
       const layerState = {
         source,
         displayState: { color: new WatchableValue(vec3.create()) },
       } as unknown as AnnotationLayerState;
       layerStates.set(table, layerState);
-      return layerState;
+      return { layerState, source };
     },
     selectAnnotation,
     moveToAnnotation,
+    makeListElement,
+    renderListHeader,
+    selectedAnnotation,
+    listCoordinatesChanged: new Signal(),
+    clearHover: vi.fn(),
     scheduleFrame: (callback) => frames.push(callback),
   };
   const state = new CalcadaAnnotationTablesState();
@@ -564,13 +731,17 @@ function startSession(
   for (const [table, filter] of Object.entries(options.filters ?? {})) {
     state.setFilter(table, filter);
   }
+  for (const table of options.wholeTables ?? []) {
+    state.setWholeTable(table, true);
+  }
+  state.excludedSegments.add(options.excluded ?? []);
   const session = new CalcadaAnnotationTablesSession(connection, state);
   const statusOf = (table: string) =>
     session.status.value.find((status) => status.table === table);
   const drawnIds = (table: string) =>
     session.drawn.value
       .filter((item) => item.table === table)
-      .map((item) => item.annotation.id);
+      .map((item) => item.id);
   return {
     session,
     state,
@@ -581,36 +752,15 @@ function startSession(
     layerStates,
     selectAnnotation,
     moveToAnnotation,
+    makeListElement,
+    renderListHeader,
+    selectedAnnotation,
     visibleSegments,
     graphEdited,
     statusOf,
   };
 }
 
-/** Root 10 has two pages (ids 100, then 101); every other root has one. */
-const twoPagesOnRoot10 = (
-  root: bigint,
-  _table: string,
-  query: TableQuery,
-): TablePage => {
-  if (root !== 10n) return { rows: [rowJson(root * 10n, root)] };
-  if (query.after_id === undefined) {
-    return { rows: [rowJson(100n, root)], next: "100" };
-  }
-  return { rows: [rowJson(101n, root)] };
-};
-
-const FILTERED_ID = 900n;
-const filteredOrPaged = (
-  root: bigint,
-  table: string,
-  query: TableQuery,
-): TablePage =>
-  "filter_greater_dict" in query
-    ? { rows: [rowJson(FILTERED_ID, root)] }
-    : twoPagesOnRoot10(root, table, query);
-
-const SOURCE_RANK = 3;
 const frames: (() => void)[] = [];
 const drawFrames = () => {
   for (const frame of frames.splice(0)) frame();
@@ -619,6 +769,8 @@ const settle = async () => {
   await vi.advanceTimersByTimeAsync(VISIBLE_SEGMENTS_DEBOUNCE_MS);
   drawFrames();
 };
+const requested = (graph: ReturnType<typeof fakeGraph>, endpoint: Endpoint) =>
+  graph.requests.filter((request) => request.endpoint === endpoint);
 
 describe("CalcadaAnnotationTablesSession", () => {
   beforeEach(() => {
@@ -630,8 +782,379 @@ describe("CalcadaAnnotationTablesSession", () => {
     frames.length = 0;
   });
 
+  it("draws everything when the sum is within the limit", async () => {
+    const graph = fakeGraph(["syn", "mark"]);
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn", "mark"],
+      visible: [10n, 20n],
+    });
+    await settle();
+    expect(requested(graph, "count")).toEqual([
+      { endpoint: "count", scope: 10n, tables: ["syn", "mark"] },
+      { endpoint: "count", scope: 20n, tables: ["syn", "mark"] },
+    ]);
+    expect(requested(graph, "points")).toEqual([
+      { endpoint: "points", scope: 10n, tables: ["syn", "mark"] },
+      { endpoint: "points", scope: 20n, tables: ["syn", "mark"] },
+    ]);
+    expect(drawnIds("syn")).toEqual([10n, 20n]);
+    expect(drawnIds("mark")).toEqual([10n, 20n]);
+    expect(session.limitNote.value).toBeUndefined();
+  });
+
+  it("draws nothing and sets limitNote when the sum is one over the limit", async () => {
+    const counts: Record<string, number> = { syn: 600_000, mark: 400_001 };
+    const graph = fakeGraph(["syn", "mark"], {
+      countOf: (_root, table) => counts[table],
+    });
+    const { session, state, drawn, drawnIds } = startSession(graph, {
+      ticked: ["syn", "mark"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.limitNote.value).toBe(
+      "More than 1 000 000 annotations in the selected tables (syn: 600 000, mark: 400 001). Add a filter or deselect a table.",
+    );
+    expect(requested(graph, "points")).toEqual([]);
+    expect(session.drawn.value).toEqual([]);
+    expect(drawn.get("syn")).toEqual([]);
+    expect(drawn.get("mark")).toEqual([]);
+    expect(session.totals.value.byTable).toEqual(
+      new Map([
+        ["syn", 600_000],
+        ["mark", 400_001],
+      ]),
+    );
+    state.untick("mark");
+    await settle();
+    expect(session.limitNote.value).toBeUndefined();
+    expect(drawnIds("syn")).toEqual([10n]);
+    counts.mark = MAX_DRAWN_ANNOTATIONS;
+    state.setTicked(["syn", "mark"]);
+    await settle();
+    expect(session.limitNote.value).toContain("(syn: 1, mark: 1 000 000)");
+    expect(drawn.get("syn")).toEqual([]);
+  });
+
+  it("exactly the limit is drawn", async () => {
+    const counts: Record<string, number> = { syn: 600_000, mark: 400_000 };
+    const graph = fakeGraph(["syn", "mark"], {
+      countOf: (_root, table) => counts[table],
+    });
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn", "mark"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.limitNote.value).toBeUndefined();
+    expect(requested(graph, "points")).toHaveLength(1);
+    expect(drawnIds("syn")).toEqual([10n]);
+    expect(drawnIds("mark")).toEqual([10n]);
+  });
+
+  it("excluded segments are not fetched", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { state, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
+      excluded: [20n],
+    });
+    await settle();
+    expect(graph.requests.map(({ scope }) => scope)).toEqual([10n, 10n]);
+    expect(drawnIds("syn")).toEqual([10n]);
+    state.excludedSegments.add(10n);
+    await settle();
+    expect(drawnIds("syn")).toEqual([]);
+    graph.requests.length = 0;
+    state.excludedSegments.delete(20n);
+    await settle();
+    expect(graph.requests.map(({ scope }) => scope)).toEqual([20n, 20n]);
+    expect(drawnIds("syn")).toEqual([20n]);
+  });
+
+  it("whole-table tables ignore visible segments and exclusions but count toward the limit", async () => {
+    const graph = fakeGraph(["syn", "whole"], {
+      rows: (root, table) =>
+        table === "whole"
+          ? [row(1n, 77n), row(2n, 88n)]
+          : root === undefined
+            ? []
+            : [row(root, root)],
+      countOf: (_root, table) =>
+        table === "syn" ? MAX_DRAWN_ANNOTATIONS : undefined,
+    });
+    const { session, state, drawn, drawnIds } = startSession(graph, {
+      ticked: ["whole"],
+      wholeTables: ["whole"],
+      visible: [10n],
+      excluded: [77n],
+    });
+    await settle();
+    expect(graph.requests).toEqual([
+      { endpoint: "count", scope: "whole", tables: ["whole"] },
+      { endpoint: "points", scope: "whole", tables: ["whole"] },
+    ]);
+    expect(graph.bodies.at(-1)).toEqual({ whole: {} });
+    expect(drawnIds("whole")).toEqual([1n, 2n]);
+    expect(drawn.get("whole")!.map((a) => a.relatedSegments)).toEqual([
+      [BigUint64Array.of(77n)],
+      [BigUint64Array.of(88n)],
+    ]);
+    graph.requests.length = 0;
+    state.setTicked(["whole", "syn"]);
+    await settle();
+    expect(requested(graph, "count")).toEqual([
+      { endpoint: "count", scope: 10n, tables: ["syn"] },
+    ]);
+    expect(requested(graph, "points")).toEqual([]);
+    expect(session.limitNote.value).toContain("(whole: 2, syn: 1 000 000)");
+    expect(session.drawn.value).toEqual([]);
+  });
+
+  it("delete drops the row from every scope and a points answer sent before the delete is dropped", async () => {
+    const SHARED_ID = 5n;
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      rows: (root) =>
+        root === undefined ? [] : [row(SHARED_ID, root), row(root, root)],
+    });
+    const { statusOf, sources, drawnIds, visibleSegments } = startSession(
+      graph,
+      { ticked: ["syn"], visible: [10n] },
+    );
+    await settle();
+    expect(drawnIds("syn")).toEqual([SHARED_ID, 10n]);
+    graph.hold = (read) => read === "points";
+    visibleSegments.add(20n);
+    await settle();
+    expect(graph.held).toHaveLength(1);
+    const source = sources.get("syn")!;
+    expect(source.readonly).toBe(false);
+    const reference = source.getReference(`syn:${SHARED_ID}`);
+    await source.delete(reference);
+    reference.dispose();
+    expect(graph.deletes).toEqual([{ table: "syn", ids: [String(SHARED_ID)] }]);
+    expect(source.get(`syn:${SHARED_ID}`)).toBeUndefined();
+    graph.hold = () => false;
+    for (const release of graph.held.splice(0)) release();
+    await settle();
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n, 20n]);
+    expect(statusOf("syn")?.error).toBeUndefined();
+  });
+
+  it("a delete sends no count or points request and the other rows stay drawn throughout", async () => {
+    const SHARED_ID = 5n;
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      rows: (root) =>
+        root === undefined ? [] : [row(SHARED_ID, root), row(root, root)],
+    });
+    const { session, statusOf, sources, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
+    });
+    await settle();
+    expect(drawnIds("syn")).toEqual([SHARED_ID, 10n, 20n]);
+    graph.requests.length = 0;
+    const source = sources.get("syn")!;
+    const others = () =>
+      [source.get("syn:10"), source.get("syn:20")].every(
+        (annotation) => annotation !== undefined,
+      );
+    const reference = source.getReference(`syn:${SHARED_ID}`);
+    const deleting = source.delete(reference);
+    expect(others()).toBe(true);
+    await deleting;
+    reference.dispose();
+    expect(others()).toBe(true);
+    await settle();
+    expect(others()).toBe(true);
+    expect(graph.requests).toEqual([]);
+    expect(drawnIds("syn")).toEqual([10n, 20n]);
+    expect(statusOf("syn")).toMatchObject({ annotations: 2 });
+    expect(session.limitNote.value).toBeUndefined();
+  });
+
+  it("a scope's received rows replace its count, so the limit is checked again", async () => {
+    const graph = fakeGraph(["syn", "whole"], {
+      rows: (root, table) =>
+        table === "whole"
+          ? [row(1n, 1n)]
+          : root === undefined
+            ? []
+            : [row(root, root), row(root + 1n, root)],
+      countOf: (_root, table) =>
+        table === "whole" ? MAX_DRAWN_ANNOTATIONS - 1 : 1,
+    });
+    graph.hold = (read, scope) => read === "points" && scope === "whole";
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn", "whole"],
+      wholeTables: ["whole"],
+      visible: [10n],
+    });
+    await settle();
+    expect(requested(graph, "points")).toHaveLength(2);
+    expect(session.limitNote.value).toContain("(syn: 2, whole: 999 999)");
+    expect(drawnIds("syn")).toEqual([]);
+  });
+
+  it("a refused delete keeps the annotation and shows the table's error", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { sources, statusOf } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    graph.failDelete = true;
+    const source = sources.get("syn")!;
+    const reference = source.getReference("syn:10");
+    await expect(source.delete(reference)).rejects.toThrow();
+    reference.dispose();
+    expect(source.get("syn:10")).toBeDefined();
+    expect(statusOf("syn")?.error).toContain("delete refused");
+  });
+
+  it("delete is readonly at an explicit timestamp", async () => {
+    const graph = fakeGraph(["syn", "mine"], { canWrite: true });
+    const { connection, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+      timestamp: EXPLICIT_TIMESTAMP_MS,
+    });
+    await settle();
+    expect(sources.get("syn")!.readonly).toBe(true);
+    (connection.timestamp as WatchableValue<number | undefined>).value =
+      undefined;
+    await settle();
+    expect(sources.get("syn")!.readonly).toBe(false);
+    const readOnlyGraph = fakeGraph(["syn"]);
+    const live = startSession(readOnlyGraph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(live.sources.get("syn")!.readonly).toBe(true);
+  });
+
+  it("select fills description from the fetched row and still selects when the fetch fails", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined
+          ? []
+          : [{ id: root, roots: [root], payload: { tag: "soma", size: 3 } }],
+    });
+    const { session, sources, selectAnnotation, visibleSegments } =
+      startSession(graph, { ticked: ["syn"], visible: [10n] });
+    await settle();
+    const [item] = session.drawn.value;
+    session.select(item);
+    expect(selectAnnotation).toHaveBeenCalledTimes(1);
+    await settle();
+    const description = "tag: soma\nsize: 3\nid: 10";
+    expect(sources.get("syn")!.get("syn:10")?.description).toBe(description);
+    visibleSegments.add(20n);
+    await settle();
+    expect(sources.get("syn")!.get("syn:10")?.description).toBe(description);
+    graph.failRows = true;
+    selectAnnotation.mockClear();
+    const other = session.drawn.value.find(({ id }) => id === 20n)!;
+    session.select(other);
+    await settle();
+    expect(selectAnnotation).toHaveBeenCalledTimes(1);
+    expect(sources.get("syn")!.get("syn:20")?.description).toBeUndefined();
+  });
+
+  it("makes the list entry from the item's annotation state, none once unticked", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session, state, sources, layerStates, makeListElement } =
+      startSession(graph, { ticked: ["syn"], visible: [10n] });
+    await settle();
+    const [item] = session.drawn.value;
+    const entry = [{} as HTMLElement, [1]];
+    makeListElement.mockReturnValue(entry);
+    expect(session.makeListElement(item)).toBe(entry);
+    expect(makeListElement).toHaveBeenCalledExactlyOnceWith(
+      layerStates.get("syn"),
+      sources.get("syn")!.get(item.layerId),
+    );
+    state.setTicked([]);
+    expect(session.makeListElement(item)).toBeUndefined();
+  });
+
+  it("renders the list header from the item's annotation state, none once unticked", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session, state, layerStates, renderListHeader } = startSession(
+      graph,
+      { ticked: ["syn"], visible: [10n] },
+    );
+    await settle();
+    const [item] = session.drawn.value;
+    const header = {} as HTMLElement;
+    const columnWidths = {} as AnnotationListColumnWidths;
+    expect(session.renderListHeader(item, header, columnWidths)).toBe(true);
+    expect(renderListHeader).toHaveBeenCalledExactlyOnceWith(
+      layerStates.get("syn"),
+      header,
+      columnWidths,
+    );
+    state.setTicked([]);
+    expect(session.renderListHeader(item, header, columnWidths)).toBe(false);
+  });
+
+  it("knows the selected item and says when its entry gets the details", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined ? [] : [{ id: root, roots: [root], payload: {} }],
+    });
+    const { session, layerStates, selectedAnnotation } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
+    });
+    await settle();
+    const [first, second] = session.drawn.value;
+    selectedAnnotation.value = {
+      annotationId: first.layerId,
+      annotationLayerState: layerStates.get("syn")!,
+    };
+    expect(session.isSelected(first)).toBe(true);
+    expect(session.isSelected(second)).toBe(false);
+    const updated = vi.fn();
+    session.annotationUpdated.add(updated);
+    session.select(second);
+    await settle();
+    expect(updated).toHaveBeenCalledWith("syn", second.layerId);
+  });
+
+  it("keeps only the details of the latest select", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined
+          ? []
+          : [{ id: root, roots: [root], payload: { root: String(root) } }],
+    });
+    const { session, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
+    });
+    await settle();
+    graph.hold = (read) => read === "rows";
+    const [first, second] = session.drawn.value;
+    session.select(first);
+    session.select(second);
+    await settle();
+    expect(graph.held).toHaveLength(2);
+    graph.held[1]();
+    await settle();
+    graph.held[0]();
+    await settle();
+    const source = sources.get("syn")!;
+    expect(source.get("syn:20")?.description).toBe("root: 20\nid: 20");
+    expect(source.get("syn:10")?.description).toBeUndefined();
+  });
+
   it("keeps a table missing at an explicit timestamp ticked and notes it", async () => {
-    const graph = fakeGraph(["syn", "late"], ["late"]);
+    const graph = fakeGraph(["syn", "late"], { lacking: ["late"] });
     const { state, drawn, statusOf } = startSession(graph, {
       ticked: ["syn", "late"],
       visible: [10n],
@@ -648,7 +1171,7 @@ describe("CalcadaAnnotationTablesSession", () => {
   });
 
   it("unticks a table missing from the live graph", async () => {
-    const graph = fakeGraph(["syn", "late"], ["late"]);
+    const graph = fakeGraph(["syn", "late"], { lacking: ["late"] });
     const { state, statusOf } = startSession(graph, {
       ticked: ["syn", "late"],
       visible: [10n],
@@ -656,6 +1179,20 @@ describe("CalcadaAnnotationTablesSession", () => {
     await settle();
     expect(state.ticked).toEqual(["syn"]);
     expect(statusOf("late")?.error).toBe("Annotation table late not found");
+  });
+
+  it("keeps the ticks and shows the failure when the server lacks the points route", async () => {
+    const graph = fakeGraph(["syn", "mark"], { lackingEndpoints: ["points"] });
+    const { state, drawn, statusOf } = startSession(graph, {
+      ticked: ["syn", "mark"],
+      visible: [10n],
+    });
+    await settle();
+    expect(requested(graph, "points")).toHaveLength(0);
+    expect(state.ticked).toEqual(["syn", "mark"]);
+    expect(drawn.get("syn")).toEqual([]);
+    expect(statusOf("syn")?.error).toBeDefined();
+    expect(statusOf("mark")?.error).toBeDefined();
   });
 
   it("keeps a ticked table missing from the list while the timestamp is explicit", async () => {
@@ -688,14 +1225,17 @@ describe("CalcadaAnnotationTablesSession", () => {
     });
     await settle();
     expect(drawn.get("syn")).toHaveLength(2);
-    graph.segmentRequests.length = 0;
+    graph.requests.length = 0;
     graphEdited.dispatch([10n], [30n]);
     drawFrames();
     expect(drawn.get("syn")).toHaveLength(1);
     visibleSegments.delete(10n);
     visibleSegments.add(30n);
     await settle();
-    expect(graph.segmentRequests).toEqual([{ root: 30n, tables: ["syn"] }]);
+    expect(graph.requests).toEqual([
+      { endpoint: "count", scope: 30n, tables: ["syn"] },
+      { endpoint: "points", scope: 30n, tables: ["syn"] },
+    ]);
     expect(drawn.get("syn")).toHaveLength(2);
   });
 
@@ -706,10 +1246,10 @@ describe("CalcadaAnnotationTablesSession", () => {
       visible: [10n],
     });
     await settle();
-    graph.segmentRequests.length = 0;
+    graph.requests.length = 0;
     graphEdited.dispatch([], [10n]);
     await settle();
-    expect(graph.segmentRequests).toEqual([{ root: 10n, tables: ["syn"] }]);
+    expect(graph.requests.map(({ scope }) => scope)).toEqual([10n, 10n]);
   });
 
   it("keeps the roots note in step with the visible set", async () => {
@@ -730,7 +1270,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     );
   });
 
-  it("posts each table's filter and the page limit", async () => {
+  it("posts each table's filter to counts and points", async () => {
     const graph = fakeGraph(["syn", "mark"]);
     startSession(graph, {
       ticked: ["syn", "mark"],
@@ -738,121 +1278,49 @@ describe("CalcadaAnnotationTablesSession", () => {
       filters: { syn: SIZE_FILTER },
     });
     await settle();
-    expect(graph.segmentBodies).toEqual([
-      {
-        syn: { ...SIZE_FILTER, limit: ANNOTATIONS_PER_PAGE },
-        mark: { limit: ANNOTATIONS_PER_PAGE },
-      },
+    expect(graph.bodies).toEqual([
+      { syn: SIZE_FILTER, mark: {} },
+      { syn: SIZE_FILTER, mark: {} },
     ]);
   });
 
-  it("turns the page only for roots that have more and steps back exactly", async () => {
-    const graph = fakeGraph(["syn"], [], twoPagesOnRoot10);
-    const { session, drawnIds, drawn, statusOf } = startSession(graph, {
-      ticked: ["syn"],
-      visible: [10n, 20n],
+  it("refetches only the refiltered table", async () => {
+    const FILTERED_ID = 900n;
+    const graph = fakeGraph(["syn", "mark"], {
+      rows: (root, _table, filter) =>
+        root === undefined
+          ? []
+          : [
+              "filter_greater_dict" in filter
+                ? row(FILTERED_ID, root)
+                : row(root, root),
+            ],
     });
-    await settle();
-    expect(drawnIds("syn")).toEqual([100n, 200n]);
-    expect(statusOf("syn")).toMatchObject({
-      page: 1,
-      hasNext: true,
-      hasPrevious: false,
-    });
-    graph.segmentRequests.length = 0;
-    graph.segmentBodies.length = 0;
-    session.nextPage("syn");
-    await settle();
-    expect(graph.segmentRequests).toEqual([{ root: 10n, tables: ["syn"] }]);
-    expect(graph.segmentBodies[0].syn.after_id).toBe("100");
-    expect(drawnIds("syn")).toEqual([101n, 200n]);
-    expect(drawn.get("syn")).toHaveLength(2);
-    expect(statusOf("syn")).toMatchObject({
-      page: 2,
-      hasNext: false,
-      hasPrevious: true,
-    });
-    graph.segmentRequests.length = 0;
-    graph.segmentBodies.length = 0;
-    session.previousPage("syn");
-    await settle();
-    expect(graph.segmentRequests).toEqual([{ root: 10n, tables: ["syn"] }]);
-    expect(graph.segmentBodies[0].syn.after_id).toBeUndefined();
-    expect(drawnIds("syn")).toEqual([100n, 200n]);
-    expect(statusOf("syn")).toMatchObject({ page: 1, hasPrevious: false });
-  });
-
-  it("starts a newly visible root on page one", async () => {
-    const graph = fakeGraph(["syn"], [], twoPagesOnRoot10);
-    const { session, visibleSegments, statusOf } = startSession(graph, {
-      ticked: ["syn"],
-      visible: [10n],
-    });
-    await settle();
-    session.nextPage("syn");
-    await settle();
-    graph.segmentBodies.length = 0;
-    visibleSegments.add(30n);
-    await settle();
-    expect(graph.segmentBodies).toEqual([
-      { syn: { limit: ANNOTATIONS_PER_PAGE } },
-    ]);
-    expect(statusOf("syn")?.page).toBe(2);
-  });
-
-  it("refetches only the refiltered table, back on page one", async () => {
-    const graph = fakeGraph(["syn", "mark"], [], filteredOrPaged);
-    const { session, state, drawnIds, statusOf } = startSession(graph, {
+    const { state, drawnIds } = startSession(graph, {
       ticked: ["syn", "mark"],
       visible: [10n],
     });
     await settle();
-    session.nextPage("syn");
-    await settle();
-    graph.segmentRequests.length = 0;
-    graph.segmentBodies.length = 0;
+    graph.requests.length = 0;
+    graph.bodies.length = 0;
     state.setFilter("syn", SIZE_FILTER);
     await settle();
-    expect(graph.segmentRequests).toEqual([{ root: 10n, tables: ["syn"] }]);
-    expect(graph.segmentBodies[0].syn).toEqual({
-      ...SIZE_FILTER,
-      limit: ANNOTATIONS_PER_PAGE,
-    });
+    expect(graph.requests).toEqual([
+      { endpoint: "count", scope: 10n, tables: ["syn"] },
+      { endpoint: "points", scope: 10n, tables: ["syn"] },
+    ]);
+    expect(graph.bodies[0]).toEqual({ syn: SIZE_FILTER });
     expect(drawnIds("syn")).toEqual([FILTERED_ID]);
-    expect(drawnIds("mark")).toEqual([100n]);
-    expect(statusOf("syn")?.page).toBe(1);
+    expect(drawnIds("mark")).toEqual([10n]);
   });
 
-  it("drops a page that arrives after the filter changed", async () => {
-    const graph = fakeGraph(["syn"], [], filteredOrPaged);
-    const { session, state, drawnIds, statusOf } = startSession(graph, {
+  it("drops points that arrive after the branch changed", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { connection, drawnIds } = startSession(graph, {
       ticked: ["syn"],
       visible: [10n],
     });
-    await settle();
-    graph.holding = true;
-    session.nextPage("syn");
-    await settle();
-    state.setFilter("syn", SIZE_FILTER);
-    await settle();
-    expect(graph.held).toHaveLength(2);
-    graph.held[1]();
-    await settle();
-    graph.held[0]();
-    await settle();
-    expect(drawnIds("syn")).toEqual([FILTERED_ID]);
-    expect(statusOf("syn")?.page).toBe(1);
-  });
-
-  it("drops a page that arrives after the branch changed", async () => {
-    const graph = fakeGraph(["syn"], [], twoPagesOnRoot10);
-    const { session, connection, drawnIds } = startSession(graph, {
-      ticked: ["syn"],
-      visible: [10n],
-    });
-    await settle();
-    graph.holding = true;
-    session.nextPage("syn");
+    graph.hold = (read) => read === "points";
     await settle();
     (connection.branchId as WatchableValue<number>).value = 3;
     await settle();
@@ -862,53 +1330,25 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(drawnIds("syn")).toEqual([]);
     graph.held[1]();
     await settle();
-    expect(drawnIds("syn")).toEqual([100n]);
-  });
-
-  it("drops a next page that arrives after stepping back", async () => {
-    const graph = fakeGraph(["syn"], [], twoPagesOnRoot10);
-    const { session, drawnIds, statusOf } = startSession(graph, {
-      ticked: ["syn"],
-      visible: [10n],
-    });
-    await settle();
-    graph.holding = true;
-    session.nextPage("syn");
-    await settle();
-    session.previousPage("syn");
-    await settle();
-    expect(graph.segmentBodies.map((body) => body.syn.after_id)).toEqual([
-      undefined,
-      "100",
-      undefined,
-    ]);
-    graph.held[0]();
-    await settle();
-    expect(drawnIds("syn")).toEqual([]);
-    graph.held[1]();
-    await settle();
-    expect(drawnIds("syn")).toEqual([100n]);
-    expect(statusOf("syn")).toMatchObject({ page: 1, hasNext: true });
+    expect(drawnIds("syn")).toEqual([10n]);
   });
 
   it("lists a row shared by two visible roots once, in selection then id order", async () => {
-    const shared = rowJson(7n, 10n, 20n);
-    const graph = fakeGraph(["syn", "mark"], [], (root, table) =>
-      table === "syn"
-        ? { rows: [shared, rowJson(root, root)] }
-        : { rows: [rowJson(root + 1n, root)] },
-    );
+    const shared = row(7n, 10n, 20n);
+    const graph = fakeGraph(["syn", "mark"], {
+      rows: (root, table) =>
+        root === undefined
+          ? []
+          : table === "syn"
+            ? [shared, row(root, root)]
+            : [row(root + 1n, root)],
+    });
     const { session, drawn } = startSession(graph, {
       ticked: ["syn", "mark"],
       visible: [20n, 10n],
     });
     await settle();
-    expect(
-      session.drawn.value.map(({ table, annotation }) => [
-        table,
-        annotation.id,
-      ]),
-    ).toEqual([
+    expect(session.drawn.value.map(({ table, id }) => [table, id])).toEqual([
       ["syn", 7n],
       ["syn", 10n],
       ["syn", 20n],
@@ -953,7 +1393,7 @@ describe("CalcadaAnnotationTablesSession", () => {
 
   it("draws a burst of answers once per table", async () => {
     const graph = fakeGraph(["syn", "mark"]);
-    graph.holding = true;
+    graph.hold = (read) => read === "points";
     const { session, sources } = startSession(graph, {
       ticked: ["syn", "mark"],
       visible: [10n, 20n, 30n],
@@ -962,56 +1402,67 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(graph.held).toHaveLength(3);
     const published = vi.fn();
     session.drawn.changed.add(published);
-    const updated = vi.fn();
-    sources.get("syn")!.childUpdated.add(updated);
+    const reordered = vi.fn();
+    sources.get("syn")!.childrenReordered.add(reordered);
     graph.held.forEach((release) => release());
     await vi.advanceTimersByTimeAsync(VISIBLE_SEGMENTS_DEBOUNCE_MS);
     expect(frames).toHaveLength(1);
     drawFrames();
     expect(published).toHaveBeenCalledTimes(1);
-    expect(updated).not.toHaveBeenCalled();
+    expect(reordered).toHaveBeenCalledTimes(1);
     expect(session.drawn.value).toHaveLength(6);
   });
 
-  it("holds no annotation references across pages and filters", async () => {
-    const graph = fakeGraph(["syn"], [], filteredOrPaged);
-    const { session, state, sources } = startSession(graph, {
+  it("redraws a table once, after the points of its last root arrive", async () => {
+    const graph = fakeGraph(["syn"]);
+    graph.hold = (read) => read === "points";
+    const { sources, drawnIds } = startSession(graph, {
       ticked: ["syn"],
-      visible: [10n, 20n],
+      visible: [10n, 20n, 30n],
     });
     await settle();
-    session.nextPage("syn");
-    await settle();
-    state.setFilter("syn", SIZE_FILTER);
-    await settle();
-    expect([...sources.get("syn")!]).toHaveLength(1);
-    expect(sources.get("syn")!.references.size).toBe(0);
+    expect(graph.held).toHaveLength(3);
+    const replaceAll = vi.spyOn(sources.get("syn")!, "replaceAll");
+    for (const release of graph.held) {
+      release();
+      await settle();
+    }
+    expect(replaceAll).toHaveBeenCalledTimes(1);
+    expect(drawnIds("syn")).toEqual([10n, 20n, 30n]);
   });
 
-  it("announces each removed annotation so other lists drop it", async () => {
-    const graph = fakeGraph(["syn"], [], twoPagesOnRoot10);
-    const { session, sources } = startSession(graph, {
+  it("redraws what arrived once the last missing root fails", async () => {
+    const graph = fakeGraph(["syn"]);
+    graph.hold = (read) => read === "points";
+    const { sources, drawnIds, statusOf } = startSession(graph, {
       ticked: ["syn"],
-      visible: [10n, 20n],
+      visible: [10n, 20n, 30n],
     });
     await settle();
-    const deleted = vi.fn();
-    sources.get("syn")!.childDeleted.add(deleted);
-    session.nextPage("syn");
+    const [first, second, last] = graph.held;
+    const replaceAll = vi.spyOn(sources.get("syn")!, "replaceAll");
+    first();
+    second();
     await settle();
-    expect(deleted.mock.calls).toEqual([["syn:100"]]);
+    expect(drawnIds("syn")).toEqual([]);
+    graph.failPoints = true;
+    last();
+    await settle();
+    expect(replaceAll).toHaveBeenCalledTimes(1);
+    expect(drawnIds("syn")).toEqual([10n, 20n]);
+    expect(statusOf("syn")?.error).toBeDefined();
   });
 
   it("counts rows, not drawn points, for rows of three points", async () => {
-    const graph = fakeGraph(["syn"], [], (root) => ({
-      rows: [rowJson(root, root, root, root)],
-    }));
+    const graph = fakeGraph(["syn"], {
+      rows: (root) => (root === undefined ? [] : [row(root, root, root, root)]),
+    });
     const { drawn, statusOf } = startSession(graph, {
       ticked: ["syn"],
       visible: [10n],
     });
     await settle();
     expect(drawn.get("syn")).toHaveLength(3);
-    expect(statusOf("syn")?.annotations).toBe(1);
+    expect(statusOf("syn")).toMatchObject({ annotations: 1, fetchedRoots: 1 });
   });
 });
