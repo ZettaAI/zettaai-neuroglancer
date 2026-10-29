@@ -87,6 +87,25 @@ describe("PaintedVolumeSegmentPalette classes", () => {
     classOfId(palette, 9n);
     expect(palette.classCount).toBe(2);
   });
+
+  it("maps each class back to its segment, for 3D picking", () => {
+    const palette = new PaintedVolumeSegmentPalette();
+    for (let id = 1n; id <= 254n; ++id) classOfId(palette, id << 40n);
+    classOfId(palette, 1000n);
+    expect(palette.segmentOfClass(1)).toBe(1n << 40n);
+    expect(palette.segmentOfClass(254)).toBe(254n << 40n);
+    expect(palette.segmentOfClass(0)).toBeUndefined();
+    expect(
+      palette.segmentOfClass(PAINTED_VOLUME_OVERFLOW_CLASS),
+    ).toBeUndefined();
+  });
+
+  it("has no segment for a class not handed out yet", () => {
+    const palette = new PaintedVolumeSegmentPalette();
+    classOfId(palette, 5n);
+    expect(palette.segmentOfClass(1)).toBe(5n);
+    expect(palette.segmentOfClass(2)).toBeUndefined();
+  });
 });
 
 describe("PaintedVolumeSegmentPalette colours", () => {

@@ -32,12 +32,15 @@ import {
   PaintedVolumeRenderer,
   PaintedVolumeRenderLayer,
 } from "#src/editing/painted_volume/painted_volume_render_layer.js";
+import { PAINTED_VOLUME_OVERFLOW_CLASS } from "#src/editing/painted_volume/painted_volume_segment_palette.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
 import {
   PaintedVolumePaletteTexture,
   PaintedVolumeTexture,
 } from "#src/editing/painted_volume/painted_volume_texture.js";
 import { brushRadiusSquared } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
+import type { MouseSelectionState } from "#src/layer/index.js";
+import { PickIDManager } from "#src/object_picking.js";
 import { perspectivePanelEmit } from "#src/perspective_view/panel.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import { mat4, vec3 } from "#src/util/geom.js";
@@ -74,6 +77,11 @@ const CLASS_B = 2;
 const COLOR_A = [200, 40, 40, 255];
 const COLOR_B = [40, 200, 40, 255];
 const BACKGROUND = [0, 0, 0, 0];
+/** The segment each test class stands for. */
+const SEGMENT_OF_CLASS = new Map<number, bigint>([
+  [CLASS_A, 101n],
+  [CLASS_B, 202n],
+]);
 
 /** Ambient-only lighting reproduces the palette colour exactly. */
 const FLAT_LIGHT = {
@@ -103,6 +111,8 @@ interface Rendered {
   readonly color: Uint8Array;
   /** The panel's Z attachment, red channel per pixel. */
   readonly z: Float32Array;
+  /** The panel's pick attachment, red channel per pixel. */
+  readonly pickId: Float32Array;
 }
 
 function wholeTexture(size: Triple): TexelBox {
@@ -176,6 +186,7 @@ function withSource(
       occupiedBox: scene.occupiedBox ?? wholeTexture(textureSize),
       cursorFootprint: scene.cursorFootprint,
       visible: true,
+      segmentOfClass: (segmentClass) => SEGMENT_OF_CLASS.get(segmentClass),
     });
   } finally {
     palette.dispose();
@@ -200,6 +211,7 @@ function renderPanel(
   const pixelCount = FRAMEBUFFER_SIZE * FRAMEBUFFER_SIZE;
   const color = new Uint8Array(pixelCount * 4);
   const zRgba = new Float32Array(pixelCount * 4);
+  const pickRgba = new Float32Array(pixelCount * 4);
   try {
     framebuffer.bind(FRAMEBUFFER_SIZE, FRAMEBUFFER_SIZE);
     gl.disable(gl.SCISSOR_TEST);
@@ -232,26 +244,45 @@ function renderPanel(
       gl.FLOAT,
       zRgba,
     );
+    framebuffer.bindSingle(2);
+    gl.readPixels(
+      0,
+      0,
+      FRAMEBUFFER_SIZE,
+      FRAMEBUFFER_SIZE,
+      gl.RGBA,
+      gl.FLOAT,
+      pickRgba,
+    );
     expect(gl.getError()).toBe(gl.NO_ERROR);
   } finally {
     framebuffer.unbind();
     framebuffer.dispose();
   }
   const z = new Float32Array(pixelCount);
-  for (let i = 0; i < pixelCount; ++i) z[i] = zRgba[i * 4];
-  return { color, z };
+  const pickId = new Float32Array(pixelCount);
+  for (let i = 0; i < pixelCount; ++i) {
+    z[i] = zRgba[i * 4];
+    pickId[i] = pickRgba[i * 4];
+  }
+  return { color, z, pickId };
 }
 
 function render(
   gl: GL,
   source: PaintedVolumeRenderSource,
   viewProjectionMat: mat4,
-  options: { clearDepth?: number; light?: typeof FLAT_LIGHT } = {},
+  options: {
+    clearDepth?: number;
+    light?: typeof FLAT_LIGHT;
+    pickIdBase?: number;
+  } = {},
 ): Rendered {
   const renderer = new PaintedVolumeRenderer(gl);
   const view: PaintedVolumeView = {
     viewProjectionMat,
     ...(options.light ?? FLAT_LIGHT),
+    pickIdBase: options.pickIdBase ?? 0,
   };
   try {
     return renderPanel(gl, () => renderer.draw(source, view), options);
@@ -267,6 +298,10 @@ function pixel(rendered: Rendered, x: number, y: number): number[] {
 
 function zAt(rendered: Rendered, x: number, y: number): number {
   return rendered.z[y * FRAMEBUFFER_SIZE + x];
+}
+
+function pickIdAt(rendered: Rendered, x: number, y: number): number {
+  return rendered.pickId[y * FRAMEBUFFER_SIZE + x];
 }
 
 /** Pixel in the middle of a texel, for views where display = texel × 8 px. */
@@ -832,6 +867,99 @@ describe("painted-volume cursor window", () => {
         expect(countPixels(rendered, COLOR_A)).toBe(
           FRAMEBUFFER_SIZE * FRAMEBUFFER_SIZE,
         );
+      });
+    });
+  });
+});
+
+describe("painted-volume picking", () => {
+  const twoSegments: Scene = {
+    texels: [
+      { texel: [2, 4, 3], segmentClass: CLASS_A },
+      { texel: [5, 4, 3], segmentClass: CLASS_B },
+    ],
+  };
+  const PICK_ID_BASE = 1000;
+
+  it("writes each class's pick id where it draws, none on the background", () => {
+    webglTest((gl) => {
+      withSource(gl, twoSegments, (source) => {
+        const rendered = render(gl, source, VIEW_DOWN_Z, {
+          pickIdBase: PICK_ID_BASE,
+        });
+        const row = texelPixel(4);
+        expect(pixel(rendered, texelPixel(2), row)).toEqual(COLOR_A);
+        expect(pickIdAt(rendered, texelPixel(2), row)).toBe(
+          PICK_ID_BASE + CLASS_A,
+        );
+        expect(pixel(rendered, texelPixel(5), row)).toEqual(COLOR_B);
+        expect(pickIdAt(rendered, texelPixel(5), row)).toBe(
+          PICK_ID_BASE + CLASS_B,
+        );
+        expect(pixel(rendered, texelPixel(0), row)).toEqual(BACKGROUND);
+        expect(pickIdAt(rendered, texelPixel(0), row)).toBe(0);
+      });
+    });
+  });
+
+  it("writes no pick id when the pass registered none", () => {
+    webglTest((gl) => {
+      withSource(gl, twoSegments, (source) => {
+        const rendered = render(gl, source, VIEW_DOWN_Z, { pickIdBase: 0 });
+        expect(pixel(rendered, texelPixel(2), texelPixel(4))).toEqual(COLOR_A);
+        expect(rendered.pickId.every((pickId) => pickId === 0)).toBe(true);
+      });
+    });
+  });
+
+  it("a picking pass registers the classes and picks the drawn segment", () => {
+    webglTest((gl) => {
+      withSource(gl, twoSegments, (source) => {
+        const layer = new PaintedVolumeRenderLayer(gl, source);
+        const pickIDs = new PickIDManager();
+        // Another layer's ids come first, so a pick id written without the
+        // preview's base would resolve to that layer.
+        const earlierLayer = new PaintedVolumeRenderLayer(gl, source);
+        pickIDs.register(earlierLayer, 7);
+        try {
+          const rendered = renderPanel(gl, () =>
+            layer.draw({
+              emitter: perspectivePanelEmit,
+              emitColor: true,
+              emitPickID: true,
+              pickIDs,
+              projectionParameters: { viewProjectionMat: VIEW_DOWN_Z },
+              ...FLAT_LIGHT,
+            } as unknown as PerspectiveViewRenderContext),
+          );
+          const pickedSegment = (x: number, y: number) => {
+            const mouseState = {} as MouseSelectionState;
+            pickIDs.setMouseState(mouseState, pickIdAt(rendered, x, y));
+            expect(mouseState.pickedRenderLayer).toBe(layer);
+            return layer.transformPickedValue(mouseState);
+          };
+          expect(pickedSegment(texelPixel(2), texelPixel(4))).toBe(101n);
+          expect(pickedSegment(texelPixel(5), texelPixel(4))).toBe(202n);
+        } finally {
+          layer.dispose();
+          earlierLayer.dispose();
+        }
+      });
+    });
+  });
+
+  it("a class without its own segment picks nothing", () => {
+    webglTest((gl) => {
+      withSource(gl, twoSegments, (source) => {
+        const layer = new PaintedVolumeRenderLayer(gl, source);
+        try {
+          const overflow = {
+            pickedOffset: PAINTED_VOLUME_OVERFLOW_CLASS,
+          } as MouseSelectionState;
+          expect(layer.transformPickedValue(overflow)).toBeUndefined();
+        } finally {
+          layer.dispose();
+        }
       });
     });
   });

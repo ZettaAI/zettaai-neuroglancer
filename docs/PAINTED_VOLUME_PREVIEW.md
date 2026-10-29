@@ -30,9 +30,16 @@ The preview follows the mesh layer instead of rules of its own:
   preview takes the colour itself (a stated colour of alpha 0 hides it).
 - **3D opacity 0** hides the preview, as it hides meshes.
 
-Still different: the preview is drawn opaque at any 3D opacity above 0, has no
-silhouette mode and cannot be picked in 3D (see "Why an opaque pass"). Segments
-that touch share one surface; only their colours tell them apart.
+- **3D picking:** each hit writes the pick id of its texel class (256 ids
+  registered per draw), and the layer maps the class back to its segment, so
+  hovering the surface picks the segment drawn there, as hovering a mesh does.
+  Overflow-class texels pick nothing of their own: the layer falls back to the
+  voxel at the 3D mouse position, which lies on the smoothed surface and so may
+  be a neighbour or background rather than the segment drawn there.
+
+Still different: the preview is drawn opaque at any 3D opacity above 0 and has
+no silhouette mode (see "Why an opaque pass"). Segments that touch share one
+surface; only their colours tell them apart.
 
 ## Smooth surface
 

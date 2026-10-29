@@ -46,6 +46,10 @@ export class PaintedVolumeSegmentPalette {
   readonly changed = new NullarySignal();
 
   private readonly classById = new Map<bigint, number>();
+  /** Inverse of `classById`, indexed by class; for 3D picking. */
+  private readonly idByClass = new Array<bigint | undefined>(
+    PAINTED_VOLUME_PALETTE_SIZE,
+  ).fill(undefined);
   private nextClass = FIRST_SEGMENT_CLASS;
   private overflowed = false;
   private lastLow = 0;
@@ -68,6 +72,14 @@ export class PaintedVolumeSegmentPalette {
    */
   get classCount(): number {
     return this.classById.size;
+  }
+
+  /**
+   * The segment holding `segmentClass`, or `undefined` for the empty class,
+   * the overflow class (shared by many segments) and unassigned classes.
+   */
+  segmentOfClass(segmentClass: number): bigint | undefined {
+    return this.idByClass[segmentClass];
   }
 
   /** True once some segment got the overflow class instead of its own. */
@@ -142,6 +154,7 @@ export class PaintedVolumeSegmentPalette {
     }
     const segmentClass = this.nextClass++;
     this.classById.set(id, segmentClass);
+    this.idByClass[segmentClass] = id;
     return segmentClass;
   }
 

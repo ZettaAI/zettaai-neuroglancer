@@ -204,6 +204,7 @@ export class PaintedVolumePreview extends RefCounted {
       occupiedBox: undefined,
       cursorFootprint: undefined,
       visible: true,
+      segmentOfClass: () => undefined,
     };
     const gpu = options.createGpu(frame);
     if (!gpu.allocate(extent.textureSize)) {
@@ -284,6 +285,8 @@ class PaintedVolumeTextureSync extends RefCounted {
     super();
     const { metadata, resolution, regionBounds, logger } = options;
     this.extent = frame.extent;
+    frame.segmentOfClass = (segmentClass) =>
+      this.palette.segmentOfClass(segmentClass);
     this.grid = ChunkGrid.fromLayer(metadata, resolution);
     this.chunkSize = scaleFor(metadata, resolution).chunkDataSize;
     this.regionChunkIds = this.grid.chunkIdsOverlappingBox(

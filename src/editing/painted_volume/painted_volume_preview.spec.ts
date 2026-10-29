@@ -479,6 +479,18 @@ describe("PaintedVolumePreview: painting", () => {
     expect(harness.gpu.alphaOfClass(harness.gpu.classAt([2, 3, 1]))).toBe(255);
   });
 
+  it("lets the render layer map each drawn class back to its segment, for 3D picking", async () => {
+    const datasource = new FakeDatasource();
+    datasource.setVoxel([1, 1, 0], SELECTED);
+    const harness = makeHarness({ datasource });
+    await harness.idle();
+    harness.paint([2, 3, 1], PAINTED);
+    await harness.idle();
+    const { gpu } = harness;
+    expect(gpu.frame.segmentOfClass(gpu.classAt([1, 1, 0]))).toBe(SELECTED);
+    expect(gpu.frame.segmentOfClass(gpu.classAt([2, 3, 1]))).toBe(PAINTED);
+  });
+
   it("removes erased voxels of a selected segment", async () => {
     const datasource = new FakeDatasource();
     datasource.setVoxel([2, 3, 1], SELECTED);

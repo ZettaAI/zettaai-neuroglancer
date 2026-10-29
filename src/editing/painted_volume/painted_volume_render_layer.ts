@@ -33,12 +33,14 @@
 
 import { PAINTED_VOLUME_DISTANCE_RANGE } from "#src/editing/painted_volume/painted_volume_distance_field.js";
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
+import { PAINTED_VOLUME_PALETTE_SIZE } from "#src/editing/painted_volume/painted_volume_segment_palette.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
 import type {
   PaintedVolumePaletteTexture,
   PaintedVolumeTexture,
 } from "#src/editing/painted_volume/painted_volume_texture.js";
 import { glsl_brushFootprintContains } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
+import type { PickState } from "#src/layer/index.js";
 import { perspectivePanelEmit } from "#src/perspective_view/panel.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
@@ -74,6 +76,8 @@ export interface PaintedVolumeRenderSource {
   readonly cursorFootprint: PaintedVolumeCursorFootprint | undefined;
   /** `false` hides the layer, as a 3D opacity of 0 hides meshes. */
   readonly visible: boolean;
+  /** The segment a texel class stands for; `undefined` when it has none. */
+  segmentOfClass(segmentClass: number): bigint | undefined;
 }
 
 /** Per-frame view inputs, as the perspective panel provides them. */
@@ -82,6 +86,11 @@ export interface PaintedVolumeView {
   readonly lightDirection: ArrayLike<number>;
   readonly ambientLighting: number;
   readonly directionalLighting: number;
+  /**
+   * First of the 256 pick ids registered for this draw, one per texel class;
+   * `0` writes no pick id.
+   */
+  readonly pickIdBase: number;
 }
 
 const OCCUPANCY_SAMPLER = Symbol("paintedVolumeOccupancy");
@@ -182,9 +191,10 @@ vec3 surfaceNormal(vec3 point, vec3 ray) {
 `;
 
 const glsl_shadeHit = `
-// Lit colour (as the mesh shader lights) and the hit's own depth, which
-// replaces the proxy face's depth both in the depth buffer and in out_z.
-void shadeHit(vec3 rgb, vec3 texelNormal, vec3 hitPoint) {
+// Lit colour (as the mesh shader lights), the hit's own depth, which
+// replaces the proxy face's depth both in the depth buffer and in out_z, and
+// the pick id of the segment's class, so hovering it picks the segment.
+void shadeHit(vec3 rgb, uint segmentClass, vec3 texelNormal, vec3 hitPoint) {
   vec3 normal = normalize(uNormalToDisplay * texelNormal);
   float lighting = abs(dot(normal, uLightDirection.xyz)) + uLightDirection.w;
   vec4 hitClip = uModelViewProjection * vec4(hitPoint, 1.0);
@@ -192,7 +202,8 @@ void shadeHit(vec3 rgb, vec3 texelNormal, vec3 hitPoint) {
   // The ray is not cut at the far plane (see the march), so cut the hit here.
   if (depth > 1.0) discard;
   gl_FragDepth = depth;
-  emit(vec4(rgb * lighting, 1.0), 0u);
+  uint pickId = uPickIdBase == 0u ? 0u : uPickIdBase + segmentClass;
+  emit(vec4(rgb * lighting, 1.0), pickId);
   float zValue = 1.0 - depth;
   out_z = vec4(zValue, zValue, zValue, 1.0);
 }
@@ -228,7 +239,7 @@ bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
   }
   vec3 rgb;
   if (!drawnColor(texel, segmentClass, rgb)) return false;
-  shadeHit(rgb, texelNormal, hitPoint);
+  shadeHit(rgb, segmentClass, texelNormal, hitPoint);
   return true;
 }
 `;
@@ -298,8 +309,9 @@ if (distancePrevious >= 0.5) {
 for (int i = 0; i < uMaxSteps; ++i) {
   if (insideUndrawn) {
     vec3 rgb;
-    if (drawnColor(texel, texelFetch(uOccupancy, texel, 0).r, rgb)) {
-      shadeHit(rgb, cellNormal, nearPoint + ray * tHit);
+    uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
+    if (drawnColor(texel, segmentClass, rgb)) {
+      shadeHit(rgb, segmentClass, cellNormal, nearPoint + ray * tHit);
       return;
     }
   }
@@ -374,6 +386,7 @@ export function buildPaintedVolumeShader(gl: GL): ShaderProgram {
   builder.addUniform("bool", "uCursorActive");
   builder.addUniform("highp vec3", "uCursorAnchorVoxel");
   builder.addUniform("highp float", "uCursorRadiusSquared");
+  builder.addUniform("highp uint", "uPickIdBase");
   builder.addVarying("highp vec4", "vClipPosition");
   builder.addVertexCode(glsl_getBoxFaceVertexPosition);
   builder.setVertexMain(`
@@ -479,6 +492,7 @@ export class PaintedVolumeRenderer extends RefCounted {
       lightDirection[2] * directionalLighting,
       view.ambientLighting,
     );
+    gl.uniform1ui(shader.uniform("uPickIdBase"), view.pickIdBase);
   }
 
   private setVolumeUniforms(
@@ -560,10 +574,18 @@ export class PaintedVolumeRenderLayer extends PerspectiveViewRenderLayer {
     if (!renderContext.emitColor) return;
     if (renderContext.emitter !== perspectivePanelEmit) return;
     this.renderer.draw(this.source, {
+      pickIdBase: renderContext.emitPickID
+        ? renderContext.pickIDs.register(this, PAINTED_VOLUME_PALETTE_SIZE)
+        : 0,
       viewProjectionMat: renderContext.projectionParameters.viewProjectionMat,
       lightDirection: renderContext.lightDirection,
       ambientLighting: renderContext.ambientLighting,
       directionalLighting: renderContext.directionalLighting,
     });
+  }
+
+  /** The segment of the picked texel class, as a mesh pick yields its object. */
+  override transformPickedValue(pickState: PickState): bigint | undefined {
+    return this.source.segmentOfClass(pickState.pickedOffset);
   }
 }

@@ -43,6 +43,8 @@ export interface PaintedVolumeFrameState {
   occupiedBox: TexelBox | undefined;
   cursorFootprint: PaintedVolumeCursorFootprint | undefined;
   visible: boolean;
+  /** The segment a texel class stands for, for 3D picking; set by the controller. */
+  segmentOfClass: (segmentClass: number) => bigint | undefined;
 }
 
 export interface PaintedVolumeGpu {
@@ -85,6 +87,7 @@ export function paintedVolumeGpuFactory(
       get visible() {
         return frame.visible;
       },
+      segmentOfClass: (segmentClass) => frame.segmentOfClass(segmentClass),
     });
     return {
       renderLayer,
