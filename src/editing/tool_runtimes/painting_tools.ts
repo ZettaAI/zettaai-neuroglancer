@@ -108,6 +108,12 @@ export interface PaintingSharedState {
    * and tunable.
    */
   readonly spacingFraction: number;
+  /**
+   * Whether the brush and fill select the segment they paint, so it shows in
+   * 2D and 3D without a double-click (TM-490). On by default; the eraser
+   * never selects.
+   */
+  readonly autoSelectPaintedSegment: boolean;
 }
 
 /**
@@ -184,6 +190,24 @@ interface PaintingToolDeps {
    * toast). Used to explain a memory-bounded fill that stopped short (TM-269).
    */
   readonly notify?: (message: string) => void;
+  /**
+   * Selects a painted segment on its layer (host wires it to the layer's
+   * visible segments, TM-490). Absent in tests / headless contexts.
+   */
+  readonly selectSegment?: (layerId: LayerId, value: number | bigint) => void;
+}
+
+/**
+ * Select the segment a brush stroke or fill is about to paint, when the user
+ * keeps auto-select on. Segment 0 is background and never selected.
+ */
+function selectPaintedSegment(
+  deps: PaintingToolDeps,
+  shared: PaintingSharedState,
+): void {
+  if (!shared.autoSelectPaintedSegment) return;
+  if (BigInt(shared.activeValue) === 0n) return;
+  deps.selectSegment?.(shared.targetLayerId, shared.activeValue);
 }
 
 /**
@@ -608,6 +632,9 @@ export class StrokeTool implements EditTool {
       });
       this.handle = handle;
       this.activeReplay = replay;
+      if (this.preset.source === "active") {
+        selectPaintedSegment(this.deps, shared);
+      }
       const edit = handle.edit;
       this.lastVoxel = pos;
       this.geometry =
@@ -857,6 +884,7 @@ export class FillTool implements EditTool {
       ev.voxelPosition[1],
       ev.voxelPosition[2],
     ];
+    selectPaintedSegment(this.deps, shared);
     const controller = new AbortController();
     this.activeFill = controller;
     this.deps.fillProgress?.start();
@@ -958,6 +986,8 @@ export class ConsumerPaintingTools {
     fillProgress?: FillProgressSink;
     /** Host transient-notification sink (TM-269). */
     notify?: (message: string) => void;
+    /** Host segment selection for auto-select (TM-490). */
+    selectSegment?: (layerId: LayerId, value: number | bigint) => void;
   }) {
     this.state = new PaintingState(opts.initialState);
     const deps: PaintingToolDeps = {
@@ -970,6 +1000,7 @@ export class ConsumerPaintingTools {
       pipeline: new PaintStrokePipeline(),
       fillProgress: opts.fillProgress,
       notify: opts.notify,
+      selectSegment: opts.selectSegment,
     };
     this.brush = new StrokeTool(deps, {
       toolId: PAINTING_BRUSH_TOOL_ID,

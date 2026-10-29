@@ -40,6 +40,7 @@ function painting(): PaintingSharedState {
     mask: undefined,
     fillMode: "3d",
     spacingFraction: 0.1,
+    autoSelectPaintedSegment: true,
   };
 }
 

@@ -3297,6 +3297,9 @@ export class EditSessionHost extends RefCounted {
       // a shape on one slice); the user switches to a 3D flood across sections
       // from the fill panel (TM-269).
       fillMode: "2d",
+      // Painting selects its segment so the stroke shows in 2D and 3D without
+      // a double-click (TM-490); the user turns it off in the brush/fill panel.
+      autoSelectPaintedSegment: true,
     };
 
     const compute = new PaintingCompute(this.morphologyClient);
@@ -3336,6 +3339,8 @@ export class EditSessionHost extends RefCounted {
       },
       // Surface a memory-bounded fill that stopped short (TM-269).
       notify: (message) => StatusMessage.showTemporaryMessage(message, 8000),
+      selectSegment: (layerId, value) =>
+        this.selectPaintedSegment(layerId, value),
     });
 
     // Registry + session-scoped binder own active-tool selection + the
@@ -4063,6 +4068,18 @@ export class EditSessionHost extends RefCounted {
       layer?.displayState.segmentationGroupState.value.selectedSegments;
     if (selected === undefined) return;
     for (const id of ids) selected.add(id);
+  }
+
+  /**
+   * Select a painted segment on its layer, the way a double-click does: its
+   * representative joins the visible segments (and so the selected list).
+   */
+  private selectPaintedSegment(layerId: LayerId, value: number | bigint): void {
+    const layer = this.findSegmentationUserLayer(layerId);
+    if (layer === undefined) return;
+    const { visibleSegments, segmentEquivalences } =
+      layer.displayState.segmentationGroupState.value;
+    visibleSegments.add(segmentEquivalences.get(BigInt(value)));
   }
 
   /** The host as the painted-volume binding sees it (TM-490). */

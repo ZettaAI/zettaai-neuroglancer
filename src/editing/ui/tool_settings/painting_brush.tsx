@@ -33,6 +33,7 @@ import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { ToggleSwitch } from "#src/editing/ui/toggle_switch.js";
 import { BrushSizeField } from "#src/editing/ui/tool_settings/brush_size_field.js";
+import { PaintedSegmentAutoSelectRow } from "#src/editing/ui/tool_settings/painted_segment_auto_select_row.js";
 import { PaintingTargetPicker } from "#src/editing/ui/tool_settings/painting_target_picker.js";
 import { PaintingThreshold } from "#src/editing/ui/tool_settings/painting_threshold.js";
 import {
@@ -122,6 +123,7 @@ export function PaintingBrush({
         highlighted={selectedId === PARAM_IDS.value}
         onSelect={() => selectParam(PARAM_IDS.value)}
       />
+      <PaintedSegmentAutoSelectRow painting={painting} />
       <BrushMask
         host={host}
         painting={painting}

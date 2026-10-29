@@ -159,6 +159,7 @@ function initialState(radius = 3): PaintingSharedState {
     // diameter 7 × 0.1 → clamped to a 1-voxel spacing, so canonical stamps land
     // on integer positions along an axis-aligned stroke (keeps assertions clean).
     spacingFraction: 0.1,
+    autoSelectPaintedSegment: true,
   };
 }
 
@@ -170,6 +171,7 @@ function setup(overrides: { radius?: number } = {}) {
     fill: [],
   };
   const metadataByLayer = new Map<LayerId, LayerMetadata>([[TARGET, meta()]]);
+  const selected: [LayerId, number | bigint][] = [];
   const tools = new ConsumerPaintingTools({
     scope: new EditScope(fakeSession(log)),
     compute: fakeCompute(calls),
@@ -187,8 +189,9 @@ function setup(overrides: { radius?: number } = {}) {
       asView: () => new Uint32Array(0),
     }),
     initialState: initialState(overrides.radius),
+    selectSegment: (layer, value) => selected.push([layer, value]),
   });
-  return { tools, log, calls };
+  return { tools, log, calls, selected };
 }
 
 const down = (x: number, y: number, z: number): PointerDownEvent => ({
@@ -599,5 +602,53 @@ describe("ConsumerPaintingTools — stroke lifecycle (TM-315)", () => {
     await tools.brush.handleInput(up(0, 0, 0));
     expect(calls.applyBrush[0]!.radius).toBe(5);
     expect(calls.applyBrush[0]!.value).toBe(42);
+  });
+});
+
+describe("ConsumerPaintingTools — auto-select painted segment (TM-490)", () => {
+  it("a brush stroke selects its segment on the target layer once", async () => {
+    const { tools, selected } = setup();
+    await tools.brush.handleInput(down(10, 10, 10));
+    await tools.brush.handleInput(move(12, 10, 10));
+    await tools.brush.handleInput(up(12, 10, 10));
+    expect(selected).toEqual([[TARGET, 7]]);
+  });
+
+  it("a fill selects its segment on the target layer", async () => {
+    const { tools, selected } = setup();
+    await tools.fill.handleInput(down(20, 20, 20));
+    expect(selected).toEqual([[TARGET, 7]]);
+  });
+
+  it("selects nothing when auto-select is off", async () => {
+    const { tools, selected } = setup();
+    tools.state.patchState({ autoSelectPaintedSegment: false });
+    await tools.brush.handleInput(down(0, 0, 0));
+    await tools.brush.handleInput(up(0, 0, 0));
+    await tools.fill.handleInput(down(20, 20, 20));
+    expect(selected).toEqual([]);
+  });
+
+  it("the eraser never selects", async () => {
+    const { tools, selected } = setup();
+    await tools.erase.handleInput(down(5, 5, 5));
+    await tools.erase.handleInput(up(5, 5, 5));
+    expect(selected).toEqual([]);
+  });
+
+  it("painting segment 0 (background) selects nothing", async () => {
+    const { tools, selected } = setup();
+    tools.state.patchState({ activeValue: 0n });
+    await tools.brush.handleInput(down(0, 0, 0));
+    await tools.brush.handleInput(up(0, 0, 0));
+    expect(selected).toEqual([]);
+  });
+
+  it("selects the value the stroke paints after the user changes it", async () => {
+    const { tools, selected } = setup();
+    tools.state.patchState({ activeValue: 42n });
+    await tools.brush.handleInput(down(0, 0, 0));
+    await tools.brush.handleInput(up(0, 0, 0));
+    expect(selected).toEqual([[TARGET, 42n]]);
   });
 });

@@ -16,8 +16,11 @@ The preview follows the mesh layer instead of rules of its own:
   so the selection, the temporary visible set and the equivalence policy apply
   as they do to meshes. Each voxel id is answered through its representative
   (under `NONREPRESENTATIVE_EXCLUDED` the mesh is the root, the voxels hold its
-  members), without enumerating large agglomerated sets. The brush segment gets no exception: paint with a segment that
-  is not selected and the stroke shows in 2D but not in 3D, like its mesh.
+  members), without enumerating large agglomerated sets. The brush segment gets
+  no exception in the preview; instead the brush and fill select the segment they
+  paint (the "Auto-select segment" switch, on by default), so a stroke shows in
+  3D. With the switch off, a stroke of an unselected segment shows in 2D only,
+  like its mesh.
 - **Colour:** `getObjectColor` of the mapped id (the raw id under
   `baseSegmentColoring`), so saturation and the hover highlight match.
 - **When colours update:** `registerCallbackWhenSegmentationDisplayStateChanged`,
