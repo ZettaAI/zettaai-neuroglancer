@@ -14,6 +14,7 @@ import { useCallback } from "preact/hooks";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { SegmentedControl } from "#src/editing/ui/segmented_control.js";
+import { PaintedSegmentAutoSelectRow } from "#src/editing/ui/tool_settings/painted_segment_auto_select_row.js";
 import { PaintingTargetPicker } from "#src/editing/ui/tool_settings/painting_target_picker.js";
 import {
   PARAM_IDS,
@@ -64,6 +65,7 @@ export function PaintingFill({
         highlighted={selectedId === PARAM_IDS.value}
         onSelect={() => selectParam(PARAM_IDS.value)}
       />
+      <PaintedSegmentAutoSelectRow painting={painting} />
       <div
         class="neuroglancer-tool-panel-row neuroglancer-painting-fill-mode-row"
         data-tooltip="2D fills only the clicked section (Z fixed) — e.g. the interior of a shape drawn on one slice. 3D floods across sections."

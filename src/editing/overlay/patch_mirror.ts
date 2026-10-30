@@ -340,7 +340,9 @@ export class PatchMirror extends RefCounted {
       if (box !== null) {
         chunk.dirty = true;
         chunk.mergePendingUpload(box);
-        this.store.noteChunkMutated(chunkGridPosition);
+        // A `null` box reports nothing, so the empty chunk `getOrCreateChunk`
+        // may have just created stays silent — harmless, it holds no patch.
+        this.store.noteChunkMutated(chunkGridPosition, box);
       }
       return true;
     } catch (err) {

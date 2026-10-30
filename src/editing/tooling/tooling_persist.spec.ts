@@ -50,6 +50,7 @@ function state(over: Partial<PaintingSharedState> = {}): PaintingSharedState {
     mask: undefined,
     fillMode: "3d",
     spacingFraction: 0.1,
+    autoSelectPaintedSegment: true,
     ...over,
   };
 }
@@ -101,6 +102,32 @@ describe("tooling_persist", () => {
     });
     const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
     expect(patch!.fillMode).toBe("2d");
+  });
+
+  it("round-trips auto-select turned off (TM-490)", () => {
+    const serialized = serializeTooling(
+      "painting.brush",
+      state({ autoSelectPaintedSegment: false }),
+    );
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.autoSelectPaintedSegment).toBe(false);
+  });
+
+  it("defaults auto-select on for configs lacking the field (TM-490)", () => {
+    const parsed = parseTooling({
+      activeToolId: "painting.brush",
+      painting: {
+        targetLayerId: "target",
+        targetResolution: RES.toString(),
+        radius: 9,
+        activeValue: { t: "b", v: "42" },
+        eraseValue: { t: "n", v: 0 },
+        mask: null,
+      },
+    });
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.autoSelectPaintedSegment).toBe(true);
   });
 
   it("preserves a number activeValue as a number (uint8 layer)", () => {

@@ -48,6 +48,13 @@ interface SerializedPainting {
   readonly mask: PaintingMaskConfig | null;
   /** Fill connectivity mode (TM-269). Optional: older blocks default to 2D. */
   readonly fillMode?: FillMode;
+  /** Auto-select the painted segment (TM-490). Optional: older blocks default on. */
+  readonly autoSelectPaintedSegment?: boolean;
+}
+
+/** Coerce an unknown to the auto-select flag, defaulting on (the app default). */
+function parseAutoSelect(x: unknown): boolean {
+  return x !== false;
 }
 
 /** Coerce an unknown to a `FillMode`, defaulting to `"2d"` (the app default). */
@@ -92,6 +99,7 @@ function serializePainting(state: PaintingSharedState): SerializedPainting {
     eraseValue: serializeValue(state.eraseValue),
     mask: state.mask ?? null,
     fillMode: state.fillMode,
+    autoSelectPaintedSegment: state.autoSelectPaintedSegment,
   };
 }
 
@@ -192,6 +200,7 @@ function parsePainting(x: unknown): SerializedPainting | undefined {
     eraseValue: serializeValue(eraseValue),
     mask,
     fillMode: parseFillMode(o.fillMode),
+    autoSelectPaintedSegment: parseAutoSelect(o.autoSelectPaintedSegment),
   };
 }
 
@@ -272,6 +281,7 @@ export function paintingPatchFromPersist(
     eraseValue,
     mask,
     fillMode: parseFillMode(p.fillMode),
+    autoSelectPaintedSegment: parseAutoSelect(p.autoSelectPaintedSegment),
   };
 }
 
