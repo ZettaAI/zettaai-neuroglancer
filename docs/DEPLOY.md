@@ -42,8 +42,8 @@ It runs when the PR is closed, and from `preview-cleanup.yml`, which runs daily 
 5 days. Run the cleanup by hand with `pr` set to delete one preview.
 
 The workflow token cannot delete environments, so teardown uses a token from the CI GitHub
-App in the `APP_ID` and `APP_PEM` secrets, which needs the Administration (read and write)
-repository permission on this repo. Deleting image tags needs
+App in the `SYNC_APP_CLIENT_ID` and `SYNC_APP_PRIVATE_KEY` secrets, which needs the
+Administration (read and write) repository permission on this repo. Deleting image tags needs
 `artifactregistry.tags.delete` for `WIF_SERVICE_ACCOUNT` on the `zettaai-neuroglancer`
 repository.
 
