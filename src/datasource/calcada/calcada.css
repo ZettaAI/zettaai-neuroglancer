@@ -1681,6 +1681,29 @@
   border-radius: 2px;
 }
 
+.calcada-annotations-color {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid #666;
+  border-radius: 2px;
+  background: none;
+  cursor: pointer;
+}
+
+.calcada-annotations-color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.calcada-annotations-color::-webkit-color-swatch {
+  border: none;
+}
+
+.calcada-annotations-color::-moz-color-swatch {
+  border: none;
+}
+
 .calcada-annotations-table-name {
   min-width: 0;
   overflow: hidden;

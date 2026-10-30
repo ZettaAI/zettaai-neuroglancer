@@ -1223,9 +1223,10 @@ function makeTableListElement(
 ) {
   const { globalDimensionIndices, localDimensionIndices } =
     annotationListDimensions(layer, [state]);
+  // The row's payload is for the Selection panel, not the list.
   return makeAnnotationListElement(
     layer,
-    annotation,
+    { ...annotation, description: undefined },
     state,
     annotationListGridTemplate(
       globalDimensionIndices.length + localDimensionIndices.length,

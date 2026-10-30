@@ -617,10 +617,8 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     total: 0,
     byTable: new Map(),
   });
-  /** A drawn annotation's list entry changed in place. */
-  readonly annotationUpdated = new Signal<
-    (table: string, layerId: string) => void
-  >();
+  /** A table's colour changed; drawn entries keep their place. */
+  readonly colorsChanged = new Signal<() => void>();
   private readonly schemas: SchemaCache = new Map();
   private readonly cache = new Map<string, AnnotationScopeEntry>();
   // Per cache key, the request each table was last asked in: in flight, or
@@ -754,7 +752,9 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   }
 
   tableColor(name: string): vec3 {
-    return colorForTable(this.colorSlots.get(name) ?? 0);
+    return (
+      this.state.colorOf(name) ?? colorForTable(this.colorSlots.get(name) ?? 0)
+    );
   }
 
   private findDrawn({ table, layerId }: DrawnAnnotation) {
@@ -804,7 +804,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.layerStates
       .get(name)
       ?.source.setDescription(details.layerId, details.description);
-    this.annotationUpdated.dispatch(name, details.layerId);
   }
 
   private isReadonly(name: string): boolean {
@@ -944,15 +943,24 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       this.forgetTable(name);
       this.errors.delete(name);
     }
-    for (const name of added) {
-      this.errors.delete(name);
-      this.annotationState(name).layerState.displayState.color.value =
-        vec3.clone(this.tableColor(name));
-    }
+    for (const name of added) this.errors.delete(name);
+    this.syncColors(ticked);
     if (requeried.length > 0) this.invalidate(requeried);
     this.publishDrawn();
     this.publishStatus();
     this.fetchVisible();
+  }
+
+  private syncColors(ticked: readonly string[]) {
+    let changed = false;
+    for (const name of ticked) {
+      const { color } = this.annotationState(name).layerState.displayState;
+      const wanted = this.tableColor(name);
+      if (vec3.equals(color.value, wanted)) continue;
+      color.value = vec3.clone(wanted);
+      changed = true;
+    }
+    if (changed) this.colorsChanged.dispatch();
   }
 
   private tableInfo(name: string): AnnotationTableInfo | undefined {

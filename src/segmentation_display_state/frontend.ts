@@ -66,6 +66,7 @@ import { ColorWidget } from "#src/widget/color.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
 import { makeEyeButton } from "#src/widget/eye_button.js";
 import { makeFilterButton } from "#src/widget/filter_button.js";
+import type { MakeIconOptions } from "#src/widget/icon.js";
 import { makeIcon } from "#src/widget/icon.js";
 import { makeStarButton } from "#src/widget/star_button.js";
 
@@ -343,6 +344,12 @@ const segmentWidgetTemplate = (() => {
   });
   visibleIcon.classList.add("neuroglancer-segment-list-entry-visible-checkbox");
   stickyContainer.appendChild(visibleIcon);
+  const annotationsIndex = stickyContainer.childElementCount;
+  stickyContainer.appendChild(
+    makeSegmentAnnotationsButton({
+      title: "Toggle annotation tables for this segment",
+    }),
+  );
   const idContainer = document.createElement("div");
   idContainer.classList.add("neuroglancer-segment-list-entry-id-container");
   const idContainerIndex = stickyContainer.childElementCount;
@@ -357,15 +364,6 @@ const segmentWidgetTemplate = (() => {
   starButton.classList.add("neuroglancer-segment-list-entry-star");
   const starIndex = stickyContainer.childElementCount;
   stickyContainer.appendChild(starButton);
-  const annotationsButton = makeIcon({
-    svg: svg_table,
-    title: "Toggle annotation tables for this segment",
-  });
-  annotationsButton.classList.add(
-    "neuroglancer-segment-list-entry-annotations",
-  );
-  const annotationsIndex = stickyContainer.childElementCount;
-  stickyContainer.appendChild(annotationsButton);
 
   const nameElement = document.createElement("span");
   nameElement.classList.add("neuroglancer-segment-list-entry-name");
@@ -797,6 +795,14 @@ function setSegmentIdElementStyle(
   element.style.backgroundColor = getCssColor(color);
   element.style.color = useWhiteBackground(color) ? "white" : "black";
   element.classList.toggle("stated-color", stated);
+}
+
+export function makeSegmentAnnotationsButton(
+  options: Pick<MakeIconOptions, "title" | "onClick">,
+) {
+  const button = makeIcon({ svg: svg_table, ...options });
+  button.classList.add("neuroglancer-segment-list-entry-annotations");
+  return button;
 }
 
 function updateAnnotationsButtonHidden(

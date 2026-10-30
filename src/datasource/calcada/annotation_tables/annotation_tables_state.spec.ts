@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ANNOTATION_FILTER_OPERATORS } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
+import { vec3 } from "#src/util/geom.js";
 
 const SIZE_FILTER = { filter_greater_dict: { size: 10 } };
 
@@ -59,6 +60,29 @@ describe("CalcadaAnnotationTablesState", () => {
     ]);
     state.restoreExcludedSegments(undefined);
     expect(state.excludedSegmentsToJSON()).toBeUndefined();
+  });
+
+  it("round-trips a chosen colour and drops it on clear and on untick", () => {
+    const state = new CalcadaAnnotationTablesState();
+    state.restoreState([{ table: "syn", color: "#FF8000" }, { table: "mark" }]);
+    expect(state.colorOf("syn")).toEqual(vec3.fromValues(1, 128 / 255, 0));
+    expect(state.colorOf("mark")).toBeUndefined();
+    state.setColor("mark", "#00ff00");
+    expect(state.toJSON()).toEqual([
+      { table: "syn", color: "#ff8000" },
+      { table: "mark", color: "#00ff00" },
+    ]);
+    state.setColor("syn", undefined);
+    state.untick("mark");
+    state.setTicked(["syn", "mark"]);
+    expect(state.toJSON()).toEqual([{ table: "syn" }, { table: "mark" }]);
+  });
+
+  it("rejects a colour it cannot parse", () => {
+    const state = new CalcadaAnnotationTablesState();
+    expect(() =>
+      state.restoreState([{ table: "syn", color: "not a colour" }]),
+    ).toThrow();
   });
 
   it("an excluded root that is no longer present is kept but harmless", () => {

@@ -52,7 +52,7 @@ import {
 import type { Disposer } from "#src/util/disposable.js";
 import { invokeDisposer } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
-import { NullarySignal, Signal } from "#src/util/signal.js";
+import { NullarySignal } from "#src/util/signal.js";
 
 const SIDE_PANEL_WIDTH_PX = 260;
 const SWATCH_COLOR = vec3.fromValues(1, 0, 0);
@@ -176,7 +176,6 @@ function tableLayerState(isReadonly: () => boolean) {
 const nativeListElement = (
   state: AnnotationLayerState,
   item: DrawnAnnotation,
-  description: string | undefined,
 ) =>
   makeAnnotationListElement(
     listLayer,
@@ -186,7 +185,6 @@ const nativeListElement = (
       point: Float32Array.of(Number(item.id % POSITION_MODULUS), 2, 3),
       relatedSegments: [BigUint64Array.of()],
       properties: [],
-      description,
     },
     state,
     annotationListGridTemplate(DIMENSIONS.length),
@@ -212,10 +210,7 @@ class FakeSession {
   readonly selectedId = new WatchableValue<string | undefined>(undefined);
   readonly annotationSelectionChanged = this.selectedId.changed;
   readonly listCoordinatesChanged = new NullarySignal();
-  readonly annotationUpdated = new Signal<
-    (table: string, layerId: string) => void
-  >();
-  readonly descriptions = new Map<string, string>();
+  readonly colorsChanged = new NullarySignal();
   private readonly color = SWATCH_COLOR;
   private readonly layerStates = new Map<string, AnnotationLayerState>();
 
@@ -236,7 +231,7 @@ class FakeSession {
       );
       this.layerStates.set(item.table, state);
     }
-    return nativeListElement(state, item, this.descriptions.get(item.layerId));
+    return nativeListElement(state, item);
   }
 
   renderListHeader(
@@ -571,6 +566,29 @@ describe("CalcadaAnnotationTablesPanel", () => {
     expect(listRows()[0].dataset.annotationId).toBe(firstShown);
   });
 
+  it("keeps the list scroll when a row is clicked", async () => {
+    const { connection, session } = makeConnection(
+      [synapses],
+      [],
+      ["synapses"],
+    );
+    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    await mountPanel(connection);
+    await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
+    const list = annotationList()!;
+    list.scrollTop = LIST_SCROLL_PX;
+    await vi.waitFor(() => expect(list.scrollTop).toBeGreaterThan(0));
+    await nextFrame();
+    const scrolled = list.scrollTop;
+    const shown = listRows().map((row) => row.dataset.annotationId);
+    const clicked = listRows()[Math.floor(shown.length / 2)];
+    clicked.click();
+    await nextFrame();
+    await nextFrame();
+    expect(list.scrollTop).toBe(scrolled);
+    expect(listRows().map((row) => row.dataset.annotationId)).toEqual(shown);
+  });
+
   it("lines the columns up on the list and resets them with the coordinates", async () => {
     const { connection, session } = makeConnection(
       [synapses],
@@ -719,23 +737,6 @@ describe("CalcadaAnnotationTablesPanel", () => {
       false,
       true,
     ]);
-  });
-
-  it("shows a row's description once the session fills it", async () => {
-    const { connection, session } = makeConnection(
-      [synapses],
-      [],
-      ["synapses"],
-    );
-    const item = drawnAnnotation("synapses", 1n);
-    session.drawn.value = [item];
-    await mountPanel(connection);
-    await renderedRows(1);
-    session.descriptions.set(item.layerId, "tag: soma");
-    session.annotationUpdated.dispatch(item.table, item.layerId);
-    await vi.waitFor(() =>
-      expect(listRows()[0].textContent).toContain("tag: soma"),
-    );
   });
 
   it("limit message replaces the list", async () => {

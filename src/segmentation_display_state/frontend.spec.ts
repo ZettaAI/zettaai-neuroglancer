@@ -121,6 +121,15 @@ describe("segment list annotation button", () => {
     return { factory, row, button };
   }
 
+  it("puts the annotation button right after the visibility toggle", () => {
+    const { button } = makeRow(new WatchableValue(new Uint64Set()));
+    expect(
+      button.previousElementSibling?.classList.contains(
+        "neuroglancer-segment-list-entry-visible-checkbox",
+      ),
+    ).toBe(true);
+  });
+
   it("keeps the annotation button hidden without annotationExcludedSegments", () => {
     expect(makeRow(undefined).button.hidden).toBe(true);
   });

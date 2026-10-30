@@ -13,6 +13,7 @@ import type { AnnotationTableFilter } from "#src/datasource/calcada/annotation_t
 import { ANNOTATION_FILTER_OPERATORS } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import { Uint64Set } from "#src/uint64_set.js";
 import { RefCounted } from "#src/util/disposable.js";
+import { vec3 } from "#src/util/geom.js";
 import {
   expectArray,
   parseUint64,
@@ -31,11 +32,31 @@ interface SelectedTable {
   table: string;
   filter?: AnnotationTableFilter;
   wholeTable?: true;
+  /** Chosen by the user, as `#rrggbb`; otherwise the palette decides. */
+  color?: string;
 }
 
 const TABLE_JSON_KEY = "table";
 const FILTER_JSON_KEY = "filter";
 const WHOLE_TABLE_JSON_KEY = "wholeTable";
+const COLOR_JSON_KEY = "color";
+
+const HEX_COLOR = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/;
+const CHANNEL_MAX = 255;
+
+function verifyHexColor(value: unknown): string {
+  const color = verifyString(value).toLowerCase();
+  if (!HEX_COLOR.test(color)) {
+    throw new Error(`Expected a #rrggbb colour, but received: ${value}`);
+  }
+  return color;
+}
+
+function hexColorToVec3(color: string): vec3 {
+  const [, red, green, blue] = HEX_COLOR.exec(color)!;
+  const channel = (hex: string) => parseInt(hex, 16) / CHANNEL_MAX;
+  return vec3.fromValues(channel(red), channel(green), channel(blue));
+}
 
 function parseFilter(value: unknown): AnnotationTableFilter {
   const filter = verifyObject(value);
@@ -72,6 +93,7 @@ function parseSelectedTable(value: unknown): SelectedTable {
       WHOLE_TABLE_JSON_KEY,
       verifyBoolean,
     ) && { wholeTable: true }),
+    color: verifyOptionalObjectProperty(value, COLOR_JSON_KEY, verifyHexColor),
   };
 }
 
@@ -79,12 +101,14 @@ function normalizeSelectedTable({
   table,
   filter,
   wholeTable,
+  color,
 }: SelectedTable): SelectedTable {
   const normalized = normalizeFilter(filter);
   return {
     table,
     ...(normalized !== undefined && { filter: normalized }),
     ...(wholeTable && { wholeTable }),
+    ...(color !== undefined && { color }),
   };
 }
 
@@ -124,6 +148,17 @@ export class CalcadaAnnotationTablesState
 
   setWholeTable(table: string, on: boolean) {
     this.updateEntry(table, { wholeTable: on || undefined });
+  }
+
+  colorOf(table: string): vec3 | undefined {
+    const color = this.entryOf(table)?.color;
+    return color === undefined ? undefined : hexColorToVec3(color);
+  }
+
+  setColor(table: string, color: string | undefined) {
+    this.updateEntry(table, {
+      color: color === undefined ? undefined : verifyHexColor(color),
+    });
   }
 
   setTicked(names: readonly string[]) {

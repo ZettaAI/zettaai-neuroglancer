@@ -31,6 +31,7 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { AnnotationListColumnWidths } from "#src/ui/annotations.js";
 import type { ArraySpliceOp } from "#src/util/array.js";
+import { serializeColor } from "#src/util/color.js";
 import { RefCounted } from "#src/util/disposable.js";
 import type { vec3 } from "#src/util/geom.js";
 import type { ReadonlySignal } from "#src/util/signal.js";
@@ -60,8 +61,6 @@ export const ANNOTATION_ROW_HINT = "Click to select, right-click to move to it";
 
 const SELECTED_ENTRY_CLASS = "neuroglancer-annotation-selected";
 
-const RGB_MAX = 255;
-
 export interface AnnotationTablesPanelSession {
   readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
   readonly status: WatchableValueInterface<AnnotationTableStatus[]>;
@@ -71,6 +70,7 @@ export interface AnnotationTablesPanelSession {
   readonly limitNote: WatchableValueInterface<string | undefined>;
   readonly totals: WatchableValueInterface<AnnotationTotals>;
   tableColor(name: string): vec3;
+  readonly colorsChanged: ReadonlySignal<() => void>;
   refreshTables(): void;
   select(item: DrawnAnnotation): void;
   moveTo(item: DrawnAnnotation): void;
@@ -83,9 +83,6 @@ export interface AnnotationTablesPanelSession {
   isSelected(item: DrawnAnnotation): boolean;
   readonly annotationSelectionChanged: ReadonlySignal<() => void>;
   readonly listCoordinatesChanged: ReadonlySignal<() => void>;
-  readonly annotationUpdated: ReadonlySignal<
-    (table: string, layerId: string) => void
-  >;
   clearHover(): void;
 }
 
@@ -103,16 +100,10 @@ export interface AnnotationTablesPanelConnection {
       setFilter(table: string, filter: AnnotationTableFilter | undefined): void;
       wholeTableOf(table: string): boolean;
       setWholeTable(table: string, on: boolean): void;
+      setColor(table: string, color: string | undefined): void;
     };
   };
   readonly annotationTablesSession: AnnotationTablesPanelSession;
-}
-
-function cssColor(color: vec3): string {
-  const [red, green, blue] = Array.from(color, (channel) =>
-    Math.round(channel * RGB_MAX),
-  );
-  return `rgb(${red} ${green} ${blue})`;
 }
 
 function Swatch({ color }: { color: vec3 }) {
@@ -120,7 +111,7 @@ function Swatch({ color }: { color: vec3 }) {
     <span
       aria-hidden
       className="calcada-annotations-swatch"
-      style={{ background: cssColor(color) }}
+      style={{ background: serializeColor(color) }}
     />
   );
 }
@@ -225,6 +216,7 @@ function TableStatusLine({
   onFilter,
   wholeTable,
   onWholeTable,
+  onColor,
 }: {
   info: AnnotationTableInfo;
   status: AnnotationTableStatus | undefined;
@@ -235,6 +227,7 @@ function TableStatusLine({
   onFilter: (filter: AnnotationTableFilter | undefined) => void;
   wholeTable: boolean;
   onWholeTable: (on: boolean) => void;
+  onColor: (color: string) => void;
 }) {
   const conditions = conditionCount(filter);
   const drawn = status?.annotations ?? 0;
@@ -242,7 +235,13 @@ function TableStatusLine({
   return (
     <li className="calcada-annotations-table">
       <div className="calcada-annotations-table-header">
-        <Swatch color={color} />
+        <input
+          type="color"
+          className="calcada-annotations-color"
+          title="Table colour"
+          value={serializeColor(color)}
+          onInput={(event) => onColor(event.currentTarget.value)}
+        />
         <span className="calcada-annotations-table-name">{info.name}</span>
         {conditions > 0 && (
           <span className="calcada-annotations-filtered">
@@ -353,9 +352,7 @@ class DrawnAnnotationListView extends RefCounted {
       }),
     );
     this.registerDisposer(
-      session.annotationUpdated.add((table, layerId) =>
-        this.rerender(table, layerId),
-      ),
+      session.colorsChanged.add(() => this.source.renderChanged.dispatch()),
     );
   }
 
@@ -364,16 +361,6 @@ class DrawnAnnotationListView extends RefCounted {
     this.items = items;
     this.source.length = items.length;
     if (splice !== undefined) this.source.changed.dispatch([splice]);
-  }
-
-  private rerender(table: string, layerId: string) {
-    const index = this.items.findIndex((item) =>
-      isSameDrawn(item, { table, layerId }),
-    );
-    if (index === -1) return;
-    this.source.changed.dispatch([
-      { retainCount: index, deleteCount: 1, insertCount: 1 },
-    ]);
   }
 
   private showSelection() {
@@ -404,7 +391,7 @@ class DrawnAnnotationListView extends RefCounted {
       ".neuroglancer-annotation-icon",
     );
     if (icon !== null) {
-      icon.style.color = cssColor(session.tableColor(item.table));
+      icon.style.color = serializeColor(session.tableColor(item.table));
     }
     element.classList.toggle(SELECTED_ENTRY_CLASS, session.isSelected(item));
     element.addEventListener("click", () => session.select(item));
@@ -526,6 +513,9 @@ export function CalcadaAnnotationTablesPanel({
                       wholeTable={annotationTables.wholeTableOf(name)}
                       onWholeTable={(on) =>
                         annotationTables.setWholeTable(name, on)
+                      }
+                      onColor={(color) =>
+                        annotationTables.setColor(name, color)
                       }
                     />
                   )

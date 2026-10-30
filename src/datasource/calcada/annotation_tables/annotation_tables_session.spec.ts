@@ -802,6 +802,27 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(session.limitNote.value).toBeUndefined();
   });
 
+  it("a chosen colour reaches the table's layer and redraws the list, the palette back on clear", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session, state, layerStates } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    const color = () => [...layerStates.get("syn")!.displayState.color.value];
+    const palette = color();
+    const colorsChanged = vi.fn();
+    session.colorsChanged.add(colorsChanged);
+    state.setColor("syn", "#ff0000");
+    expect(color()).toEqual([1, 0, 0]);
+    expect([...session.tableColor("syn")]).toEqual([1, 0, 0]);
+    state.setFilter("syn", SIZE_FILTER);
+    expect(colorsChanged).toHaveBeenCalledTimes(1);
+    state.setColor("syn", undefined);
+    expect(color()).toEqual(palette);
+    expect(colorsChanged).toHaveBeenCalledTimes(2);
+  });
+
   it("draws nothing and sets limitNote when the sum is one over the limit", async () => {
     const counts: Record<string, number> = { syn: 600_000, mark: 400_001 };
     const graph = fakeGraph(["syn", "mark"], {
@@ -1102,15 +1123,18 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(session.renderListHeader(item, header, columnWidths)).toBe(false);
   });
 
-  it("knows the selected item and says when its entry gets the details", async () => {
+  it("knows the selected item and gives the selected one its details", async () => {
     const graph = fakeGraph(["syn"], {
       rows: (root) =>
         root === undefined ? [] : [{ id: root, roots: [root], payload: {} }],
     });
-    const { session, layerStates, selectedAnnotation } = startSession(graph, {
-      ticked: ["syn"],
-      visible: [10n, 20n],
-    });
+    const { session, sources, layerStates, selectedAnnotation } = startSession(
+      graph,
+      {
+        ticked: ["syn"],
+        visible: [10n, 20n],
+      },
+    );
     await settle();
     const [first, second] = session.drawn.value;
     selectedAnnotation.value = {
@@ -1119,11 +1143,11 @@ describe("CalcadaAnnotationTablesSession", () => {
     };
     expect(session.isSelected(first)).toBe(true);
     expect(session.isSelected(second)).toBe(false);
-    const updated = vi.fn();
-    session.annotationUpdated.add(updated);
     session.select(second);
     await settle();
-    expect(updated).toHaveBeenCalledWith("syn", second.layerId);
+    expect(sources.get("syn")!.get(second.layerId)?.description).toContain(
+      `id: ${second.id}`,
+    );
   });
 
   it("keeps only the details of the latest select", async () => {

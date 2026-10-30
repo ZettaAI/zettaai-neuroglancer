@@ -105,6 +105,11 @@
   visibility: hidden;
 }
 
+.neuroglancer-segment-list-entry-sticky
+  > .neuroglancer-segment-list-entry-annotations {
+  order: 1;
+}
+
 .neuroglancer-segment-list-entry-annotations[hidden] {
   display: none;
 }
