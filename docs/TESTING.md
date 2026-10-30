@@ -55,7 +55,7 @@ tests/editing/
   unit/          *.spec.ts  — compute matrices, adapters, overlay, patch store, harness-helper tests
   integration/   *.spec.ts  — EditSessionHost wiring
   e2e/           *.e2e.ts   — Playwright correctness (built app + fake-gcs fixtures)
-  perf/          *.perf.ts  — Playwright paint benchmark
+  perf/          *.perf.ts  — Playwright paint and session-load benchmarks
   fakes/         FakeViewer / FakeLayerManager / FakeLogger
   harness/       e2e_setup, build_ng_state, gcs_route, fake_gcs, serve_dist  (drivers only, no *.spec)
   README.md      — the suite guide
@@ -76,7 +76,7 @@ npm run test:fixtures    # generate the precomputed fixtures (uv + tensorstore)
 npm run e2e              # fixtures + build + correctness e2e   (--project e2e)
 npm run e2e:headed       # …with a visible browser
 npm run e2e:ui           # …Playwright UI mode
-npm run perf             # fixtures + build + paint benchmark   (--project perf)
+npm run perf             # fixtures + build + benchmarks        (--project perf)
 npm run perf:headed
 ```
 

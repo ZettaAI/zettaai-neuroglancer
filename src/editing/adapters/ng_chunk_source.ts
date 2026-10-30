@@ -29,7 +29,11 @@ import type { ChunkManager, Chunk } from "#src/chunk_manager/frontend.js";
 import { makeChunkGridPosition } from "#src/editing/adapters/ng_chunk_grid.js";
 import { resolutionFor } from "#src/editing/adapters/ng_layer_metadata_source.js";
 import type { ChunkLoadProgressState } from "#src/editing/adapters/session_chunk_preloader.js";
-import { SessionChunkPreloader } from "#src/editing/adapters/session_chunk_preloader.js";
+import {
+  pinBudgetFor,
+  preloadPoolSizeFor,
+  SessionChunkPreloader,
+} from "#src/editing/adapters/session_chunk_preloader.js";
 import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
 import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
 import type { LayerManager, UserLayer } from "#src/layer/index.js";
@@ -69,6 +73,13 @@ export class NgChunkSource implements LibraryChunkSource {
     kind: "idle",
   });
   /**
+   * The session's painted (writable) layers. Their chunks take the preload's
+   * pin budget before the reference layers'. Set by `EditSessionHost` before
+   * each session opens.
+   */
+  writableLayerIds: ReadonlySet<LayerId> = new Set();
+
+  /**
    * Optional handle to the host's committed-buffer store. When set, baseline
    * reads consult it before falling through to the data source — committed
    * chunks from a previous session become the starting state for the next
@@ -95,10 +106,8 @@ export class NgChunkSource implements LibraryChunkSource {
 
   constructor(
     private readonly layerManager: LayerManager,
-    _chunkManager: ChunkManager,
-  ) {
-    void _chunkManager;
-  }
+    private readonly chunkManager: ChunkManager,
+  ) {}
 
   /**
    * Record the bytes just written for `(layerId, resolution, chunkId)` as the
@@ -275,8 +284,16 @@ export class NgChunkSource implements LibraryChunkSource {
         });
       }
     }
-    const preloader = new SessionChunkPreloader((layerId, resolution) =>
-      this.resolveVolumeChunkSource(layerId, resolution),
+    const { capacities } = this.chunkManager.chunkQueueManager;
+    const { writableLayerIds } = this;
+    const preloader = new SessionChunkPreloader(
+      (layerId, resolution) =>
+        this.resolveVolumeChunkSource(layerId, resolution),
+      {
+        poolSize: preloadPoolSizeFor(capacities.download),
+        pinBudgetBytes: () => pinBudgetFor(capacities),
+        pinsFirst: (layerId) => writableLayerIds.has(layerId),
+      },
     );
     this.preloader = preloader;
     this.preloadProgressUnsub = preloader.progress.changed.add(() => {
@@ -297,6 +314,7 @@ export class NgChunkSource implements LibraryChunkSource {
     }
     this.teardownPreload();
     this.currentSessionId = undefined;
+    this.writableLayerIds = new Set();
   }
 
   /** Abort the in-flight preload, release its pins, and reset progress. */
