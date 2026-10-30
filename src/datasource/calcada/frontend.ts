@@ -39,6 +39,13 @@ import { LayerChunkProgressInfo } from "#src/chunk_manager/base.js";
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { WithParameters } from "#src/chunk_manager/frontend.js";
 import { makeIdentityTransform } from "#src/coordinate_transform.js";
+import { CalcadaAnnotationTablesSession } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
+import {
+  ANNOTATION_TABLES_TAB_LABEL,
+  CalcadaAnnotationTablesTab,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
+import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import type {
   ChunkedGraphChunkSource as ChunkedGraphChunkSourceInterface,
   ChunkedGraphChunkSpecification,
@@ -129,6 +136,7 @@ import {
   FilterLibrary,
 } from "#src/datasource/calcada/filter_library.js";
 import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
+import { appendCoordParams } from "#src/datasource/calcada/graph_coordinates.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
@@ -309,9 +317,14 @@ import {
 } from "#src/trackable_value.js";
 import {
   AnnotationLayerView,
+  annotationListDimensions,
+  annotationListGridTemplate,
   makeAnnotationListElement,
   MergedAnnotationStates,
+  moveToAnnotation,
   PlaceLineTool,
+  renderAnnotationListHeader,
+  selectedListAnnotation,
 } from "#src/ui/annotations.js";
 import { getDefaultAnnotationListBindings } from "#src/ui/default_input_event_bindings.js";
 import { SidePanelManager } from "#src/ui/side_panel.js";
@@ -366,7 +379,7 @@ import { KeyboardEventBinder } from "#src/util/keyboard_bindings.js";
 import { MouseEventBinder } from "#src/util/mouse_bindings.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
-import { NullarySignal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
 import { makeDeleteButton } from "#src/widget/delete_button.js";
@@ -1180,6 +1193,8 @@ function getGraphLoadedSubsource(layer: SegmentationUserLayer) {
   return undefined;
 }
 
+const ASSOCIATED_SEGMENTS_RELATIONSHIP = "associated segments";
+
 function makeColoredAnnotationState(
   layer: SegmentationUserLayer,
   loadedSubsource: LoadedDataSubsource,
@@ -1187,20 +1202,55 @@ function makeColoredAnnotationState(
   color: vec3,
   properties: AnnotationPropertySpec[] = [],
 ) {
-  const { subsourceEntry } = loadedSubsource;
-  const source = new LocalAnnotationSource(
-    loadedSubsource.loadedDataSource.transform,
-    new WatchableValue(properties),
-    ["associated segments"],
+  return makeAnnotationStateForSource(
+    layer,
+    loadedSubsource,
+    subsubsourceId,
+    color,
+    new LocalAnnotationSource(
+      loadedSubsource.loadedDataSource.transform,
+      new WatchableValue(properties),
+      [ASSOCIATED_SEGMENTS_RELATIONSHIP],
+    ),
   );
+}
 
+/** The entry, and its column widths, that `AnnotationLayerView` would show. */
+function makeTableListElement(
+  layer: SegmentationUserLayer,
+  state: AnnotationLayerState,
+  annotation: Annotation,
+) {
+  const { globalDimensionIndices, localDimensionIndices } =
+    annotationListDimensions(layer, [state]);
+  // The row's payload is for the Selection panel, not the list.
+  return makeAnnotationListElement(
+    layer,
+    { ...annotation, description: undefined },
+    state,
+    annotationListGridTemplate(
+      globalDimensionIndices.length + localDimensionIndices.length,
+    ),
+    globalDimensionIndices,
+    localDimensionIndices,
+  );
+}
+
+function makeAnnotationStateForSource(
+  layer: SegmentationUserLayer,
+  loadedSubsource: LoadedDataSubsource,
+  subsubsourceId: string,
+  color: vec3,
+  source: LocalAnnotationSource,
+) {
+  const { subsourceEntry } = loadedSubsource;
   const displayState = new AnnotationDisplayState();
   displayState.color.value.set(color);
   // prop_<name>() resolves against this list, not the one the source carries;
   // unset, any shader naming a property fails to parse and falls back to plain.
-  displayState.annotationProperties.value = properties;
+  displayState.annotationProperties.value = source.properties.value;
 
-  displayState.relationshipStates.set("associated segments", {
+  displayState.relationshipStates.set(ASSOCIATED_SEGMENTS_RELATIONSHIP, {
     segmentationState: new WatchableValue(layer.displayState),
     showMatches: new TrackableBoolean(false),
   });
@@ -1277,9 +1327,13 @@ const PIECE_SPLIT_JSON_KEY = "pieceSplit";
 const ZETTA_TRACE_JSON_KEY = "zettaTrace";
 const CALCADA_DEBUG_JSON_KEY = "debug";
 const CALCADA_TRACE_TAB_ID = "calcada-trace";
+const CALCADA_ANNOTATIONS_TAB_ID = "calcada-annotations";
 const CALCADA_OVERVIEW_JSON_KEY = "candidateOverview";
 const PROOFREAD_SEGMENT_JSON_KEY = "proofreadSegment";
 const CALCADA_BRANCH_JSON_KEY = "calcadaBranch";
+const ANNOTATION_TABLES_JSON_KEY = "annotationTables";
+const ANNOTATION_TABLES_EXCLUDED_SEGMENTS_JSON_KEY =
+  "annotationTablesExcludedSegments";
 
 // Debugging more than a handful of segments at once is N whole-segment queries,
 // each up to ~10K pieces. The cap keeps an accidental "select everything" from
@@ -1599,6 +1653,7 @@ class CalcadaState extends RefCounted implements Trackable {
   public calcadaDebugState = new CalcadaDebugState();
   public overviewState = new CalcadaOverviewState();
   public proofreadSegment = new ProofreadSegment();
+  public annotationTables = new CalcadaAnnotationTablesState();
   public branchId = new TrackableValue<number>(0, (x) =>
     typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : 0,
   );
@@ -1633,6 +1688,9 @@ class CalcadaState extends RefCounted implements Trackable {
     );
     this.registerDisposer(
       this.proofreadSegment.changed.add(() => this.changed.dispatch()),
+    );
+    this.registerDisposer(
+      this.annotationTables.changed.add(() => this.changed.dispatch()),
     );
     this.registerDisposer(
       this.zettaTraceState.changed.add(() => {
@@ -1675,6 +1733,9 @@ class CalcadaState extends RefCounted implements Trackable {
       [CALCADA_OVERVIEW_JSON_KEY]: this.overviewState.toJSON(),
       [PROOFREAD_SEGMENT_JSON_KEY]: this.proofreadSegment.toJSON(),
       [CALCADA_BRANCH_JSON_KEY]: this.branchId.toJSON(),
+      [ANNOTATION_TABLES_JSON_KEY]: this.annotationTables.toJSON(),
+      [ANNOTATION_TABLES_EXCLUDED_SEGMENTS_JSON_KEY]:
+        this.annotationTables.excludedSegmentsToJSON(),
     };
   }
 
@@ -1706,6 +1767,14 @@ class CalcadaState extends RefCounted implements Trackable {
     verifyOptionalObjectProperty(x, CALCADA_BRANCH_JSON_KEY, (value) => {
       this.branchId.restoreState(value);
     });
+    verifyOptionalObjectProperty(x, ANNOTATION_TABLES_JSON_KEY, (value) => {
+      this.annotationTables.restoreState(value);
+    });
+    verifyOptionalObjectProperty(
+      x,
+      ANNOTATION_TABLES_EXCLUDED_SEGMENTS_JSON_KEY,
+      (value) => this.annotationTables.restoreExcludedSegments(value),
+    );
   }
 }
 
@@ -5224,6 +5293,11 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public overviewSession!: CandidateOverviewSession;
   public segmentSession!: ProofreadSegmentSession;
   public debugSession!: CalcadaDebugSession;
+  public annotationTablesSession!: CalcadaAnnotationTablesSession;
+  // Fires after any edit that rewrote roots: merge, split or undo.
+  readonly graphEdited = new Signal<
+    (oldRoots: Uint64Set, newRoots: Uint64Set) => void
+  >();
   public splitErrorAnnotationState!: AnnotationLayerState;
   public segmentPointAnnotationState!: AnnotationLayerState;
   public pointPlacement!: PointPlacement;
@@ -5271,6 +5345,11 @@ class GraphConnection extends SegmentationGraphSourceConnection {
       order: -21,
       getter: () => new CalcadaTraceTab(this),
     });
+    layer.tabs.add(CALCADA_ANNOTATIONS_TAB_ID, {
+      label: ANNOTATION_TABLES_TAB_LABEL,
+      order: -18,
+      getter: () => new CalcadaAnnotationTablesTab(this),
+    });
     // The side panel snapshots the layer's tab list before this
     // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
     // and it only registers hidden-listeners for tabs it knew at init — so
@@ -5284,6 +5363,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     this.registerDisposer(() => {
       layer.tabs.remove("calcada-debug");
       layer.tabs.remove(CALCADA_TRACE_TAB_ID);
+      layer.tabs.remove(CALCADA_ANNOTATIONS_TAB_ID);
       layer.panels.updateTabs();
     });
     this.registerDisposer(
@@ -5772,6 +5852,86 @@ void main() {
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
     );
+    const listCoordinatesChanged = new NullarySignal();
+    for (const coordinateSpace of [
+      layer.manager.root.coordinateSpace,
+      layer.localCoordinateSpace,
+    ]) {
+      this.registerDisposer(
+        coordinateSpace.changed.add(listCoordinatesChanged.dispatch),
+      );
+    }
+    const { selectionState } = layer.manager.root;
+    const selectedTableAnnotation = this.registerDisposer(
+      makeCachedLazyDerivedWatchableValue(
+        (selection) =>
+          selectedListAnnotation(
+            layer,
+            layer.annotationStates.states,
+            selection,
+          ),
+        selectionState,
+      ),
+    );
+    this.annotationTablesSession = this.registerDisposer(
+      new CalcadaAnnotationTablesSession(
+        {
+          httpSource: graph.httpSource,
+          branchId: graph.branchId,
+          timestamp: segmentsState.timestamp,
+          visibleSegments: segmentsState.visibleSegments,
+          graphEdited: this.graphEdited,
+          nanometresToSource: (nanometres) =>
+            nanometresToGlobal(
+              nanometres,
+              loadedSubsource.loadedDataSource.transform.value.inputSpace,
+            ),
+          makeAnnotationState: (subsubsourceId, color, properties, options) => {
+            const source = new CalcadaTableAnnotationSource(
+              loadedSubsource.loadedDataSource.transform,
+              new WatchableValue(properties),
+              [ASSOCIATED_SEGMENTS_RELATIONSHIP],
+              options,
+            );
+            return {
+              source,
+              layerState: makeAnnotationStateForSource(
+                layer,
+                loadedSubsource,
+                subsubsourceId,
+                color,
+                source,
+              ),
+            };
+          },
+          selectAnnotation: (annotationState, annotation) =>
+            layer.selectAnnotation(annotationState, annotation.id, true),
+          moveToAnnotation: (annotationState, annotation) =>
+            moveToAnnotation(layer, annotation, annotationState),
+          makeListElement: (annotationState, annotation) =>
+            makeTableListElement(layer, annotationState, annotation),
+          renderListHeader: (annotationState, header, columnWidths) =>
+            renderAnnotationListHeader(
+              header,
+              layer,
+              annotationListDimensions(layer, [annotationState]),
+              columnWidths,
+            ),
+          selectedAnnotation: selectedTableAnnotation,
+          listCoordinatesChanged,
+          clearHover: () => {
+            layer.annotationDisplayState.hoverState.value = undefined;
+          },
+          scheduleFrame: (callback) => requestAnimationFrame(callback),
+        },
+        state.annotationTables,
+      ),
+    );
+    layer.displayState.annotationExcludedSegments.value =
+      state.annotationTables.excludedSegments;
+    this.registerDisposer(() => {
+      layer.displayState.annotationExcludedSegments.value = undefined;
+    });
     this.pointPlacement = this.registerDisposer(
       new PointPlacement(layer.manager.root.display, viewerPanelKind),
     );
@@ -6184,6 +6344,7 @@ void main() {
     this.pieceGraphCache.clear();
     this.state.replaceSegments(oldRoots, newRoots);
     this.overviewSession.onGraphEdited(oldRoots);
+    this.graphEdited.dispatch(oldRoots, newRoots);
   }
 
   updateAfterSplit(
@@ -6343,6 +6504,9 @@ void main() {
     const superseded = new Uint64Set();
     superseded.add(supersededRoots);
     this.overviewSession.onGraphEdited(superseded);
+    const restoredSet = new Uint64Set();
+    restoredSet.add(restoredRoots);
+    this.graphEdited.dispatch(superseded, restoredSet);
     const restored = restoredRoots.filter((r) => r !== 0n);
     // Restored roots keep the same id as before the edit, so force their cached
     // 3D meshes to re-download (their leaves reverted to the original pieces).
@@ -7118,22 +7282,6 @@ const selectionInNanometers = (
   };
 };
 
-function appendCoordParams(
-  url: string,
-  coord: { timestamp?: number; branchId?: number },
-): string {
-  const parts: string[] = [];
-  if (coord.timestamp !== undefined && coord.timestamp > 0) {
-    parts.push(`timestamp=${coord.timestamp / 1000}`);
-  }
-  if (coord.branchId !== undefined && coord.branchId !== 0) {
-    parts.push(`branch_id=${coord.branchId}`);
-  }
-  if (parts.length === 0) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}${parts.join("&")}`;
-}
-
 class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
 
@@ -7886,7 +8034,7 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
   public graphServer: CalcadaGraphServerInterface;
   public filterLibrary: FilterLibrary;
   private l2CacheAvailable: boolean | undefined = undefined;
-  private httpSource: HttpSource;
+  readonly httpSource: HttpSource;
   private meshingHttpSource: HttpSource;
   public timestampLimit = new TrackableValue<number>(0, (x) => x);
   public branches = new WatchableValue<CalcadaBranch[]>([]);
