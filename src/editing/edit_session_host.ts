@@ -1257,11 +1257,17 @@ export class EditSessionHost extends RefCounted {
 
     const libraryConfig = this.buildLibraryConfig(config);
     const adapters = this.buildAdapters();
+    this.chunkSource.writableLayerIds = new Set(
+      config.layers
+        .filter((layer) => layer.writable)
+        .map((layer) => layer.layerId),
+    );
 
     let session: EditSession;
     try {
       session = await EditSession.open(libraryConfig, adapters);
     } catch (err) {
+      this.chunkSource.writableLayerIds = new Set();
       this.handleOpenFailure(err);
       throw err;
     }

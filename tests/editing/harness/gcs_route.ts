@@ -46,11 +46,16 @@ const COI_HEADERS: Record<string, string> = {
 /**
  * Install the redirect on a Playwright page. Call BEFORE `page.goto`.
  * `fakeBase` is the fake-gcs origin (e.g. `http://localhost:9778`).
+ * `latencyMs` delays every data request, standing in for GCS's time to first
+ * byte: the local server answers at once, which hides how a loader scales with
+ * the requests it keeps in flight.
  */
 export async function installGcsRoute(
   page: Page,
   fakeBase: string,
+  options: { latencyMs?: number } = {},
 ): Promise<void> {
+  const latencyMs = options.latencyMs ?? 0;
   await page.route(GCS_URL_PATTERN, async (route: Route) => {
     const request = route.request();
     // Answer CORS preflight locally so the real GET can proceed.
@@ -64,6 +69,9 @@ export async function installGcsRoute(
         },
       });
       return;
+    }
+    if (latencyMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, latencyMs));
     }
     const target = rewriteGcsUrl(request.url(), fakeBase);
     let resp: Response;

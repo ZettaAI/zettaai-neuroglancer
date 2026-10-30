@@ -19,11 +19,12 @@ import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
  * Topbar indicator for the background bbox-chunk preload (TM-316).
  *
  * - while `loading`: `chunks N/M` + a progress bar (painting is already usable);
- * - on `done` with no failures: nothing — a clean load is the expected outcome,
- *   so we avoid a transient "loaded" badge that would pop in and then out (per
- *   the "nothing moves unless necessary" UX principle);
- * - on `done` with failures: a warning with per-(layer, resolution) detail —
- *   painting still works (unavailable chunks zero-fill lazily on first read).
+ * - on a clean `done` (every chunk loaded): nothing — that is the expected
+ *   outcome, so we avoid a transient "loaded" badge that would pop in and then
+ *   out (per the "nothing moves unless necessary" UX principle);
+ * - on `done` with failed or skipped chunks: one warning naming both counts,
+ *   with per-(layer, resolution) failure detail — painting still works (those
+ *   chunks load on demand on first read).
  */
 export function ChunkLoadProgress({ host }: { host: EditSessionHost }) {
   const progress = useWatchable(host.chunkLoadProgress);
@@ -63,28 +64,59 @@ export function ChunkLoadProgress({ host }: { host: EditSessionHost }) {
   }
 
   // progress.kind === "done"
+  const labels: string[] = [];
+  const tooltips: string[] = [];
   if (progress.failed > 0) {
-    const detail = progress.failures
-      .map((f) => `${f.layerId} @ ${f.resolution}: ${f.count}`)
-      .join("\n");
-    const noun = progress.failed === 1 ? "chunk" : "chunks";
-    return (
-      <div
-        class="neuroglancer-editing-topbar-group neuroglancer-editing-topbar-chunkload warning"
-        role="status"
-        aria-label={`${progress.failed} ${noun} unavailable`}
-        data-tooltip={`${progress.failed} ${noun} unavailable — they will load on demand while painting${
-          detail ? `\n${detail}` : ""
-        }`}
-      >
-        <TriangleAlert size={13} aria-hidden="true" />
-        <span class="neuroglancer-editing-topbar-chunkload-label">
-          {progress.failed} {noun} unavailable
-        </span>
-      </div>
+    const label = `${progress.failed} ${chunkNoun(progress.failed)} unavailable`;
+    labels.push(label);
+    tooltips.push(
+      `${label} — they will load on demand while painting`,
+      ...progress.failures.map(
+        (failure) =>
+          `${failure.layerId} @ ${failure.resolution}: ${failure.count}`,
+      ),
+    );
+  }
+  if (progress.skipped !== undefined) {
+    labels.push(
+      `${progress.skipped} ${chunkNoun(progress.skipped)} not preloaded`,
+    );
+    tooltips.push(
+      `The edit region is larger than the viewer's memory budget: ${progress.skipped} of ${progress.total} chunks were not preloaded and load on demand while painting`,
     );
   }
 
   // Clean `done`: render nothing — no transient confirmation badge.
-  return null;
+  if (labels.length === 0) return null;
+  return (
+    <ChunkLoadWarning
+      label={labels.join(" · ")}
+      tooltip={tooltips.join("\n")}
+    />
+  );
+}
+
+function chunkNoun(count: number): string {
+  return count === 1 ? "chunk" : "chunks";
+}
+
+/** The topbar's warning badge for a preload that ended short of every chunk. */
+function ChunkLoadWarning({
+  label,
+  tooltip,
+}: {
+  label: string;
+  tooltip: string;
+}) {
+  return (
+    <div
+      class="neuroglancer-editing-topbar-group neuroglancer-editing-topbar-chunkload warning"
+      role="status"
+      aria-label={label}
+      data-tooltip={tooltip}
+    >
+      <TriangleAlert size={13} aria-hidden="true" />
+      <span class="neuroglancer-editing-topbar-chunkload-label">{label}</span>
+    </div>
+  );
 }
