@@ -229,6 +229,12 @@ export interface StrokeFootprintMask {
   readonly mask: Uint8Array;
 }
 
+export interface MaskedFootprintInput
+  extends Omit<BrushApplyInput, "voxelPosition" | "radius"> {
+  readonly footprint: StrokeFootprintMask;
+  readonly maxImageVoxels: number;
+}
+
 export interface PaintCompute {
   /** Single brush stamp centred at `voxelPosition`. */
   applyBrush(input: BrushApplyInput): Promise<PaintWriteBatch>;
@@ -251,4 +257,13 @@ export interface PaintCompute {
   computeMaskedStrokeFootprint?(
     input: BrushStrokeInput,
   ): Promise<StrokeFootprintMask | null>;
+  /**
+   * Pass a precomputed footprint through the image mask (threshold + morphology)
+   * and build its writes, for a closed stroke's fill under a mask that can
+   * reject voxels (TM-268). `null` when the image slab it would read exceeds
+   * `maxImageVoxels`. Optional like the route above; absent ⇒ no masked fill.
+   */
+  applyMaskedFootprint?(
+    input: MaskedFootprintInput,
+  ): Promise<PaintWriteBatch | null>;
 }

@@ -90,6 +90,8 @@ interface ActiveStrokeState {
   lastVoxel: VoxelPos | undefined;
   /** True while a dispatched `handleInput` promise has not settled. */
   inFlight: boolean;
+  /** `PointerEventBridge.toolEpoch` when this stroke began. */
+  readonly toolEpoch: number;
   /**
    * Raw stroke-sample buffer: resampled voxels appended since the last
    * dispatch, oldest first. The whole buffer drains as one coalesced segment.
@@ -105,11 +107,9 @@ interface ActiveStrokeState {
   /**
    * Deferred stroke finish (`pointer-up` / `pointer-cancel`), dispatched
    * after the sample buffer drains so the library records history AFTER
-   * the last segment has applied. `event === undefined` ends the stroke
-   * without delivering a finish event (parity with the non-camera-locked
-   * dispatch path, which never reaches the tool).
+   * the last segment has applied.
    */
-  finish: { readonly event: ToolInputEvent | undefined } | undefined;
+  finish: { readonly event: ToolInputEvent } | undefined;
   /**
    * Callbacks released when the stroke fully drains (idle, no finish left).
    * Used to chain the NEXT stroke's `pointer-down` behind this stroke when
@@ -118,6 +118,9 @@ interface ActiveStrokeState {
    */
   onDrained: (() => void)[];
 }
+
+/** `PointerEvent.buttons` bit of the primary button. */
+const PRIMARY_BUTTON_MASK = 1;
 
 /**
  * Translates DOM pointer / wheel / key events on neuroglancer's slice and
@@ -151,6 +154,19 @@ export class PointerEventBridge extends RefCounted {
    */
   private activeStroke: ActiveStrokeState | undefined;
   /**
+   * The last stroke released while its queue or finish was still running. It is
+   * no longer `activeStroke`, but the next pointer-down must still wait for it:
+   * dispatched early, the tool would drop that down and take the new stroke's
+   * moves as part of this one.
+   */
+  private drainingStroke: ActiveStrokeState | undefined;
+  /**
+   * Bumped when the active tool or session changes. That change cancels whatever
+   * the tool was doing, so a stroke from an earlier epoch is neither waited for,
+   * even if its op never settles, nor delivered to the tool now active.
+   */
+  private toolEpoch = 0;
+  /**
    * Pending `requestAnimationFrame` handles for idle→dispatch drains (one per
    * stroke), tracked so disposal can cancel them. See `scheduleStrokeDrain`.
    */
@@ -164,6 +180,38 @@ export class PointerEventBridge extends RefCounted {
     this.scanAndAttach();
     this.registerDisposer(
       displayContext.updateStarted.add(() => this.scanAndAttach()),
+    );
+    for (const watchable of [host.activeToolId, host.activeSession]) {
+      this.registerDisposer(
+        watchable.changed.add(() => {
+          this.toolEpoch++;
+        }),
+      );
+    }
+    // Panels do not capture the pointer (see `attachPanel`), so a release away
+    // from every panel reaches only the window. Capture phase: an element under
+    // the pointer may stop propagation.
+    for (const [type, kind] of [
+      ["pointerup", "pointer-up"],
+      ["pointercancel", "pointer-cancel"],
+    ] as const) {
+      this.registerEventListener(
+        window,
+        type,
+        (ev) => this.finishStrokeReleasedOffPanels(ev as PointerEvent, kind),
+        { capture: true },
+      );
+    }
+    // The release itself can be lost, with the pointer then anywhere on the
+    // page, and a live stroke blocks undo and save.
+    this.registerEventListener(
+      window,
+      "pointermove",
+      (ev) => this.finishStrokeIfPrimaryReleased(ev as PointerEvent),
+      { capture: true },
+    );
+    this.registerEventListener(window, "blur", () =>
+      this.finishStrokeOnWindowBlur(),
     );
   }
 
@@ -213,14 +261,14 @@ export class PointerEventBridge extends RefCounted {
       // would prevent the panel's pick-pass from running and freeze both
       // the cursor and the stroke. The trade-off is that releasing the
       // pointer outside the panel won't fire a pointerup on the panel; the
-      // active stroke ends instead on the next pointermove that arrives
-      // (or on pointerup if the cursor re-enters). With Ctrl/Cmd held we
-      // bail entirely from `dispatch` so the event falls through to
-      // neuroglancer's pan binding.
+      // bridge's window listeners finish the stroke instead, and a move with
+      // the button up finishes one whose release was never delivered at all.
+      // With Ctrl/Cmd held we bail entirely from `dispatch` so the event falls
+      // through to neuroglancer's pan binding.
       const cameraLocked = this.isCameraLockedForEvent(ev);
       const strokeStart = cameraLocked && ev.button === 0;
-      const prev = this.activeStroke;
-      if (strokeStart && prev !== undefined && this.strokeHasWork(prev)) {
+      const prev = this.strokeToChainBehind();
+      if (strokeStart && prev !== undefined) {
         // The previous stroke is still draining its coalesced queue (its
         // deferred pointer-up included). Chain this stroke's pointer-down
         // behind it so the shared library StrokeTool sees strictly ordered
@@ -229,7 +277,9 @@ export class PointerEventBridge extends RefCounted {
         this.consume(ev);
         const stroke = this.beginStrokeForwarding(panel, { gated: true });
         prev.onDrained.push(() => {
-          if (event !== undefined) {
+          if (stroke.toolEpoch !== this.toolEpoch) {
+            this.abandonStroke(stroke);
+          } else if (event !== undefined) {
             this.dispatchStrokeEvent(stroke, event);
           } else {
             stroke.inFlight = false;
@@ -272,11 +322,13 @@ export class PointerEventBridge extends RefCounted {
     };
     const onPointerUp = (ev: PointerEvent) => {
       if (this.requestStrokeFinish(panel, ev, "pointer-up")) return;
+      if (this.ignoreReleaseOfFinishingStroke(ev)) return;
       this.dispatch(ev, () => this.translatePointer(panel, ev, "pointer-up"));
       this.endActiveStroke();
     };
     const onPointerCancel = (ev: PointerEvent) => {
       if (this.requestStrokeFinish(panel, ev, "pointer-cancel")) return;
+      if (this.ignoreReleaseOfFinishingStroke(ev)) return;
       this.dispatch(ev, () =>
         this.translatePointer(panel, ev, "pointer-cancel"),
       );
@@ -456,6 +508,10 @@ export class PointerEventBridge extends RefCounted {
 
   private isPointerEvent(ev: Event): ev is PointerEvent {
     return typeof PointerEvent !== "undefined" && ev instanceof PointerEvent;
+  }
+
+  private isStrokeTool(tool: Tool): boolean {
+    return tool.id === "painting.brush" || tool.id === "painting.erase";
   }
 
   private isPaintLikeTool(tool: Tool): boolean {
@@ -744,6 +800,7 @@ export class PointerEventBridge extends RefCounted {
       // Gated until the pointer-down op settles (or, for a chained stroke,
       // until the previous stroke drains and the deferred down dispatches).
       inFlight: opts.downOp !== undefined || opts.gated === true,
+      toolEpoch: this.toolEpoch,
       samples: [],
       drainScheduled: false,
       finish: undefined,
@@ -788,6 +845,43 @@ export class PointerEventBridge extends RefCounted {
     this.activeStroke = undefined;
   }
 
+  /** The stroke a new pointer-down has to wait for, if any. */
+  private strokeToChainBehind(): ActiveStrokeState | undefined {
+    const tool = this.activeTool();
+    // A discrete tool handles its own clicks while busy: FillTool swallows them,
+    // and queued here each one would run as another fill.
+    const released =
+      tool !== undefined && this.isStrokeTool(tool)
+        ? this.drainingStroke
+        : undefined;
+    const previous = this.activeStroke ?? released;
+    return previous !== undefined &&
+      previous.toolEpoch === this.toolEpoch &&
+      this.strokeHasWork(previous)
+      ? previous
+      : undefined;
+  }
+
+  /**
+   * A release for a stroke already finishing, which happens after losing window
+   * focus queued its finish. Dispatched directly it would overtake that queue and
+   * commit the edit while the stroke's op is still running.
+   */
+  private ignoreReleaseOfFinishingStroke(ev: PointerEvent): boolean {
+    if (this.strokeToChainBehind() === undefined) return false;
+    if (this.isCameraLockedForEvent(ev)) this.consume(ev);
+    return true;
+  }
+
+  /** Drop a stroke queued for a tool that is no longer active. */
+  private abandonStroke(stroke: ActiveStrokeState): void {
+    stroke.inFlight = false;
+    stroke.samples = [];
+    stroke.finish = undefined;
+    if (this.activeStroke === stroke) this.endActiveStroke();
+    this.drainStroke(stroke);
+  }
+
   private strokeHasWork(stroke: ActiveStrokeState): boolean {
     return (
       stroke.inFlight ||
@@ -799,38 +893,84 @@ export class PointerEventBridge extends RefCounted {
   /**
    * Defer the stroke finish (`pointer-up` / `pointer-cancel`) behind the
    * stroke's coalesced queue, so the library records history AFTER the last
-   * segment has applied. Returns false when there is no active stroke on
-   * `panel` or it is idle — the caller falls back to the direct dispatch
-   * path, which is then equivalent.
+   * segment has applied. Every live stroke gets a finish event, whatever panel
+   * or modifiers the release came with: without one the tool's edit stays live,
+   * which blocks undo, save and the next stroke. Returns false when no stroke
+   * is active, and the caller falls back to the direct dispatch path.
    */
   private requestStrokeFinish(
     panel: RenderedDataPanel,
     ev: PointerEvent,
     kind: "pointer-up" | "pointer-cancel",
+    consumeEvent = true,
   ): boolean {
     const stroke = this.activeStroke;
-    if (stroke === undefined || stroke.panel !== panel) return false;
-    if (!this.strokeHasWork(stroke)) return false;
+    if (stroke === undefined) return false;
     const cameraLocked = this.isCameraLockedForEvent(ev);
-    // Without the camera lock (Ctrl/Cmd held) the direct path would never
-    // deliver the event to the tool — mirror that by ending the stroke with
-    // no finish event.
-    const event = cameraLocked
-      ? this.translatePointer(panel, ev, kind)
-      : undefined;
+    const event =
+      this.translatePointer(panel, ev, kind) ??
+      strokeReleaseWithoutPosition(stroke, extractModifiers(ev));
     if (kind === "pointer-cancel") {
       // A canceled stroke must not paint its trailing coalesced segment.
       stroke.samples = [];
     }
+    this.queueStrokeFinish(stroke, event);
+    if (consumeEvent && cameraLocked) this.consume(ev);
+    return true;
+  }
+
+  private queueStrokeFinish(
+    stroke: ActiveStrokeState,
+    event: ToolInputEvent,
+  ): void {
     stroke.finish = { event };
     this.endActiveStroke();
+    this.drainingStroke = stroke;
     // Flush now rather than waiting for the scheduled frame drain (TM-317
     // fix 2), so the stroke commits deterministically on pointer-up: dispatch
     // any buffered samples (their settle then drives the finish) or the finish
     // directly. A pending frame drain, if any, no-ops once this has run.
     if (!stroke.inFlight) this.drainStroke(stroke);
-    if (cameraLocked) this.consume(ev);
-    return true;
+  }
+
+  /** With the window unfocused its release may never arrive, so end it now. */
+  private finishStrokeOnWindowBlur(): void {
+    const stroke = this.activeStroke;
+    if (stroke === undefined) return;
+    this.queueStrokeFinish(
+      stroke,
+      strokeReleaseWithoutPosition(stroke, NO_MODIFIERS),
+    );
+  }
+
+  /** A release away from every panel; a panel's own listener handles the rest. */
+  private finishStrokeReleasedOffPanels(
+    ev: PointerEvent,
+    kind: "pointer-up" | "pointer-cancel",
+  ): void {
+    const stroke = this.activeStroke;
+    if (stroke === undefined) return;
+    const target = ev.target;
+    if (target instanceof Node) {
+      for (const panel of this.attached.keys()) {
+        if (panel.element.contains(target)) return;
+      }
+    }
+    // The event belongs to whatever is under the pointer, so it is not consumed.
+    this.requestStrokeFinish(stroke.panel, ev, kind, false);
+  }
+
+  /**
+   * A move with the primary button up means its release was never delivered,
+   * for example it happened outside an embedding iframe. Without this the stroke
+   * would keep painting under a hovering pointer. The move itself is not a
+   * stroke sample.
+   */
+  private finishStrokeIfPrimaryReleased(ev: PointerEvent): void {
+    const stroke = this.activeStroke;
+    if (stroke === undefined) return;
+    if ((ev.buttons & PRIMARY_BUTTON_MASK) !== 0) return;
+    this.requestStrokeFinish(stroke.panel, ev, "pointer-up", false);
   }
 
   /**
@@ -951,23 +1091,31 @@ export class PointerEventBridge extends RefCounted {
    */
   private drainStroke(stroke: ActiveStrokeState): void {
     if (stroke.inFlight) return;
+    if (stroke.toolEpoch !== this.toolEpoch) {
+      // The tool this queue was meant for canceled the stroke when it was
+      // switched away; delivered now, it would act on the active tool's stroke.
+      stroke.samples = [];
+      stroke.finish = undefined;
+    }
     if (stroke.samples.length > 0) {
       const samples = stroke.samples;
       stroke.samples = [];
       const to = samples[samples.length - 1];
-      const via =
-        paintScheduler.mode === "latestWins" ? [] : samples.slice(0, -1);
-      this.dispatchStrokeMove(stroke, to, via);
+      const earlier = samples.slice(0, -1);
+      if (paintScheduler.mode === "latestWins") {
+        this.dispatchStrokeMove(stroke, to, [], earlier);
+      } else {
+        this.dispatchStrokeMove(stroke, to, earlier, []);
+      }
       return;
     }
     if (stroke.finish !== undefined) {
       const event = stroke.finish.event;
       stroke.finish = undefined;
-      if (event !== undefined) {
-        this.dispatchStrokeEvent(stroke, event);
-        return;
-      }
+      this.dispatchStrokeEvent(stroke, event);
+      return;
     }
+    if (this.drainingStroke === stroke) this.drainingStroke = undefined;
     const callbacks = stroke.onDrained.splice(0);
     for (const cb of callbacks) cb();
   }
@@ -976,6 +1124,7 @@ export class PointerEventBridge extends RefCounted {
     stroke: ActiveStrokeState,
     voxelPosition: VoxelPos,
     via: readonly VoxelPos[],
+    droppedSamples: readonly VoxelPos[],
   ): void {
     stroke.lastVoxel = voxelPosition;
     const mouseState = this.host.viewer.mouseState;
@@ -984,6 +1133,9 @@ export class PointerEventBridge extends RefCounted {
       button: "primary",
       voxelPosition,
       ...(via.length > 0 ? { viaVoxelPositions: via } : {}),
+      ...(droppedSamples.length > 0
+        ? { contourVoxelPositions: droppedSamples }
+        : {}),
       screenPosition: [mouseState.pageX ?? 0, mouseState.pageY ?? 0],
       panelHint: panelKind(stroke.panel),
       at: nowMs(),
@@ -1067,6 +1219,24 @@ export class PointerEventBridge extends RefCounted {
       this.drainStroke(stroke);
     }
   }
+}
+
+/**
+ * A release at a point with no voxel under it, such as outside the volume. The
+ * tools finish a stroke without reading the position, so the last known one will
+ * do.
+ */
+function strokeReleaseWithoutPosition(
+  stroke: ActiveStrokeState,
+  modifiers: ModifierState,
+): ToolInputEvent {
+  return {
+    kind: "pointer-up",
+    button: "primary",
+    voxelPosition: stroke.lastVoxel ?? [0, 0, 0],
+    at: nowMs(),
+    modifiers,
+  };
 }
 
 function domButtonToPointer(button: number): PointerButton {

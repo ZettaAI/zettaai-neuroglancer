@@ -50,6 +50,8 @@ interface SerializedPainting {
   readonly fillMode?: FillMode;
   /** Auto-select the painted segment (TM-490). Optional: older blocks default on. */
   readonly autoSelectPaintedSegment?: boolean;
+  /** Optional like the field above; absent ⇒ off (TM-268). */
+  readonly fillClosedPaths?: boolean;
 }
 
 /** Coerce an unknown to the auto-select flag, defaulting on (the app default). */
@@ -100,6 +102,7 @@ function serializePainting(state: PaintingSharedState): SerializedPainting {
     mask: state.mask ?? null,
     fillMode: state.fillMode,
     autoSelectPaintedSegment: state.autoSelectPaintedSegment,
+    fillClosedPaths: state.fillClosedPaths,
   };
 }
 
@@ -201,6 +204,7 @@ function parsePainting(x: unknown): SerializedPainting | undefined {
     mask,
     fillMode: parseFillMode(o.fillMode),
     autoSelectPaintedSegment: parseAutoSelect(o.autoSelectPaintedSegment),
+    fillClosedPaths: o.fillClosedPaths === true,
   };
 }
 
@@ -282,6 +286,7 @@ export function paintingPatchFromPersist(
     mask,
     fillMode: parseFillMode(p.fillMode),
     autoSelectPaintedSegment: parseAutoSelect(p.autoSelectPaintedSegment),
+    fillClosedPaths: p.fillClosedPaths === true,
   };
 }
 

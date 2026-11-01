@@ -314,6 +314,9 @@ export class PaintStrokePipeline {
     metadata: LayerMetadata,
     footprint: StrokeFootprintMask,
     value: number | bigint,
+    // The tiles to write, when the caller already enumerated them; otherwise
+    // every tile the footprint's box overlaps.
+    knownTiles?: readonly ChunkTile[],
   ): Promise<void> {
     const controlBuffer = this.controlBuffer;
     if (controlBuffer === undefined) return;
@@ -326,16 +329,18 @@ export class PaintStrokePipeline {
       chunkId: ChunkId.fromCoord({ x: 0, y: 0, z: 0 }),
     });
     const { loTx, loTy, maskW, maskH, cz, mask } = footprint;
-    const tiles = chunksForBox(
-      loTx,
-      loTy,
-      maskW,
-      maskH,
-      cz,
-      chunkSize,
-      bounds,
-      scale.voxelOffset,
-    );
+    const tiles =
+      knownTiles ??
+      chunksForBox(
+        loTx,
+        loTy,
+        maskW,
+        maskH,
+        cz,
+        chunkSize,
+        bounds,
+        scale.voxelOffset,
+      );
     if (tiles.length === 0) return;
     const voxelDataType = metadata.voxelDataType as BrushVoxelDataType;
     // Share the mask read-only across all tiles (one copy, never transferred).
@@ -424,6 +429,50 @@ function commitTile(
   // Drop any hint the handler did not consume (defensive; commitWrites always
   // fires the event here, so this is normally a no-op).
   takePaintedSubBox(target.layerId, target.resolution, chunkId);
+}
+
+/**
+ * The chunk tiles a footprint actually paints: its box's tiles, minus those
+ * where the mask is empty. A closed stroke's corners often are, and writing such
+ * a tile would still materialize the whole chunk and add it to the undo history.
+ */
+export function chunksForFootprint(
+  footprint: StrokeFootprintMask,
+  chunkSize: readonly [number, number, number],
+  bounds?: SessionVoxelBounds,
+  voxelOffset: readonly [number, number, number] = [0, 0, 0],
+): ChunkTile[] {
+  const { loTx, loTy, maskW, maskH, cz } = footprint;
+  return chunksForBox(
+    loTx,
+    loTy,
+    maskW,
+    maskH,
+    cz,
+    chunkSize,
+    bounds,
+    voxelOffset,
+  ).filter((tile) => footprintPaintsTile(footprint, tile, chunkSize));
+}
+
+function footprintPaintsTile(
+  footprint: StrokeFootprintMask,
+  tile: ChunkTile,
+  chunkSize: readonly [number, number, number],
+): boolean {
+  const { loTx, loTy, maskW, maskH, mask } = footprint;
+  const startColumn = Math.max(tile.origin[0], loTx) - loTx;
+  const endColumn =
+    Math.min(tile.origin[0] + chunkSize[0], loTx + maskW) - loTx;
+  const startRow = Math.max(tile.origin[1], loTy) - loTy;
+  const endRow = Math.min(tile.origin[1] + chunkSize[1], loTy + maskH) - loTy;
+  for (let row = startRow; row < endRow; row++) {
+    const rowOffset = row * maskW;
+    for (let column = startColumn; column < endColumn; column++) {
+      if (mask[rowOffset + column] === 1) return true;
+    }
+  }
+  return false;
 }
 
 /**

@@ -454,6 +454,7 @@ export class EditSessionHotkeyBinder extends RefCounted {
         const session = host.activeSession.value;
         if (session === undefined) return;
         event.stopPropagation();
+        if (host.refuseWhilePainting()) return;
         void session.undo().catch((err) => {
           host.logger.warn(
             "session",
@@ -468,6 +469,7 @@ export class EditSessionHotkeyBinder extends RefCounted {
         const session = host.activeSession.value;
         if (session === undefined) return;
         event.stopPropagation();
+        if (host.refuseWhilePainting()) return;
         void session.redo().catch((err) => {
           host.logger.warn(
             "session",

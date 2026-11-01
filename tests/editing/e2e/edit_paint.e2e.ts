@@ -145,6 +145,54 @@ async function stamp(
   )) as ReadbackShape;
 }
 
+/**
+ * Remove earlier tests' paint from the overlay. `clearFirst` only drops the GPU
+ * patches, so their voxels come back as soon as a stroke rewrites their chunk,
+ * and a read-back then counts them too.
+ */
+const undoAllPaint = (page: Page): Promise<void> =>
+  page.evaluate(async () => {
+    const session = (window as any).viewer.editSessionHost.activeSession.value;
+    while ((await session.undo()) !== undefined);
+  });
+
+const strokeIsLive = (page: Page): Promise<boolean> =>
+  page.evaluate(() => (window as any).viewer.editSessionHost.hasLiveEdit);
+
+/** A viewport point over no panel, for a release that only the window sees. */
+function findPointOffPanels(): { x: number; y: number } | null {
+  const STEP_PX = 8;
+  for (let y = 1; y < window.innerHeight; y += STEP_PX) {
+    for (let x = 1; x < window.innerWidth; x += STEP_PX) {
+      const element = document.elementFromPoint(x, y);
+      if (element !== null && element.closest(".neuroglancer-panel") === null) {
+        return { x, y };
+      }
+    }
+  }
+  return null;
+}
+
+/** Press and drag with the real mouse, so the browser picks the event targets. */
+async function beginRealStroke(page: Page): Promise<{ x: number; y: number }> {
+  const center = await page.evaluate(() => {
+    const host = (window as any).viewer.editSessionHost;
+    host.painting.state.patchState({ radius: 2, mask: undefined });
+    host.selectTool("painting.brush");
+    const canvases = Array.from(document.querySelectorAll("canvas"));
+    const largest = canvases.reduce((best, canvas) =>
+      canvas.width * canvas.height > best.width * best.height ? canvas : best,
+    );
+    const rect = largest.getBoundingClientRect();
+    return { x: rect.left + rect.width / 4, y: rect.top + rect.height / 4 };
+  });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 20, center.y + 20, { steps: 4 });
+  await expect.poll(() => strokeIsLive(page)).toBe(true);
+  return center;
+}
+
 const SHOT_DIR = path.resolve(HERE, "../../../test-results/correctness");
 
 function slug(s: string): string {
@@ -295,6 +343,138 @@ for (const { scenario, hasImage } of SCENARIOS) {
       expect(a.paintedVoxels).toBe(b.paintedVoxels);
       expect(a.signature).toBe(b.signature);
       expect(a.signature).toMatch(/^[0-9a-f]{8}$/);
+    });
+
+    test("a closed stroke fills its interior only with the setting on (TM-268)", async () => {
+      test.skip(scenarioError !== undefined, scenarioError);
+      const loop = {
+        masked: false,
+        radius: 2,
+        closedLoopRadiusPx: 60,
+        clearFirst: true,
+      };
+      await undoAllPaint(page);
+      const outline = await paint({ ...loop, fillClosedPaths: false });
+      await undoAllPaint(page);
+      const filled = await paint({ ...loop, fillClosedPaths: true });
+      expect(filled.error ?? "", `readback error: ${filled.error}`).toBe("");
+      expect(outline.paintedVoxels).toBeGreaterThan(0);
+      expect(filled.paintedVoxels).toBeGreaterThan(outline.paintedVoxels * 2);
+      expect(filled.distinctValues).toEqual(["1"]);
+      expect(
+        within(filled.bbox!, region),
+        `bbox ${JSON.stringify(filled.bbox)} escaped region ${JSON.stringify(region)}`,
+      ).toBe(true);
+    });
+
+    for (const release of ["off every panel", "with Ctrl held"] as const) {
+      test(`a stroke released ${release} ends and leaves undo usable (TM-268)`, async () => {
+        test.skip(scenarioError !== undefined, scenarioError);
+        await paint({ masked: false, clearFirst: true });
+        const center = await beginRealStroke(page);
+        if (release === "off every panel") {
+          const offPanel = await page.evaluate(findPointOffPanels);
+          expect(offPanel, "no point outside the panels").not.toBeNull();
+          await page.mouse.move(offPanel!.x, offPanel!.y);
+          await page.mouse.up();
+        } else {
+          await page.keyboard.down("Control");
+          await page.mouse.up();
+          await page.keyboard.up("Control");
+        }
+        await expect.poll(() => strokeIsLive(page)).toBe(false);
+        // Hovering back over the panel must not reopen or extend the stroke.
+        await page.mouse.move(center.x + 30, center.y + 30, { steps: 5 });
+        expect(await strokeIsLive(page)).toBe(false);
+        expect(
+          await page.evaluate(() =>
+            (window as any).viewer.editSessionHost.refuseWhilePainting(),
+          ),
+        ).toBe(false);
+      });
+    }
+
+    test("a stroke started before the last one settled stays its own stroke (TM-268)", async () => {
+      test.skip(scenarioError !== undefined, scenarioError);
+      await paint({ masked: false, clearFirst: true });
+      await undoAllPaint(page);
+      await page.evaluate(() => {
+        const host = (window as any).viewer.editSessionHost;
+        host.selectTool("painting.brush");
+        host.painting.state.patchState({
+          radius: 2,
+          mask: undefined,
+          fillClosedPaths: true,
+        });
+        const panel = document.querySelector(
+          ".neuroglancer-rendered-data-panel",
+        )!;
+        const rect = panel.getBoundingClientRect();
+        const fire = (type: string, x: number, y: number) =>
+          panel.dispatchEvent(
+            new PointerEvent(type, {
+              pointerId: 1,
+              isPrimary: true,
+              bubbles: true,
+              clientX: rect.left + x,
+              clientY: rect.top + y,
+              button: type === "pointermove" ? -1 : 0,
+              buttons: type === "pointerup" ? 0 : 1,
+            }),
+          );
+        // All in one tick, so the first stroke is still running when the second
+        // one is pressed.
+        fire("pointerdown", 60, 60);
+        fire("pointermove", 90, 60);
+        fire("pointerup", 90, 60);
+        fire("pointerdown", 150, 150);
+        fire("pointermove", 180, 150);
+        fire("pointerup", 180, 150);
+      });
+      await expect.poll(() => strokeIsLive(page)).toBe(false);
+      await page.waitForTimeout(500);
+      await expect.poll(() => strokeIsLive(page)).toBe(false);
+      const strokes = await page.evaluate(async () => {
+        const host = (window as any).viewer.editSessionHost;
+        host.painting.state.patchState({ fillClosedPaths: false });
+        let entries = 0;
+        while ((await host.activeSession.value.undo()) !== undefined) entries++;
+        return entries;
+      });
+      expect(strokes).toBe(2);
+    });
+
+    test("Ctrl+drag with the brush pans and does not paint (TM-268)", async () => {
+      test.skip(scenarioError !== undefined, scenarioError);
+      await undoAllPaint(page);
+      await paint({ masked: false, clearFirst: true });
+      await undoAllPaint(page);
+      const center = await page.evaluate(() => {
+        const host = (window as any).viewer.editSessionHost;
+        host.selectTool("painting.brush");
+        host.painting.state.patchState({ radius: 2, mask: undefined });
+        const rect = document
+          .querySelector(".neuroglancer-rendered-data-panel")!
+          .getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      });
+      const viewerPosition = () =>
+        page.evaluate(() =>
+          Array.from((window as any).viewer.position.value as Float32Array),
+        );
+      const before = await viewerPosition();
+      await page.mouse.move(center.x, center.y);
+      await page.keyboard.down("Control");
+      await page.mouse.down();
+      await page.mouse.move(center.x + 40, center.y + 40, { steps: 4 });
+      expect(await strokeIsLive(page)).toBe(false);
+      await page.mouse.up();
+      await page.keyboard.up("Control");
+      expect(await viewerPosition()).not.toEqual(before);
+      expect(await strokeIsLive(page)).toBe(false);
+      await page.evaluate((position) => {
+        (window as any).viewer.position.value = Float32Array.from(position);
+      }, before);
     });
 
     test("erase after paint records erase patches (value 0)", async () => {

@@ -61,6 +61,45 @@ function sampleIntent(): EditSessionIntent {
   };
 }
 
+describe("EditSessionHost while an edit is live (TM-268)", () => {
+  const messages = "Painting is still in progress. Try again when it finishes.";
+  let host: EditSessionHost;
+  let session: {
+    save: ReturnType<typeof vi.fn>;
+    commit: ReturnType<typeof vi.fn>;
+  };
+
+  beforeEach(() => {
+    host = new EditSessionHost(createFakeViewer());
+    session = { save: vi.fn(), commit: vi.fn() };
+    (host as any).activeSession.value = session;
+    (host as any).editScope = { hasLiveEdit: true };
+  });
+
+  afterEach(() => {
+    (host as any).activeSession.value = undefined;
+    (host as any).editScope = undefined;
+    host.dispose();
+  });
+
+  it("refuses to save, leaving the session and its save state untouched", async () => {
+    await expect(host.saveActive()).rejects.toThrow(messages);
+    expect(session.save).not.toHaveBeenCalled();
+    expect(host.saveInProgress.value).toBe(false);
+  });
+
+  it("refuses to commit", async () => {
+    await expect(host.commitActive()).rejects.toThrow(messages);
+    expect(session.commit).not.toHaveBeenCalled();
+  });
+
+  it("refuses undo/redo only while the edit is live", () => {
+    expect(host.refuseWhilePainting()).toBe(true);
+    (host as any).editScope = { hasLiveEdit: false };
+    expect(host.refuseWhilePainting()).toBe(false);
+  });
+});
+
 describe("EditSessionHost (no active session)", () => {
   let host: EditSessionHost;
 

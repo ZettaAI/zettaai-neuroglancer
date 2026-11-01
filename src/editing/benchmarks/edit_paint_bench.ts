@@ -229,6 +229,35 @@ async function dispatchStroke(
   );
 }
 
+const CLOSED_LOOP_STEPS = 48;
+
+/** A full circle starting and ending at its rightmost point (TM-268). */
+function dispatchClosedLoop(
+  el: HTMLElement,
+  centerX: number,
+  centerY: number,
+  radiusPx: number,
+): void {
+  const pointerEvent = (type: string, step: number, buttons: number) => {
+    const angle = (2 * Math.PI * step) / CLOSED_LOOP_STEPS;
+    return new PointerEvent(type, {
+      pointerId: 1,
+      isPrimary: true,
+      bubbles: true,
+      cancelable: true,
+      clientX: centerX + radiusPx * Math.cos(angle),
+      clientY: centerY + radiusPx * Math.sin(angle),
+      button: type === "pointermove" ? -1 : 0,
+      buttons,
+    });
+  };
+  el.dispatchEvent(pointerEvent("pointerdown", 0, 1));
+  for (let step = 1; step <= CLOSED_LOOP_STEPS; step++) {
+    el.dispatchEvent(pointerEvent("pointermove", step, 1));
+  }
+  el.dispatchEvent(pointerEvent("pointerup", CLOSED_LOOP_STEPS, 0));
+}
+
 /** A single brush stamp at `(x, y)`: down + one tiny move + up → one segment. */
 function dispatchStamp(el: HTMLElement, x: number, y: number): void {
   const c = {
@@ -582,6 +611,13 @@ export function clearEditPaintTargetPatches(): boolean {
 }
 
 export interface StampReadbackInput {
+  /** The `fillClosedPaths` brush setting for this stamp (default false). */
+  readonly fillClosedPaths?: boolean;
+  /**
+   * Draw a closed circle of this radius, in screen pixels, instead of a single
+   * stamp, with its moves all arriving in one go, as in a fast drag.
+   */
+  readonly closedLoopRadiusPx?: number;
   /** Apply the loaded threshold/morphology mask preset (default false). */
   readonly masked?: boolean;
   /** Brush radius in voxels (default 8 — small, for a deterministic read-back). */
@@ -671,6 +707,7 @@ export async function stampAndReadbackEditPaint(
     ps.patchState({
       radius: input.radius ?? 8,
       mask: input.masked ? presetMask : undefined,
+      fillClosedPaths: input.fillClosedPaths ?? false,
     });
     host.selectTool(input.erase ? "painting.erase" : "painting.brush");
     await nextFrame();
@@ -683,7 +720,11 @@ export async function stampAndReadbackEditPaint(
     // per stamp; `waitForPaintStable` also gives up fast on zero paint.
     const settleMs = input.settleTimeoutMs ?? 15000;
     const doStamp = async (): Promise<number> => {
-      dispatchStamp(el, x, y);
+      if (input.closedLoopRadiusPx !== undefined) {
+        dispatchClosedLoop(el, x, y, input.closedLoopRadiusPx);
+      } else {
+        dispatchStamp(el, x, y);
+      }
       await waitForSettle(settleMs);
       // The overlay write lands after the apply promise; wait for the painted
       // count to settle so the read-back is deterministic (not a race).

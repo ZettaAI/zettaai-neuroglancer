@@ -41,6 +41,7 @@ function painting(): PaintingSharedState {
     fillMode: "3d",
     spacingFraction: 0.1,
     autoSelectPaintedSegment: true,
+    fillClosedPaths: false,
   };
 }
 
