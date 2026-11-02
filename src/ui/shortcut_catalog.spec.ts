@@ -27,12 +27,16 @@ describe("buildShortcutSections", () => {
   const section = (title: string) =>
     sections.find((candidate) => candidate.title === title)!;
 
-  it("reads edit keys from what the session binds and marks them rebindable", () => {
-    const brush = section("Edit session").rows.find(
-      (row) => row.label === "Brush",
-    )!;
-    expect(brush.keys).toEqual(editKeys.brush);
-    expect(brush.rebind).toBe("brush");
+  it("reads edit keys from what the session binds, rebindable only in a session", () => {
+    const brushIn = (sessionActive: boolean) =>
+      buildShortcutSections(editKeys, [map], sessionActive)
+        .find((candidate) => candidate.title === "Edit session")!
+        .rows.find((row) => row.label === "Brush")!;
+    expect(brushIn(true).keys).toEqual(editKeys.brush);
+    expect(brushIn(true).rebind).toBe("brush");
+    // Without a session a change would not be saved, so the sheet offers none.
+    expect(brushIn(false).keys).toEqual(editKeys.brush);
+    expect(brushIn(false).rebind).toBeUndefined();
   });
 
   it("reads view keys from the input maps and leaves out unbound actions", () => {

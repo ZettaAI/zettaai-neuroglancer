@@ -439,6 +439,32 @@ test.describe("hotkey hints", () => {
     await expect(page.locator(".neuroglancer-shortcut-sheet")).toBeVisible();
   });
 
+  // A key changed without a session would not be saved, so the sheet only
+  // lists the edit keys then.
+  test("the sheet offers no rebinding without a session", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.evaluate(() =>
+      (globalThis as any).viewer.editSessionHost.discardActive(),
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (globalThis as any).viewer.editSessionHost.activeSession.value ===
+            undefined,
+        ),
+      )
+      .toBe(true);
+    await focusDataPanel(page);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    await expect(sheet).toContainText("Open an edit session to change keys.");
+    await expect(sheet.locator(".neuroglancer-shortcut-rebind")).toHaveCount(0);
+    await expect(
+      sheet.locator(".neuroglancer-shortcut-row", { hasText: /^Brush/ }),
+    ).toHaveText("BrushB");
+  });
+
   test("the sheet searches, rebinds and refuses a taken key", async () => {
     test.skip(setupError !== undefined, setupError);
     await page.keyboard.press("KeyB");

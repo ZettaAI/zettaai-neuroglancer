@@ -28,7 +28,10 @@ import type { EventActionMap } from "#src/util/event_action_map.js";
 export interface ShortcutRow {
   readonly label: string;
   readonly keys: readonly string[];
-  /** Set when the row's key can be changed from the sheet. */
+  /**
+   * Set when the row's key can be changed from the sheet: only during a
+   * session, since a change is saved with the session's tool state.
+   */
   readonly rebind?: EditKeybindName;
 }
 
@@ -122,7 +125,7 @@ export function buildShortcutSections(
         ...EDIT_ROWS.map(([name, label]) => ({
           label,
           keys: editKeys[name],
-          rebind: name,
+          ...(sessionActive ? { rebind: name } : {}),
         })),
       ],
     },
