@@ -78,5 +78,25 @@
     "offset": [0, 0, 0],
     "size": [2048, 2048, 4],
     "resolutions": [[16, 16, 40]]
+  },
+  {
+    "id": "load_img_u8_raw",
+    "kind": "image",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [256, 256, 1],
+    "offset": [0, 0, 0],
+    "size": [1024, 1024, 64],
+    "resolutions": [[16, 16, 40]]
+  },
+  {
+    "id": "load_seg_u64_cseg",
+    "kind": "segmentation",
+    "dtype": "uint64",
+    "encoding": "compressed_segmentation",
+    "chunk": [128, 128, 16],
+    "offset": [0, 0, 0],
+    "size": [1024, 1024, 64],
+    "resolutions": [[16, 16, 40], [32, 32, 40]]
   }
 ]

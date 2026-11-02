@@ -45,6 +45,8 @@ curl "http://localhost:9778/storage/v1/b/zetta-editing-test/o/img_u8_raw%2Finfo?
 | `img_u8_jpeg` | image | uint8 | jpeg | 64²×1 | 0 | 16 | jpeg (lossy) |
 | `seg_u64_multires` | seg | uint64 | compressed_segmentation | 64²×16 | 0 | **16 + 32** | multi-resolution |
 | `seg_u8_bigchunk` | seg | uint8 | raw | **8192×128×1** | 0 | 16 | chunk > 4096 |
+| `load_img_u8_raw` | image | uint8 | raw | 256²×1 | 0 | 16 | session-load benchmark (1024² × 64) |
+| `load_seg_u64_cseg` | seg | uint64 | compressed_segmentation | 128²×16 | 0 | 16 + 32 | session-load benchmark (1024² × 64) |
 
 Add a fixture = add a manifest row + regenerate. Content is a deterministic
 function of global voxel coords (images: gradient; segmentations: blocky 32-voxel

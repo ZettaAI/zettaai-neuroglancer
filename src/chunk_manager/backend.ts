@@ -921,6 +921,18 @@ export class ChunkQueueManager extends SharedObjectCounterpart {
       this.adjustCapacitiesForChunk(chunk, true);
     }
     this.addChunkToQueues_(chunk);
+    // A chunk that finished downloading while it was wanted on the GPU waits
+    // in the worker for GPU promotion. Once only SYSTEM_MEMORY is requested
+    // (the fetch RPC alone), no queue would ever hand it to the frontend, and
+    // the fetch would wait forever: hand it over here, as `downloadSucceeded`
+    // does for a chunk requested that way from the start.
+    if (
+      chunk.state === ChunkState.SYSTEM_MEMORY_WORKER &&
+      chunk.requestedState === ChunkState.SYSTEM_MEMORY
+    ) {
+      this.moveChunkToFrontend(chunk);
+      this.updateChunkState(chunk, ChunkState.SYSTEM_MEMORY);
+    }
   }
 
   updateChunkState(chunk: Chunk, newState: ChunkState) {
