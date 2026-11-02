@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeCoordinateSpace } from "#src/coordinate_transform.js";
 import {
+  globalToNanometres,
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
@@ -38,6 +39,19 @@ describe("nanometresToGlobal", () => {
     });
     expect(Array.from(nanometresToGlobal([160, 320, 450], space)!)).toEqual([
       10, 20, 10,
+    ]);
+  });
+});
+
+describe("globalToNanometres", () => {
+  it("multiplies by each axis's nanometres per unit", () => {
+    const space = makeCoordinateSpace({
+      names: ["x", "y", "z"],
+      units: ["m", "m", "m"],
+      scales: Float64Array.of(16e-9, 16e-9, 45e-9),
+    });
+    expect(globalToNanometres(Float32Array.of(10, 20, 10), space)).toEqual([
+      160, 320, 450,
     ]);
   });
 });

@@ -1665,6 +1665,43 @@
   font-weight: 600;
 }
 
+.calcada-annotations-place {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.calcada-annotations-place-tools {
+  display: flex;
+}
+
+.calcada-annotations-place-tools .neuroglancer-icon[aria-pressed="true"] {
+  background-color: #db4437;
+}
+
+.calcada-annotations-limit {
+  color: #f6c344;
+}
+
+.calcada-annotations-payload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.calcada-annotations-payload-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-annotations-payload-value {
+  width: 7em;
+}
+
 .calcada-annotations-picker {
   min-width: 0;
 }
@@ -1712,6 +1749,11 @@
   height: 10px;
   border: 1px solid #666;
   border-radius: 2px;
+}
+
+.calcada-annotations-loading {
+  margin-left: 8px;
+  color: #aaa;
 }
 
 .calcada-annotations-color {

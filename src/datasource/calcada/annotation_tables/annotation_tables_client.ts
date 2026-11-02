@@ -45,6 +45,8 @@ export const ANNOTATION_PROPERTY_TYPES = [
   "boolean",
 ] as const;
 export type AnnotationPropertyType = (typeof ANNOTATION_PROPERTY_TYPES)[number];
+export type AnnotationPayloadValue = number | string | boolean;
+export type AnnotationPayload = Record<string, AnnotationPayloadValue>;
 
 export interface AnnotationTableInfo {
   name: string;
@@ -54,6 +56,8 @@ export interface AnnotationTableInfo {
   voxelResolution: [number, number, number];
   points: string[];
   properties: Record<string, AnnotationPropertyType>;
+  /** Typed properties every new row must carry. */
+  requiredProperties: string[];
   canWrite: boolean;
 }
 
@@ -102,13 +106,19 @@ export interface TablePoints {
 interface AnnotationSchema {
   points: string[];
   properties: Record<string, AnnotationPropertyType>;
+  requiredProperties: string[];
 }
 
 export type SchemaCache = Map<string, Promise<AnnotationSchema>>;
 
+type TableAccess = "read" | "write";
+
 export class AnnotationTableForbidden extends Error {
-  constructor(readonly table: string) {
-    super(`No read permission on annotation table ${table}`);
+  constructor(
+    readonly table: string,
+    readonly access: TableAccess = "read",
+  ) {
+    super(`No ${access} permission on annotation table ${table}`);
     this.name = "AnnotationTableForbidden";
   }
 }
@@ -188,6 +198,17 @@ function parseSchemaProperties(
   return properties;
 }
 
+function parseRequiredProperties(jsonSchema: unknown): string[] {
+  const properties = parseSchemaProperties(jsonSchema);
+  const required = verifyOptionalObjectProperty(
+    jsonSchema,
+    "required",
+    (value) => expectArray(value).map(verifyString),
+    [],
+  );
+  return required.filter((name) => name in properties);
+}
+
 function parseSchema(body: unknown): AnnotationSchema {
   const roles = expectArray(verifyObjectProperty(body, "points", (v) => v)).map(
     (p) => ({
@@ -202,6 +223,12 @@ function parseSchema(body: unknown): AnnotationSchema {
       "json_schema",
       parseSchemaProperties,
       {},
+    ),
+    requiredProperties: verifyOptionalObjectProperty(
+      body,
+      "json_schema",
+      parseRequiredProperties,
+      [],
     ),
   };
 }
@@ -262,7 +289,7 @@ export async function listAnnotationTables(
         "schema_version",
         verifyNonnegativeInt,
       );
-      const { points, properties } = await schemaDefinition(
+      const { points, properties, requiredProperties } = await schemaDefinition(
         fetchOk,
         baseUrl,
         schemaName,
@@ -281,6 +308,7 @@ export async function listAnnotationTables(
         ],
         points,
         properties,
+        requiredProperties,
         // Older servers send no access; they then allow no delete here.
         canWrite: verifyOptionalObjectProperty(
           row,
@@ -348,6 +376,7 @@ async function fetchTableOk(
   url: string,
   init: RequestInit | undefined,
   tableNames: string[],
+  access: TableAccess = "read",
 ): Promise<Response> {
   try {
     return await fetchOk(url, init);
@@ -356,6 +385,7 @@ async function fetchTableOk(
       if (error.status === HTTP_FORBIDDEN) {
         throw new AnnotationTableForbidden(
           namedTable(await errorMessageOf(error)) ?? tableNames.join(","),
+          access,
         );
       }
       if (error.status === HTTP_NOT_FOUND) {
@@ -567,6 +597,43 @@ export async function fetchAnnotationRows(
   );
 }
 
+const CREATE_REFUSED_PREFIX = "Could not add the annotation: ";
+
+/** Writes one row with an empty payload; positions are in the table's voxels. Returns its id. */
+export async function createAnnotationRow(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  table: string,
+  positions: ReadonlyMap<string, readonly number[]>,
+  payload: AnnotationPayload,
+): Promise<bigint> {
+  const points = Object.fromEntries(
+    [...positions].map(([name, position]) => [name, { position }]),
+  );
+  let response: Response;
+  try {
+    response = await fetchTableOk(
+      fetchOk,
+      `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
+      {
+        method: "POST",
+        body: JSON.stringify({ annotations: [{ points, payload }] }),
+      },
+      [table],
+      "write",
+    );
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    const reason = await errorMessageOf(error);
+    throw new Error(
+      reason === "" ? error.message : `${CREATE_REFUSED_PREFIX}${reason}`,
+    );
+  }
+  const body = await response.json();
+  const [id] = expectArray(verifyObjectProperty(body, "ids", (v) => v));
+  return BigInt(verifyString(id));
+}
+
 export async function deleteAnnotationRows(
   fetchOk: FetchOk,
   baseUrl: string,
@@ -578,5 +645,6 @@ export async function deleteAnnotationRows(
     `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
     { method: "DELETE", body: JSON.stringify({ ids: ids.map(String) }) },
     [table],
+    "write",
   );
 }

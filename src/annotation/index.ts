@@ -1364,6 +1364,26 @@ function restoreAnnotation(
   return result;
 }
 
+export interface IndexedAnnotations {
+  readonly length: number;
+  at(index: number): Annotation;
+  indexOf(id: AnnotationId): number | undefined;
+}
+
+export function indexAnnotations(
+  annotations: readonly Annotation[],
+): IndexedAnnotations {
+  let indexById: Map<AnnotationId, number> | undefined;
+  return {
+    length: annotations.length,
+    at: (index) => annotations[index],
+    indexOf: (id) =>
+      (indexById ??= new Map(
+        annotations.map(({ id: annotationId }, index) => [annotationId, index]),
+      )).get(id),
+  };
+}
+
 export interface AnnotationSourceSignals {
   changed: NullarySignal;
   childAdded: Signal<(annotation: Annotation) => void>;
@@ -1494,9 +1514,28 @@ export class AnnotationSource
     return true;
   }
 
-  [Symbol.iterator]() {
+  [Symbol.iterator](): Iterator<Annotation> {
     this.ensureUpdated();
     return this.annotationMap.values();
+  }
+
+  /** The annotations as the annotation list shows them, by index. */
+  annotationList(): IndexedAnnotations {
+    return indexAnnotations(Array.from(this));
+  }
+
+  serializeForRender(
+    filter: ((annotation: AnnotationBase) => boolean) | undefined,
+  ): RenderedAnnotations {
+    const serializer = new AnnotationSerializer(
+      this.annotationPropertySerializers,
+    );
+    for (const annotation of this) {
+      if (filter === undefined || filter(annotation)) {
+        serializer.add(annotation);
+      }
+    }
+    return serializer.serialize();
   }
 
   get(id: AnnotationId) {
@@ -1813,6 +1852,23 @@ export interface SerializedAnnotations {
   typeToIdMaps: Map<string, number>[];
   typeToSize: number[];
 }
+
+export interface AnnotationIdsByIndex {
+  readonly length: number;
+  at(index: number): string | undefined;
+}
+
+export interface AnnotationIndexById {
+  get(id: string): number | undefined;
+}
+
+export type RenderedAnnotations = Omit<
+  SerializedAnnotations,
+  "typeToIds" | "typeToIdMaps"
+> & {
+  typeToIds: AnnotationIdsByIndex[];
+  typeToIdMaps: AnnotationIndexById[];
+};
 
 function serializeAnnotations(
   allAnnotations: Annotation[][],

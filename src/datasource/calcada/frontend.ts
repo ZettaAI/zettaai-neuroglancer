@@ -46,6 +46,11 @@ import {
   CalcadaAnnotationTablesTab,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import {
+  TableLineTool,
+  TablePointTool,
+  tableStateOfTool,
+} from "#src/datasource/calcada/annotation_tables/table_place_tools.js";
 import type {
   ChunkedGraphChunkSource as ChunkedGraphChunkSourceInterface,
   ChunkedGraphChunkSpecification,
@@ -136,12 +141,14 @@ import {
   FilterLibrary,
 } from "#src/datasource/calcada/filter_library.js";
 import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
+import { nanometresPerGlobalUnit } from "#src/datasource/calcada/global_nanometres.js";
 import { appendCoordParams } from "#src/datasource/calcada/graph_coordinates.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import type { PieceSphere } from "#src/datasource/calcada/piece_centers.js";
 import {
+  globalToNanometres,
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
@@ -5356,7 +5363,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     layer.tabs.add(CALCADA_ANNOTATIONS_TAB_ID, {
       label: ANNOTATION_TABLES_TAB_LABEL,
       order: -18,
-      getter: () => new CalcadaAnnotationTablesTab(this),
+      getter: () => new CalcadaAnnotationTablesTab(this, layer),
     });
     // The side panel snapshots the layer's tab list before this
     // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
@@ -5881,6 +5888,20 @@ void main() {
         selectionState,
       ),
     );
+    const armedPlacement = new WatchableValue<AnnotationLayerState | undefined>(
+      undefined,
+    );
+    this.registerDisposer(
+      layer.tool.changed.add(() => {
+        armedPlacement.value = tableStateOfTool(layer.tool.value);
+      }),
+    );
+    const disarmPlacement = () => {
+      if (tableStateOfTool(layer.tool.value) !== undefined) {
+        layer.tool.value = undefined;
+      }
+    };
+    this.registerDisposer(disarmPlacement);
     this.annotationTablesSession = this.registerDisposer(
       new CalcadaAnnotationTablesSession(
         {
@@ -5889,9 +5910,20 @@ void main() {
           timestamp: segmentsState.timestamp,
           visibleSegments: segmentsState.visibleSegments,
           graphEdited: this.graphEdited,
-          nanometresToSource: (nanometres) =>
-            nanometresToGlobal(
-              nanometres,
+          sourceScale: () => {
+            const { inputSpace } =
+              loadedSubsource.loadedDataSource.transform.value;
+            const nanometresPerUnit = nanometresPerGlobalUnit(inputSpace);
+            return nanometresPerUnit === undefined
+              ? undefined
+              : {
+                  rank: inputSpace.rank,
+                  nanometresPerUnit: Array.from(nanometresPerUnit),
+                };
+          },
+          sourceToNanometres: (point) =>
+            globalToNanometres(
+              point,
               loadedSubsource.loadedDataSource.transform.value.inputSpace,
             ),
           makeAnnotationState: (subsubsourceId, color, properties, options) => {
@@ -5930,7 +5962,17 @@ void main() {
           clearHover: () => {
             layer.annotationDisplayState.hoverState.value = undefined;
           },
-          scheduleFrame: (callback) => requestAnimationFrame(callback),
+          // After the paint, so a "Loading…" set before a heavy redraw shows first.
+          scheduleFrame: (callback) =>
+            requestAnimationFrame(() => setTimeout(callback)),
+          armPlacement: (annotationState, type) => {
+            layer.tool.value =
+              type === AnnotationType.LINE
+                ? new TableLineTool(layer, annotationState)
+                : new TablePointTool(layer, annotationState);
+          },
+          disarmPlacement,
+          armedPlacement,
         },
         state.annotationTables,
       ),

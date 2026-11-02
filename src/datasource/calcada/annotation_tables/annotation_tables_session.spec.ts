@@ -10,6 +10,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
+import type { Annotation } from "#src/annotation/index.js";
+import { AnnotationType } from "#src/annotation/index.js";
 import {
   makeCoordinateSpace,
   makeIdentityTransform,
@@ -33,6 +35,10 @@ import {
   CalcadaAnnotationTablesSession,
   MAX_ANNOTATION_ROOTS,
   MAX_DRAWN_ANNOTATIONS,
+  PLACE_NO_WRITE_NOTE,
+  PLACE_ONE_TABLE_NOTE,
+  PLACE_PAST_NOTE,
+  PLACE_POINT_COUNT_NOTE,
   RootFailures,
   TABLE_ABSENT_AT_TIMESTAMP_NOTE,
   TABLE_UNLISTED_NOTE,
@@ -46,6 +52,7 @@ import {
   assignColorSlots,
   classifyAnnotationError,
   describeAnnotationRow,
+  nanometresToTableVoxels,
   planAnnotationFetches,
   visibleAnnotationRoots,
   visibleRootsNote,
@@ -424,6 +431,7 @@ describe("RootFailures", () => {
   });
 });
 
+const HTTP_FORBIDDEN = 403;
 const HTTP_NOT_FOUND = 404;
 const HTTP_SERVER_ERROR = 500;
 const ROUTER_NOT_FOUND_BODY = "404 page not found";
@@ -434,6 +442,7 @@ const ROW_IDS = /[?&]ids=([\d,]+)/;
 const SIZE_FILTER = { filter_greater_dict: { size: 3 } };
 const POINT_NAMES = ["at", "to", "via"];
 const NO_ROOT_INDEX = -1;
+const CREATED_ROW_ID = 900n;
 
 const tableRow = (name: string, canWrite: boolean) => ({
   table_name: name,
@@ -482,14 +491,14 @@ interface FakeRequest {
   tables: string[];
 }
 
-function pointsJson(rows: FakeRow[]) {
+function pointsJson(rows: FakeRow[], pointNames: readonly string[]) {
   const rowRoots = [...new Set(rows.flatMap(({ roots }) => roots))];
   const columns = Math.max(0, ...rows.map(({ roots }) => roots.length));
   return {
     ids: rows.map(({ id }) => String(id)),
     values: rows.map(() => 0),
     roots: rowRoots.map(String),
-    points: POINT_NAMES.slice(0, columns).map((name, column) => ({
+    points: pointNames.slice(0, columns).map((name, column) => ({
       name,
       positions: rows.flatMap(() => [1, 2, 3]),
       root_index: rows.map(({ roots }) =>
@@ -501,14 +510,17 @@ function pointsJson(rows: FakeRow[]) {
   };
 }
 
-const rowJson = ({ id, roots, payload = {} }: FakeRow) => ({
+const rowJson = (
+  { id, roots, payload = {} }: FakeRow,
+  pointNames: readonly string[],
+) => ({
   id: String(id),
   value: 0,
   payload,
   schema_version: 1,
   points: Object.fromEntries(
     roots.map((root, role) => [
-      POINT_NAMES[role],
+      pointNames[role],
       { position: [1, 2, 3], piece_id: "1", root_id: String(root) },
     ]),
   ),
@@ -525,6 +537,10 @@ function fakeGraph(
     /** Overrides the row count a count request answers. */
     countOf?: (root: bigint | undefined, table: string) => number | undefined;
     canWrite?: boolean;
+    pointNames?: readonly string[];
+    /** The root every created row's points land on. */
+    createdOn?: bigint;
+    jsonSchema?: Record<string, unknown>;
   } = {},
 ) {
   const {
@@ -533,7 +549,12 @@ function fakeGraph(
     rows: rowsOf = (root) => (root === undefined ? [] : [row(root, root)]),
     countOf = () => undefined,
     canWrite = false,
+    pointNames = POINT_NAMES,
+    createdOn = 10n,
+    jsonSchema = {},
   } = options;
+  const created: FakeRow[] = [];
+  const creates: { table: string; body: unknown }[] = [];
   const requests: FakeRequest[] = [];
   const bodies: Record<string, unknown>[] = [];
   const held: (() => void)[] = [];
@@ -541,7 +562,12 @@ function fakeGraph(
   const answeredRows = new Map<string, FakeRow>();
   const deletes: { table: string; ids: string[] }[] = [];
   const liveRows: RowsOf = (root, table, filter) =>
-    rowsOf(root, table, filter).filter(({ id }) => !deleted.has(id));
+    [
+      ...rowsOf(root, table, filter),
+      ...created.filter(
+        ({ roots }) => root === undefined || roots.includes(root),
+      ),
+    ].filter(({ id }) => !deleted.has(id));
   const answer = (
     endpoint: Endpoint,
     root: bigint | undefined,
@@ -554,13 +580,14 @@ function fakeGraph(
     }
     return endpoint === "count"
       ? { count: countOf(root, table) ?? tableRows.length }
-      : pointsJson(tableRows);
+      : pointsJson(tableRows, pointNames);
   };
   const graph = {
     requests,
     bodies,
     held,
     deletes,
+    creates,
     hold: (_read: HeldRead, _scope: bigint | string) => false,
     failRows: false,
     failPoints: false,
@@ -574,12 +601,16 @@ function fakeGraph(
       }
       if (url.includes("/annotation/schemas/")) {
         return jsonResponse({
-          points: POINT_NAMES.map((name, role) => ({ name, role })),
+          points: pointNames.map((name, role) => ({ name, role })),
+          json_schema: jsonSchema,
         });
       }
       const segment = SEGMENT_URL.exec(url);
       const [, tableName, tableEndpoint] = TABLE_URL.exec(url) ?? [];
       if (tableEndpoint === "annotations") {
+        if (init?.method === "POST") {
+          return createRow(tableName, JSON.parse(String(init.body)));
+        }
         return init?.method === "DELETE"
           ? deleteRows(tableName, JSON.parse(String(init.body)).ids)
           : readRows(tableName, url);
@@ -633,7 +664,17 @@ function fakeGraph(
       await new Promise<void>((done) => held.push(done));
     }
     if (graph.failRows) throw httpError(HTTP_SERVER_ERROR, "boom");
-    return jsonResponse({ annotations: found.map(rowJson) });
+    return jsonResponse({
+      annotations: found.map((answered) => rowJson(answered, pointNames)),
+    });
+  };
+  const createRow = (table: string, body: unknown) => {
+    creates.push({ table, body });
+    const id = CREATED_ROW_ID + BigInt(created.length);
+    const createdRow = row(id, ...pointNames.map(() => createdOn));
+    created.push(createdRow);
+    answeredRows.set(String(id), createdRow);
+    return jsonResponse({ ids: [String(id)] });
   };
   const deleteRows = (table: string, ids: string[]) => {
     deletes.push({ table, ids });
@@ -680,6 +721,15 @@ function startSession(
     (oldRoots: Iterable<bigint>, newRoots: Iterable<bigint>) => void
   >();
   const selectAnnotation = vi.fn();
+  const armedPlacement = new WatchableValue<AnnotationLayerState | undefined>(
+    undefined,
+  );
+  const armPlacement = vi.fn((state: AnnotationLayerState) => {
+    armedPlacement.value = state;
+  });
+  const disarmPlacement = vi.fn(() => {
+    armedPlacement.value = undefined;
+  });
   const moveToAnnotation = vi.fn();
   const makeListElement = vi.fn();
   const renderListHeader = vi.fn();
@@ -695,7 +745,11 @@ function startSession(
     timestamp: new WatchableValue<number | undefined>(options.timestamp),
     visibleSegments,
     graphEdited,
-    nanometresToSource: (nanometres) => Float32Array.from(nanometres),
+    sourceScale: () => UNIT_SCALE,
+    sourceToNanometres: ([x, y, z]) => [x, y, z],
+    armPlacement,
+    disarmPlacement,
+    armedPlacement,
     makeAnnotationState: (
       subsubsourceId,
       _color,
@@ -739,7 +793,7 @@ function startSession(
   const statusOf = (table: string) =>
     session.status.value.find((status) => status.table === table);
   const drawnIds = (table: string) =>
-    session.drawn.value
+    drawnItems(session)
       .filter((item) => item.table === table)
       .map((item) => item.id);
   return {
@@ -755,11 +809,25 @@ function startSession(
     makeListElement,
     renderListHeader,
     selectedAnnotation,
+    armPlacement,
+    disarmPlacement,
     visibleSegments,
     graphEdited,
     statusOf,
   };
 }
+
+const UNRELATED_ROOT = 990n;
+const SIZED_SCHEMA = {
+  properties: { size: { type: "number" }, kind: { type: "string" } },
+  required: ["size"],
+};
+const UNIT_SCALE = { rank: 3, nanometresPerUnit: [1, 1, 1] };
+
+const drawnItems = (session: CalcadaAnnotationTablesSession) =>
+  Array.from({ length: session.drawn.value.length }, (_, index) =>
+    session.drawn.value.at(index),
+  );
 
 const frames: (() => void)[] = [];
 const drawFrames = () => {
@@ -837,7 +905,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       "More than 1 000 000 annotations in the selected tables (syn: 600 000, mark: 400 001). Add a filter or deselect a table.",
     );
     expect(requested(graph, "points")).toEqual([]);
-    expect(session.drawn.value).toEqual([]);
+    expect(drawnItems(session)).toEqual([]);
     expect(drawn.get("syn")).toEqual([]);
     expect(drawn.get("mark")).toEqual([]);
     expect(session.totals.value.byTable).toEqual(
@@ -929,7 +997,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     ]);
     expect(requested(graph, "points")).toEqual([]);
     expect(session.limitNote.value).toContain("(whole: 2, syn: 1 000 000)");
-    expect(session.drawn.value).toEqual([]);
+    expect(drawnItems(session)).toEqual([]);
   });
 
   it("delete drops the row from every scope and a points answer sent before the delete is dropped", async () => {
@@ -1068,7 +1136,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     const { session, sources, selectAnnotation, visibleSegments } =
       startSession(graph, { ticked: ["syn"], visible: [10n] });
     await settle();
-    const [item] = session.drawn.value;
+    const [item] = drawnItems(session);
     session.select(item);
     expect(selectAnnotation).toHaveBeenCalledTimes(1);
     await settle();
@@ -1079,7 +1147,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(sources.get("syn")!.get("syn:10")?.description).toBe(description);
     graph.failRows = true;
     selectAnnotation.mockClear();
-    const other = session.drawn.value.find(({ id }) => id === 20n)!;
+    const other = drawnItems(session).find(({ id }) => id === 20n)!;
     session.select(other);
     await settle();
     expect(selectAnnotation).toHaveBeenCalledTimes(1);
@@ -1091,7 +1159,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     const { session, state, sources, layerStates, makeListElement } =
       startSession(graph, { ticked: ["syn"], visible: [10n] });
     await settle();
-    const [item] = session.drawn.value;
+    const [item] = drawnItems(session);
     const entry = [{} as HTMLElement, [1]];
     makeListElement.mockReturnValue(entry);
     expect(session.makeListElement(item)).toBe(entry);
@@ -1110,7 +1178,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       { ticked: ["syn"], visible: [10n] },
     );
     await settle();
-    const [item] = session.drawn.value;
+    const [item] = drawnItems(session);
     const header = {} as HTMLElement;
     const columnWidths = {} as AnnotationListColumnWidths;
     expect(session.renderListHeader(item, header, columnWidths)).toBe(true);
@@ -1121,6 +1189,35 @@ describe("CalcadaAnnotationTablesSession", () => {
     );
     state.setTicked([]);
     expect(session.renderListHeader(item, header, columnWidths)).toBe(false);
+  });
+
+  it("selectAdjacent steps through the drawn rows and stops at the ends", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session, layerStates, moveToAnnotation, selectedAnnotation } =
+      startSession(graph, { ticked: ["syn"], visible: [10n, 20n, 30n] });
+    await settle();
+    const stepped = vi.fn();
+    session.selectionStepped.add(stepped);
+    const movedTo = () => moveToAnnotation.mock.lastCall?.[1].id;
+    const selectRow = (rowId: bigint) => {
+      selectedAnnotation.value = {
+        annotationId: `syn:${rowId}`,
+        annotationLayerState: layerStates.get("syn")!,
+      };
+    };
+
+    session.selectAdjacent(-1);
+    expect(movedTo()).toBe("syn:30");
+    session.selectAdjacent(1);
+    expect(movedTo()).toBe("syn:10");
+    selectRow(10n);
+    session.selectAdjacent(1);
+    expect(movedTo()).toBe("syn:20");
+    expect(stepped).toHaveBeenLastCalledWith(1);
+    selectRow(30n);
+    moveToAnnotation.mockClear();
+    session.selectAdjacent(1);
+    expect(moveToAnnotation).not.toHaveBeenCalled();
   });
 
   it("knows the selected item and gives the selected one its details", async () => {
@@ -1136,7 +1233,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       },
     );
     await settle();
-    const [first, second] = session.drawn.value;
+    const [first, second] = drawnItems(session);
     selectedAnnotation.value = {
       annotationId: first.layerId,
       annotationLayerState: layerStates.get("syn")!,
@@ -1163,7 +1260,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     });
     await settle();
     graph.hold = (read) => read === "rows";
-    const [first, second] = session.drawn.value;
+    const [first, second] = drawnItems(session);
     session.select(first);
     session.select(second);
     await settle();
@@ -1372,7 +1469,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       visible: [20n, 10n],
     });
     await settle();
-    expect(session.drawn.value.map(({ table, id }) => [table, id])).toEqual([
+    expect(drawnItems(session).map(({ table, id }) => [table, id])).toEqual([
       ["syn", 7n],
       ["syn", 10n],
       ["syn", 20n],
@@ -1380,7 +1477,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       ["mark", 21n],
     ]);
     expect(drawn.get("syn")!.filter((a) => a.id === "syn:7")).toHaveLength(1);
-    expect(session.drawn.value[0].layerId).toBe("syn:7");
+    expect(drawnItems(session)[0].layerId).toBe("syn:7");
   });
 
   it("selects or moves to a drawn annotation only while its table is selected", async () => {
@@ -1388,7 +1485,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     const { session, state, layerStates, selectAnnotation, moveToAnnotation } =
       startSession(graph, { ticked: ["syn"], visible: [10n] });
     await settle();
-    const [item] = session.drawn.value;
+    const [item] = drawnItems(session);
     const drawnItem = expect.objectContaining({ id: item.layerId });
     session.select(item);
     expect(selectAnnotation).toHaveBeenCalledWith(
@@ -1426,15 +1523,46 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(graph.held).toHaveLength(3);
     const published = vi.fn();
     session.drawn.changed.add(published);
-    const reordered = vi.fn();
-    sources.get("syn")!.childrenReordered.add(reordered);
+    const redrawn = vi.fn();
+    sources.get("syn")!.changed.add(redrawn);
     graph.held.forEach((release) => release());
     await vi.advanceTimersByTimeAsync(VISIBLE_SEGMENTS_DEBOUNCE_MS);
     expect(frames).toHaveLength(1);
     drawFrames();
     expect(published).toHaveBeenCalledTimes(1);
-    expect(reordered).toHaveBeenCalledTimes(1);
-    expect(session.drawn.value).toHaveLength(6);
+    expect(redrawn).toHaveBeenCalledTimes(1);
+    expect(drawnItems(session)).toHaveLength(6);
+  });
+
+  it("is loading while its points are on their way and until they are drawn", async () => {
+    const graph = fakeGraph(["syn"]);
+    graph.hold = (read) => read === "points";
+    const { statusOf, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(statusOf("syn")?.loading).toBe(true);
+    graph.held.forEach((release) => release());
+    await vi.advanceTimersByTimeAsync(VISIBLE_SEGMENTS_DEBOUNCE_MS);
+    expect(frames).toHaveLength(1);
+    expect(statusOf("syn")?.loading).toBe(true);
+    drawFrames();
+    expect(drawnIds("syn")).toEqual([10n]);
+    expect(statusOf("syn")?.loading).toBe(false);
+  });
+
+  it("is not loading once nothing is drawn because of the limit", async () => {
+    const graph = fakeGraph(["syn"], {
+      countOf: () => MAX_DRAWN_ANNOTATIONS + 1,
+    });
+    const { session, statusOf } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.limitNote.value).toBeDefined();
+    expect(statusOf("syn")?.loading).toBe(false);
   });
 
   it("redraws a table once, after the points of its last root arrive", async () => {
@@ -1446,13 +1574,60 @@ describe("CalcadaAnnotationTablesSession", () => {
     });
     await settle();
     expect(graph.held).toHaveLength(3);
-    const replaceAll = vi.spyOn(sources.get("syn")!, "replaceAll");
+    const showRows = vi.spyOn(sources.get("syn")!, "showRows");
     for (const release of graph.held) {
       release();
       await settle();
     }
-    expect(replaceAll).toHaveBeenCalledTimes(1);
+    expect(showRows).toHaveBeenCalledTimes(1);
     expect(drawnIds("syn")).toEqual([10n, 20n, 30n]);
+  });
+
+  it("a second redraw with the same fetched points does not touch the source", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { sources, drawnIds, graphEdited, session } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    const showRows = vi.spyOn(sources.get("syn")!, "showRows");
+    const published = vi.fn();
+    session.drawn.changed.add(published);
+    graphEdited.dispatch([UNRELATED_ROOT], [UNRELATED_ROOT + 1n]);
+    await settle();
+    expect(showRows).not.toHaveBeenCalled();
+    expect(published).not.toHaveBeenCalled();
+    expect(drawnIds("syn")).toEqual([10n]);
+  });
+
+  it("a redraw after new points does reach the source", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { sources, drawnIds, visibleSegments } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    const showRows = vi.spyOn(sources.get("syn")!, "showRows");
+    visibleSegments.add(20n);
+    await settle();
+    expect(showRows).toHaveBeenCalledTimes(1);
+    expect(drawnIds("syn")).toEqual([10n, 20n]);
+  });
+
+  it("an unticked table leaves drawn and the source empty, and is drawn again when ticked", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session, state, sources, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    state.setTicked([]);
+    await settle();
+    expect(drawnItems(session)).toEqual([]);
+    expect([...sources.get("syn")!]).toEqual([]);
+    state.setTicked(["syn"]);
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n]);
   });
 
   it("redraws what arrived once the last missing root counts zero", async () => {
@@ -1487,7 +1662,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     });
     await settle();
     const [first, second, last] = graph.held;
-    const replaceAll = vi.spyOn(sources.get("syn")!, "replaceAll");
+    const showRows = vi.spyOn(sources.get("syn")!, "showRows");
     first();
     second();
     await settle();
@@ -1495,7 +1670,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     graph.failPoints = true;
     last();
     await settle();
-    expect(replaceAll).toHaveBeenCalledTimes(1);
+    expect(showRows).toHaveBeenCalledTimes(1);
     expect(drawnIds("syn")).toEqual([10n, 20n]);
     expect(statusOf("syn")?.error).toBeDefined();
   });
@@ -1511,5 +1686,270 @@ describe("CalcadaAnnotationTablesSession", () => {
     await settle();
     expect(drawn.get("syn")).toHaveLength(3);
     expect(statusOf("syn")).toMatchObject({ annotations: 1, fetchedRoots: 1 });
+  });
+
+  describe("placing", () => {
+    const SINGLE_POINT = ["at"];
+    const LINE_POINTS = ["pre", "post"];
+    const placedPoint = (point: number[]): Annotation => ({
+      id: "",
+      type: AnnotationType.POINT,
+      point: Float32Array.from(point),
+      relatedSegments: [BigUint64Array.of()],
+      properties: [0],
+    });
+
+    it("is allowed for one writable table of one or two points, and says why not otherwise", async () => {
+      const line = startSession(
+        fakeGraph(["syn", "mark"], { canWrite: true, pointNames: LINE_POINTS }),
+        { ticked: ["syn"], visible: [10n] },
+      );
+      await settle();
+      expect(line.session.placement.value).toEqual({
+        table: "syn",
+        type: AnnotationType.LINE,
+      });
+      line.state.setTicked(["syn", "mark"]);
+      expect(line.session.placement.value).toEqual({
+        blockedBy: PLACE_ONE_TABLE_NOTE,
+      });
+      line.state.setTicked([]);
+      expect(line.session.placement.value).toBeUndefined();
+
+      const cases = [
+        [
+          { canWrite: false, pointNames: SINGLE_POINT },
+          {},
+          PLACE_NO_WRITE_NOTE,
+        ],
+        [
+          { canWrite: true, pointNames: SINGLE_POINT },
+          { timestamp: EXPLICIT_TIMESTAMP_MS },
+          PLACE_PAST_NOTE,
+        ],
+        [{ canWrite: true }, {}, PLACE_POINT_COUNT_NOTE],
+      ] as const;
+      for (const [graphOptions, sessionOptions, note] of cases) {
+        const { session } = startSession(fakeGraph(["syn"], graphOptions), {
+          ticked: ["syn"],
+          visible: [10n],
+          ...sessionOptions,
+        });
+        await settle();
+        expect(session.placement.value).toEqual({ blockedBy: note });
+      }
+    });
+
+    it("arms NG's tool on the table and takes it off when the table may no longer be added to", async () => {
+      const { session, state, layerStates, armPlacement, disarmPlacement } =
+        startSession(
+          fakeGraph(["syn", "mark"], {
+            canWrite: true,
+            pointNames: SINGLE_POINT,
+          }),
+          { ticked: ["syn"], visible: [10n] },
+        );
+      await settle();
+      session.togglePlacing();
+      expect(armPlacement).toHaveBeenCalledExactlyOnceWith(
+        layerStates.get("syn"),
+        AnnotationType.POINT,
+      );
+      expect(session.isPlacing()).toBe(true);
+      session.togglePlacing();
+      expect(session.isPlacing()).toBe(false);
+      session.togglePlacing();
+      disarmPlacement.mockClear();
+      state.setTicked(["syn", "mark"]);
+      expect(disarmPlacement).toHaveBeenCalled();
+      expect(session.isPlacing()).toBe(false);
+    });
+
+    it("writes a placed point in table voxels, rereads only its root and selects its row", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+        createdOn: 10n,
+      });
+      const {
+        sources,
+        drawnIds,
+        selectedAnnotation,
+        selectAnnotation,
+        layerStates,
+      } = startSession(graph, { ticked: ["syn"], visible: [10n, 20n] });
+      await settle();
+      graph.requests.length = 0;
+      const source = sources.get("syn")!;
+      const reference = source.add(placedPoint([5.5, 6.5, 7.9]));
+      selectedAnnotation.value = {
+        annotationId: reference.id,
+        annotationLayerState: layerStates.get("syn")!,
+      };
+      await settle();
+      expect(graph.creates).toEqual([
+        {
+          table: "syn",
+          body: {
+            annotations: [
+              { points: { at: { position: [5, 6, 7] } }, payload: {} },
+            ],
+          },
+        },
+      ]);
+      await settle();
+      expect(requested(graph, "points")).toEqual([
+        { endpoint: "points", scope: 10n, tables: ["syn"] },
+      ]);
+      expect(drawnIds("syn")).toEqual([10n, 20n, CREATED_ROW_ID]);
+      expect(source.get(reference.id)).toBeUndefined();
+      expect(selectAnnotation).toHaveBeenLastCalledWith(
+        layerStates.get("syn"),
+        source.get(`syn:${CREATED_ROW_ID}`),
+      );
+      reference.dispose();
+    });
+
+    it("a placed row carries the payload typed for new rows", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+        jsonSchema: SIZED_SCHEMA,
+      });
+      const { session, sources } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n],
+      });
+      await settle();
+      session.setNewRowValue("size", 2.5);
+      session.setNewRowValue("kind", "spine");
+      session.setNewRowValue("kind", undefined);
+      const reference = sources.get("syn")!.add(placedPoint([1, 1, 1]));
+      await settle();
+      expect(graph.creates).toEqual([
+        {
+          table: "syn",
+          body: {
+            annotations: [
+              {
+                points: { at: { position: [1, 1, 1] } },
+                payload: { size: 2.5 },
+              },
+            ],
+          },
+        },
+      ]);
+      reference.dispose();
+    });
+
+    it("arms only once every required property is filled, and disarms when one is cleared", async () => {
+      const { session, armPlacement, disarmPlacement } = startSession(
+        fakeGraph(["syn"], {
+          canWrite: true,
+          pointNames: SINGLE_POINT,
+          jsonSchema: SIZED_SCHEMA,
+        }),
+        { ticked: ["syn"], visible: [10n] },
+      );
+      await settle();
+      expect(session.missingRequired()).toEqual(["size"]);
+      session.togglePlacing();
+      expect(armPlacement).not.toHaveBeenCalled();
+      session.setNewRowValue("size", 1);
+      expect(session.missingRequired()).toEqual([]);
+      session.togglePlacing();
+      expect(session.isPlacing()).toBe(true);
+      disarmPlacement.mockClear();
+      session.setNewRowValue("size", undefined);
+      expect(disarmPlacement).toHaveBeenCalled();
+      expect(session.isPlacing()).toBe(false);
+    });
+
+    it("forgets the typed payload when another table is the one to add to", async () => {
+      const { session, state } = startSession(
+        fakeGraph(["syn", "mark"], {
+          canWrite: true,
+          pointNames: SINGLE_POINT,
+          jsonSchema: SIZED_SCHEMA,
+        }),
+        { ticked: ["syn"], visible: [10n] },
+      );
+      await settle();
+      session.setNewRowValue("size", 1);
+      state.setTicked(["mark"]);
+      await settle();
+      expect(session.newRowPayload.value).toEqual({});
+    });
+
+    it("a point written onto a root out of view leaves the placed one even with no new points", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+        createdOn: UNRELATED_ROOT,
+      });
+      const { sources } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n],
+      });
+      await settle();
+      const source = sources.get("syn")!;
+      const reference = source.add(placedPoint([1, 1, 1]));
+      await settle();
+      await settle();
+      expect(graph.creates).toHaveLength(1);
+      expect(source.get(reference.id)).toBeUndefined();
+      reference.dispose();
+    });
+
+    it("a write the server forbids says so and keeps the table ticked", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+      });
+      const { state, sources, statusOf } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n],
+      });
+      await settle();
+      graph.fetchOkImpl.mockImplementationOnce(async () => {
+        throw httpError(HTTP_FORBIDDEN, "forbidden");
+      });
+      const reference = sources.get("syn")!.add(placedPoint([1, 1, 1]));
+      await settle();
+      expect(statusOf("syn")?.error).toBe(
+        "No write permission on annotation table syn",
+      );
+      expect(state.ticked).toEqual(["syn"]);
+      reference.dispose();
+    });
+
+    it("a refused write shows the table's error and leaves nothing placed", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+      });
+      const { sources, statusOf } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n],
+      });
+      await settle();
+      graph.fetchOkImpl.mockImplementationOnce(async () => {
+        throw httpError(HTTP_SERVER_ERROR, "no piece at this position");
+      });
+      const source = sources.get("syn")!;
+      const reference = source.add(placedPoint([1, 1, 1]));
+      await settle();
+      expect(source.get(reference.id)).toBeUndefined();
+      expect(statusOf("syn")?.error).toContain("no piece at this position");
+      reference.dispose();
+    });
+  });
+});
+
+describe("nanometresToTableVoxels", () => {
+  it("is the voxel holding the point", () => {
+    expect(nanometresToTableVoxels([17, 9.9, 81], [8, 4, 40])).toEqual([
+      2, 2, 2,
+    ]);
   });
 });
