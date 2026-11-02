@@ -561,6 +561,7 @@ describe("deleteAnnotationRows", () => {
     ).catch((e) => e);
     expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
     expect(forbidden.table).toBe("a");
+    expect(forbidden.message).toBe("No write permission on annotation table a");
     const missing = await deleteAnnotationRows(
       vi.fn(() => failing(404, "annotation table not found")),
       BASE,
@@ -627,7 +628,7 @@ describe("createAnnotationRow", () => {
     );
   });
 
-  it("maps 403 to the table's forbidden error", async () => {
+  it("maps 403 to the table's forbidden error, naming write", async () => {
     const forbidden = await createAnnotationRow(
       vi.fn(() => failing(403, "forbidden")),
       BASE,
@@ -636,6 +637,7 @@ describe("createAnnotationRow", () => {
       {},
     ).catch((e) => e);
     expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
+    expect(forbidden.message).toBe("No write permission on annotation table a");
   });
 });
 

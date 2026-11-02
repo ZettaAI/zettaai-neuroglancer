@@ -431,6 +431,7 @@ describe("RootFailures", () => {
   });
 });
 
+const HTTP_FORBIDDEN = 403;
 const HTTP_NOT_FOUND = 404;
 const HTTP_SERVER_ERROR = 500;
 const ROUTER_NOT_FOUND_BODY = "404 page not found";
@@ -1897,6 +1898,28 @@ describe("CalcadaAnnotationTablesSession", () => {
       await settle();
       expect(graph.creates).toHaveLength(1);
       expect(source.get(reference.id)).toBeUndefined();
+      reference.dispose();
+    });
+
+    it("a write the server forbids says so and keeps the table ticked", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+      });
+      const { state, sources, statusOf } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n],
+      });
+      await settle();
+      graph.fetchOkImpl.mockImplementationOnce(async () => {
+        throw httpError(HTTP_FORBIDDEN, "forbidden");
+      });
+      const reference = sources.get("syn")!.add(placedPoint([1, 1, 1]));
+      await settle();
+      expect(statusOf("syn")?.error).toBe(
+        "No write permission on annotation table syn",
+      );
+      expect(state.ticked).toEqual(["syn"]);
       reference.dispose();
     });
 

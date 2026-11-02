@@ -111,9 +111,14 @@ interface AnnotationSchema {
 
 export type SchemaCache = Map<string, Promise<AnnotationSchema>>;
 
+type TableAccess = "read" | "write";
+
 export class AnnotationTableForbidden extends Error {
-  constructor(readonly table: string) {
-    super(`No read permission on annotation table ${table}`);
+  constructor(
+    readonly table: string,
+    readonly access: TableAccess = "read",
+  ) {
+    super(`No ${access} permission on annotation table ${table}`);
     this.name = "AnnotationTableForbidden";
   }
 }
@@ -371,6 +376,7 @@ async function fetchTableOk(
   url: string,
   init: RequestInit | undefined,
   tableNames: string[],
+  access: TableAccess = "read",
 ): Promise<Response> {
   try {
     return await fetchOk(url, init);
@@ -379,6 +385,7 @@ async function fetchTableOk(
       if (error.status === HTTP_FORBIDDEN) {
         throw new AnnotationTableForbidden(
           namedTable(await errorMessageOf(error)) ?? tableNames.join(","),
+          access,
         );
       }
       if (error.status === HTTP_NOT_FOUND) {
@@ -613,6 +620,7 @@ export async function createAnnotationRow(
         body: JSON.stringify({ annotations: [{ points, payload }] }),
       },
       [table],
+      "write",
     );
   } catch (error) {
     if (!(error instanceof HttpError)) throw error;
@@ -637,5 +645,6 @@ export async function deleteAnnotationRows(
     `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
     { method: "DELETE", body: JSON.stringify({ ids: ids.map(String) }) },
     [table],
+    "write",
   );
 }
