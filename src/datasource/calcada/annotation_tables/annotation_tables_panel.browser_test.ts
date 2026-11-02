@@ -14,13 +14,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import "#src/datasource/calcada/calcada.css";
 
 import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
-import { AnnotationType } from "#src/annotation/index.js";
+import {
+  AnnotationType,
+  annotationTypeHandlers,
+} from "#src/annotation/index.js";
 import {
   makeCoordinateSpace,
   makeIdentityTransform,
   WatchableCoordinateSpaceTransform,
 } from "#src/coordinate_transform.js";
-import type { AnnotationTableInfo } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
+import type {
+  AnnotationPayload,
+  AnnotationPayloadValue,
+  AnnotationTableInfo,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import type { AnnotationTablesPanelConnection } from "#src/datasource/calcada/annotation_tables/annotation_tables_panel.js";
 import {
   ANNOTATION_ROW_HINT,
@@ -29,7 +36,6 @@ import {
 import type {
   AnnotationTableStatus,
   AnnotationTotals,
-  DrawnAnnotation,
   TablePlacement,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import {
@@ -39,6 +45,10 @@ import {
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import { ANNOTATION_TABLES_TAB_LABEL } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
+import type {
+  DrawnAnnotation,
+  DrawnRows,
+} from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WatchableValue } from "#src/trackable_value.js";
@@ -100,6 +110,7 @@ const synapses: AnnotationTableInfo = {
   voxelResolution: [4, 4, 40],
   points: ["pre", "post"],
   properties: { size: "integer", tag: "string" },
+  requiredProperties: [],
   canWrite: false,
 };
 const nuclei: AnnotationTableInfo = {
@@ -110,6 +121,7 @@ const nuclei: AnnotationTableInfo = {
   voxelResolution: [4, 4, 40],
   points: ["center"],
   properties: {},
+  requiredProperties: [],
   canWrite: false,
 };
 
@@ -127,6 +139,23 @@ const drawnAnnotation = (table: string, id: bigint): DrawnAnnotation => ({
   layerId: `${table}:${id}`,
   id,
   value: Number(id % 100n) / 100,
+});
+
+/** The panel's view of drawn rows, over a plain list. */
+const drawnList = (items: DrawnAnnotation[]): DrawnRows => ({
+  length: items.length,
+  at: (index) => items[index],
+  isSameRow: (index, other, otherIndex) => {
+    const item = items[index];
+    const otherItem = other.at(otherIndex);
+    return item.table === otherItem.table && item.id === otherItem.id;
+  },
+  indexOf: (table, layerId) => {
+    const index = items.findIndex(
+      (item) => item.table === table && item.layerId === layerId,
+    );
+    return index === -1 ? undefined : index;
+  },
 });
 
 const drawnRun = (table: string, length: number) =>
@@ -202,7 +231,7 @@ const nativeListElement = (
 class FakeSession {
   readonly tables: WatchableValue<AnnotationTableInfo[] | undefined>;
   readonly status = new WatchableValue<AnnotationTableStatus[]>([]);
-  readonly drawn = new WatchableValue<DrawnAnnotation[]>([]);
+  readonly drawn = new WatchableValue<DrawnRows>(drawnList([]));
   readonly listError = new WatchableValue<string | undefined>(undefined);
   readonly rootsNote = new WatchableValue<string | undefined>(undefined);
   readonly limitNote = new WatchableValue<string | undefined>(undefined);
@@ -224,6 +253,14 @@ class FakeSession {
     undefined,
   );
   readonly placingChanged = new NullarySignal();
+  readonly newRowPayload = new WatchableValue<AnnotationPayload>({});
+  readonly setNewRowValue = vi.fn(
+    (name: string, value: AnnotationPayloadValue | undefined) => {
+      const { [name]: _replaced, ...others } = this.newRowPayload.value;
+      this.newRowPayload.value =
+        value === undefined ? others : { ...others, [name]: value };
+    },
+  );
   placing = false;
   readonly togglePlacing = vi.fn(() => {
     this.placing = !this.placing;
@@ -271,6 +308,15 @@ class FakeSession {
 
   isPlacing() {
     return this.placing;
+  }
+
+  missingRequired() {
+    const table = this.tables.value?.find(
+      ({ name }) => name === this.placement.value?.table,
+    );
+    return (table?.requiredProperties ?? []).filter(
+      (name) => !(name in this.newRowPayload.value),
+    );
   }
 
   isSelected(item: DrawnAnnotation) {
@@ -492,7 +538,9 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = [drawnAnnotation("synapses", BEYOND_SAFE_INTEGER_ID)];
+    session.drawn.value = drawnList([
+      drawnAnnotation("synapses", BEYOND_SAFE_INTEGER_ID),
+    ]);
     await mountPanel(connection);
     const [row] = await renderedRows(1);
     const icon = row.querySelector<HTMLElement>(
@@ -509,7 +557,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     expect(buttonLabelled("Previous page")).toBeUndefined();
@@ -522,7 +570,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [status({ table: "synapses", annotations: LONG_LIST_LENGTH })],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     const list = annotationList()!;
@@ -544,7 +592,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [status({ table: "synapses", annotations: 10 })],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     const list = annotationList()!;
@@ -566,7 +614,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     const list = annotationList()!;
@@ -576,9 +624,8 @@ describe("CalcadaAnnotationTablesPanel", () => {
     const scrolled = list.scrollTop;
     const heightBefore = list.scrollHeight;
     const firstShown = listRows()[0].dataset.annotationId;
-    session.drawn.value = drawnRun(
-      "synapses",
-      LONG_LIST_LENGTH + APPENDED_ROWS,
+    session.drawn.value = drawnList(
+      drawnRun("synapses", LONG_LIST_LENGTH + APPENDED_ROWS),
     );
     await vi.waitFor(() =>
       expect(list.scrollHeight).toBeGreaterThan(heightBefore),
@@ -594,7 +641,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     const list = annotationList()!;
@@ -617,10 +664,10 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = [
+    session.drawn.value = drawnList([
       drawnAnnotation("synapses", WIDE_ID),
       drawnAnnotation("synapses", NARROW_ID),
-    ];
+    ]);
     await mountPanel(connection);
     const rows = await renderedRows(2);
     const view = listView()!;
@@ -629,7 +676,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
     for (const row of [...rows, listHeader()!]) {
       expect(row.style.getPropertyValue(FIRST_COLUMN_WIDTH)).toBe("");
     }
-    session.drawn.value = [drawnAnnotation("synapses", NARROW_ID)];
+    session.drawn.value = drawnList([drawnAnnotation("synapses", NARROW_ID)]);
     await renderedRows(1);
     expect(view.style.getPropertyValue(FIRST_COLUMN_WIDTH)).toBe(wide);
     session.listCoordinatesChanged.dispatch();
@@ -646,7 +693,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     const header = listHeader()!;
@@ -711,7 +758,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses"],
     );
-    session.drawn.value = [drawnAnnotation("synapses", 1n)];
+    session.drawn.value = drawnList([drawnAnnotation("synapses", 1n)]);
     await mountPanel(connection);
     await renderedRows(1);
     annotationList()!.dispatchEvent(new MouseEvent("mouseleave"));
@@ -746,7 +793,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       drawnAnnotation("synapses", 1n),
       drawnAnnotation("synapses", 2n),
     ];
-    session.drawn.value = [first, second];
+    session.drawn.value = drawnList([first, second]);
     session.selectedId.value = first.layerId;
     await mountPanel(connection);
     const rows = await renderedRows(2);
@@ -767,7 +814,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [status({ table: "synapses", annotations: LONG_LIST_LENGTH })],
       ["synapses"],
     );
-    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
     session.selectionStepped.dispatch(LONG_LIST_LENGTH - 1);
@@ -776,7 +823,16 @@ describe("CalcadaAnnotationTablesPanel", () => {
     );
   });
 
-  it("adds to the one writable table: the button arms and disarms placing", async () => {
+  const placeButton = (label: string) =>
+    vi.waitFor(() => {
+      const found = tab.querySelector<HTMLButtonElement>(
+        `button[aria-label="${label}"]`,
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+
+  it("offers NG's point and line tools; the table's type arms and disarms placing", async () => {
     const { connection, session } = makeConnection(
       [{ ...synapses, canWrite: true }],
       [],
@@ -787,24 +843,26 @@ describe("CalcadaAnnotationTablesPanel", () => {
       type: AnnotationType.LINE,
     };
     await mountPanel(connection);
-    const button = await vi.waitFor(() => {
-      const found = [...tab.querySelectorAll("button")].find(
-        (candidate) => candidate.textContent === "Add line",
-      );
-      expect(found).toBeDefined();
-      return found!;
-    });
-    expect(button.disabled).toBe(false);
-    expect(button.getAttribute("aria-pressed")).toBe("false");
-    await userEvent.click(button);
+    const line = await placeButton("Add line");
+    const point = await placeButton("Add point");
+    expect(line.textContent).toBe(
+      annotationTypeHandlers[AnnotationType.LINE].icon,
+    );
+    expect(point.textContent).toBe(
+      annotationTypeHandlers[AnnotationType.POINT].icon,
+    );
+    expect(point.disabled).toBe(true);
+    expect(line.disabled).toBe(false);
+    expect(line.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(line);
     expect(session.togglePlacing).toHaveBeenCalledTimes(1);
     await vi.waitFor(() =>
-      expect(button.getAttribute("aria-pressed")).toBe("true"),
+      expect(line.getAttribute("aria-pressed")).toBe("true"),
     );
     expect(tab.textContent).toContain("Ctrl+click in a view to place");
   });
 
-  it("shows the placing button disabled with the reason", async () => {
+  it("shows the tools disabled with the reason", async () => {
     const { connection, session } = makeConnection(
       [synapses, nuclei],
       [],
@@ -812,15 +870,60 @@ describe("CalcadaAnnotationTablesPanel", () => {
     );
     session.placement.value = { blockedBy: PLACE_ONE_TABLE_NOTE };
     await mountPanel(connection);
-    const button = await vi.waitFor(() => {
-      const found = [...tab.querySelectorAll("button")].find(
-        (candidate) => candidate.textContent === "Add annotation",
+    expect((await placeButton("Add line")).disabled).toBe(true);
+    expect((await placeButton("Add point")).disabled).toBe(true);
+    expect(tab.textContent).toContain(PLACE_ONE_TABLE_NOTE);
+  });
+
+  it("asks for the payload of new rows and adds only once the required part is typed", async () => {
+    const { connection, session } = makeConnection(
+      [{ ...synapses, canWrite: true, requiredProperties: ["size"] }],
+      [],
+      ["synapses"],
+    );
+    session.placement.value = {
+      table: "synapses",
+      type: AnnotationType.LINE,
+    };
+    await mountPanel(connection);
+    const line = await placeButton("Add line");
+    expect(line.disabled).toBe(true);
+    expect(tab.textContent).toContain("Fill in size to add");
+    const size = tab.querySelector<HTMLInputElement>(
+      'input[aria-label="size (required)"]',
+    )!;
+    await userEvent.type(size, "12");
+    expect(session.setNewRowValue).toHaveBeenLastCalledWith("size", 12);
+    await vi.waitFor(() => expect(line.disabled).toBe(false));
+    const tag = tab.querySelector<HTMLInputElement>('input[aria-label="tag"]')!;
+    await userEvent.type(tag, "spine");
+    expect(session.newRowPayload.value).toEqual({ size: 12, tag: "spine" });
+    await userEvent.clear(size);
+    expect(session.setNewRowValue).toHaveBeenLastCalledWith("size", undefined);
+    await vi.waitFor(() => expect(line.disabled).toBe(true));
+  });
+
+  it("takes no fraction for an integer property", async () => {
+    const { connection, session } = makeConnection(
+      [{ ...synapses, canWrite: true }],
+      [],
+      ["synapses"],
+    );
+    session.placement.value = {
+      table: "synapses",
+      type: AnnotationType.LINE,
+    };
+    await mountPanel(connection);
+    const size = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLInputElement>(
+        'input[aria-label="size"]',
       );
-      expect(found).toBeDefined();
+      expect(found).not.toBeNull();
       return found!;
     });
-    expect(button.disabled).toBe(true);
-    expect(tab.textContent).toContain(PLACE_ONE_TABLE_NOTE);
+    await userEvent.type(size, "1.5");
+    expect(session.setNewRowValue).toHaveBeenLastCalledWith("size", undefined);
+    expect(size.getAttribute("aria-invalid")).toBe("true");
   });
 
   it("says a table is loading beside its count, and alone before any count", async () => {
@@ -866,7 +969,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       total: MAX_DRAWN_ANNOTATIONS + 1,
       byTable: new Map([["synapses", MAX_DRAWN_ANNOTATIONS + 1]]),
     })!;
-    session.drawn.value = [drawnAnnotation("synapses", 1n)];
+    session.drawn.value = drawnList([drawnAnnotation("synapses", 1n)]);
     session.limitNote.value = note;
     await mountPanel(connection);
     expect(tab.textContent).toContain(note);
@@ -883,10 +986,10 @@ describe("CalcadaAnnotationTablesPanel", () => {
       [],
       ["synapses", "nuclei"],
     );
-    session.drawn.value = [
+    session.drawn.value = drawnList([
       drawnAnnotation("synapses", 1n),
       drawnAnnotation("nuclei", 2n),
-    ];
+    ]);
     await mountPanel(connection);
     const [readOnlyRow, writableRow] = await renderedRows(2);
     const deleteButton = ".neuroglancer-annotation-list-entry-delete";
@@ -926,7 +1029,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
       ["synapses", "nuclei"],
     );
     const target = drawnAnnotation("nuclei", 7n);
-    session.drawn.value = [drawnAnnotation("synapses", 1n), target];
+    session.drawn.value = drawnList([drawnAnnotation("synapses", 1n), target]);
     await mountPanel(connection);
     const rows = await renderedRows(2);
     expect(annotationList()!.title).toBe(ANNOTATION_ROW_HINT);
@@ -1170,7 +1273,9 @@ describe("CalcadaAnnotationTablesPanel", () => {
       ],
       ["synapses", "nuclei"],
     );
-    session.drawn.value = [drawnAnnotation("synapses", BEYOND_SAFE_INTEGER_ID)];
+    session.drawn.value = drawnList([
+      drawnAnnotation("synapses", BEYOND_SAFE_INTEGER_ID),
+    ]);
     await mountPanel(connection);
     await renderedRows(1);
     const tabRight = tab.getBoundingClientRect().right;

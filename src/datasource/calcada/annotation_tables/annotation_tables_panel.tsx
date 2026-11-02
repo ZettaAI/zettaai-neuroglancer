@@ -11,24 +11,34 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { AnnotationType } from "#src/annotation/index.js";
+import {
+  AnnotationType,
+  annotationTypeHandlers,
+} from "#src/annotation/index.js";
 import {
   conditionCount,
   filterFields,
 } from "#src/datasource/calcada/annotation_tables/annotation_filter.js";
 import { AnnotationFilterEditor } from "#src/datasource/calcada/annotation_tables/annotation_filter_editor.js";
 import type {
+  AnnotationPayload,
+  AnnotationPayloadValue,
+  AnnotationPropertyType,
   AnnotationTableFilter,
   AnnotationTableInfo,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import type {
   AnnotationTableStatus,
   AnnotationTotals,
-  DrawnAnnotation,
   PlacementType,
   TablePlacement,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { formatCount } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import type {
+  DrawnAnnotation,
+  DrawnRows,
+} from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
+import { NO_DRAWN_ROWS } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -54,6 +64,7 @@ import {
   ComboboxValue,
   useComboboxAnchor,
 } from "@/components/ui/combobox";
+import { Input } from "@/components/ui/input";
 import {
   Popover,
   PopoverContent,
@@ -67,16 +78,29 @@ const SELECTED_ENTRY_CLASS = "neuroglancer-annotation-selected";
 const LOADING_TEXT = "Loading…";
 
 const PLACEMENT_HINT = "Ctrl+click in a view to place";
+const PLACEMENT_TYPES: readonly PlacementType[] = [
+  AnnotationType.POINT,
+  AnnotationType.LINE,
+];
 const PLACEMENT_LABELS = new Map<PlacementType, string>([
   [AnnotationType.POINT, "Add point"],
   [AnnotationType.LINE, "Add line"],
 ]);
-const BLOCKED_PLACEMENT_LABEL = "Add annotation";
+const OTHER_TYPE_HINT = "The table's rows are another kind of annotation";
+const FILL_IN_PREFIX = "Fill in ";
+const FILL_IN_SUFFIX = " to add";
+const REQUIRED_MARK = " *";
+const REQUIRED_LABEL_SUFFIX = " (required)";
+const TRUE_TEXT = "true";
+const BOOLEAN_CHOICES = ["", TRUE_TEXT, "false"];
+const UNSET_CHOICE_LABEL = "—";
+const INTEGER_STEP = 1;
+const ANY_STEP = "any";
 
 export interface AnnotationTablesPanelSession {
   readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
   readonly status: WatchableValueInterface<AnnotationTableStatus[]>;
-  readonly drawn: WatchableValueInterface<DrawnAnnotation[]>;
+  readonly drawn: WatchableValueInterface<DrawnRows>;
   readonly listError: WatchableValueInterface<string | undefined>;
   readonly rootsNote: WatchableValueInterface<string | undefined>;
   readonly limitNote: WatchableValueInterface<string | undefined>;
@@ -85,6 +109,10 @@ export interface AnnotationTablesPanelSession {
   readonly placingChanged: ReadonlySignal<() => void>;
   isPlacing(): boolean;
   togglePlacing(): void;
+  readonly newRowPayload: WatchableValueInterface<AnnotationPayload>;
+  setNewRowValue(name: string, value: AnnotationPayloadValue | undefined): void;
+  /** Required properties of the placement table not yet typed. */
+  missingRequired(): string[];
   tableColor(name: string): vec3;
   readonly colorsChanged: ReadonlySignal<() => void>;
   refreshTables(): void;
@@ -196,32 +224,136 @@ function TablePicker({
   );
 }
 
+function parsePayloadText(
+  type: AnnotationPropertyType,
+  text: string,
+): AnnotationPayloadValue | undefined {
+  if (text === "") return undefined;
+  switch (type) {
+    case "string":
+      return text;
+    case "boolean":
+      return text === TRUE_TEXT;
+    case "integer":
+    case "number": {
+      const parsed = Number(text);
+      const valid =
+        Number.isFinite(parsed) &&
+        (type === "number" || Number.isInteger(parsed));
+      return valid ? parsed : undefined;
+    }
+  }
+}
+
+function PayloadField({
+  name,
+  type,
+  required,
+  onValue,
+}: {
+  name: string;
+  type: AnnotationPropertyType;
+  required: boolean;
+  onValue: (value: AnnotationPayloadValue | undefined) => void;
+}) {
+  const [text, setText] = useState("");
+  const label = required ? `${name}${REQUIRED_LABEL_SUFFIX}` : name;
+  const change = (next: string) => {
+    setText(next);
+    onValue(parsePayloadText(type, next));
+  };
+  const invalid = text !== "" && parsePayloadText(type, text) === undefined;
+  return (
+    <label className="calcada-annotations-payload-field">
+      <span>
+        {name}
+        {required && REQUIRED_MARK}
+      </span>
+      {type === "boolean" ? (
+        <select
+          aria-label={label}
+          className="calcada-annotations-payload-value"
+          value={text}
+          onChange={(event) => change(event.target.value)}
+        >
+          {BOOLEAN_CHOICES.map((choice) => (
+            <option key={choice} value={choice}>
+              {choice === "" ? UNSET_CHOICE_LABEL : choice}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <Input
+          aria-label={label}
+          aria-invalid={invalid}
+          className="calcada-annotations-payload-value"
+          type={type === "string" ? "text" : "number"}
+          step={type === "integer" ? INTEGER_STEP : ANY_STEP}
+          value={text}
+          onChange={(event) => change(event.target.value)}
+        />
+      )}
+    </label>
+  );
+}
+
 function PlacementControl({
   placement,
+  info,
   placing,
+  missing,
   onToggle,
+  onValue,
 }: {
   placement: TablePlacement;
+  info: AnnotationTableInfo | undefined;
   placing: boolean;
+  missing: readonly string[];
   onToggle: () => void;
+  onValue: (name: string, value: AnnotationPayloadValue | undefined) => void;
 }) {
   const { type, blockedBy } = placement;
+  const missingNote =
+    missing.length > 0
+      ? `${FILL_IN_PREFIX}${missing.join(", ")}${FILL_IN_SUFFIX}`
+      : undefined;
   return (
     <div className="calcada-annotations-place">
-      <Button
-        size="sm"
-        variant={placing ? "default" : "outline"}
-        aria-pressed={placing}
-        disabled={blockedBy !== undefined}
-        title={PLACEMENT_HINT}
-        onClick={onToggle}
-      >
-        {type === undefined
-          ? BLOCKED_PLACEMENT_LABEL
-          : PLACEMENT_LABELS.get(type)}
-      </Button>
+      <div className="calcada-annotations-place-tools" role="toolbar">
+        {PLACEMENT_TYPES.map((toolType) => {
+          const label = PLACEMENT_LABELS.get(toolType)!;
+          const pressed = placing && type === toolType;
+          return (
+            <Button
+              key={toolType}
+              size="icon-sm"
+              variant={pressed ? "default" : "outline"}
+              aria-label={label}
+              aria-pressed={pressed}
+              title={type === toolType ? label : OTHER_TYPE_HINT}
+              disabled={type !== toolType || missingNote !== undefined}
+              onClick={onToggle}
+            >
+              {annotationTypeHandlers[toolType].icon}
+            </Button>
+          );
+        })}
+      </div>
+      {info !== undefined && (
+        <div className="calcada-annotations-payload" key={info.name}>
+          {Object.entries(info.properties).map(([name, propertyType]) => (
+            <PayloadField
+              key={name}
+              name={name}
+              type={propertyType}
+              required={info.requiredProperties.includes(name)}
+              onValue={(value) => onValue(name, value)}
+            />
+          ))}
+        </div>
+      )}
       <span className="calcada-annotations-empty">
-        {blockedBy ?? (placing ? PLACEMENT_HINT : undefined)}
+        {blockedBy ?? missingNote ?? (placing ? PLACEMENT_HINT : undefined)}
       </span>
     </div>
   );
@@ -341,27 +473,23 @@ function TableStatusLine({
   );
 }
 
-type DrawnKey = Pick<DrawnAnnotation, "table" | "layerId">;
-
-const isSameDrawn = (a: DrawnKey, b: DrawnKey) =>
-  a.table === b.table && a.layerId === b.layerId;
-
 /** One splice from `before` to `after` that keeps their common ends; none if equal. */
 function drawnSplice(
-  before: readonly DrawnAnnotation[],
-  after: readonly DrawnAnnotation[],
+  before: DrawnRows,
+  after: DrawnRows,
 ): ArraySpliceOp | undefined {
   const shorter = Math.min(before.length, after.length);
   let prefix = 0;
-  while (prefix < shorter && isSameDrawn(before[prefix], after[prefix])) {
+  while (prefix < shorter && before.isSameRow(prefix, after, prefix)) {
     ++prefix;
   }
   let suffix = 0;
   while (
     suffix < shorter - prefix &&
-    isSameDrawn(
-      before[before.length - 1 - suffix],
-      after[after.length - 1 - suffix],
+    before.isSameRow(
+      before.length - 1 - suffix,
+      after,
+      after.length - 1 - suffix,
     )
   ) {
     ++suffix;
@@ -380,10 +508,10 @@ class DrawnAnnotationListView extends RefCounted {
   readonly element = document.createElement("div");
   private readonly header = document.createElement("div");
   private headerShown = false;
-  private items: readonly DrawnAnnotation[] = [];
+  private items = NO_DRAWN_ROWS;
   private readonly source = {
     length: 0,
-    render: (index: number) => this.render(this.items[index]),
+    render: (index: number) => this.render(this.items.at(index)),
     changed: new Signal<(splices: ArraySpliceOp[]) => void>(),
     renderChanged: new NullarySignal(),
   } satisfies VirtualListSource;
@@ -421,7 +549,7 @@ class DrawnAnnotationListView extends RefCounted {
     );
   }
 
-  show(items: readonly DrawnAnnotation[]) {
+  show(items: DrawnRows) {
     const splice = drawnSplice(this.items, items);
     this.items = items;
     this.source.length = items.length;
@@ -432,7 +560,7 @@ class DrawnAnnotationListView extends RefCounted {
     this.list.forEachRenderedItem((element, index) =>
       element.classList.toggle(
         SELECTED_ENTRY_CLASS,
-        this.session.isSelected(this.items[index]),
+        this.session.isSelected(this.items.at(index)),
       ),
     );
   }
@@ -473,7 +601,7 @@ function DrawnAnnotationList({
   drawn,
 }: {
   session: AnnotationTablesPanelSession;
-  drawn: readonly DrawnAnnotation[];
+  drawn: DrawnRows;
 }) {
   const holder = useRef<HTMLDivElement>(null);
   const view = useRef<DrawnAnnotationListView>(undefined);
@@ -506,6 +634,7 @@ export function CalcadaAnnotationTablesPanel({
   const limitNote = useWatchable(session.limitNote);
   const totals = useWatchable(session.totals);
   const placement = useWatchable(session.placement);
+  useSignalRerender(session.newRowPayload.changed);
   useSignalRerender(session.placingChanged);
   const infoByName = new Map(tables?.map((table) => [table.name, table]));
   const orphans = statuses.filter(
@@ -594,8 +723,11 @@ export function CalcadaAnnotationTablesPanel({
         {placement !== undefined && (
           <PlacementControl
             placement={placement}
+            info={tables?.find(({ name }) => name === placement.table)}
             placing={session.isPlacing()}
+            missing={session.missingRequired()}
             onToggle={() => session.togglePlacing()}
+            onValue={(name, value) => session.setNewRowValue(name, value)}
           />
         )}
         {limitNote !== undefined && (

@@ -45,6 +45,8 @@ export const ANNOTATION_PROPERTY_TYPES = [
   "boolean",
 ] as const;
 export type AnnotationPropertyType = (typeof ANNOTATION_PROPERTY_TYPES)[number];
+export type AnnotationPayloadValue = number | string | boolean;
+export type AnnotationPayload = Record<string, AnnotationPayloadValue>;
 
 export interface AnnotationTableInfo {
   name: string;
@@ -54,6 +56,8 @@ export interface AnnotationTableInfo {
   voxelResolution: [number, number, number];
   points: string[];
   properties: Record<string, AnnotationPropertyType>;
+  /** Typed properties every new row must carry. */
+  requiredProperties: string[];
   canWrite: boolean;
 }
 
@@ -102,6 +106,7 @@ export interface TablePoints {
 interface AnnotationSchema {
   points: string[];
   properties: Record<string, AnnotationPropertyType>;
+  requiredProperties: string[];
 }
 
 export type SchemaCache = Map<string, Promise<AnnotationSchema>>;
@@ -188,6 +193,17 @@ function parseSchemaProperties(
   return properties;
 }
 
+function parseRequiredProperties(jsonSchema: unknown): string[] {
+  const properties = parseSchemaProperties(jsonSchema);
+  const required = verifyOptionalObjectProperty(
+    jsonSchema,
+    "required",
+    (value) => expectArray(value).map(verifyString),
+    [],
+  );
+  return required.filter((name) => name in properties);
+}
+
 function parseSchema(body: unknown): AnnotationSchema {
   const roles = expectArray(verifyObjectProperty(body, "points", (v) => v)).map(
     (p) => ({
@@ -202,6 +218,12 @@ function parseSchema(body: unknown): AnnotationSchema {
       "json_schema",
       parseSchemaProperties,
       {},
+    ),
+    requiredProperties: verifyOptionalObjectProperty(
+      body,
+      "json_schema",
+      parseRequiredProperties,
+      [],
     ),
   };
 }
@@ -262,7 +284,7 @@ export async function listAnnotationTables(
         "schema_version",
         verifyNonnegativeInt,
       );
-      const { points, properties } = await schemaDefinition(
+      const { points, properties, requiredProperties } = await schemaDefinition(
         fetchOk,
         baseUrl,
         schemaName,
@@ -281,6 +303,7 @@ export async function listAnnotationTables(
         ],
         points,
         properties,
+        requiredProperties,
         // Older servers send no access; they then allow no delete here.
         canWrite: verifyOptionalObjectProperty(
           row,
@@ -575,6 +598,7 @@ export async function createAnnotationRow(
   baseUrl: string,
   table: string,
   positions: ReadonlyMap<string, readonly number[]>,
+  payload: AnnotationPayload,
 ): Promise<bigint> {
   const points = Object.fromEntries(
     [...positions].map(([name, position]) => [name, { position }]),
@@ -586,7 +610,7 @@ export async function createAnnotationRow(
       `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
       {
         method: "POST",
-        body: JSON.stringify({ annotations: [{ points, payload: {} }] }),
+        body: JSON.stringify({ annotations: [{ points, payload }] }),
       },
       [table],
     );

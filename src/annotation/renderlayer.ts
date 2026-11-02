@@ -41,10 +41,9 @@ import {
 } from "#src/annotation/frontend_source.js";
 import type {
   AnnotationBase,
-  SerializedAnnotations,
+  RenderedAnnotations,
 } from "#src/annotation/index.js";
 import {
-  AnnotationSerializer,
   AnnotationSource,
   AnnotationType,
   annotationTypes,
@@ -166,21 +165,6 @@ function segmentationFilter(
   };
 }
 
-function serializeAnnotationSet(
-  annotationSet: AnnotationSource,
-  filter?: (annotation: AnnotationBase) => boolean,
-) {
-  const serializer = new AnnotationSerializer(
-    annotationSet.annotationPropertySerializers,
-  );
-  for (const annotation of annotationSet) {
-    if (filter === undefined || filter(annotation)) {
-      serializer.add(annotation);
-    }
-  }
-  return serializer.serialize();
-}
-
 @registerSharedObjectOwner(ANNOTATION_RENDER_LAYER_RPC_ID)
 class AnnotationLayerSharedObject extends withSharedVisibility(
   ChunkRenderLayerFrontend,
@@ -239,7 +223,7 @@ export class AnnotationLayer extends RefCounted {
   private generation = -1;
 
   redrawNeeded = new NullarySignal();
-  serializedAnnotations: SerializedAnnotations | undefined = undefined;
+  serializedAnnotations: RenderedAnnotations | undefined = undefined;
 
   get source() {
     return this.state.source;
@@ -373,8 +357,7 @@ export class AnnotationLayer extends RefCounted {
         }
         this.generation = generation;
         const serializedAnnotations = (this.serializedAnnotations =
-          serializeAnnotationSet(
-            source,
+          source.serializeForRender(
             segmentationFilter(this.segmentationStates.value),
           ));
         buffer.setData(this.serializedAnnotations.data);
@@ -385,7 +368,7 @@ export class AnnotationLayer extends RefCounted {
 }
 
 interface AnnotationGeometryDataInterface {
-  serializedAnnotations: SerializedAnnotations;
+  serializedAnnotations: RenderedAnnotations;
   buffer: GLBuffer;
   numPickIds: number;
 }
@@ -761,7 +744,7 @@ function AnnotationRenderLayer<
               pickedOffset -
               typeToInstanceCount[annotationIndex] * pickIdsPerInstance;
           }
-          const id = ids[annotationIndex];
+          const id = ids.at(annotationIndex)!;
           mouseState.pickedAnnotationId = id;
           mouseState.pickedAnnotationLayer = this.base.state;
           mouseState.pickedOffset = partIndex;

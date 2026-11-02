@@ -10,12 +10,27 @@
 
 import type {
   Annotation,
+  AnnotationBase,
   AnnotationPropertySpec,
   AnnotationId,
   AnnotationReference,
+  RenderedAnnotations,
 } from "#src/annotation/index.js";
-import { LocalAnnotationSource } from "#src/annotation/index.js";
+import {
+  AnnotationType,
+  LocalAnnotationSource,
+} from "#src/annotation/index.js";
 import type { WatchableCoordinateSpaceTransform } from "#src/coordinate_transform.js";
+import { serializeTableRows } from "#src/datasource/calcada/annotation_tables/table_render_buffer.js";
+import type { TableRows } from "#src/datasource/calcada/annotation_tables/table_rows.js";
+import {
+  annotationOfInstance,
+  EMPTY_TABLE_ROWS,
+  instanceCount,
+  instanceOfId,
+  rowOfInstance,
+  withoutRow,
+} from "#src/datasource/calcada/annotation_tables/table_rows.js";
 import type { WatchableValue } from "#src/trackable_value.js";
 
 export interface TableAnnotationSourceOptions {
@@ -26,17 +41,21 @@ export interface TableAnnotationSourceOptions {
 }
 
 /**
- * A local source that takes a whole table at once and writes server-first.
- * The rows belong to the server, so NG's edits of them (moving, editing a
- * description, changing the property schema) are ignored; placing a new
- * annotation and deleting one stay.
+ * A local source that takes a whole table at once as columns and writes
+ * server-first. A row's annotation is made only when asked for. The rows
+ * belong to the server, so NG's edits of them (moving, editing a description,
+ * changing the property schema) are ignored; placing a new annotation and
+ * deleting one stay. Placed annotations live in `annotationMap`.
  */
 export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
+  listedInAnnotationList = false;
+  private tableRows = EMPTY_TABLE_ROWS("");
+  private readonly descriptions = new Map<AnnotationId, string>();
   private readonly onDelete: TableAnnotationSourceOptions["onDelete"];
   private readonly onCreate: TableAnnotationSourceOptions["onCreate"];
   private readonly deletesInFlight = new Map<AnnotationId, Promise<void>>();
   // Placed here and not yet drawn from the server, so carried across
-  // replaceAll; once written, the id its row is drawn under.
+  // showRows; once written, the id its row is drawn under.
   private readonly placed = new Map<AnnotationId, AnnotationId | undefined>();
 
   constructor(
@@ -52,23 +71,59 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     Object.defineProperty(this, "readonly", { get: isReadonly });
   }
 
-  replaceAll(annotations: readonly Annotation[]) {
+  get rows(): TableRows {
+    return this.tableRows;
+  }
+
+  showRows(rows: TableRows) {
     this.ensureUpdated();
-    const placed = [...this.placed.keys()].flatMap(
-      (id) => this.annotationMap.get(id) ?? [],
-    );
-    this.annotationMap = new Map(
-      [...annotations, ...placed].map((annotation) => [
-        annotation.id,
-        annotation,
-      ]),
-    );
-    for (const reference of this.references.values()) {
-      reference.value = this.annotationMap.get(reference.id) ?? null;
-      reference.changed.dispatch();
+    this.tableRows = rows;
+    for (const id of this.descriptions.keys()) {
+      if (instanceOfId(rows, id) === undefined) this.descriptions.delete(id);
     }
+    for (const id of this.annotationMap.keys()) {
+      if (!this.placed.has(id)) this.annotationMap.delete(id);
+    }
+    this.refreshReferences();
     this.changed.dispatch();
-    this.childrenReordered.dispatch();
+  }
+
+  get(id: AnnotationId): Annotation | undefined {
+    this.ensureUpdated();
+    return this.annotationMap.get(id) ?? this.rowAnnotation(id);
+  }
+
+  getReference(id: AnnotationId): AnnotationReference {
+    const reference = super.getReference(id);
+    reference.value ??= this.get(id) ?? null;
+    return reference;
+  }
+
+  *[Symbol.iterator](): Generator<Annotation> {
+    this.ensureUpdated();
+    const rows = this.tableRows;
+    for (let instance = 0; instance < instanceCount(rows); ++instance) {
+      yield this.described(annotationOfInstance(rows, instance));
+    }
+    yield* this.annotationMap.values();
+  }
+
+  serializeForRender(
+    filter: ((annotation: AnnotationBase) => boolean) | undefined,
+  ): RenderedAnnotations {
+    this.ensureUpdated();
+    const placed = [...this.annotationMap.values()];
+    if (
+      filter !== undefined ||
+      placed.some(({ type }) => type === AnnotationType.POLYLINE)
+    ) {
+      return super.serializeForRender(filter);
+    }
+    return serializeTableRows(
+      this.tableRows,
+      placed,
+      this.annotationPropertySerializers,
+    );
   }
 
   /**
@@ -81,16 +136,37 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
       return;
     }
     const described = { ...annotation, description };
-    this.annotationMap.set(id, described);
+    if (this.annotationMap.has(id)) this.annotationMap.set(id, described);
+    else this.descriptions.set(id, description);
     const reference = this.references.get(id);
     if (reference === undefined) return;
     reference.value = described;
     reference.changed.dispatch();
   }
 
+  private rowAnnotation(id: AnnotationId): Annotation | undefined {
+    const instance = instanceOfId(this.tableRows, id);
+    if (instance === undefined) return undefined;
+    return this.described(annotationOfInstance(this.tableRows, instance));
+  }
+
+  private described(annotation: Annotation): Annotation {
+    const description = this.descriptions.get(annotation.id);
+    return description === undefined
+      ? annotation
+      : { ...annotation, description };
+  }
+
+  private refreshReferences() {
+    for (const reference of this.references.values()) {
+      reference.value = this.get(reference.id) ?? null;
+      reference.changed.dispatch();
+    }
+  }
+
   /**
    * Placed annotations whose rows are written, each with the id its row is
-   * drawn under. They are no longer carried: the next replaceAll drops them.
+   * drawn under. They are no longer carried: the next showRows drops them.
    */
   takeWritten(): Map<AnnotationId, AnnotationId> {
     const written = new Map<AnnotationId, AnnotationId>();
@@ -102,7 +178,12 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     return written;
   }
 
-  /** Placed annotations, written or not, go with the next replaceAll. */
+  /** Some placed annotation's row is written and waits to be handed over. */
+  hasWritten(): boolean {
+    return [...this.placed.values()].some((rowId) => rowId !== undefined);
+  }
+
+  /** Placed annotations, written or not, go with the next showRows. */
   discardPlaced() {
     this.placed.clear();
     this.pending.clear();
@@ -161,11 +242,24 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
   ) {
     try {
       await this.onDelete(annotation);
-      if (this.annotationMap.has(reference.id)) super.delete(reference);
+      this.dropRow(reference.id);
     } finally {
       this.deletesInFlight.delete(reference.id);
       reference.dispose();
     }
+  }
+
+  private dropRow(id: AnnotationId) {
+    const instance = instanceOfId(this.tableRows, id);
+    if (instance === undefined) return;
+    this.tableRows = withoutRow(
+      this.tableRows,
+      rowOfInstance(this.tableRows, instance),
+    );
+    this.descriptions.delete(id);
+    this.refreshReferences();
+    this.changed.dispatch();
+    this.childDeleted.dispatch(id);
   }
 
   private write(id: AnnotationId) {

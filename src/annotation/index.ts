@@ -1388,6 +1388,8 @@ export class AnnotationSource
 
   public pending = new Set<AnnotationId>();
 
+  listedInAnnotationList = true;
+
   protected rank_: number;
 
   get rank() {
@@ -1494,9 +1496,23 @@ export class AnnotationSource
     return true;
   }
 
-  [Symbol.iterator]() {
+  [Symbol.iterator](): Iterator<Annotation> {
     this.ensureUpdated();
     return this.annotationMap.values();
+  }
+
+  serializeForRender(
+    filter: ((annotation: AnnotationBase) => boolean) | undefined,
+  ): RenderedAnnotations {
+    const serializer = new AnnotationSerializer(
+      this.annotationPropertySerializers,
+    );
+    for (const annotation of this) {
+      if (filter === undefined || filter(annotation)) {
+        serializer.add(annotation);
+      }
+    }
+    return serializer.serialize();
   }
 
   get(id: AnnotationId) {
@@ -1813,6 +1829,23 @@ export interface SerializedAnnotations {
   typeToIdMaps: Map<string, number>[];
   typeToSize: number[];
 }
+
+export interface AnnotationIdsByIndex {
+  readonly length: number;
+  at(index: number): string | undefined;
+}
+
+export interface AnnotationIndexById {
+  get(id: string): number | undefined;
+}
+
+export type RenderedAnnotations = Omit<
+  SerializedAnnotations,
+  "typeToIds" | "typeToIdMaps"
+> & {
+  typeToIds: AnnotationIdsByIndex[];
+  typeToIdMaps: AnnotationIndexById[];
+};
 
 function serializeAnnotations(
   allAnnotations: Annotation[][],

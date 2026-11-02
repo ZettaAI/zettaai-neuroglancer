@@ -348,6 +348,11 @@ export interface SelectedListAnnotation {
   annotationLayerState: AnnotationLayerState;
 }
 
+function isListedInAnnotationList(state: AnnotationLayerState) {
+  const { source } = state;
+  return !(source instanceof AnnotationSource) || source.listedInAnnotationList;
+}
+
 /** The layer's selected annotation, when it belongs to one of the states. */
 export function selectedListAnnotation(
   layer: Borrowed<UserLayerWithAnnotations>,
@@ -536,7 +541,7 @@ export class AnnotationLayerView extends Tab {
         info.refCounted.dispose();
       }
     }
-    for (const state of states) {
+    for (const state of states.filter(isListedInAnnotationList)) {
       const info = attachedAnnotationStates.get(state);
       if (info !== undefined) {
         newAttachedAnnotationStates.set(state, info);
@@ -2213,9 +2218,11 @@ export function UserLayerWithAnnotationsMixin<
       const context = this.getSelectedAnnotationContext();
       if (context === undefined) return;
       const { annotationLayerState, annotationId } = context;
-      const entries = this.annotationStates.states.flatMap((state) =>
-        Array.from(state.source, (annotation) => ({ annotation, state })),
-      );
+      const entries = this.annotationStates.states
+        .filter(isListedInAnnotationList)
+        .flatMap((state) =>
+          Array.from(state.source, (annotation) => ({ annotation, state })),
+        );
       const selectedIndex = entries.findIndex(
         (entry) =>
           entry.state === annotationLayerState &&

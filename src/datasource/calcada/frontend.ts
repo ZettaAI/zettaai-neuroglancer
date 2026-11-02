@@ -141,6 +141,7 @@ import {
   FilterLibrary,
 } from "#src/datasource/calcada/filter_library.js";
 import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
+import { nanometresPerGlobalUnit } from "#src/datasource/calcada/global_nanometres.js";
 import { appendCoordParams } from "#src/datasource/calcada/graph_coordinates.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
@@ -5901,11 +5902,17 @@ void main() {
           timestamp: segmentsState.timestamp,
           visibleSegments: segmentsState.visibleSegments,
           graphEdited: this.graphEdited,
-          nanometresToSource: (nanometres) =>
-            nanometresToGlobal(
-              nanometres,
-              loadedSubsource.loadedDataSource.transform.value.inputSpace,
-            ),
+          sourceScale: () => {
+            const { inputSpace } =
+              loadedSubsource.loadedDataSource.transform.value;
+            const nanometresPerUnit = nanometresPerGlobalUnit(inputSpace);
+            return nanometresPerUnit === undefined
+              ? undefined
+              : {
+                  rank: inputSpace.rank,
+                  nanometresPerUnit: Array.from(nanometresPerUnit),
+                };
+          },
           sourceToNanometres: (point) =>
             globalToNanometres(
               point,

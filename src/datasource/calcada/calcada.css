@@ -1639,6 +1639,29 @@
   gap: 6px;
 }
 
+.calcada-annotations-place-tools {
+  display: flex;
+  gap: 4px;
+}
+
+.calcada-annotations-payload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.calcada-annotations-payload-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-annotations-payload-value {
+  width: 7em;
+}
+
 .calcada-annotations-picker {
   min-width: 0;
 }
