@@ -66,12 +66,3 @@
   width: calc(var(--nge-control-w-narrow) + var(--nge-space-5));
   text-align: center;
 }
-
-/* The keys sit under the label, so they take no width from the slider. */
-.neuroglancer-brush-size-label {
-  display: inline-flex;
-  flex-direction: column;
-  flex: none;
-  align-items: flex-start;
-  gap: var(--nge-space-1);
-}

@@ -21,7 +21,6 @@ import { effectiveEditKeybinds } from "#src/editing/session_hotkey_binder.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { ParamInput } from "#src/editing/ui/tool_settings/param_input.js";
 import { ParamLabel } from "#src/editing/ui/tool_settings/param_label.js";
-import { ShortcutKeys } from "#src/ui/key_caps.js";
 import "#src/editing/ui/tool_settings/brush_size_field.css";
 
 /** Parse a typed size into a valid brush size, or null if empty/invalid. */
@@ -82,25 +81,16 @@ export function BrushSizeField({
       onPointerDownCapture={onSelect}
       onFocusCapture={onSelect}
     >
-      <span class="neuroglancer-brush-size-label">
-        <ParamLabel
-          text="Size"
-          hint={hint}
-          setting
-          shortcut={{
-            keys: keys.sizeDecrease,
-            pairKeys: keys.sizeIncrease,
-            label: "Size",
-          }}
-        />
-        <ShortcutKeys
-          shortcut={{
-            keys: keys.sizeDecrease,
-            pairKeys: keys.sizeIncrease,
-            label: "Size",
-          }}
-        />
-      </span>
+      <ParamLabel
+        text="Size"
+        hint={hint}
+        setting
+        shortcut={{
+          keys: keys.sizeDecrease,
+          pairKeys: keys.sizeIncrease,
+          label: "Size",
+        }}
+      />
       <span class="neuroglancer-brush-size-scale">
         <input
           type="range"
