@@ -1,0 +1,201 @@
+/**
+ * @license
+ * Copyright 2026 Calcada AI / Zetta AI
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ */
+
+/* Placed by the viewer over the data panels, never over a side panel. */
+.neuroglancer-mode-strip-mount {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.neuroglancer-mode-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nge-space-2) var(--nge-space-5);
+  box-sizing: border-box;
+  max-width: calc(100% - var(--nge-space-6) * 2);
+  padding: var(--nge-space-3) var(--nge-space-5);
+  background: var(--nge-overlay-bg);
+  border: 1px solid var(--nge-border-strong);
+  border-radius: var(--nge-radius-md);
+  box-shadow: var(--nge-overlay-shadow);
+  color: var(--nge-text-subtle);
+  font-family: var(--nge-font);
+  font-size: var(--nge-text-size);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.neuroglancer-mode-strip-title {
+  padding-right: var(--nge-space-5);
+  border-right: 1px solid var(--nge-border);
+  color: var(--nge-accent-fg-soft);
+  font-weight: 700;
+}
+
+.neuroglancer-mode-strip-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nge-space-2);
+}
+
+.neuroglancer-mode-strip-close {
+  padding: 0 var(--nge-space-1);
+  background: none;
+  border: 0;
+  color: var(--nge-text-faint);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.neuroglancer-mode-strip-close:hover {
+  color: var(--nge-text);
+}
+
+.neuroglancer-shortcut-sheet {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 1000;
+  display: grid;
+  gap: var(--nge-space-5);
+  width: min(860px, calc(100vw - var(--nge-space-6) * 2));
+  max-height: calc(100vh - var(--nge-space-6) * 4);
+  padding: var(--nge-space-6);
+  overflow-y: auto;
+  transform: translate(-50%, -50%);
+  background: var(--nge-overlay-bg);
+  border: 1px solid var(--nge-overlay-border);
+  border-radius: var(--nge-radius-md);
+  color: var(--nge-text);
+  font-family: var(--nge-font);
+  font-size: var(--nge-text-size);
+}
+
+.neuroglancer-shortcut-sheet-header,
+.neuroglancer-shortcut-sheet-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nge-space-5);
+}
+
+.neuroglancer-shortcut-sheet-header input[type="text"] {
+  flex: 1;
+  max-width: 320px;
+  height: var(--nge-control-h);
+  padding: 0 var(--nge-space-3);
+  background: var(--nge-control-bg);
+  border: 1px solid var(--nge-border);
+  border-radius: var(--nge-radius-sm);
+  color: var(--nge-text);
+  font: inherit;
+}
+
+.neuroglancer-shortcut-sheet-header input[type="text"]:focus {
+  border-color: var(--nge-accent-border);
+  outline: 1px solid var(--nge-accent-ring);
+}
+
+.neuroglancer-shortcut-sheet h3 {
+  margin: 0 0 var(--nge-space-2);
+  color: var(--nge-text-faint);
+  font-size: var(--nge-text-size-sm);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.neuroglancer-shortcut-now {
+  padding: var(--nge-space-4) var(--nge-space-5);
+  background: var(--nge-accent-tint);
+  border-radius: var(--nge-radius-md);
+}
+
+.neuroglancer-shortcut-now h3 {
+  color: var(--nge-accent-fg-soft);
+}
+
+.neuroglancer-shortcut-now-rows,
+.neuroglancer-shortcut-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--nge-space-1) var(--nge-space-6);
+}
+
+.neuroglancer-shortcut-columns {
+  align-items: start;
+  row-gap: var(--nge-space-5);
+}
+
+.neuroglancer-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nge-space-4);
+  min-height: var(--nge-control-h-compact);
+  color: var(--nge-text-muted);
+}
+
+.neuroglancer-shortcut-rebind {
+  padding: 1px var(--nge-space-1);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--nge-radius-sm);
+  color: var(--nge-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.neuroglancer-shortcut-rebind:hover,
+.neuroglancer-shortcut-rebind:focus-visible {
+  border-color: var(--nge-border-strong);
+}
+
+.neuroglancer-shortcut-rebind.capturing {
+  border-color: var(--nge-accent-border);
+  color: var(--nge-accent-fg-soft);
+}
+
+.neuroglancer-shortcut-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nge-space-1);
+  background: none;
+  border: 0;
+  color: var(--nge-text-subtle);
+  font: inherit;
+  cursor: pointer;
+}
+
+.neuroglancer-shortcut-link:hover {
+  color: var(--nge-text);
+}
+
+.neuroglancer-shortcut-sheet-footer label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nge-space-2);
+  color: var(--nge-text-subtle);
+}
+
+.neuroglancer-shortcut-message {
+  margin: 0;
+  color: var(--nge-warning-fg);
+}
+
+.neuroglancer-shortcut-empty {
+  margin: 0;
+  color: var(--nge-text-faint);
+}

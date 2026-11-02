@@ -17,6 +17,7 @@ import {
 } from "#src/editing/tool_runtimes/mask_coord.js";
 import { ParamInput } from "#src/editing/ui/tool_settings/param_input.js";
 import { ParamLabel } from "#src/editing/ui/tool_settings/param_label.js";
+import type { ModeShortcut } from "#src/ui/mode_shortcuts.js";
 
 /**
  * The "Target value" parameter row, shared by the Brush and Fill panels: the
@@ -38,6 +39,7 @@ export function TargetValueField({
   voxelDataType,
   label = "Target value",
   hint,
+  shortcut,
   highlighted = false,
   onSelect,
 }: {
@@ -46,6 +48,8 @@ export function TargetValueField({
   voxelDataType?: VoxelDataType;
   label?: string;
   hint: string;
+  /** The keys that step the value, shown in the hint. */
+  shortcut?: ModeShortcut;
   /** Outline the row when it is the keyboard-selected parameter (TM-337). */
   highlighted?: boolean;
   /**
@@ -67,7 +71,7 @@ export function TargetValueField({
         onPointerDownCapture={onSelect}
         onFocusCapture={onSelect}
       >
-        <ParamLabel text={label} hint={hint} />
+        <ParamLabel text={label} hint={hint} shortcut={shortcut} />
         <ParamInput<number | bigint>
           type="text"
           inputMode={rule.inputMode}

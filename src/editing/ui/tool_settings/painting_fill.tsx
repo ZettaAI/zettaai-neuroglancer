@@ -25,6 +25,10 @@ import {
   valueDescriptor,
 } from "#src/editing/ui/tool_settings/param_descriptors.js";
 import { TargetValueField } from "#src/editing/ui/tool_settings/target_value_field.js";
+import {
+  ToolPanelKeys,
+  useEditKeybinds,
+} from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 import { useLayerVoxelType } from "#src/editing/ui/tool_settings/use_layer_voxel_type.js";
 
 /**
@@ -49,6 +53,7 @@ export function PaintingFill({
   const selectedId = useParamSelection(host);
   const selectParam = useParamFocus(host);
   const targetDescriptors = useTargetParamDescriptors(host);
+  const editKeys = useEditKeybinds(host);
   usePublishParams(host, [
     ...targetDescriptors,
     valueDescriptor(painting, targetVoxelType),
@@ -58,6 +63,11 @@ export function PaintingFill({
     <div class="neuroglancer-tool-panel neuroglancer-painting-fill-panel">
       <PaintingTargetPicker host={host} />
       <TargetValueField
+        shortcut={{
+          keys: editKeys.targetValueDecrease,
+          pairKeys: editKeys.targetValueIncrease,
+          label: "Target value",
+        }}
         value={state.activeValue}
         voxelDataType={targetVoxelType}
         onCommit={(activeValue) => painting.patchState({ activeValue })}
@@ -81,6 +91,7 @@ export function PaintingFill({
           onChange={(fillMode) => painting.patchState({ fillMode })}
         />
       </div>
+      <ToolPanelKeys host={host} toolId="painting.fill" />
     </div>
   );
 }

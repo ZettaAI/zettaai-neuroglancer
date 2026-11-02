@@ -24,6 +24,7 @@ import {
   usePublishParams,
   useTargetParamDescriptors,
 } from "#src/editing/ui/tool_settings/param_descriptors.js";
+import { ToolPanelKeys } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 
 /**
  * Eraser panel (TM-294 simplification): Target layer + resolution + Size
@@ -59,12 +60,14 @@ export function PaintingEraser({
     <div class="neuroglancer-tool-panel neuroglancer-painting-eraser-panel">
       <PaintingTargetPicker host={host} />
       <BrushSizeField
+        host={host}
         size={size}
         hint="Eraser diameter in voxels at the target resolution. Larger sizes clear a wider stroke."
         onCommit={commitSize}
         highlighted={selectedId === PARAM_IDS.size}
         onSelect={() => selectParam(PARAM_IDS.size)}
       />
+      <ToolPanelKeys host={host} toolId="painting.erase" />
     </div>
   );
 }

@@ -10,6 +10,9 @@
 
 import { Info } from "lucide-preact";
 
+import { shortcutAttributes } from "#src/ui/key_chord_format.js";
+import type { ModeShortcut } from "#src/ui/mode_shortcuts.js";
+
 /**
  * A tool-panel parameter label with an inline help marker. The marker carries
  * a `data-tooltip` hint surfaced by the shared fast-tooltip mechanism (see
@@ -17,13 +20,27 @@ import { Info } from "lucide-preact";
  *
  * Drop-in replacement for a bare `<label>` inside `.neuroglancer-tool-panel-row`.
  */
-export function ParamLabel({ text, hint }: { text: string; hint: string }) {
+export function ParamLabel({
+  text,
+  hint,
+  shortcut,
+}: {
+  text: string;
+  hint: string;
+  /** The parameter's keys, shown in the hint as key caps beside its name. */
+  shortcut?: ModeShortcut;
+}) {
+  const keyAttributes =
+    shortcut === undefined
+      ? {}
+      : shortcutAttributes(shortcut.keys, shortcut.pairKeys);
   return (
     <label>
       {text}
       <span
         class="neuroglancer-param-hint"
-        data-tooltip={hint}
+        data-tooltip={shortcut === undefined ? hint : `${text}\n${hint}`}
+        {...keyAttributes}
         aria-hidden="true"
       >
         <Info size={13} />

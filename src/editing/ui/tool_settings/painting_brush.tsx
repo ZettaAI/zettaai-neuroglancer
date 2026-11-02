@@ -59,6 +59,10 @@ import {
   UINT64_REFERENCE_DISABLED,
 } from "#src/editing/ui/tool_settings/reference_layer_options.js";
 import { TargetValueField } from "#src/editing/ui/tool_settings/target_value_field.js";
+import {
+  ToolPanelKeys,
+  useEditKeybinds,
+} from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 import { useLayerVoxelType } from "#src/editing/ui/tool_settings/use_layer_voxel_type.js";
 import "#src/editing/ui/tool_settings/painting_brush.css";
 
@@ -100,6 +104,7 @@ export function PaintingBrush({
   // size, value. The mask section appends its own descriptors and publishes the
   // combined list (single publisher per tool — see `BrushMask`).
   const targetDescriptors = useTargetParamDescriptors(host);
+  const editKeys = useEditKeybinds(host);
   const leadingDescriptors: ParamDescriptor[] = [
     ...targetDescriptors,
     sizeDescriptor(painting),
@@ -110,6 +115,7 @@ export function PaintingBrush({
     <div class="neuroglancer-tool-panel neuroglancer-painting-brush-panel">
       <PaintingTargetPicker host={host} />
       <BrushSizeField
+        host={host}
         size={size}
         hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
         onCommit={commitSize}
@@ -117,6 +123,11 @@ export function PaintingBrush({
         onSelect={() => selectParam(PARAM_IDS.size)}
       />
       <TargetValueField
+        shortcut={{
+          keys: editKeys.targetValueDecrease,
+          pairKeys: editKeys.targetValueIncrease,
+          label: "Target value",
+        }}
         value={state.activeValue}
         voxelDataType={targetVoxelType}
         onCommit={(activeValue) => painting.patchState({ activeValue })}
@@ -125,12 +136,19 @@ export function PaintingBrush({
         onSelect={() => selectParam(PARAM_IDS.value)}
       />
       <PaintedSegmentAutoSelectRow painting={painting} />
-      <FillClosedPathsRow painting={painting} />
+      <FillClosedPathsRow
+        painting={painting}
+        shortcut={{
+          keys: editKeys.fillClosedPaths,
+          label: "Fill closed paths",
+        }}
+      />
       <BrushMask
         host={host}
         painting={painting}
         leadingDescriptors={leadingDescriptors}
       />
+      <ToolPanelKeys host={host} toolId="painting.brush" />
     </div>
   );
 }
