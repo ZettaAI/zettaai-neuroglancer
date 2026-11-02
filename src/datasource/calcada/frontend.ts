@@ -5922,7 +5922,9 @@ void main() {
           clearHover: () => {
             layer.annotationDisplayState.hoverState.value = undefined;
           },
-          scheduleFrame: (callback) => requestAnimationFrame(callback),
+          // After the paint, so a "Loading…" set before a heavy redraw shows first.
+          scheduleFrame: (callback) =>
+            requestAnimationFrame(() => setTimeout(callback)),
         },
         state.annotationTables,
       ),

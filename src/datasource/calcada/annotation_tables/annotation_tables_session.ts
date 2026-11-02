@@ -123,6 +123,8 @@ export interface AnnotationTableStatus {
   table: string;
   annotations: number;
   fetchedRoots: number;
+  /** A count or points request is on its way, or received points wait to be drawn. */
+  loading: boolean;
   error?: string;
   note?: string;
 }
@@ -488,13 +490,15 @@ export function annotationTableStatus(input: {
   table: string;
   fetched: readonly FetchedTablePoints[];
   annotations: number;
+  loading: boolean;
   error?: string;
   note?: string;
 }): AnnotationTableStatus {
-  const { table, fetched, annotations, error, note } = input;
+  const { table, fetched, annotations, loading, error, note } = input;
   return {
     table,
     annotations,
+    loading,
     fetchedRoots: fetched.filter(
       ({ fetchedUnder }) => fetchedUnder !== undefined,
     ).length,
@@ -597,7 +601,7 @@ export interface AnnotationTablesConnection {
   /** List entries show positions in these coordinates. */
   readonly listCoordinatesChanged: ReadonlySignal<() => void>;
   clearHover(): void;
-  /** Runs the callback before the next frame is drawn. */
+  /** Runs the callback once the next frame is painted. */
   scheduleFrame(callback: () => void): void;
 }
 
@@ -637,6 +641,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   // Tables the server does not have at the explicit timestamp in view.
   private readonly absent = new Set<string>();
   private colorSlots = new Map<string, number>();
+  private readonly inFlight = new Map<string, number>();
   private shownTables: readonly string[] = [];
   private shownQueries = new Map<string, unknown>();
   private details: SelectedDetails | undefined;
@@ -1083,6 +1088,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
             (table) => this.pending.get(request.key)?.get(table) === requestId,
           );
     this.running++;
+    this.countInFlight(request.tables, 1);
     try {
       const accept = await this.read(request, queries, this.coords);
       const tables = stillAsked();
@@ -1099,6 +1105,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       if (tables.length > 0) this.failed({ ...request, tables }, error, asked);
     } finally {
       this.running--;
+      this.countInFlight(request.tables, -1);
       this.fetchVisible();
     }
   }
@@ -1161,8 +1168,21 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     return point;
   };
 
+  private countInFlight(tables: readonly string[], change: number) {
+    for (const table of tables) {
+      const count = (this.inFlight.get(table) ?? 0) + change;
+      if (count === 0) this.inFlight.delete(table);
+      else this.inFlight.set(table, count);
+    }
+  }
+
+  private isLoading(name: string): boolean {
+    return this.inFlight.has(name) || this.stale.has(name);
+  }
+
   private invalidate(names: readonly string[]) {
     for (const name of names) this.stale.add(name);
+    this.publishStatus();
     if (this.frameRequested) return;
     this.frameRequested = true;
     this.connection.scheduleFrame(() => this.redrawStale());
@@ -1184,22 +1204,15 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.frameRequested = false;
     if (this.wasDisposed) return;
     const scopes = this.scopes();
-    const visibleRoots = new Set(this.connection.visibleSegments);
     for (const name of this.stale) {
-      if (this.state.ticked.includes(name)) {
-        this.redraw(name, scopes, visibleRoots);
-      }
+      if (this.state.ticked.includes(name)) this.redraw(name, scopes);
     }
     this.stale.clear();
     this.publishDrawn();
     this.publishStatus();
   }
 
-  private redraw(
-    name: string,
-    scopes: readonly AnnotationScope[],
-    visibleRoots: ReadonlySet<bigint>,
-  ) {
+  private redraw(name: string, scopes: readonly AnnotationScope[]) {
     const info = this.tableInfo(name);
     let layerRows: LayerRow[] = [];
     if (info !== undefined && this.limitNote.value === undefined) {
@@ -1208,7 +1221,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
           fetchedTablePoints(name, scopes, this.cache),
           info,
           this.nanometresToSource,
-          visibleRoots,
         );
       } catch (error) {
         this.errors.set(name, errorMessage(error));
@@ -1258,6 +1270,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         table: name,
         fetched: fetchedTablePoints(name, scopes, this.cache),
         annotations: this.rendered.get(name) ?? 0,
+        loading: this.isLoading(name),
         error: this.errors.get(name) ?? this.rootFailures.messageFor(name),
         note: this.tableNote(name),
       }),

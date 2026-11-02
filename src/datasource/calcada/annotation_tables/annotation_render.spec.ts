@@ -93,18 +93,8 @@ const response = (fetchedUnder: bigint | undefined, rows: TestRow[]) => ({
 
 type Response = ReturnType<typeof response>;
 
-const renderRows = (responses: Response[], visibleRoots: bigint[] = []) =>
-  toLayerAnnotations(
-    responses,
-    TABLE,
-    toLayer,
-    new Set([
-      ...responses.flatMap(({ fetchedUnder }) =>
-        fetchedUnder === undefined ? [] : [fetchedUnder],
-      ),
-      ...visibleRoots,
-    ]),
-  );
+const renderRows = (responses: Response[]) =>
+  toLayerAnnotations(responses, TABLE, toLayer);
 
 const render = (...responses: Response[]) =>
   renderRows(responses).flatMap(({ annotations }) => annotations);
@@ -172,7 +162,7 @@ describe("toLayerAnnotations", () => {
     expect(render(response(10n, [row(7n, [])]))).toEqual([]);
   });
 
-  it("draws a cross-segment row once and relates it to both visible roots", () => {
+  it("draws a cross-segment row once and relates it to both roots", () => {
     const shared = row(7n, [point([0, 0, 0], 10n), point([1, 1, 1], 20n)]);
     const annotations = render(
       response(10n, [shared]),
@@ -201,11 +191,11 @@ describe("toLayerAnnotations", () => {
     expect(rows[0].annotations.map(({ id }) => id)).toEqual(["syn:7"]);
   });
 
-  it("ignores roots that are not visible and falls back to the fetched root", () => {
+  it("relates a row to the root of each point, and to the fetched root when none is bound", () => {
     const [partner] = render(
       response(10n, [row(7n, [point([0, 0, 0], 10n), point([1, 1, 1], 99n)])]),
     );
-    expect(partner.relatedSegments).toEqual([BigUint64Array.of(10n)]);
+    expect(partner.relatedSegments).toEqual([BigUint64Array.of(10n, 99n)]);
     const [unresolved] = render(response(10n, [row(8n, [point([0, 0, 0])])]));
     expect(unresolved.relatedSegments).toEqual([BigUint64Array.of(10n)]);
   });

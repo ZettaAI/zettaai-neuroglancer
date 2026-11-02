@@ -78,17 +78,16 @@ function dedupeRows(tables: Iterable<FetchedTablePoints>) {
   return rows;
 }
 
-function relatedRoots(
-  { response: { fetchedUnder, points }, index }: PendingRow,
-  visibleRoots: ReadonlySet<bigint>,
-): BigUint64Array {
+function relatedRoots({
+  response: { fetchedUnder, points },
+  index,
+}: PendingRow): BigUint64Array {
   const roots: bigint[] = [];
   for (const { rootIndex } of points.points) {
     const pointRootIndex = rootIndex[index];
     if (pointRootIndex === UNBOUND_ROOT_INDEX) continue;
     const root = points.roots[pointRootIndex];
-    const related = fetchedUnder === undefined || visibleRoots.has(root);
-    if (related && !roots.includes(root)) roots.push(root);
+    if (!roots.includes(root)) roots.push(root);
   }
   if (roots.length === 0 && fetchedUnder !== undefined) {
     roots.push(fetchedUnder);
@@ -104,7 +103,6 @@ export function toLayerAnnotations(
   tables: Iterable<FetchedTablePoints>,
   table: AnnotationTableInfo,
   toLayer: ToLayer,
-  visibleRoots: ReadonlySet<bigint>,
 ): LayerRow[] {
   const [resolutionX, resolutionY, resolutionZ] = table.voxelResolution;
   const place = ({ positions }: TablePointColumn, index: number) => {
@@ -122,7 +120,7 @@ export function toLayerAnnotations(
     if (columns.length === 0) continue;
     const value = response.points.values[index];
     const common = {
-      relatedSegments: [relatedRoots(pending, visibleRoots)],
+      relatedSegments: [relatedRoots(pending)],
       properties: [value],
     };
     const id = rowAnnotationId(table.name, rowId);

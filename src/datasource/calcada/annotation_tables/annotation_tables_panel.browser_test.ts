@@ -116,6 +116,7 @@ const status = (
 ): AnnotationTableStatus => ({
   annotations: 0,
   fetchedRoots: 0,
+  loading: false,
   ...overrides,
 });
 
@@ -737,6 +738,38 @@ describe("CalcadaAnnotationTablesPanel", () => {
       false,
       true,
     ]);
+  });
+
+  it("says a table is loading beside its count, and alone before any count", async () => {
+    const { connection, session } = makeConnection(
+      [synapses],
+      [],
+      ["synapses"],
+    );
+    session.status.value = [status({ table: "synapses", loading: true })];
+    await mountPanel(connection);
+    await vi.waitFor(() =>
+      expect(statusLines()[0].textContent).toContain("Loading…"),
+    );
+    expect(statusLines()[0].textContent).not.toContain("0 annotations");
+    session.status.value = [
+      status({
+        table: "synapses",
+        annotations: 12,
+        fetchedRoots: 1,
+        loading: true,
+      }),
+    ];
+    await vi.waitFor(() =>
+      expect(statusLines()[0].textContent).toContain("12 annotations"),
+    );
+    expect(statusLines()[0].textContent).toContain("Loading…");
+    session.status.value = [
+      status({ table: "synapses", annotations: 12, fetchedRoots: 1 }),
+    ];
+    await vi.waitFor(() =>
+      expect(statusLines()[0].textContent).not.toContain("Loading…"),
+    );
   });
 
   it("limit message replaces the list", async () => {

@@ -1437,6 +1437,37 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(session.drawn.value).toHaveLength(6);
   });
 
+  it("is loading while its points are on their way and until they are drawn", async () => {
+    const graph = fakeGraph(["syn"]);
+    graph.hold = (read) => read === "points";
+    const { statusOf, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(statusOf("syn")?.loading).toBe(true);
+    graph.held.forEach((release) => release());
+    await vi.advanceTimersByTimeAsync(VISIBLE_SEGMENTS_DEBOUNCE_MS);
+    expect(frames).toHaveLength(1);
+    expect(statusOf("syn")?.loading).toBe(true);
+    drawFrames();
+    expect(drawnIds("syn")).toEqual([10n]);
+    expect(statusOf("syn")?.loading).toBe(false);
+  });
+
+  it("is not loading once nothing is drawn because of the limit", async () => {
+    const graph = fakeGraph(["syn"], {
+      countOf: () => MAX_DRAWN_ANNOTATIONS + 1,
+    });
+    const { session, statusOf } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.limitNote.value).toBeDefined();
+    expect(statusOf("syn")?.loading).toBe(false);
+  });
+
   it("redraws a table once, after the points of its last root arrive", async () => {
     const graph = fakeGraph(["syn"]);
     graph.hold = (read) => read === "points";

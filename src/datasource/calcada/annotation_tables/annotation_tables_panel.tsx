@@ -61,6 +61,8 @@ export const ANNOTATION_ROW_HINT = "Click to select, right-click to move to it";
 
 const SELECTED_ENTRY_CLASS = "neuroglancer-annotation-selected";
 
+const LOADING_TEXT = "Loading…";
+
 export interface AnnotationTablesPanelSession {
   readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
   readonly status: WatchableValueInterface<AnnotationTableStatus[]>;
@@ -264,12 +266,23 @@ function TableStatusLine({
       )}
       {status !== undefined && status.note === undefined && (
         <div>
-          {formatCount(shown)} {shown === 1 ? "annotation" : "annotations"}
-          {drawn > 0 && !wholeTable && (
+          {status.loading && shown === 0 ? (
+            LOADING_TEXT
+          ) : (
             <>
-              {" "}
-              on {status.fetchedRoots}{" "}
-              {status.fetchedRoots === 1 ? "segment" : "segments"}
+              {formatCount(shown)} {shown === 1 ? "annotation" : "annotations"}
+              {drawn > 0 && !wholeTable && (
+                <>
+                  {" "}
+                  on {status.fetchedRoots}{" "}
+                  {status.fetchedRoots === 1 ? "segment" : "segments"}
+                </>
+              )}
+              {status.loading && (
+                <span className="calcada-annotations-loading">
+                  {LOADING_TEXT}
+                </span>
+              )}
             </>
           )}
         </div>

@@ -1681,6 +1681,11 @@
   border-radius: 2px;
 }
 
+.calcada-annotations-loading {
+  margin-left: 8px;
+  color: #aaa;
+}
+
 .calcada-annotations-color {
   flex: 0 0 auto;
   width: 14px;
