@@ -180,6 +180,20 @@ describe("PointerEventBridge stroke finish", () => {
     expect(released.samples).toEqual([FIRST]);
   });
 
+  it("delivers a cancel with no voxel under the pointer as a cancel, not a release", () => {
+    const stroke = liveStroke({ lastVoxel: SECOND });
+    const bridge = fakeBridge(stroke);
+    // The real translation: a cancel never needs a voxel, so the
+    // position-less release fallback must not turn it into a commit.
+    bridge.translatePointer = (
+      PointerEventBridge.prototype as any
+    ).translatePointer;
+    bridge.resolveVoxelForPointer = vi.fn(() => undefined);
+    bridge.finishStrokeReleasedOffPanels(pointerEvent(), "pointer-cancel");
+    expect(stroke.finish?.event.kind).toBe("pointer-cancel");
+    expect(bridge.resolveVoxelForPointer).not.toHaveBeenCalled();
+  });
+
   it("finishes on a hover move with the primary button up, adding no sample", () => {
     const stroke = liveStroke();
     const bridge = fakeBridge(stroke);
