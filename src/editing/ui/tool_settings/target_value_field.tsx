@@ -71,7 +71,7 @@ export function TargetValueField({
         onPointerDownCapture={onSelect}
         onFocusCapture={onSelect}
       >
-        <ParamLabel text={label} hint={hint} shortcut={shortcut} />
+        <ParamLabel text={label} hint={hint} shortcut={shortcut} setting />
         <ParamInput<number | bigint>
           type="text"
           inputMode={rule.inputMode}

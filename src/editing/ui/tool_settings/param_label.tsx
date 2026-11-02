@@ -10,7 +10,13 @@
 
 import { Info } from "lucide-preact";
 
-import { shortcutAttributes } from "#src/ui/key_chord_format.js";
+import { useContext } from "preact/hooks";
+
+import { EditKeybindsContext } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
+import {
+  formatShortcutKeys,
+  shortcutAttributes,
+} from "#src/ui/key_chord_format.js";
 import type { ModeShortcut } from "#src/ui/mode_shortcuts.js";
 
 /**
@@ -24,22 +30,52 @@ export function ParamLabel({
   text,
   hint,
   shortcut,
+  setting = false,
 }: {
   text: string;
   hint: string;
-  /** The parameter's keys, shown in the hint as key caps beside its name. */
+  /** The parameter's own keys, shown in the hint as key caps beside its name. */
   shortcut?: ModeShortcut;
+  /**
+   * The row is one of the settings the Ctrl/Option+Arrow keys walk through: the
+   * hint then says how to reach and change it, and shows the change keys when
+   * the row has none of its own.
+   */
+  setting?: boolean;
 }) {
+  const editKeys = useContext(EditKeybindsContext);
+  const settingKeys =
+    setting && editKeys !== undefined
+      ? {
+          choose: formatShortcutKeys(editKeys.paramPrev, editKeys.paramNext),
+          change: formatShortcutKeys(
+            editKeys.paramDecrease,
+            editKeys.paramIncrease,
+          ),
+          shortcut: {
+            keys: editKeys.paramDecrease,
+            pairKeys: editKeys.paramIncrease,
+            label: text,
+          },
+        }
+      : undefined;
+  const shownKeys = shortcut ?? settingKeys?.shortcut;
+  const howToReach =
+    settingKeys === undefined
+      ? ""
+      : `\nChoose it with ${settingKeys.choose}, change it with ${settingKeys.change}.`;
   const keyAttributes =
-    shortcut === undefined
+    shownKeys === undefined
       ? {}
-      : shortcutAttributes(shortcut.keys, shortcut.pairKeys);
+      : shortcutAttributes(shownKeys.keys, shownKeys.pairKeys);
   return (
     <label>
       {text}
       <span
         class="neuroglancer-param-hint"
-        data-tooltip={shortcut === undefined ? hint : `${text}\n${hint}`}
+        data-tooltip={
+          shownKeys === undefined ? hint : `${text}\n${hint}${howToReach}`
+        }
         {...keyAttributes}
         aria-hidden="true"
       >

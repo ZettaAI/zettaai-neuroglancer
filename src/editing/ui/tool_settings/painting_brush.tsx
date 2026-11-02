@@ -60,6 +60,7 @@ import {
 } from "#src/editing/ui/tool_settings/reference_layer_options.js";
 import { TargetValueField } from "#src/editing/ui/tool_settings/target_value_field.js";
 import {
+  EditKeybindsContext,
   ToolPanelKeys,
   useEditKeybinds,
 } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
@@ -112,44 +113,46 @@ export function PaintingBrush({
   ];
 
   return (
-    <div class="neuroglancer-tool-panel neuroglancer-painting-brush-panel">
-      <PaintingTargetPicker host={host} />
-      <BrushSizeField
-        host={host}
-        size={size}
-        hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
-        onCommit={commitSize}
-        highlighted={selectedId === PARAM_IDS.size}
-        onSelect={() => selectParam(PARAM_IDS.size)}
-      />
-      <TargetValueField
-        shortcut={{
-          keys: editKeys.targetValueDecrease,
-          pairKeys: editKeys.targetValueIncrease,
-          label: "Target value",
-        }}
-        value={state.activeValue}
-        voxelDataType={targetVoxelType}
-        onCommit={(activeValue) => painting.patchState({ activeValue })}
-        hint="The segment ID painted into the target layer — every voxel the stroke covers is set to this value."
-        highlighted={selectedId === PARAM_IDS.value}
-        onSelect={() => selectParam(PARAM_IDS.value)}
-      />
-      <PaintedSegmentAutoSelectRow painting={painting} />
-      <FillClosedPathsRow
-        painting={painting}
-        shortcut={{
-          keys: editKeys.fillClosedPaths,
-          label: "Fill closed paths",
-        }}
-      />
-      <BrushMask
-        host={host}
-        painting={painting}
-        leadingDescriptors={leadingDescriptors}
-      />
-      <ToolPanelKeys host={host} toolId="painting.brush" />
-    </div>
+    <EditKeybindsContext.Provider value={editKeys}>
+      <div class="neuroglancer-tool-panel neuroglancer-painting-brush-panel">
+        <PaintingTargetPicker host={host} />
+        <BrushSizeField
+          host={host}
+          size={size}
+          hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
+          onCommit={commitSize}
+          highlighted={selectedId === PARAM_IDS.size}
+          onSelect={() => selectParam(PARAM_IDS.size)}
+        />
+        <TargetValueField
+          shortcut={{
+            keys: editKeys.targetValueDecrease,
+            pairKeys: editKeys.targetValueIncrease,
+            label: "Target value",
+          }}
+          value={state.activeValue}
+          voxelDataType={targetVoxelType}
+          onCommit={(activeValue) => painting.patchState({ activeValue })}
+          hint="The segment ID painted into the target layer — every voxel the stroke covers is set to this value."
+          highlighted={selectedId === PARAM_IDS.value}
+          onSelect={() => selectParam(PARAM_IDS.value)}
+        />
+        <PaintedSegmentAutoSelectRow painting={painting} />
+        <FillClosedPathsRow
+          painting={painting}
+          shortcut={{
+            keys: editKeys.fillClosedPaths,
+            label: "Fill closed paths",
+          }}
+        />
+        <BrushMask
+          host={host}
+          painting={painting}
+          leadingDescriptors={leadingDescriptors}
+        />
+        <ToolPanelKeys host={host} toolId="painting.brush" />
+      </div>
+    </EditKeybindsContext.Provider>
   );
 }
 
@@ -514,6 +517,7 @@ function BrushMask({
       >
         <ParamLabel
           text="Reference layer"
+          setting
           hint="The image layer the mask samples to decide which voxels a stroke may paint. Session image layers plus any other loaded image layer can be used; non-session layers are read on demand."
         />
         <span class="neuroglancer-painting-brush-mask-reference">
@@ -564,6 +568,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Reference resolution"
+            setting
             hint="The voxel scale the reference image is sampled at. Coarser scales are faster but mask less precisely."
           />
           {resolutions.length <= 1 ? (
@@ -587,6 +592,7 @@ function BrushMask({
         <div class="neuroglancer-painting-brush-threshold-row">
           <ParamLabel
             text="Threshold"
+            setting
             hint="Limits painting to voxels whose reference-image intensity falls within the low–high range. Voxels outside it are left untouched."
           />
           <PaintingThreshold
@@ -623,6 +629,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Min component"
+            setting
             hint="Drops connected blobs smaller than this many voxels from the mask, removing speckle. 0 keeps every component."
           />
           <ParamInput<number>
@@ -645,6 +652,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Binary closing"
+            setting
             hint="Closes gaps and small holes in the mask by this many voxels (morphological closing). 0 disables it."
           />
           <ParamInput<number>
@@ -667,6 +675,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Filter components first"
+            setting
             hint="When on, min-component filtering runs before binary closing; when off, closing runs first. Changes whether holes are filled before or after small blobs are removed."
           />
           <ToggleSwitch

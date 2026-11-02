@@ -8,11 +8,12 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { Fragment } from "preact";
+import { createContext, Fragment } from "preact";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import {
   editModeShortcuts,
   effectiveEditKeybinds,
+  type EditKeybindName,
 } from "#src/editing/session_hotkey_binder.js";
 
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
@@ -24,6 +25,15 @@ import "#src/editing/ui/tool_settings/tool_panel_keys.css";
 export function useEditKeybinds(host: EditSessionHost) {
   return effectiveEditKeybinds(useWatchable(host.editKeybindOverrides));
 }
+
+/**
+ * The live edit keybinds for every row of a tool panel, so a setting's info hint
+ * can name the keys that reach it without each row being handed them. Absent
+ * outside a tool panel, where hints show no keys.
+ */
+export const EditKeybindsContext = createContext<
+  Record<EditKeybindName, readonly string[]> | undefined
+>(undefined);
 
 /**
  * The active tool's keys at the bottom of its panel, open by default: a plain

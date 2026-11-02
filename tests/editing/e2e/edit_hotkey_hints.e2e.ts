@@ -321,6 +321,50 @@ test.describe("hotkey hints", () => {
     ]);
   });
 
+  test("every setting's info hint says how to reach and change it", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("KeyB");
+    const tooltip = page.locator(".neuroglancer-fast-tooltip.visible");
+    const hintOf = (label: string) =>
+      page
+        .locator(".neuroglancer-painting-brush-panel label", { hasText: label })
+        .locator(".neuroglancer-param-hint");
+    // Ctrl+Arrow, or Option+Arrow on a Mac, whichever this browser reports.
+    const mac = await page.evaluate(() => /mac/i.test(navigator.platform));
+    const modifier = mac ? "⌥" : "Ctrl";
+    const chord = (arrow: string) =>
+      mac ? `${modifier}${arrow}` : `${modifier}+${arrow}`;
+    for (const label of [
+      "Target layer",
+      "Reference layer",
+      "Threshold",
+      "Min component",
+      "Binary closing",
+      "Filter components first",
+    ]) {
+      await page.mouse.move(0, 0);
+      await hintOf(label).first().hover();
+      await expect(tooltip).toContainText(
+        `Choose it with ${chord("←")} / ${chord("→")}, ` +
+          `change it with ${chord("↓")} / ${chord("↑")}.`,
+      );
+      await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText([
+        modifier,
+        "↓",
+        modifier,
+        "↑",
+      ]);
+    }
+    // A setting with keys of its own keeps them as the caps.
+    await page.mouse.move(0, 0);
+    await hintOf("Target value").hover();
+    await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText([
+      "{",
+      "}",
+    ]);
+    await expect(tooltip).toContainText(`Choose it with ${chord("←")}`);
+  });
+
   test("{ and } step the target value", async () => {
     test.skip(setupError !== undefined, setupError);
     const value = () =>

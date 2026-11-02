@@ -24,7 +24,11 @@ import {
   usePublishParams,
   useTargetParamDescriptors,
 } from "#src/editing/ui/tool_settings/param_descriptors.js";
-import { ToolPanelKeys } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
+import {
+  EditKeybindsContext,
+  ToolPanelKeys,
+  useEditKeybinds,
+} from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 
 /**
  * Eraser panel (TM-294 simplification): Target layer + resolution + Size
@@ -39,6 +43,7 @@ export function PaintingEraser({
   host: EditSessionHost;
 }) {
   const painting = host.painting!.state;
+  const editKeys = useEditKeybinds(host);
   const subscribe = useCallback(
     (h: () => void) => painting.changed.add(h),
     [painting],
@@ -57,17 +62,19 @@ export function PaintingEraser({
   usePublishParams(host, [...targetDescriptors, sizeDescriptor(painting)]);
 
   return (
-    <div class="neuroglancer-tool-panel neuroglancer-painting-eraser-panel">
-      <PaintingTargetPicker host={host} />
-      <BrushSizeField
-        host={host}
-        size={size}
-        hint="Eraser diameter in voxels at the target resolution. Larger sizes clear a wider stroke."
-        onCommit={commitSize}
-        highlighted={selectedId === PARAM_IDS.size}
-        onSelect={() => selectParam(PARAM_IDS.size)}
-      />
-      <ToolPanelKeys host={host} toolId="painting.erase" />
-    </div>
+    <EditKeybindsContext.Provider value={editKeys}>
+      <div class="neuroglancer-tool-panel neuroglancer-painting-eraser-panel">
+        <PaintingTargetPicker host={host} />
+        <BrushSizeField
+          host={host}
+          size={size}
+          hint="Eraser diameter in voxels at the target resolution. Larger sizes clear a wider stroke."
+          onCommit={commitSize}
+          highlighted={selectedId === PARAM_IDS.size}
+          onSelect={() => selectParam(PARAM_IDS.size)}
+        />
+        <ToolPanelKeys host={host} toolId="painting.erase" />
+      </div>
+    </EditKeybindsContext.Provider>
   );
 }

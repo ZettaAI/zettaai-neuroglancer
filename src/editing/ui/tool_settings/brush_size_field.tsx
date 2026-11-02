@@ -86,6 +86,7 @@ export function BrushSizeField({
         <ParamLabel
           text="Size"
           hint={hint}
+          setting
           shortcut={{
             keys: keys.sizeDecrease,
             pairKeys: keys.sizeIncrease,
