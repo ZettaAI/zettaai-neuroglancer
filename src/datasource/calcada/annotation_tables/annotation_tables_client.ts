@@ -567,6 +567,41 @@ export async function fetchAnnotationRows(
   );
 }
 
+const CREATE_REFUSED_PREFIX = "Could not add the annotation: ";
+
+/** Writes one row with an empty payload; positions are in the table's voxels. Returns its id. */
+export async function createAnnotationRow(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  table: string,
+  positions: ReadonlyMap<string, readonly number[]>,
+): Promise<bigint> {
+  const points = Object.fromEntries(
+    [...positions].map(([name, position]) => [name, { position }]),
+  );
+  let response: Response;
+  try {
+    response = await fetchTableOk(
+      fetchOk,
+      `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
+      {
+        method: "POST",
+        body: JSON.stringify({ annotations: [{ points, payload: {} }] }),
+      },
+      [table],
+    );
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    const reason = await errorMessageOf(error);
+    throw new Error(
+      reason === "" ? error.message : `${CREATE_REFUSED_PREFIX}${reason}`,
+    );
+  }
+  const body = await response.json();
+  const [id] = expectArray(verifyObjectProperty(body, "ids", (v) => v));
+  return BigInt(verifyString(id));
+}
+
 export async function deleteAnnotationRows(
   fetchOk: FetchOk,
   baseUrl: string,

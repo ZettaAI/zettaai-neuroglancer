@@ -1632,6 +1632,13 @@
   font-weight: 600;
 }
 
+.calcada-annotations-place {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .calcada-annotations-picker {
   min-width: 0;
 }

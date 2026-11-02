@@ -34,7 +34,7 @@ const SINGLE_POINT_COUNT = 1;
 export const COORDINATES_PER_POSITION = 3;
 const ANNOTATION_ID_SEPARATOR = ":";
 
-function rowAnnotationId(table: string, rowId: bigint): string {
+export function rowAnnotationId(table: string, rowId: bigint): string {
   return `${table}${ANNOTATION_ID_SEPARATOR}${rowId}`;
 }
 

@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { AnnotationType } from "#src/annotation/index.js";
 import {
   conditionCount,
   filterFields,
@@ -24,6 +25,8 @@ import type {
   AnnotationTableStatus,
   AnnotationTotals,
   DrawnAnnotation,
+  PlacementType,
+  TablePlacement,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { formatCount } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
@@ -63,6 +66,13 @@ const SELECTED_ENTRY_CLASS = "neuroglancer-annotation-selected";
 
 const LOADING_TEXT = "Loading…";
 
+const PLACEMENT_HINT = "Ctrl+click in a view to place";
+const PLACEMENT_LABELS = new Map<PlacementType, string>([
+  [AnnotationType.POINT, "Add point"],
+  [AnnotationType.LINE, "Add line"],
+]);
+const BLOCKED_PLACEMENT_LABEL = "Add annotation";
+
 export interface AnnotationTablesPanelSession {
   readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
   readonly status: WatchableValueInterface<AnnotationTableStatus[]>;
@@ -71,6 +81,10 @@ export interface AnnotationTablesPanelSession {
   readonly rootsNote: WatchableValueInterface<string | undefined>;
   readonly limitNote: WatchableValueInterface<string | undefined>;
   readonly totals: WatchableValueInterface<AnnotationTotals>;
+  readonly placement: WatchableValueInterface<TablePlacement | undefined>;
+  readonly placingChanged: ReadonlySignal<() => void>;
+  isPlacing(): boolean;
+  togglePlacing(): void;
   tableColor(name: string): vec3;
   readonly colorsChanged: ReadonlySignal<() => void>;
   refreshTables(): void;
@@ -83,6 +97,8 @@ export interface AnnotationTablesPanelSession {
     columnWidths: AnnotationListColumnWidths,
   ): boolean;
   isSelected(item: DrawnAnnotation): boolean;
+  selectAdjacent(offset: number): void;
+  readonly selectionStepped: ReadonlySignal<(index: number) => void>;
   readonly annotationSelectionChanged: ReadonlySignal<() => void>;
   readonly listCoordinatesChanged: ReadonlySignal<() => void>;
   clearHover(): void;
@@ -177,6 +193,37 @@ function TablePicker({
         </ComboboxList>
       </ComboboxContent>
     </Combobox>
+  );
+}
+
+function PlacementControl({
+  placement,
+  placing,
+  onToggle,
+}: {
+  placement: TablePlacement;
+  placing: boolean;
+  onToggle: () => void;
+}) {
+  const { type, blockedBy } = placement;
+  return (
+    <div className="calcada-annotations-place">
+      <Button
+        size="sm"
+        variant={placing ? "default" : "outline"}
+        aria-pressed={placing}
+        disabled={blockedBy !== undefined}
+        title={PLACEMENT_HINT}
+        onClick={onToggle}
+      >
+        {type === undefined
+          ? BLOCKED_PLACEMENT_LABEL
+          : PLACEMENT_LABELS.get(type)}
+      </Button>
+      <span className="calcada-annotations-empty">
+        {blockedBy ?? (placing ? PLACEMENT_HINT : undefined)}
+      </span>
+    </div>
   );
 }
 
@@ -367,6 +414,11 @@ class DrawnAnnotationListView extends RefCounted {
     this.registerDisposer(
       session.colorsChanged.add(() => this.source.renderChanged.dispatch()),
     );
+    this.registerDisposer(
+      session.selectionStepped.add((index) =>
+        this.list.scrollItemIntoView(index),
+      ),
+    );
   }
 
   show(items: readonly DrawnAnnotation[]) {
@@ -453,6 +505,8 @@ export function CalcadaAnnotationTablesPanel({
   const rootsNote = useWatchable(session.rootsNote);
   const limitNote = useWatchable(session.limitNote);
   const totals = useWatchable(session.totals);
+  const placement = useWatchable(session.placement);
+  useSignalRerender(session.placingChanged);
   const infoByName = new Map(tables?.map((table) => [table.name, table]));
   const orphans = statuses.filter(
     (status) =>
@@ -536,6 +590,13 @@ export function CalcadaAnnotationTablesPanel({
               })}
             </ul>
           </>
+        )}
+        {placement !== undefined && (
+          <PlacementControl
+            placement={placement}
+            placing={session.isPlacing()}
+            onToggle={() => session.togglePlacing()}
+          />
         )}
         {limitNote !== undefined && (
           <div className="calcada-annotations-empty">{limitNote}</div>

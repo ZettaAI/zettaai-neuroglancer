@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { Annotation } from "#src/annotation/index.js";
+import type { Annotation, AnnotationId } from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 import {
   makeCoordinateSpace,
@@ -24,9 +24,11 @@ const LARGE_TABLE_SIZE = 100_000;
 const makeSource = ({
   isReadonly = () => false,
   onDelete = () => Promise.resolve(),
+  onCreate = () => Promise.reject(new Error("not written")),
 }: {
   isReadonly?: () => boolean;
   onDelete?: (annotation: Annotation) => Promise<void>;
+  onCreate?: (annotation: Annotation) => Promise<AnnotationId>;
 } = {}) =>
   new CalcadaTableAnnotationSource(
     new WatchableCoordinateSpaceTransform(
@@ -40,7 +42,7 @@ const makeSource = ({
     ),
     new WatchableValue([]),
     ["associated segments"],
-    { isReadonly, onDelete },
+    { isReadonly, onDelete, onCreate },
   );
 
 const pointAnnotation = (id: string): Annotation => ({
@@ -198,7 +200,7 @@ describe("CalcadaTableAnnotationSource", () => {
     reference.dispose();
   });
 
-  it("ignores NG's own edits but takes the session's description", () => {
+  it("ignores NG's edits of a row but takes the session's description", () => {
     const source = makeSource();
     const annotation = pointAnnotation("syn:1");
     source.replaceAll([annotation]);
@@ -207,7 +209,6 @@ describe("CalcadaTableAnnotationSource", () => {
       ...pointAnnotation(annotation.id),
       description: "typed in",
     });
-    source.add(pointAnnotation("placed"));
     source.addProperty({
       type: "float32",
       identifier: "extra",
@@ -239,6 +240,89 @@ describe("CalcadaTableAnnotationSource", () => {
     expect(source.get(annotation.id)?.description).toBe("size: 1242");
     expect(changed).not.toHaveBeenCalled();
     expect(childUpdated).not.toHaveBeenCalled();
+  });
+
+  it("a placed point is written and stays drawn until its row is", async () => {
+    let resolveCreate!: (rowId: AnnotationId) => void;
+    const onCreate = vi.fn(
+      () =>
+        new Promise<AnnotationId>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const source = makeSource({ onCreate });
+    source.replaceAll([pointAnnotation("syn:1")]);
+    const reference = source.add(pointAnnotation(""));
+    const placedId = reference.id;
+    expect(onCreate).toHaveBeenCalledExactlyOnceWith(source.get(placedId));
+    source.replaceAll([pointAnnotation("syn:1")]);
+    expect(source.get(placedId)).toBeDefined();
+    expect(source.takeWritten()).toEqual(new Map());
+    resolveCreate("syn:2");
+    await Promise.resolve();
+    expect(source.takeWritten()).toEqual(new Map([[placedId, "syn:2"]]));
+    source.replaceAll([pointAnnotation("syn:1"), pointAnnotation("syn:2")]);
+    expect(source.get(placedId)).toBeUndefined();
+    expect(reference.value).toBeNull();
+    reference.dispose();
+  });
+
+  it("a line is written once, on commit, with its last update", () => {
+    const onCreate = vi.fn(() => new Promise<AnnotationId>(() => {}));
+    const source = makeSource({ onCreate });
+    const reference = source.add(pointAnnotation(""), false);
+    const moved = {
+      ...pointAnnotation(reference.id),
+      point: Float32Array.of(1, 2, 3),
+    };
+    source.update(reference, moved);
+    expect(onCreate).not.toHaveBeenCalled();
+    source.commit(reference);
+    source.commit(reference);
+    expect(onCreate).toHaveBeenCalledExactlyOnceWith(moved);
+    reference.dispose();
+  });
+
+  it("a line deleted while being drawn goes without a server call", async () => {
+    const onCreate = vi.fn(() => new Promise<AnnotationId>(() => {}));
+    const onDelete = vi.fn(() => Promise.resolve());
+    const source = makeSource({ onCreate, onDelete });
+    const reference = source.add(pointAnnotation(""), false);
+    await source.delete(reference);
+    expect(source.get(reference.id)).toBeUndefined();
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+    reference.dispose();
+  });
+
+  it("a refused write takes the placed annotation away", async () => {
+    const source = makeSource({
+      onCreate: () => Promise.reject(new Error("forbidden")),
+    });
+    const reference = source.add(pointAnnotation(""));
+    await new Promise((resolve) => setTimeout(resolve));
+    expect(source.get(reference.id)).toBeUndefined();
+    expect(source.takeWritten()).toEqual(new Map());
+    reference.dispose();
+  });
+
+  it("nothing is placed into a readonly table", () => {
+    const onCreate = vi.fn(() => Promise.resolve("syn:1"));
+    const source = makeSource({ isReadonly: () => true, onCreate });
+    source.add(pointAnnotation("placed"));
+    expect([...source]).toEqual([]);
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("discardPlaced lets the next replaceAll drop placed annotations", () => {
+    const source = makeSource({
+      onCreate: () => new Promise<AnnotationId>(() => {}),
+    });
+    const reference = source.add(pointAnnotation(""));
+    source.discardPlaced();
+    source.replaceAll([]);
+    expect(source.get(reference.id)).toBeUndefined();
+    reference.dispose();
   });
 
   it("readonly follows isReadonly", () => {

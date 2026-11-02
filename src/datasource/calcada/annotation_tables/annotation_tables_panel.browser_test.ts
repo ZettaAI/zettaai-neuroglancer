@@ -30,10 +30,12 @@ import type {
   AnnotationTableStatus,
   AnnotationTotals,
   DrawnAnnotation,
+  TablePlacement,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import {
   annotationLimitNote,
   MAX_DRAWN_ANNOTATIONS,
+  PLACE_ONE_TABLE_NOTE,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import { ANNOTATION_TABLES_TAB_LABEL } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
@@ -52,7 +54,7 @@ import {
 import type { Disposer } from "#src/util/disposable.js";
 import { invokeDisposer } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
-import { NullarySignal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
 
 const SIDE_PANEL_WIDTH_PX = 260;
 const SWATCH_COLOR = vec3.fromValues(1, 0, 0);
@@ -155,7 +157,11 @@ function tableLayerState(isReadonly: () => boolean) {
     ),
     new WatchableValue([]),
     ["associated segments"],
-    { isReadonly, onDelete: () => Promise.resolve() },
+    {
+      isReadonly,
+      onDelete: () => Promise.resolve(),
+      onCreate: () => Promise.reject(new Error("not placed in this test")),
+    },
   );
   return {
     source,
@@ -212,6 +218,17 @@ class FakeSession {
   readonly annotationSelectionChanged = this.selectedId.changed;
   readonly listCoordinatesChanged = new NullarySignal();
   readonly colorsChanged = new NullarySignal();
+  readonly selectionStepped = new Signal<(index: number) => void>();
+  readonly selectAdjacent = vi.fn<(offset: number) => void>();
+  readonly placement = new WatchableValue<TablePlacement | undefined>(
+    undefined,
+  );
+  readonly placingChanged = new NullarySignal();
+  placing = false;
+  readonly togglePlacing = vi.fn(() => {
+    this.placing = !this.placing;
+    this.placingChanged.dispatch();
+  });
   private readonly color = SWATCH_COLOR;
   private readonly layerStates = new Map<string, AnnotationLayerState>();
 
@@ -250,6 +267,10 @@ class FakeSession {
       columnWidths,
     );
     return true;
+  }
+
+  isPlacing() {
+    return this.placing;
   }
 
   isSelected(item: DrawnAnnotation) {
@@ -738,6 +759,68 @@ describe("CalcadaAnnotationTablesPanel", () => {
       false,
       true,
     ]);
+  });
+
+  it("scrolls a row stepped to into view", async () => {
+    const { connection, session } = makeConnection(
+      [synapses],
+      [status({ table: "synapses", annotations: LONG_LIST_LENGTH })],
+      ["synapses"],
+    );
+    session.drawn.value = drawnRun("synapses", LONG_LIST_LENGTH);
+    await mountPanel(connection);
+    await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
+    session.selectionStepped.dispatch(LONG_LIST_LENGTH - 1);
+    await vi.waitFor(() =>
+      expect(annotationList()!.scrollTop).toBeGreaterThan(0),
+    );
+  });
+
+  it("adds to the one writable table: the button arms and disarms placing", async () => {
+    const { connection, session } = makeConnection(
+      [{ ...synapses, canWrite: true }],
+      [],
+      ["synapses"],
+    );
+    session.placement.value = {
+      table: "synapses",
+      type: AnnotationType.LINE,
+    };
+    await mountPanel(connection);
+    const button = await vi.waitFor(() => {
+      const found = [...tab.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Add line",
+      );
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(button);
+    expect(session.togglePlacing).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(button.getAttribute("aria-pressed")).toBe("true"),
+    );
+    expect(tab.textContent).toContain("Ctrl+click in a view to place");
+  });
+
+  it("shows the placing button disabled with the reason", async () => {
+    const { connection, session } = makeConnection(
+      [synapses, nuclei],
+      [],
+      ["synapses", "nuclei"],
+    );
+    session.placement.value = { blockedBy: PLACE_ONE_TABLE_NOTE };
+    await mountPanel(connection);
+    const button = await vi.waitFor(() => {
+      const found = [...tab.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Add annotation",
+      );
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(button.disabled).toBe(true);
+    expect(tab.textContent).toContain(PLACE_ONE_TABLE_NOTE);
   });
 
   it("says a table is loading beside its count, and alone before any count", async () => {
