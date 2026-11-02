@@ -360,6 +360,14 @@ function annotationListOf(state: AnnotationLayerState): IndexedAnnotations {
 
 const NO_ANNOTATIONS = indexAnnotations([]);
 
+interface StateListChange {
+  state: AnnotationLayerState;
+  changeOf: (
+    before: IndexedAnnotations,
+    after: IndexedAnnotations,
+  ) => { index: number | undefined; deleteCount: number; insertCount: number };
+}
+
 /** The layer's selected annotation, when it belongs to one of the states. */
 export function selectedListAnnotation(
   layer: Borrowed<UserLayerWithAnnotations>,
@@ -1178,28 +1186,36 @@ export class AnnotationLayerView extends Tab {
     }));
   }
 
+  private pendingListChanges: StateListChange[] | undefined;
+
   /**
-   * Re-reads the state's list and splices the one changed entry; anything
-   * else the change moved redraws the whole list.
+   * Changes of one burst (e.g. annotations added in a loop) are applied once
+   * it is over: a lone change splices its entry, several re-read the list.
    */
   private updateStateList(
     state: AnnotationLayerState,
-    changeOf: (
-      before: IndexedAnnotations,
-      after: IndexedAnnotations,
-    ) => {
-      index: number | undefined;
-      deleteCount: number;
-      insertCount: number;
-    },
+    changeOf: StateListChange["changeOf"],
   ) {
     if (!this.visible) {
       this.updated = false;
       return;
     }
+    if (this.pendingListChanges !== undefined) {
+      this.pendingListChanges.push({ state, changeOf });
+      return;
+    }
+    this.pendingListChanges = [{ state, changeOf }];
+    queueMicrotask(() => this.applyListChanges());
+  }
+
+  private applyListChanges() {
+    const changes = this.pendingListChanges!;
+    this.pendingListChanges = undefined;
+    if (this.wasDisposed) return;
+    const [{ state, changeOf }] = changes;
     const info = this.attachedAnnotationStates.get(state);
-    if (!this.updated || info === undefined) {
-      this.updateView();
+    if (!this.updated || info === undefined || changes.length > 1) {
+      this.forceUpdateView();
       return;
     }
     const before = info.annotations;
