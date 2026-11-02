@@ -216,15 +216,29 @@ describe("CalcadaTableAnnotationSource", () => {
     });
     expect([...source]).toEqual([annotation]);
     expect(source.properties.value).toEqual([]);
-    const updated = vi.fn();
-    source.childUpdated.add(updated);
+    const referenceChanged = vi.fn();
+    reference.changed.add(referenceChanged);
     source.setDescription(annotation.id, "tag: soma");
     expect(source.get(annotation.id)?.description).toBe("tag: soma");
     expect(reference.value?.description).toBe("tag: soma");
-    expect(updated).toHaveBeenCalledTimes(1);
+    expect(referenceChanged).toHaveBeenCalledTimes(1);
     source.setDescription(annotation.id, "tag: soma");
-    expect(updated).toHaveBeenCalledTimes(1);
+    expect(referenceChanged).toHaveBeenCalledTimes(1);
     reference.dispose();
+  });
+
+  it("a description reaches its reference without redrawing the table", () => {
+    const source = makeSource();
+    const annotation = pointAnnotation("syn:1");
+    source.replaceAll([annotation]);
+    const changed = vi.fn();
+    const childUpdated = vi.fn();
+    source.changed.add(changed);
+    source.childUpdated.add(childUpdated);
+    source.setDescription(annotation.id, "size: 1242");
+    expect(source.get(annotation.id)?.description).toBe("size: 1242");
+    expect(changed).not.toHaveBeenCalled();
+    expect(childUpdated).not.toHaveBeenCalled();
   });
 
   it("readonly follows isReadonly", () => {

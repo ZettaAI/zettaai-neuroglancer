@@ -58,17 +58,21 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     this.childrenReordered.dispatch();
   }
 
+  /**
+   * Tells only the annotation's reference, which the Selection panel watches:
+   * a description is not drawn, so the table's buffer and list stay as they are.
+   */
   setDescription(id: AnnotationId, description: string) {
     const annotation = this.get(id);
     if (annotation === undefined || annotation.description === description) {
       return;
     }
-    const reference = this.getReference(id);
-    try {
-      super.update(reference, { ...annotation, description });
-    } finally {
-      reference.dispose();
-    }
+    const described = { ...annotation, description };
+    this.annotationMap.set(id, described);
+    const reference = this.references.get(id);
+    if (reference === undefined) return;
+    reference.value = described;
+    reference.changed.dispatch();
   }
 
   add(annotation: Annotation): AnnotationReference {
