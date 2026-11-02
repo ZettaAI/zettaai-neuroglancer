@@ -825,12 +825,15 @@ describe("CalcadaAnnotationTablesPanel", () => {
 
   const placeButton = (label: string) =>
     vi.waitFor(() => {
-      const found = tab.querySelector<HTMLButtonElement>(
-        `button[aria-label="${label}"]`,
+      const found = tab.querySelector<HTMLElement>(
+        `.neuroglancer-icon[aria-label="${label}"]`,
       );
       expect(found).not.toBeNull();
       return found!;
     });
+
+  const isDisabled = (icon: HTMLElement) =>
+    icon.getAttribute("aria-disabled") === "true";
 
   it("offers NG's point and line tools; the table's type arms and disarms placing", async () => {
     const { connection, session } = makeConnection(
@@ -851,8 +854,8 @@ describe("CalcadaAnnotationTablesPanel", () => {
     expect(point.textContent).toBe(
       annotationTypeHandlers[AnnotationType.POINT].icon,
     );
-    expect(point.disabled).toBe(true);
-    expect(line.disabled).toBe(false);
+    expect(isDisabled(point)).toBe(true);
+    expect(isDisabled(line)).toBe(false);
     expect(line.getAttribute("aria-pressed")).toBe("false");
     await userEvent.click(line);
     expect(session.togglePlacing).toHaveBeenCalledTimes(1);
@@ -870,8 +873,8 @@ describe("CalcadaAnnotationTablesPanel", () => {
     );
     session.placement.value = { blockedBy: PLACE_ONE_TABLE_NOTE };
     await mountPanel(connection);
-    expect((await placeButton("Add line")).disabled).toBe(true);
-    expect((await placeButton("Add point")).disabled).toBe(true);
+    expect(isDisabled(await placeButton("Add line"))).toBe(true);
+    expect(isDisabled(await placeButton("Add point"))).toBe(true);
     expect(tab.textContent).toContain(PLACE_ONE_TABLE_NOTE);
   });
 
@@ -887,20 +890,20 @@ describe("CalcadaAnnotationTablesPanel", () => {
     };
     await mountPanel(connection);
     const line = await placeButton("Add line");
-    expect(line.disabled).toBe(true);
+    expect(isDisabled(line)).toBe(true);
     expect(tab.textContent).toContain("Fill in size to add");
     const size = tab.querySelector<HTMLInputElement>(
       'input[aria-label="size (required)"]',
     )!;
     await userEvent.type(size, "12");
     expect(session.setNewRowValue).toHaveBeenLastCalledWith("size", 12);
-    await vi.waitFor(() => expect(line.disabled).toBe(false));
+    await vi.waitFor(() => expect(isDisabled(line)).toBe(false));
     const tag = tab.querySelector<HTMLInputElement>('input[aria-label="tag"]')!;
     await userEvent.type(tag, "spine");
     expect(session.newRowPayload.value).toEqual({ size: 12, tag: "spine" });
     await userEvent.clear(size);
     expect(session.setNewRowValue).toHaveBeenLastCalledWith("size", undefined);
-    await vi.waitFor(() => expect(line.disabled).toBe(true));
+    await vi.waitFor(() => expect(isDisabled(line)).toBe(true));
   });
 
   it("takes no fraction for an integer property", async () => {
@@ -958,12 +961,16 @@ describe("CalcadaAnnotationTablesPanel", () => {
     );
   });
 
-  it("limit message replaces the list", async () => {
+  it("limit message replaces the list, right under the tables, above adding", async () => {
     const { connection, session } = makeConnection(
-      [synapses],
+      [{ ...synapses, canWrite: true }],
       [],
       ["synapses"],
     );
+    session.placement.value = {
+      table: "synapses",
+      type: AnnotationType.LINE,
+    };
     const note = annotationLimitNote({
       complete: true,
       total: MAX_DRAWN_ANNOTATIONS + 1,
@@ -972,7 +979,12 @@ describe("CalcadaAnnotationTablesPanel", () => {
     session.drawn.value = drawnList([drawnAnnotation("synapses", 1n)]);
     session.limitNote.value = note;
     await mountPanel(connection);
-    expect(tab.textContent).toContain(note);
+    const shown = tab.querySelector(".calcada-annotations-limit")!;
+    expect(shown.textContent).toBe(note);
+    expect(
+      shown.compareDocumentPosition(await placeButton("Add line")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(annotationList()).toBe(null);
     session.limitNote.value = undefined;
     await renderedRows(1);

@@ -14,10 +14,12 @@ import type {
   AnnotationPropertySpec,
   AnnotationId,
   AnnotationReference,
+  IndexedAnnotations,
   RenderedAnnotations,
 } from "#src/annotation/index.js";
 import {
   AnnotationType,
+  indexAnnotations,
   LocalAnnotationSource,
 } from "#src/annotation/index.js";
 import type { WatchableCoordinateSpaceTransform } from "#src/coordinate_transform.js";
@@ -48,7 +50,6 @@ export interface TableAnnotationSourceOptions {
  * deleting one stay. Placed annotations live in `annotationMap`.
  */
 export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
-  listedInAnnotationList = false;
   private tableRows = EMPTY_TABLE_ROWS("");
   private readonly descriptions = new Map<AnnotationId, string>();
   private readonly onDelete: TableAnnotationSourceOptions["onDelete"];
@@ -86,6 +87,28 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     }
     this.refreshReferences();
     this.changed.dispatch();
+    this.childrenReordered.dispatch();
+  }
+
+  /** Rows, then placed annotations; each made only when the list shows it. */
+  annotationList(): IndexedAnnotations {
+    this.ensureUpdated();
+    const rows = this.tableRows;
+    const rowInstances = instanceCount(rows);
+    const placed = indexAnnotations([...this.annotationMap.values()]);
+    return {
+      length: rowInstances + placed.length,
+      at: (index) =>
+        index < rowInstances
+          ? this.described(annotationOfInstance(rows, index))
+          : placed.at(index - rowInstances),
+      indexOf: (id) => {
+        const instance = instanceOfId(rows, id);
+        if (instance !== undefined) return instance;
+        const index = placed.indexOf(id);
+        return index === undefined ? undefined : rowInstances + index;
+      },
+    };
   }
 
   get(id: AnnotationId): Annotation | undefined {

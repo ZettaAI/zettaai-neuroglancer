@@ -1641,7 +1641,14 @@
 
 .calcada-annotations-place-tools {
   display: flex;
-  gap: 4px;
+}
+
+.calcada-annotations-place-tools .neuroglancer-icon[aria-pressed="true"] {
+  background-color: #db4437;
+}
+
+.calcada-annotations-limit {
+  color: #f6c344;
 }
 
 .calcada-annotations-payload {

@@ -113,8 +113,33 @@ const VALUE_PROPERTY = {
 };
 
 describe("CalcadaTableAnnotationSource", () => {
-  it("is not listed in the annotation list", () => {
-    expect(makeSource().listedInAnnotationList).toBe(false);
+  it("lists rows then placed annotations by index without making the others", () => {
+    const source = makeSource({
+      onCreate: () => new Promise<AnnotationId>(() => {}),
+    });
+    const rows = tableRows([4, 7], 3);
+    source.showRows(rows);
+    source.setDescription("syn:7:1", "payload");
+    const placed = source.add(pointAnnotation(""));
+    const list = source.annotationList();
+    expect(list.length).toBe(7);
+    expect(list.at(4)).toEqual({
+      ...annotationOfInstance(rows, 4),
+      description: "payload",
+    });
+    expect(list.at(6).id).toBe(placed.id);
+    expect(list.indexOf("syn:7:1")).toBe(4);
+    expect(list.indexOf(placed.id)).toBe(6);
+    expect(list.indexOf("syn:5")).toBeUndefined();
+    placed.dispose();
+  });
+
+  it("showRows tells lists to reorder, once", () => {
+    const source = makeSource();
+    const reordered = vi.fn();
+    source.childrenReordered.add(reordered);
+    source.showRows(tableRows([1]));
+    expect(reordered).toHaveBeenCalledTimes(1);
   });
 
   it("serializeForRender without a filter equals NG's own serializer over the same annotations", () => {
@@ -195,7 +220,7 @@ describe("CalcadaTableAnnotationSource", () => {
     const replacement = tableRows([1, 3]);
     source.showRows(replacement);
     expect(changed).toHaveBeenCalledTimes(1);
-    expect(reordered).not.toHaveBeenCalled();
+    expect(reordered).toHaveBeenCalledTimes(1);
     expect(keptChanged).toHaveBeenCalledTimes(1);
     expect(kept.value).toEqual(annotationOfInstance(replacement, 0));
     expect(dropped.value).toBeNull();

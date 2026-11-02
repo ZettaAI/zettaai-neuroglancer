@@ -56,8 +56,17 @@ describe("AnnotationSource.serializeForRender", () => {
     expect(rendered.typeToSize[AnnotationType.POINT]).toBe(1);
     expect(rendered.typeToIds[AnnotationType.POINT].at(0)).toBe("p2");
   });
+});
 
-  it("is listed in the annotation list by default", () => {
-    expect(new AnnotationSource(RANK).listedInAnnotationList).toBe(true);
+describe("AnnotationSource.annotationList", () => {
+  it("lists the annotations by index and finds each by id", () => {
+    const source = new AnnotationSource(RANK);
+    source.add(point("p1", [1, 2, 3]));
+    source.add(line("l1", [0, 0, 0], [4, 5, 6]));
+    const list = source.annotationList();
+    expect(list.length).toBe(2);
+    expect(list.at(1).id).toBe("l1");
+    expect(list.indexOf("p1")).toBe(0);
+    expect(list.indexOf("absent")).toBeUndefined();
   });
 });

@@ -1364,6 +1364,26 @@ function restoreAnnotation(
   return result;
 }
 
+export interface IndexedAnnotations {
+  readonly length: number;
+  at(index: number): Annotation;
+  indexOf(id: AnnotationId): number | undefined;
+}
+
+export function indexAnnotations(
+  annotations: readonly Annotation[],
+): IndexedAnnotations {
+  let indexById: Map<AnnotationId, number> | undefined;
+  return {
+    length: annotations.length,
+    at: (index) => annotations[index],
+    indexOf: (id) =>
+      (indexById ??= new Map(
+        annotations.map(({ id: annotationId }, index) => [annotationId, index]),
+      )).get(id),
+  };
+}
+
 export interface AnnotationSourceSignals {
   changed: NullarySignal;
   childAdded: Signal<(annotation: Annotation) => void>;
@@ -1387,8 +1407,6 @@ export class AnnotationSource
   childrenReordered = new NullarySignal();
 
   public pending = new Set<AnnotationId>();
-
-  listedInAnnotationList = true;
 
   protected rank_: number;
 
@@ -1499,6 +1517,11 @@ export class AnnotationSource
   [Symbol.iterator](): Iterator<Annotation> {
     this.ensureUpdated();
     return this.annotationMap.values();
+  }
+
+  /** The annotations as the annotation list shows them, by index. */
+  annotationList(): IndexedAnnotations {
+    return indexAnnotations(Array.from(this));
   }
 
   serializeForRender(

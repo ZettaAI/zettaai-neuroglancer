@@ -51,6 +51,7 @@ import type { ReadonlySignal } from "#src/util/signal.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { VirtualListSource } from "#src/widget/virtual_list.js";
 import { VirtualList } from "#src/widget/virtual_list.js";
+import "#src/widget/icon.css";
 import { Button } from "@/components/ui/button";
 import {
   Combobox,
@@ -323,19 +324,20 @@ function PlacementControl({
         {PLACEMENT_TYPES.map((toolType) => {
           const label = PLACEMENT_LABELS.get(toolType)!;
           const pressed = placing && type === toolType;
+          const disabled = type !== toolType || missingNote !== undefined;
           return (
-            <Button
+            <div
               key={toolType}
-              size="icon-sm"
-              variant={pressed ? "default" : "outline"}
+              role="button"
+              className="neuroglancer-icon"
               aria-label={label}
               aria-pressed={pressed}
+              aria-disabled={disabled}
               title={type === toolType ? label : OTHER_TYPE_HINT}
-              disabled={type !== toolType || missingNote !== undefined}
-              onClick={onToggle}
+              onClick={disabled ? undefined : onToggle}
             >
               {annotationTypeHandlers[toolType].icon}
-            </Button>
+            </div>
           );
         })}
       </div>
@@ -720,6 +722,9 @@ export function CalcadaAnnotationTablesPanel({
             </ul>
           </>
         )}
+        {limitNote !== undefined && (
+          <div className="calcada-annotations-limit">{limitNote}</div>
+        )}
         {placement !== undefined && (
           <PlacementControl
             placement={placement}
@@ -729,9 +734,6 @@ export function CalcadaAnnotationTablesPanel({
             onToggle={() => session.togglePlacing()}
             onValue={(name, value) => session.setNewRowValue(name, value)}
           />
-        )}
-        {limitNote !== undefined && (
-          <div className="calcada-annotations-empty">{limitNote}</div>
         )}
       </div>
       {limitNote === undefined && (
