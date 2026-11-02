@@ -12,6 +12,7 @@ import type {
   ChunkCoord,
   ChunkId as ChunkIdType,
   ChunkVoxelBuffer,
+  LayerId,
   LayerMetadata,
   ReadonlyChunkVoxelBuffer,
   Resolution as ResolutionType,
@@ -45,6 +46,7 @@ import type {
   BrushApplyInput,
   BrushStrokeInput,
   FillInput,
+  MaskedFootprintInput,
   PaintChunkWrite,
   PaintCompute,
   PaintWriteBatch,
@@ -469,6 +471,66 @@ export class PaintingCompute implements PaintCompute {
     );
     if (mask === null) return null;
     return { loTx, loTy, maskW: tShapeX, maskH: tShapeY, cz, mask };
+  }
+
+  /**
+   * See {@link PaintCompute.applyMaskedFootprint}. Stays on the main-thread
+   * masked path on purpose: the pyodide pipeline rebuilds its footprint from
+   * `pathPoints`, and a filled area has no such path. The footprint comes with
+   * its image slab, so the size check has to happen here, before allocating it.
+   */
+  async applyMaskedFootprint(
+    input: MaskedFootprintInput,
+  ): Promise<PaintWriteBatch | null> {
+    const { footprint, value } = input;
+    const maskCtx = resolveMaskContext(
+      { ...input, voxelPosition: [0, 0, 0], radius: 0 },
+      this.imageChunkCache,
+    );
+    if (maskCtx === undefined) {
+      // Same fallback as a stroke whose mask cannot be resolved.
+      return buildFootprintBatch(
+        input.metadata,
+        input.targetLayerId,
+        input.targetResolution,
+        footprint,
+        value,
+      );
+    }
+    const imageVoxelsPerTargetX = Math.max(
+      1,
+      maskCtx.targetVoxelSizeNm[0] / maskCtx.imageVoxelSizeNm[0],
+    );
+    const imageVoxelsPerTargetY = Math.max(
+      1,
+      maskCtx.targetVoxelSizeNm[1] / maskCtx.imageVoxelSizeNm[1],
+    );
+    const slabVoxels =
+      footprint.maskW *
+      imageVoxelsPerTargetX *
+      footprint.maskH *
+      imageVoxelsPerTargetY;
+    if (slabVoxels > input.maxImageVoxels) return null;
+
+    const builder = new PaintBatchBuilder(
+      input.metadata,
+      input.targetLayerId,
+      input.targetResolution,
+    );
+    await stampShape2DMasked(
+      builder,
+      footprint.loTx,
+      footprint.loTy,
+      footprint.maskW,
+      footprint.maskH,
+      footprint.cz,
+      value,
+      maskCtx,
+      this.runMorphology,
+      (voxelX, voxelY) => footprintCovers(footprint, voxelX, voxelY),
+      /* useSlice */ true,
+    );
+    return builder.build();
   }
 
   /**
@@ -1818,6 +1880,47 @@ function stampPolyline2DMasked(
     pipeline,
     { points, radius: brushRadius(radius) },
   );
+}
+
+function footprintCovers(
+  footprint: StrokeFootprintMask,
+  voxelX: number,
+  voxelY: number,
+): boolean {
+  const column = voxelX - footprint.loTx;
+  const row = voxelY - footprint.loTy;
+  return footprint.mask[row * footprint.maskW + column] === 1;
+}
+
+/**
+ * The writes for a footprint with no mask to apply. Goes through the same
+ * builder as the masked scatter route, so the result is dense per-chunk blocks
+ * that `applyPaintBatch` hands to `writeRegion`, which clips to the session and
+ * maps onto the real chunk grid.
+ */
+export function buildFootprintBatch(
+  metadata: LayerMetadata,
+  targetLayerId: LayerId,
+  targetResolution: ResolutionType,
+  footprint: StrokeFootprintMask,
+  value: number | bigint,
+): PaintWriteBatch {
+  const { loTx, loTy, maskW, maskH, cz, mask } = footprint;
+  const builder = new PaintBatchBuilder(
+    metadata,
+    targetLayerId,
+    targetResolution,
+  );
+  builder.beginSliceStamp(loTx, loTy, loTx + maskW - 1, loTy + maskH - 1, cz);
+  for (let row = 0; row < maskH; row++) {
+    const rowOffset = row * maskW;
+    for (let column = 0; column < maskW; column++) {
+      if (mask[rowOffset + column] === 1) {
+        builder.writeVoxel(loTx + column, loTy + row, cz, value);
+      }
+    }
+  }
+  return builder.build();
 }
 
 /**

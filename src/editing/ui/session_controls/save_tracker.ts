@@ -428,6 +428,8 @@ export class SaveTracker {
       return;
     }
     if (!session.dirty.isDirty()) return;
+    // Not a failure: nothing was attempted, so the layers must not turn red.
+    if (host.refuseWhilePainting()) return;
 
     const controller = new AbortController();
     this.state_ = { kind: "saving", controller };

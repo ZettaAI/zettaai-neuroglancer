@@ -160,6 +160,7 @@ function initialState(radius = 3): PaintingSharedState {
     // on integer positions along an axis-aligned stroke (keeps assertions clean).
     spacingFraction: 0.1,
     autoSelectPaintedSegment: true,
+    fillClosedPaths: false,
   };
 }
 

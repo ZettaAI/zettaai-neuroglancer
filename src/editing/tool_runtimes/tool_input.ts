@@ -56,6 +56,16 @@ export interface PointerMoveEvent extends ToolInputCommon {
    * empty => no coalescing happened.
    */
   readonly viaVoxelPositions?: readonly (readonly [number, number, number])[];
+  /**
+   * Pointer samples the scheduler dropped from painting (oldest first), for
+   * tools that follow the true pointer path without painting it: closing a
+   * stroke's outline (TM-268). Never painted as such.
+   */
+  readonly contourVoxelPositions?: readonly (readonly [
+    number,
+    number,
+    number,
+  ])[];
   readonly screenPosition: readonly [number, number];
   readonly panelHint: string | undefined;
 }

@@ -432,6 +432,7 @@ function ActiveTopbarControls({
   }, []);
 
   const runUndo = useCallback(async () => {
+    if (host.refuseWhilePainting()) return;
     try {
       await session.undo();
     } catch (err) {
@@ -443,6 +444,7 @@ function ActiveTopbarControls({
   }, [session]);
 
   const runRedo = useCallback(async () => {
+    if (host.refuseWhilePainting()) return;
     try {
       await session.redo();
     } catch (err) {

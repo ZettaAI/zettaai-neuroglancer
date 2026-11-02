@@ -42,6 +42,10 @@ export async function applyPaintBatch(
   edit: Edit,
   batch: PaintWriteBatch,
   chunkSize: readonly [number, number, number],
+  // Polled before each chunk write. `writeRegion` awaits, so a stroke can be
+  // canceled mid-batch, and `Edit` does not refuse writes after it is finalized:
+  // a later chunk would land in the overlay with no undo entry behind it.
+  isCurrent: () => boolean = () => true,
 ): Promise<void> {
   const target: WriteTarget = {
     layerId: batch.targetLayerId,
@@ -53,6 +57,7 @@ export async function applyPaintBatch(
   let appliedChunks = 0;
 
   for (const w of batch.chunks) {
+    if (!isCurrent()) break;
     const [ox, oy, oz] = w.subregion.origin;
     const [sxv, syv, szv] = w.subregion.size;
     const box = {

@@ -51,6 +51,7 @@ function state(over: Partial<PaintingSharedState> = {}): PaintingSharedState {
     fillMode: "3d",
     spacingFraction: 0.1,
     autoSelectPaintedSegment: true,
+    fillClosedPaths: false,
     ...over,
   };
 }
@@ -102,6 +103,38 @@ describe("tooling_persist", () => {
     });
     const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
     expect(patch!.fillMode).toBe("2d");
+  });
+
+  it("round-trips fill-closed-paths turned on (TM-268)", () => {
+    const serialized = serializeTooling(
+      "painting.brush",
+      state({ fillClosedPaths: true }),
+    );
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.fillClosedPaths).toBe(true);
+  });
+
+  it("keeps fill-closed-paths off for configs lacking the field or holding junk (TM-268)", () => {
+    for (const persisted of [{}, { fillClosedPaths: "true" }]) {
+      const parsed = parseTooling({
+        activeToolId: "painting.brush",
+        painting: {
+          targetLayerId: "target",
+          targetResolution: RES.toString(),
+          radius: 9,
+          activeValue: { t: "b", v: "42" },
+          eraseValue: { t: "n", v: 0 },
+          mask: null,
+          ...persisted,
+        },
+      });
+      const patch = paintingPatchFromPersist(
+        parsed!.painting!,
+        allowed(TARGET),
+      );
+      expect(patch!.fillClosedPaths).toBe(false);
+    }
   });
 
   it("round-trips auto-select turned off (TM-490)", () => {

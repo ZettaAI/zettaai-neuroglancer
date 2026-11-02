@@ -152,6 +152,7 @@ function fakeHost(
         },
       },
     },
+    refuseWhilePainting: () => false,
     saveActive: async () => saveResult,
     hasUnconfirmedSaves: () => unconfirmed,
     cancelActiveSave: () => {},

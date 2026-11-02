@@ -528,6 +528,9 @@ const VERIFY_BACKOFF_MS: readonly number[] = [
  */
 const VERIFY_CONCURRENCY = 5;
 
+const PAINTING_IN_PROGRESS_MESSAGE =
+  "Painting is still in progress. Try again when it finishes.";
+
 /**
  * Stands in for a layer whose committed chunks were painted under more than one
  * edit session, so no single region describes them. Saving such a layer is
@@ -609,6 +612,8 @@ export class EditSessionHost extends RefCounted {
    * read its shared `state`.
    */
   private paintingTools: ConsumerPaintingTools | undefined;
+  /** The active session's edit scope; set alongside `paintingTools`. */
+  private editScope: EditScope | undefined;
   get painting(): ConsumerPaintingTools | undefined {
     return this.paintingTools;
   }
@@ -1683,11 +1688,34 @@ export class EditSessionHost extends RefCounted {
     return undefined;
   }
 
+  /**
+   * True while an edit is still writing: a stroke being drawn or a closed
+   * stroke's fill (TM-268).
+   */
+  get hasLiveEdit(): boolean {
+    return this.editScope?.hasLiveEdit ?? false;
+  }
+
+  /**
+   * Guard for undo/redo, which the library gates only on the session phase.
+   * Undo mid-write would restore chunks the edit is still writing, and the edit
+   * would then record its entry on top of the entry it just raced. Tells the
+   * user and returns true when the caller must not proceed.
+   */
+  refuseWhilePainting(): boolean {
+    if (!this.hasLiveEdit) return false;
+    StatusMessage.showTemporaryMessage(PAINTING_IN_PROGRESS_MESSAGE, 3000);
+    return true;
+  }
+
   /** Commit the active session. Ends the session regardless of outcome. */
   async commitActive(): Promise<CommitResult> {
     const session = this.activeSession.value;
     if (session === undefined) {
       throw new Error("No active session to commit");
+    }
+    if (this.hasLiveEdit) {
+      throw new Error(PAINTING_IN_PROGRESS_MESSAGE);
     }
     let result: CommitResult;
     try {
@@ -1752,6 +1780,9 @@ export class EditSessionHost extends RefCounted {
     const session = this.activeSession.value;
     if (session === undefined) {
       throw new Error("No active session to save");
+    }
+    if (this.hasLiveEdit) {
+      throw new Error(PAINTING_IN_PROGRESS_MESSAGE);
     }
     if (this.saveAbortController !== undefined) {
       throw new Error("A save is already in flight");
@@ -3306,6 +3337,9 @@ export class EditSessionHost extends RefCounted {
       // Painting selects its segment so the stroke shows in 2D and 3D without
       // a double-click (TM-490); the user turns it off in the brush/fill panel.
       autoSelectPaintedSegment: true,
+      // Off until the user opts in: with it off a stroke behaves exactly as it
+      // did before TM-268.
+      fillClosedPaths: false,
     };
 
     const compute = new PaintingCompute(this.morphologyClient);
@@ -3323,6 +3357,7 @@ export class EditSessionHost extends RefCounted {
     // edits) and the binder's activations (so a tool switch rolls back any
     // in-flight stroke) — the single-live-edit invariant (TM-315).
     const editScope = new EditScope(session);
+    this.editScope = editScope;
     this.paintingTools = new ConsumerPaintingTools({
       scope: editScope,
       compute,
@@ -4428,6 +4463,7 @@ export class EditSessionHost extends RefCounted {
     }
     this._toolRegistry = undefined;
     this.paintingTools = undefined;
+    this.editScope = undefined;
     this.zExtrapolationTool = undefined;
     this.teardownHotkeyBinder();
     this.teardownCursorOverlays();
