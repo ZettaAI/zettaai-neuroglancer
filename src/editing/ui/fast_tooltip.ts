@@ -20,11 +20,20 @@
  * `overflow: hidden` clipping contexts of the entry modal and tool panels (a
  * pure-CSS `::after` tooltip cannot). Call {@link installFastTooltips} once
  * during edit-UI bootstrap; it is idempotent.
+ *
+ * An element may also carry `data-shortcut`, a space-separated list of event
+ * identifiers (see `key_chord_format.ts`). The tooltip's first line then becomes
+ * a title with the key caps beside it and any further lines become its detail.
  */
 
 import "#src/editing/ui/fast_tooltip.css";
 
+import { makeKeyChips } from "#src/ui/key_chips.js";
+import { preferredChord } from "#src/ui/key_chord_format.js";
+
 const SHOW_DELAY_MS = 150;
+/** Moving along a row of buttons within this time shows the next hint at once. */
+const SKIP_DELAY_WINDOW_MS = 400;
 /** Minimum gap kept between the bubble and the viewport edges. */
 const VIEWPORT_MARGIN = 6;
 /** Gap between the anchor element and the bubble. */
@@ -35,6 +44,7 @@ let bubble: HTMLDivElement | null = null;
 /** Element the bubble is currently anchored to (or scheduled to show for). */
 let anchor: Element | null = null;
 let showTimer = 0;
+let lastHiddenAt = Number.NEGATIVE_INFINITY;
 
 function getBubble(): HTMLDivElement {
   if (bubble === null) {
@@ -46,10 +56,46 @@ function getBubble(): HTMLDivElement {
   return bubble;
 }
 
+function fillBubble(
+  el: HTMLDivElement,
+  text: string,
+  shortcut: string | null,
+  pairShortcut: string | null,
+): void {
+  const chord =
+    shortcut === null ? undefined : preferredChord(shortcut.split(" "));
+  if (chord === undefined) {
+    el.textContent = text;
+    return;
+  }
+  const pairChord =
+    pairShortcut === null ? undefined : preferredChord(pairShortcut.split(" "));
+  const [title, ...details] = text.split("\n");
+  const titleRow = document.createElement("div");
+  titleRow.className = "neuroglancer-fast-tooltip-title";
+  const keys = document.createElement("span");
+  keys.className = "neuroglancer-key-chips";
+  keys.append(makeKeyChips(chord));
+  if (pairChord !== undefined) keys.append(" / ", makeKeyChips(pairChord));
+  titleRow.append(title, keys);
+  el.replaceChildren(titleRow);
+  if (details.length > 0) {
+    const detail = document.createElement("div");
+    detail.className = "neuroglancer-fast-tooltip-detail";
+    detail.textContent = details.join("\n");
+    el.appendChild(detail);
+  }
+}
+
 /** Position the bubble below `target` (flipping above if it would overflow). */
 function place(target: Element, text: string): void {
   const el = getBubble();
-  el.textContent = text;
+  fillBubble(
+    el,
+    text,
+    target.getAttribute("data-shortcut"),
+    target.getAttribute("data-shortcut-pair"),
+  );
   el.classList.add("visible");
 
   const tip = el.getBoundingClientRect();
@@ -84,7 +130,10 @@ function clearTimer(): void {
 function hide(): void {
   clearTimer();
   anchor = null;
-  if (bubble !== null) bubble.classList.remove("visible");
+  if (bubble !== null && bubble.classList.contains("visible")) {
+    bubble.classList.remove("visible");
+    lastHiddenAt = performance.now();
+  }
 }
 
 function scheduleShow(target: Element): void {
@@ -92,6 +141,10 @@ function scheduleShow(target: Element): void {
   if (text === null || text === "") return;
   anchor = target;
   clearTimer();
+  if (performance.now() - lastHiddenAt < SKIP_DELAY_WINDOW_MS) {
+    place(target, text);
+    return;
+  }
   showTimer = window.setTimeout(() => {
     showTimer = 0;
     // The anchor may have changed or detached during the delay.
@@ -122,6 +175,12 @@ function onFocusIn(e: FocusEvent): void {
   if (target !== null) scheduleShow(target);
 }
 
+function onKeyDown(e: KeyboardEvent): void {
+  // Closes the hint without moving the pointer. The key still reaches the
+  // viewer: the hint is not modal, so Esc keeps its usual meaning there too.
+  if (e.key === "Escape") hide();
+}
+
 /**
  * Install the delegated tooltip listeners. Idempotent — safe to call from
  * multiple bootstrap paths.
@@ -137,6 +196,7 @@ export function installFastTooltips(): void {
   // position — cheapest to just dismiss.
   document.addEventListener("pointerdown", hide, true);
   document.addEventListener("scroll", hide, true);
+  document.addEventListener("keydown", onKeyDown, true);
   window.addEventListener("resize", hide);
   window.addEventListener("blur", hide);
 }

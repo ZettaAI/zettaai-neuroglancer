@@ -45,18 +45,30 @@
 import { radiusToSize, sizeToRadius } from "#src/editing/brush_size_presets.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { HeldKeyTracker } from "#src/editing/held_key_tracker.js";
+import { keyboardEventToIdentifier } from "#src/editing/keybind_event.js";
 import {
   accelStepsPerSecond,
   nextPresetSize,
 } from "#src/editing/painting_hotkey_math.js";
 import { ParamStatusOverlay } from "#src/editing/param_status_overlay.js";
+import { isFieldKeyForSession } from "#src/editing/tool_panel_field_keys.js";
 import type { PaintingState } from "#src/editing/tool_runtimes/painting_tools.js";
 import type { PaintParamCursor } from "#src/editing/tool_runtimes/param_cursor.js";
 import type { EditKeybindOverrides } from "#src/editing/tooling/tooling_persist.js";
 import {
+  PARAM_IDS,
+  valueDescriptor,
+} from "#src/editing/ui/tool_settings/param_descriptors.js";
+import {
   getEditSessionKeybinds,
   type EditSessionKeybinds,
 } from "#src/ui/custom_keybinds.js";
+import { isMacPlatform } from "#src/ui/key_chord_format.js";
+import {
+  modeShortcuts,
+  SHORTCUT_SHEET_KEYS,
+  type ModeShortcut,
+} from "#src/ui/mode_shortcuts.js";
 import { RefCounted } from "#src/util/disposable.js";
 import {
   EventActionMap,
@@ -68,6 +80,8 @@ import type { Viewer } from "#src/viewer.js";
 // `viewer.inputEventMap` (e.g. neuroglancer's global `keyb` → "toggle-scale-bar"
 // in `src/ui/default_input_event_bindings.ts:28`).
 const SESSION_HOTKEY_PRIORITY = 100;
+
+export { isMacPlatform };
 
 // Centralised so the action ids stay in sync between the action map and the
 // action-listener registrations below. Mirrors the v1 hotkey table in
@@ -81,10 +95,16 @@ const ACTION_IDS = {
   cursorMode: "edit-session-cursor-mode",
   undo: "edit-session-undo",
   redo: "edit-session-redo",
+  saveAll: "edit-session-save-all",
   exitTool: "edit-session-exit-tool",
   // `+` / `-` — step brush *size* through the preset cycle.
   sizeDecr: "edit-session-size-decr",
   sizeIncr: "edit-session-size-incr",
+  // `{` / `}` — step the target value (the segment being painted).
+  targetValueDecr: "edit-session-target-value-decr",
+  targetValueIncr: "edit-session-target-value-incr",
+  // Brush: fill the inside of a closed stroke on / off (TM-268).
+  toggleFillClosedPaths: "edit-session-toggle-fill-closed-paths",
   // Ctrl+Left / Ctrl+Right (Option+Arrow on macOS) — move the parameter
   // selection cursor through the active tool panel's enabled controls (TM-337).
   paramPrev: "edit-session-param-prev",
@@ -110,20 +130,16 @@ export type EditKeybindName =
   | "cursor"
   | "undo"
   | "redo"
+  | "saveAll"
   | "sizeDecrease"
   | "sizeIncrease"
+  | "targetValueDecrease"
+  | "targetValueIncrease"
+  | "fillClosedPaths"
   | "paramPrev"
   | "paramNext"
   | "paramIncrease"
   | "paramDecrease";
-
-/** True when running on macOS (best-effort; false in non-browser contexts). */
-export function isMacPlatform(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const platform = navigator.platform ?? "";
-  const ua = navigator.userAgent ?? "";
-  return /mac/i.test(platform) || /mac os x/i.test(ua);
-}
 
 /**
  * Default keys for the Ctrl+Arrow parameter scheme (TM-337), chosen per
@@ -149,16 +165,29 @@ export function paramArrowDefaults(mac: boolean): {
   };
 }
 
+// Single letters as in Photoshop: a text field never receives them as shortcuts
+// (see `KeyboardEventBinder`) and the session layer only shadows the global keys
+// while a session is open. The Ctrl chords are the previous defaults, kept for
+// one release so habits keep working; Ctrl+F is gone because it took the
+// browser's Find away.
 const DEFAULT_EDIT_KEYBINDS: Record<EditKeybindName, readonly string[]> = {
-  brush: ["control+keyb"],
-  erase: ["control+keye"],
-  fill: ["control+keyf"],
-  zextrap: ["control+keyx"],
-  cursor: ["control+keyv"],
+  brush: ["keyb", "control+keyb"],
+  erase: ["keye", "control+keye"],
+  fill: ["keyg"],
+  zextrap: ["keyx", "control+keyx"],
+  cursor: ["keyv", "control+keyv"],
   undo: ["control+keyz", "meta+keyz"],
   redo: ["control+shift+keyz", "meta+shift+keyz"],
+  saveAll: ["control+keys", "meta+keys"],
   sizeDecrease: ["minus", "numpadsubtract"],
-  sizeIncrease: ["equal", "shift+equal", "numpadadd"],
+  // The shifted key comes first because it is the one shown: "+", not "=".
+  sizeIncrease: ["shift+equal", "equal", "numpadadd"],
+  // Shifted, because plain `[` / `]` walk the annotations during a session
+  // (TM-439); these stay on the same two keys the old portal used.
+  targetValueDecrease: ["shift+bracketleft"],
+  targetValueIncrease: ["shift+bracketright"],
+  // "Fill Inside": F is Find Path's, and I is free in every map.
+  fillClosedPaths: ["keyi"],
   ...paramArrowDefaults(isMacPlatform()),
 };
 
@@ -170,8 +199,12 @@ const EDIT_KEYBIND_ACTION: Record<EditKeybindName, string> = {
   cursor: ACTION_IDS.cursorMode,
   undo: ACTION_IDS.undo,
   redo: ACTION_IDS.redo,
+  saveAll: ACTION_IDS.saveAll,
   sizeDecrease: ACTION_IDS.sizeDecr,
   sizeIncrease: ACTION_IDS.sizeIncr,
+  targetValueDecrease: ACTION_IDS.targetValueDecr,
+  targetValueIncrease: ACTION_IDS.targetValueIncr,
+  fillClosedPaths: ACTION_IDS.toggleFillClosedPaths,
   paramPrev: ACTION_IDS.paramPrev,
   paramNext: ACTION_IDS.paramNext,
   paramIncrease: ACTION_IDS.paramIncr,
@@ -262,6 +295,156 @@ const TOOL_ID_ERASE = "painting.erase";
 const TOOL_ID_FILL = "painting.fill";
 const TOOL_ID_Z_EXTRAP = "z-extrapolation";
 const TOOL_ID_CORRESPONDENCE = "correspondence";
+
+// Keys a rebind may never take: H opens the shortcut sheet, and plain [ / ]
+// walk the annotations during a session (TM-439).
+const RESERVED_KEYS: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    SHORTCUT_SHEET_KEYS.map((key) => [key, "show all shortcuts"]),
+  ),
+  bracketleft: "previous annotation",
+  bracketright: "next annotation",
+};
+
+/**
+ * What already uses `identifier`: another edit action, a reserved key, or an
+ * action the viewer's input maps bind (calcada tools, Trace, view keys). The
+ * session's own map is a parent of those maps, so its entries are skipped. A
+ * rebind that would take the key is refused rather than letting it shadow the
+ * other binding for the whole session.
+ */
+export function findEditKeybindConflict(
+  name: EditKeybindName,
+  identifier: string,
+  effective: Record<EditKeybindName, readonly string[]>,
+  inputMaps: readonly EventActionMap[] = [],
+): string | undefined {
+  if (identifier === "escape") return "exit";
+  const editOwner = EDIT_KEYBIND_NAMES.find(
+    (other) => other !== name && effective[other].includes(identifier),
+  );
+  if (editOwner !== undefined) return editOwner;
+  const reserved = RESERVED_KEYS[identifier];
+  if (reserved !== undefined) return reserved;
+  return inputMapOwner(inputMaps, identifier);
+}
+
+function inputMapOwner(
+  inputMaps: readonly EventActionMap[],
+  identifier: string,
+): string | undefined {
+  // Normalised through a probe map, the same way the maps store their keys.
+  const probe = EventActionMap.fromObject({ [identifier]: "probe" });
+  for (const [normalized] of probe.entries()) {
+    for (const map of inputMaps) {
+      const action = map.get(normalized)?.action;
+      if (action !== undefined && !action.startsWith("edit-session-")) {
+        return action;
+      }
+    }
+  }
+  return undefined;
+}
+
+const EDIT_MODE_PRIORITY = 1;
+const EDIT_MODE_ID = "edit-session";
+const TARGET_VALUE_PARAM_ID = PARAM_IDS.value;
+
+/**
+ * The keys worth keeping on screen: the tools themselves on the plain cursor,
+ * and what the tool's settings need once one is active. Pure for tests.
+ */
+export function editModeShortcuts(
+  toolId: string | undefined,
+  keys: Record<EditKeybindName, readonly string[]>,
+): ModeShortcut[] {
+  const history: ModeShortcut[] = [
+    { keys: keys.undo, label: "Undo", description: "undo the last edit" },
+    { keys: keys.redo, label: "Redo", description: "redo the undone edit" },
+  ];
+  const save: ModeShortcut = {
+    keys: keys.saveAll,
+    label: "Save all",
+    description: "save all edited layers",
+  };
+  if (toolId === undefined) {
+    return [
+      { keys: keys.brush, label: "Brush", description: "brush" },
+      { keys: keys.erase, label: "Eraser", description: "eraser" },
+      { keys: keys.fill, label: "Fill", description: "fill" },
+      {
+        keys: keys.zextrap,
+        label: "Z-extrapolation",
+        description: "z-extrapolation",
+      },
+      ...history,
+      save,
+    ];
+  }
+  const shortcuts: ModeShortcut[] = [];
+  if (toolId === TOOL_ID_BRUSH || toolId === TOOL_ID_ERASE) {
+    shortcuts.push({
+      keys: keys.sizeDecrease,
+      pairKeys: keys.sizeIncrease,
+      label: "Size",
+      description: "smaller / larger brush",
+    });
+  }
+  if (toolId === TOOL_ID_BRUSH) {
+    shortcuts.push({
+      keys: keys.fillClosedPaths,
+      label: "Fill closed paths",
+      description: "fill closed paths on / off",
+      detailOnly: true,
+    });
+  }
+  if (toolId === TOOL_ID_BRUSH || toolId === TOOL_ID_FILL) {
+    shortcuts.push({
+      keys: keys.targetValueDecrease,
+      pairKeys: keys.targetValueIncrease,
+      label: "Target value",
+      description: "previous / next target value",
+      detailOnly: true,
+    });
+  }
+  if (isPaintLikeToolId(toolId)) {
+    shortcuts.push(
+      {
+        keys: keys.paramPrev,
+        pairKeys: keys.paramNext,
+        label: "Choose setting",
+        description: "move between the settings",
+        detailOnly: true,
+      },
+      {
+        keys: keys.paramDecrease,
+        pairKeys: keys.paramIncrease,
+        label: "Change setting",
+        description: "change the selected setting",
+        detailOnly: true,
+      },
+    );
+  }
+  // Save stays in the panel's list: the strip keeps to one line over the data.
+  shortcuts.push(
+    ...history,
+    { ...save, detailOnly: true },
+    {
+      keys: ["escape"],
+      label: "Cursor",
+      description: "back to the cursor",
+    },
+  );
+  return shortcuts;
+}
+
+const EDIT_TOOL_TITLE: Record<string, string> = {
+  [TOOL_ID_BRUSH]: "Brush",
+  [TOOL_ID_ERASE]: "Eraser",
+  [TOOL_ID_FILL]: "Fill",
+  [TOOL_ID_Z_EXTRAP]: "Z-extrapolation",
+  [TOOL_ID_CORRESPONDENCE]: "Correspondence",
+};
 
 /**
  * Installs a session-scoped keyboard shortcut layer for the duration of an
@@ -415,7 +598,60 @@ export class EditSessionHotkeyBinder extends RefCounted {
       }
     });
 
+    // Keep the strip over the viewer in step with the active tool.
+    let withdrawMode: (() => void) | undefined;
+    const publishMode = () => {
+      withdrawMode?.();
+      withdrawMode = undefined;
+      const toolId = host.activeToolId.value;
+      withdrawMode = modeShortcuts.publish({
+        id: EDIT_MODE_ID,
+        title:
+          toolId === undefined
+            ? "Edit session"
+            : (EDIT_TOOL_TITLE[toolId] ?? "Edit"),
+        priority: EDIT_MODE_PRIORITY,
+        shortcuts: editModeShortcuts(
+          toolId,
+          effectiveEditKeybinds(host.editKeybindOverrides.value),
+        ),
+      });
+    };
+    publishMode();
+    this.registerDisposer(host.activeToolId.changed.add(publishMode));
+    this.registerDisposer(host.editKeybindOverrides.changed.add(publishMode));
+    this.registerDisposer(() => withdrawMode?.());
+
     const target = viewer.element;
+
+    // A tool panel field keeps the keys it cannot type from going dead: the
+    // field is committed (blur) and the key runs its session action.
+    this.registerEventListener(
+      target,
+      "keydown",
+      (event: KeyboardEvent) => {
+        if (!isFieldKeyForSession(event.target, event.key, event)) return;
+        // A Trace or other mode above the session owns its keys; leave them be.
+        if (modeShortcuts.current?.id !== EDIT_MODE_ID) return;
+        const identifier = keyboardEventToIdentifier(event);
+        if (identifier === undefined) return;
+        const action = buildEditActionBindings(host.editKeybindOverrides.value)[
+          identifier
+        ];
+        if (action === undefined) return;
+        event.preventDefault();
+        event.stopPropagation();
+        (event.target as HTMLElement).blur();
+        target.dispatchEvent(
+          new CustomEvent(`action:${action}`, {
+            bubbles: true,
+            cancelable: true,
+            detail: event,
+          }),
+        );
+      },
+      { capture: true },
+    );
 
     const activateTool = (toolId: string) => {
       // Route through host.selectTool so hotkey activation keeps tool-panel
@@ -446,6 +682,12 @@ export class EditSessionHotkeyBinder extends RefCounted {
     this.registerDisposer(
       registerActionListener(target, ACTION_IDS.toolCorrespondence, () => {
         activateTool(TOOL_ID_CORRESPONDENCE);
+      }),
+    );
+
+    this.registerDisposer(
+      registerActionListener(target, ACTION_IDS.saveAll, () => {
+        host.requestSaveAll.dispatch();
       }),
     );
 
@@ -504,6 +746,23 @@ export class EditSessionHotkeyBinder extends RefCounted {
       }),
     );
 
+    this.registerDisposer(
+      registerActionListener(target, ACTION_IDS.targetValueDecr, () => {
+        this.stepTargetValue(-1);
+      }),
+    );
+    this.registerDisposer(
+      registerActionListener(target, ACTION_IDS.targetValueIncr, () => {
+        this.stepTargetValue(+1);
+      }),
+    );
+
+    this.registerDisposer(
+      registerActionListener(target, ACTION_IDS.toggleFillClosedPaths, () => {
+        this.toggleFillClosedPaths();
+      }),
+    );
+
     // Ctrl+Arrow parameter scheme (TM-337; Option+Arrow on macOS). Left/Right
     // move the selection cursor through the active panel's enabled parameters;
     // Up/Down nudge the selected one (hold to accelerate for numeric params).
@@ -548,12 +807,23 @@ export class EditSessionHotkeyBinder extends RefCounted {
       buildEditActionBindings(overrides),
     );
     actionMap.label = "Edit session";
-    // `addParent` returns a thunk that removes the parent linkage; safe to call
-    // exactly once.
-    this.detachActionMap = this.viewer.inputEventMap.addParent(
-      actionMap,
-      SESSION_HOTKEY_PRIORITY,
-    );
+    // Installed on the panel maps too: a focused data panel handles a key before
+    // the viewer sees it, so `keye` would otherwise rotate instead of erase.
+    const { inputEventMap, inputEventBindings } = this.viewer;
+    const detachers = [
+      inputEventMap,
+      inputEventBindings.sliceView,
+      inputEventBindings.perspectiveView,
+    ].map((map) => map.addParent(actionMap, SESSION_HOTKEY_PRIORITY));
+    this.detachActionMap = () => {
+      for (const detach of detachers) {
+        try {
+          detach();
+        } catch {
+          // best-effort: one failed detach must not keep the others attached
+        }
+      }
+    };
   }
 
   // -- Painting adjustments -------------------------------------------------
@@ -573,6 +843,62 @@ export class EditSessionHotkeyBinder extends RefCounted {
     const nextSize = nextPresetSize(size, dir);
     if (nextSize === size) return;
     painting.patchState({ radius: sizeToRadius(nextSize) });
+  }
+
+  /** `I`: the brush's "Fill closed paths" switch, read back where it shows. */
+  private toggleFillClosedPaths(): void {
+    if (this.host.activeToolId.value !== TOOL_ID_BRUSH) return;
+    const painting = this.getPainting();
+    if (painting === undefined) return;
+    const fillClosedPaths = !painting.getState().fillClosedPaths;
+    painting.patchState({ fillClosedPaths });
+    this.statusOverlay.show(
+      `Fill closed paths: ${fillClosedPaths ? "on" : "off"}`,
+    );
+  }
+
+  /**
+   * Step the target value. The panel's own parameter is used when it is open:
+   * it already knows the layer's voxel type and clamps to it. A closed panel
+   * publishes nothing, so the key then builds the same parameter after reading
+   * the voxel type itself, rather than going dead.
+   */
+  private stepTargetValue(direction: number): void {
+    const activeId = this.host.activeToolId.value;
+    if (activeId !== TOOL_ID_BRUSH && activeId !== TOOL_ID_FILL) return;
+    const painting = this.getPainting();
+    if (painting === undefined) return;
+    const published = this.getCursor()
+      ?.getDescriptors()
+      .find((descriptor) => descriptor.id === TARGET_VALUE_PARAM_ID);
+    if (published !== undefined) {
+      this.applyTargetValueStep(published, direction);
+      return;
+    }
+    const { targetLayerId } = painting.getState();
+    void this.host.layerMetadataSource
+      .resolve(targetLayerId)
+      .then((metadata) => metadata.voxelDataType)
+      .catch(() => undefined)
+      .then((voxelType) => {
+        if (this.wasDisposed) return;
+        this.applyTargetValueStep(
+          valueDescriptor(painting, voxelType),
+          direction,
+        );
+      });
+  }
+
+  private applyTargetValueStep(
+    value: {
+      adjust(dir: number, magnitude: number): void;
+      label: string;
+      format(): string;
+    },
+    direction: number,
+  ): void {
+    value.adjust(direction, 1);
+    this.statusOverlay.show(`${value.label}: ${value.format()}`);
   }
 
   // -- Ctrl+Arrow parameter scheme (TM-337) ---------------------------------
