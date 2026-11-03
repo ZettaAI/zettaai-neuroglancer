@@ -165,17 +165,16 @@ export function paramArrowDefaults(mac: boolean): {
   };
 }
 
-// Single letters as in Photoshop: a text field never receives them as shortcuts
-// (see `KeyboardEventBinder`) and the session layer only shadows the global keys
-// while a session is open. The Ctrl chords are the previous defaults, kept for
-// one release so habits keep working; Ctrl+F is gone because it took the
-// browser's Find away.
+// Tools take Ctrl, as before TM-517: plain letters belong to neuroglancer in the
+// data panels (E / R rotate the view, B the scale bar, V the default
+// annotations), and a session must not take them away. Fill is Ctrl+G, not
+// Ctrl+F, which is the browser's Find.
 const DEFAULT_EDIT_KEYBINDS: Record<EditKeybindName, readonly string[]> = {
-  brush: ["keyb", "control+keyb"],
-  erase: ["keye", "control+keye"],
-  fill: ["keyg"],
-  zextrap: ["keyx", "control+keyx"],
-  cursor: ["keyv", "control+keyv"],
+  brush: ["control+keyb"],
+  erase: ["control+keye"],
+  fill: ["control+keyg"],
+  zextrap: ["control+keyx"],
+  cursor: ["control+keyv"],
   undo: ["control+keyz", "meta+keyz"],
   redo: ["control+shift+keyz", "meta+shift+keyz"],
   saveAll: ["control+keys", "meta+keys"],

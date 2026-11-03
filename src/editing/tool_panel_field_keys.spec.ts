@@ -45,6 +45,22 @@ describe("isFieldKeyForSession", () => {
     expect(isFieldKeyForSession(list, "e", NO_MODIFIERS)).toBe(true);
   });
 
+  it("hands a Ctrl or Cmd letter to the session, but keeps the editing ones", () => {
+    const ctrl = { ...NO_MODIFIERS, ctrlKey: true };
+    const cmd = { ...NO_MODIFIERS, metaKey: true };
+    for (const key of ["b", "e", "g"]) {
+      expect(isFieldKeyForSession(numberField, key, ctrl)).toBe(true);
+      expect(isFieldKeyForSession(numberField, key, cmd)).toBe(true);
+    }
+    for (const key of ["a", "c", "v", "x", "y", "z"]) {
+      expect(isFieldKeyForSession(numberField, key, ctrl)).toBe(false);
+      expect(isFieldKeyForSession(numberField, key, cmd)).toBe(false);
+    }
+    expect(
+      isFieldKeyForSession(numberField, "b", { ...NO_MODIFIERS, altKey: true }),
+    ).toBe(false);
+  });
+
   it("never takes a text field, a modified key, or a field elsewhere", () => {
     const textField = fieldInToolPanel('<input type="text">');
     expect(isFieldKeyForSession(textField, "}", NO_MODIFIERS)).toBe(false);

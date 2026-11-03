@@ -47,8 +47,10 @@ describe("buildShortcutSections", () => {
 });
 
 describe("buildShortcutSections during a session", () => {
+  // I is a key the session takes (Fill closed paths); the action is only a
+  // stand-in for a view row that uses it.
   const map = EventActionMap.fromObject({
-    keyb: "toggle-scale-bar",
+    keyi: "toggle-scale-bar",
     space: "toggle-layout",
   });
   const viewRows = (sessionActive: boolean) =>
