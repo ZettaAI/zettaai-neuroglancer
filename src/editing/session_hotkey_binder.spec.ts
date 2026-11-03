@@ -41,25 +41,17 @@ const A = {
 describe("mergeEditKeybinds", () => {
   it("uses built-in defaults when there are no overrides", () => {
     const m = mergeEditKeybinds(undefined);
-    // Tools take Ctrl: plain letters stay neuroglancer's (E / R rotate the
-    // view, B the scale bar, V the default annotations).
+    expect(m["keyb"]).toBe(A.brush);
+    expect(m["keye"]).toBe(A.erase);
+    expect(m["keyg"]).toBe(A.fill);
+    expect(m["keyv"]).toBe(A.cursor);
+    expect(m["keyx"]).toBe(A.zextrap);
+    // The previous Ctrl chords stay for one release, except Ctrl+F, which took
+    // the browser's Find away.
     expect(m["control+keyb"]).toBe(A.brush);
     expect(m["control+keye"]).toBe(A.erase);
-    expect(m["control+keyg"]).toBe(A.fill);
     expect(m["control+keyv"]).toBe(A.cursor);
     expect(m["control+keyx"]).toBe(A.zextrap);
-    for (const letter of [
-      "keyb",
-      "keye",
-      "keyr",
-      "keyg",
-      "keyv",
-      "keyx",
-      "keyz",
-    ]) {
-      expect(m[letter]).toBeUndefined();
-    }
-    // Ctrl+F is the browser's Find.
     expect(m["control+keyf"]).toBeUndefined();
     expect(m["keyf"]).toBeUndefined();
     // Multi-key defaults (undo/redo + size) all map to their action.
@@ -138,7 +130,7 @@ describe("effectiveEditKeybinds", () => {
     // No `custom-keybinds.json` is injected in the test build, so the result
     // is exactly the built-in defaults.
     const e = effectiveEditKeybinds(undefined);
-    expect(e.brush).toEqual(["control+keyb"]);
+    expect(e.brush).toEqual(["keyb", "control+keyb"]);
     expect(e.undo).toEqual(["control+keyz", "meta+keyz"]);
     expect(e.sizeDecrease).toEqual(["minus", "numpadsubtract"]);
   });
@@ -147,7 +139,7 @@ describe("effectiveEditKeybinds", () => {
     const e = effectiveEditKeybinds({ brush: ["control+keyq"] });
     expect(e.brush).toEqual(["control+keyq"]);
     // Other actions keep their defaults.
-    expect(e.erase).toEqual(["control+keye"]);
+    expect(e.erase).toEqual(["keye", "control+keye"]);
   });
 
   it("covers every configurable action name", () => {
@@ -195,18 +187,14 @@ describe("findEditKeybindConflict", () => {
   const effective = effectiveEditKeybinds(undefined);
 
   it("names the action that already has the key", () => {
-    expect(findEditKeybindConflict("fill", "control+keyb", effective)).toBe(
-      "brush",
-    );
+    expect(findEditKeybindConflict("fill", "keyb", effective)).toBe("brush");
     expect(findEditKeybindConflict("brush", "control+keyz", effective)).toBe(
       "undo",
     );
   });
 
   it("lets an action keep its own key and take a free one", () => {
-    expect(
-      findEditKeybindConflict("brush", "control+keyb", effective),
-    ).toBeUndefined();
+    expect(findEditKeybindConflict("brush", "keyb", effective)).toBeUndefined();
     expect(findEditKeybindConflict("brush", "keyq", effective)).toBeUndefined();
   });
 
@@ -248,7 +236,7 @@ describe("editModeShortcuts", () => {
   it("offers each tool only the keys that apply to it", () => {
     expect(labels("painting.brush")).toEqual([
       "Size",
-      "Fill inside",
+      "Fill closed paths",
       "Target value",
       "Choose setting",
       "Change setting",

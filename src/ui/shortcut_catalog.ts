@@ -28,10 +28,7 @@ import type { EventActionMap } from "#src/util/event_action_map.js";
 export interface ShortcutRow {
   readonly label: string;
   readonly keys: readonly string[];
-  /**
-   * Set when the row's key can be changed from the sheet: only during a
-   * session, since a change is saved with the session's tool state.
-   */
+  /** Set when the row's key can be changed from the sheet. */
   readonly rebind?: EditKeybindName;
 }
 
@@ -50,7 +47,7 @@ const EDIT_ROWS: ReadonlyArray<[EditKeybindName, string]> = [
   ["sizeIncrease", "Larger brush"],
   ["targetValueDecrease", "Previous target value"],
   ["targetValueIncrease", "Next target value"],
-  ["fillClosedPaths", "Fill inside on / off"],
+  ["fillClosedPaths", "Fill closed paths on / off"],
   ["undo", "Undo"],
   ["redo", "Redo"],
   ["saveAll", "Save all"],
@@ -125,7 +122,7 @@ export function buildShortcutSections(
         ...EDIT_ROWS.map(([name, label]) => ({
           label,
           keys: editKeys[name],
-          ...(sessionActive ? { rebind: name } : {}),
+          rebind: name,
         })),
       ],
     },

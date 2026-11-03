@@ -148,15 +148,6 @@ function OpenShortcutSheet({
   const searchInput = useRef<HTMLInputElement>(null);
   const sheetElement = useRef<HTMLDivElement>(null);
 
-  // A capture started in a session must not outlive it: the change would not
-  // be saved.
-  useEffect(() => {
-    if (!sessionActive && capturingNow.current !== null) {
-      setCapturing(null);
-      setMessage("");
-    }
-  }, [sessionActive]);
-
   const editKeys = useMemo(() => effectiveEditKeybinds(overrides), [overrides]);
   const sections = useMemo(
     () =>
@@ -305,11 +296,6 @@ function OpenShortcutSheet({
         {sections.map((section) => (
           <section key={section.title}>
             <h3>{section.title}</h3>
-            {section.title === "Edit session" && !sessionActive && (
-              <p class="neuroglancer-shortcut-note">
-                Open an edit session to change keys.
-              </p>
-            )}
             {section.rows.map(renderRow)}
           </section>
         ))}

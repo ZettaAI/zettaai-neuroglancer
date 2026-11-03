@@ -70,12 +70,12 @@ const KEY_LABEL: Record<string, string> = {
   wheel: "wheel",
 };
 
-// Shifted punctuation is shown as the character it types. The brackets are
-// not: `{` and `}` read as keys of their own, and on many layouts (Ukrainian
-// among them) Shift+[ types something else, so they show as Shift+[ / Shift+].
+// Shifted punctuation is shown as the character it types.
 const SHIFTED_KEY_LABEL: Record<string, string> = {
   slash: "?",
   equal: "+",
+  bracketleft: "{",
+  bracketright: "}",
 };
 
 function formatKeyName(key: string): string {

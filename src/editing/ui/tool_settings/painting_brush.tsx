@@ -142,7 +142,7 @@ export function PaintingBrush({
           painting={painting}
           shortcut={{
             keys: editKeys.fillClosedPaths,
-            label: "Fill inside",
+            label: "Fill closed paths",
           }}
         />
         <BrushMask

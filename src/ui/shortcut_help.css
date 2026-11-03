@@ -195,13 +195,6 @@
   color: var(--nge-warning-fg);
 }
 
-/* Without a session the edit keys are listed but cannot be changed. */
-.neuroglancer-shortcut-note {
-  margin: 0 0 var(--nge-space-2);
-  color: var(--nge-text-faint);
-  font-size: var(--nge-text-size-sm);
-}
-
 .neuroglancer-shortcut-empty {
   margin: 0;
   color: var(--nge-text-faint);

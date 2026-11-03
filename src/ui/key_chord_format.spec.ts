@@ -55,14 +55,6 @@ describe("formatChord", () => {
     expect(formatChord("control+keyb", false)).toBe("Ctrl+B");
     expect(formatChord("meta+shift+keyz", true)).toBe("⇧⌘Z");
   });
-
-  it("names Shift on the brackets instead of showing { and }", () => {
-    expect(formatChord("shift+bracketleft", false)).toBe("Shift+[");
-    expect(formatChord("shift+bracketright", true)).toBe("⇧]");
-    expect(
-      formatShortcutKeys(["shift+bracketleft"], ["shift+bracketright"]),
-    ).toMatch(/^(Shift\+\[ \/ Shift\+\]|⇧\[ \/ ⇧\])$/);
-  });
 });
 
 describe("formatShortcutKeys", () => {

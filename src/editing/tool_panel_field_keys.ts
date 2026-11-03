@@ -11,17 +11,10 @@
 /**
  * Session keys while a tool panel field has focus. Neuroglancer gives a focused
  * field every key without Ctrl, Cmd or Alt, which is right for typing but left
- * `{`, Ctrl+B and the rest dead after a click on Size or Target value. A number
+ * `B`, `{` and the rest dead after a click on Size or Target value. A number
  * field or a list cannot take those characters anyway, so they go to their
  * action; what the field can type (digits, `-`, `.`, `e`) stays with it.
  */
-
-/**
- * Ctrl / Cmd letters a field keeps: select all, copy, paste, cut, undo, redo.
- * Any other Ctrl letter (the tools: Ctrl+B, Ctrl+E, Ctrl+G) goes to its action.
- */
-const FIELD_EDITING_LETTER = /^[acvxyz]$/i;
-const LETTER = /^[a-z]$/i;
 
 /** Characters a number field accepts, besides editing and arrow keys. */
 const NUMBER_FIELD_CHARACTER = /^[0-9eE+\-.,]$/;
@@ -39,13 +32,10 @@ export function isFieldKeyForSession(
   modifiers: { ctrlKey: boolean; metaKey: boolean; altKey: boolean },
 ): boolean {
   if (!(target instanceof Element)) return false;
+  if (modifiers.ctrlKey || modifiers.metaKey || modifiers.altKey) return false;
   if (!target.matches(FIELD_SELECTOR)) return false;
   if (target.closest(TOOL_PANEL_SELECTOR) === null) return false;
   if (key.length !== 1) return false;
-  if (modifiers.altKey) return false;
-  if (modifiers.ctrlKey || modifiers.metaKey) {
-    return LETTER.test(key) && !FIELD_EDITING_LETTER.test(key);
-  }
   return !(
     target instanceof HTMLInputElement && NUMBER_FIELD_CHARACTER.test(key)
   );
