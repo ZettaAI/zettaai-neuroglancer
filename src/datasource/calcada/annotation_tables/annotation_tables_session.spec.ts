@@ -1196,8 +1196,6 @@ describe("CalcadaAnnotationTablesSession", () => {
     const { session, layerStates, moveToAnnotation, selectedAnnotation } =
       startSession(graph, { ticked: ["syn"], visible: [10n, 20n, 30n] });
     await settle();
-    const stepped = vi.fn();
-    session.selectionStepped.add(stepped);
     const movedTo = () => moveToAnnotation.mock.lastCall?.[1].id;
     const selectRow = (rowId: bigint) => {
       selectedAnnotation.value = {
@@ -1213,7 +1211,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     selectRow(10n);
     session.selectAdjacent(1);
     expect(movedTo()).toBe("syn:20");
-    expect(stepped).toHaveBeenLastCalledWith(1);
+    expect(session.selectedDrawnIndex()).toBe(0);
     selectRow(30n);
     moveToAnnotation.mockClear();
     session.selectAdjacent(1);

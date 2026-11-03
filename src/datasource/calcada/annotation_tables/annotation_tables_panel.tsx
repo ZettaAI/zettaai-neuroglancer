@@ -127,7 +127,7 @@ export interface AnnotationTablesPanelSession {
   ): boolean;
   isSelected(item: DrawnAnnotation): boolean;
   selectAdjacent(offset: number): void;
-  readonly selectionStepped: ReadonlySignal<(index: number) => void>;
+  selectedDrawnIndex(): number | undefined;
   readonly annotationSelectionChanged: ReadonlySignal<() => void>;
   readonly listCoordinatesChanged: ReadonlySignal<() => void>;
   clearHover(): void;
@@ -544,11 +544,6 @@ class DrawnAnnotationListView extends RefCounted {
     this.registerDisposer(
       session.colorsChanged.add(() => this.source.renderChanged.dispatch()),
     );
-    this.registerDisposer(
-      session.selectionStepped.add((index) =>
-        this.list.scrollItemIntoView(index),
-      ),
-    );
   }
 
   show(items: DrawnRows) {
@@ -565,6 +560,8 @@ class DrawnAnnotationListView extends RefCounted {
         this.session.isSelected(this.items.at(index)),
       ),
     );
+    const selected = this.session.selectedDrawnIndex();
+    if (selected !== undefined) this.list.scrollItemIntoView(selected);
   }
 
   private render(item: DrawnAnnotation): HTMLElement {

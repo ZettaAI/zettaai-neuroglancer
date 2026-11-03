@@ -64,7 +64,7 @@ import {
 import type { Disposer } from "#src/util/disposable.js";
 import { invokeDisposer } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
-import { NullarySignal, Signal } from "#src/util/signal.js";
+import { NullarySignal } from "#src/util/signal.js";
 
 const SIDE_PANEL_WIDTH_PX = 260;
 const SWATCH_COLOR = vec3.fromValues(1, 0, 0);
@@ -247,7 +247,6 @@ class FakeSession {
   readonly annotationSelectionChanged = this.selectedId.changed;
   readonly listCoordinatesChanged = new NullarySignal();
   readonly colorsChanged = new NullarySignal();
-  readonly selectionStepped = new Signal<(index: number) => void>();
   readonly selectAdjacent = vi.fn<(offset: number) => void>();
   readonly placement = new WatchableValue<TablePlacement | undefined>(
     undefined,
@@ -321,6 +320,13 @@ class FakeSession {
 
   isSelected(item: DrawnAnnotation) {
     return item.layerId === this.selectedId.value;
+  }
+
+  selectedDrawnIndex() {
+    const id = this.selectedId.value;
+    return id === undefined
+      ? undefined
+      : this.drawn.value.indexOf(this.drawn.value.at(0).table, id);
   }
 
   refreshTables() {
@@ -808,7 +814,7 @@ describe("CalcadaAnnotationTablesPanel", () => {
     ]);
   });
 
-  it("scrolls a row stepped to into view", async () => {
+  it("scrolls the selected row into view", async () => {
     const { connection, session } = makeConnection(
       [synapses],
       [status({ table: "synapses", annotations: LONG_LIST_LENGTH })],
@@ -817,7 +823,9 @@ describe("CalcadaAnnotationTablesPanel", () => {
     session.drawn.value = drawnList(drawnRun("synapses", LONG_LIST_LENGTH));
     await mountPanel(connection);
     await vi.waitFor(() => expect(listRows().length).toBeGreaterThan(0));
-    session.selectionStepped.dispatch(LONG_LIST_LENGTH - 1);
+    session.selectedId.value = session.drawn.value.at(
+      LONG_LIST_LENGTH - 1,
+    ).layerId;
     await vi.waitFor(() =>
       expect(annotationList()!.scrollTop).toBeGreaterThan(0),
     );

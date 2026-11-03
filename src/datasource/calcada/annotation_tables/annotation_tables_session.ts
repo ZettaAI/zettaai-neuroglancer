@@ -715,8 +715,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   );
   /** Typed in the panel; every row added to the placement table carries it. */
   readonly newRowPayload = new WatchableValue<AnnotationPayload>({});
-  /** `selectAdjacent` moved the selection to this index of `drawn`. */
-  readonly selectionStepped = new Signal<(index: number) => void>();
   private readonly schemas: SchemaCache = new Map();
   private readonly cache = new Map<string, AnnotationScopeEntry>();
   // Per cache key, the request each table was last asked in: in flight, or
@@ -850,10 +848,10 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         : Math.min(Math.max(selected + offset, 0), last);
     if (target === selected) return;
     this.moveTo(drawn.at(target));
-    this.selectionStepped.dispatch(target);
   }
 
-  private selectedDrawnIndex(): number | undefined {
+  /** Where in `drawn` the selected annotation is, if it is one of them. */
+  selectedDrawnIndex(): number | undefined {
     const selected = this.connection.selectedAnnotation.value;
     if (selected === undefined) return undefined;
     const table = [...this.layerStates].find(
