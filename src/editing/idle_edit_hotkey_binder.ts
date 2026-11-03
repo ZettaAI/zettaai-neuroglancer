@@ -44,38 +44,18 @@ import type { Viewer } from "#src/viewer.js";
 // win, but > 0 so it overrides any direct global binding on the same chord.
 const IDLE_HOTKEY_PRIORITY = 50;
 
-export const ACTION_OPEN_ENTRY = "edit-session-open-entry";
-export const ACTION_QUICK_REGION = "edit-session-quick-region";
-
-/** Keys that open the entry modal while no session is active. */
-export const OPEN_ENTRY_KEYS: readonly string[] = ["control+keye", "meta+keye"];
-/** Keys that start the quick edit-region capture while no session is active. */
-export const QUICK_REGION_KEYS: readonly string[] = [
-  "control+shift+keye",
-  "meta+shift+keye",
-];
-
-/**
- * The keys hints name: Ctrl even on a Mac. Cmd+E is often taken before the page
- * sees it (the Claude app and browser extensions claim it), so the hint points
- * at the chord that reliably arrives; Cmd+E still works where it is free.
- */
-export const OPEN_ENTRY_SHOWN_KEYS: readonly string[] = ["control+keye"];
-export const QUICK_REGION_SHOWN_KEYS: readonly string[] = [
-  "control+shift+keye",
-];
+const ACTION_OPEN_ENTRY = "edit-session-open-entry";
+const ACTION_QUICK_REGION = "edit-session-quick-region";
 
 export class IdleEditHotkeyBinder extends RefCounted {
   constructor(host: EditSessionHost, viewer: Viewer) {
     super();
 
     const actionMap = EventActionMap.fromObject({
-      ...Object.fromEntries(
-        OPEN_ENTRY_KEYS.map((key) => [key, ACTION_OPEN_ENTRY]),
-      ),
-      ...Object.fromEntries(
-        QUICK_REGION_KEYS.map((key) => [key, ACTION_QUICK_REGION]),
-      ),
+      "control+keye": ACTION_OPEN_ENTRY,
+      "meta+keye": ACTION_OPEN_ENTRY,
+      "control+shift+keye": ACTION_QUICK_REGION,
+      "meta+shift+keye": ACTION_QUICK_REGION,
     });
     actionMap.label = "Edit (idle)";
 

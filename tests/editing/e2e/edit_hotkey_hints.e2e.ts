@@ -110,26 +110,6 @@ test.describe("hotkey hints", () => {
     expect(await activeTool(page)).toBe("painting.brush");
   });
 
-  // Before a session there is no topbar of tools yet: the Edit button itself
-  // names the key that opens the entry modal.
-  // Ctrl+E on a Mac too: Cmd+E is often claimed before the page sees it.
-  test("the Edit button names Ctrl+E before a session", async () => {
-    test.skip(setupError !== undefined, setupError);
-    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
-    await page.evaluate(() =>
-      (globalThis as any).viewer.editSessionHost.discardActive(),
-    );
-    await page.locator(".neuroglancer-editing-topbar-edit-button-wrap").hover();
-    const tooltip = page.locator(".neuroglancer-fast-tooltip.visible");
-    await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText(
-      mac ? ["⌃", "E"] : ["Ctrl", "E"],
-    );
-    // Only the one key: the region key is in the sheet, not this hint.
-    await expect(tooltip).toHaveText(
-      `Open the edit-session entry modal${mac ? "⌃" : "Ctrl"}E`,
-    );
-  });
-
   test("the tooltip shows the tool's key as a key cap", async () => {
     test.skip(setupError !== undefined, setupError);
     await page.locator('button[aria-label^="Brush"]').hover();
@@ -174,10 +154,9 @@ test.describe("hotkey hints", () => {
     expect((await dataPanel.boundingBox())!.height).toBe(heightBefore);
     const keys = page.locator(".neuroglancer-tool-panel-keys");
     await expect(keys).toHaveAttribute("open", "");
-    // The keys live in the list and the ⓘ hint, not as caps beside the label.
     await expect(
-      page.locator(".neuroglancer-tool-panel-row .neuroglancer-key-chip"),
-    ).toHaveCount(0);
+      page.locator(".neuroglancer-brush-size-label .neuroglancer-key-chip"),
+    ).toHaveText(["−", "+"]);
     await expect(keys.locator("dt").first()).toHaveText("− / +");
     await expect(keys.locator("dd").first()).toHaveText(
       "smaller / larger brush",
@@ -322,8 +301,7 @@ test.describe("hotkey hints", () => {
     // The Size hint shows its pair of keys the same way.
     await page.mouse.move(0, 0);
     await page
-      .locator(".neuroglancer-tool-panel-row", { hasText: "Size" })
-      .locator(".neuroglancer-param-hint")
+      .locator(".neuroglancer-brush-size-label .neuroglancer-param-hint")
       .hover();
     await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText([
       "−",

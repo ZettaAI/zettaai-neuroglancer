@@ -12,12 +12,10 @@ import { Pencil } from "lucide-preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
-import { OPEN_ENTRY_SHOWN_KEYS } from "#src/editing/idle_edit_hotkey_binder.js";
 import { ConfirmDialog } from "#src/editing/ui/confirm_dialog.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { SessionEntryModal } from "#src/editing/ui/session_entry/session_entry.js";
 import { StatusMessage } from "#src/status.js";
-import { shortcutAttributes } from "#src/ui/key_chord_format.js";
 
 import "#src/editing/ui/topbar/editing_topbar.css";
 
@@ -145,7 +143,6 @@ export function TopbarEditButton({ host }: { host: EditSessionHost }) {
           blockedReason ??
           (isActive ? "Exit edit session" : "Open the edit-session entry modal")
         }
-        {...(isActive ? {} : shortcutAttributes(OPEN_ENTRY_SHOWN_KEYS))}
       >
         <button
           type="button"

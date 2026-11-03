@@ -56,7 +56,6 @@ import {
 } from "#src/editing/ui/session_entry/memory_estimate.js";
 import { ResolutionSelectionModel } from "#src/editing/ui/session_entry/resolution_options.js";
 import type { LayerManager } from "#src/layer/index.js";
-import { shortcutAttributes } from "#src/ui/key_chord_format.js";
 // Load the shared --nge-* design tokens (declared on :root) so the modal's
 // local token aliases resolve them even before any tool panel is mounted.
 import "#src/editing/ui/editing_theme.css";
@@ -654,7 +653,6 @@ function SessionEntryModalBody(props: {
             type="button"
             class="neuroglancer-edit-session-entry-modal-close"
             data-tooltip="Close"
-            {...shortcutAttributes(["escape"])}
             aria-label="Close"
             disabled={submitting}
             onClick={cancel}

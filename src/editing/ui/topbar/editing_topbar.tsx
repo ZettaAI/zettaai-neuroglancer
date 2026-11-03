@@ -93,7 +93,7 @@ const TOOL_ENTRIES: readonly ToolEntry[] = [
   {
     toolId: CURSOR_TOOL_ID,
     label: "Cursor",
-    hint: "Pan and select without painting · Esc also returns here",
+    hint: "Pan and select without painting",
     keybind: "cursor",
     Icon: MousePointer2,
   },

@@ -31,8 +31,6 @@ import { TopbarEditButton } from "#src/editing/ui/topbar/topbar_edit_button.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import { Signal } from "#src/util/signal.js";
 
-const IDLE_TOOLTIP = "Open the edit-session entry modal";
-
 // The real entry modal needs a live layer manager and metadata source. What is
 // under test is only whether the topbar opens it.
 vi.mock("#src/editing/ui/session_entry/session_entry.js", async () => {
@@ -196,8 +194,9 @@ describe("TopbarEditButton without an exit lock", () => {
     const { wrapper, button } = mount(host);
 
     expect(button.textContent).toBe("Edit");
-    expect(wrapper.getAttribute("data-tooltip")).toBe(IDLE_TOOLTIP);
-    expect(wrapper.getAttribute("data-shortcut")).toBe("control+keye");
+    expect(wrapper.getAttribute("data-tooltip")).toBe(
+      "Open the edit-session entry modal",
+    );
 
     act(() => button.click());
 
@@ -334,8 +333,9 @@ describe("TopbarEditButton with an exit lock", () => {
 
     expect(button.disabled).toBe(false);
     expect(button.textContent).toBe("Edit");
-    expect(wrapper.getAttribute("data-tooltip")).toBe(IDLE_TOOLTIP);
-    expect(wrapper.getAttribute("data-shortcut")).toBe("control+keye");
+    expect(wrapper.getAttribute("data-tooltip")).toBe(
+      "Open the edit-session entry modal",
+    );
 
     act(() => button.click());
 

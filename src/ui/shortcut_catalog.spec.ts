@@ -72,20 +72,3 @@ describe("filterShortcutSections", () => {
     expect(filterShortcutSections(sections, "  ")).toEqual(sections);
   });
 });
-
-describe("buildShortcutSections entry keys", () => {
-  const editRows = (sessionActive: boolean) =>
-    buildShortcutSections(editKeys, [], sessionActive)
-      .find((section) => section.title === "Edit session")!
-      .rows.slice(0, 2);
-
-  it("lists the keys that open a session only while none is active", () => {
-    expect(editRows(false)).toEqual([
-      // Ctrl even on a Mac: Cmd+E is often claimed before the page sees it.
-      { label: "Open edit session", keys: ["control+keye"] },
-      { label: "Draw an edit region", keys: ["control+shift+keye"] },
-    ]);
-    // Inside a session Ctrl+E is the eraser, so the sheet starts at Cursor.
-    expect(editRows(true).map((row) => row.label)).toEqual(["Cursor", "Brush"]);
-  });
-});

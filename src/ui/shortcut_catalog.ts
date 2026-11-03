@@ -13,10 +13,6 @@
  * from the source that actually binds them, so a remapped key shows as remapped.
  */
 
-import {
-  OPEN_ENTRY_SHOWN_KEYS,
-  QUICK_REGION_SHOWN_KEYS,
-} from "#src/editing/idle_edit_hotkey_binder.js";
 import type { EditKeybindName } from "#src/editing/session_hotkey_binder.js";
 import {
   keysForCustomAction,
@@ -111,20 +107,11 @@ export function buildShortcutSections(
   return [
     {
       title: "Edit session",
-      rows: [
-        // Only without a session: inside one, Ctrl+E is the eraser.
-        ...(sessionActive
-          ? []
-          : [
-              { label: "Open edit session", keys: OPEN_ENTRY_SHOWN_KEYS },
-              { label: "Draw an edit region", keys: QUICK_REGION_SHOWN_KEYS },
-            ]),
-        ...EDIT_ROWS.map(([name, label]) => ({
-          label,
-          keys: editKeys[name],
-          rebind: name,
-        })),
-      ],
+      rows: EDIT_ROWS.map(([name, label]) => ({
+        label,
+        keys: editKeys[name],
+        rebind: name,
+      })),
     },
     {
       title: "Segments",
