@@ -83,3 +83,4 @@ npm run perf:headed
 `e2e*` / `perf*` all rebuild the prod bundle + regenerate fixtures first (no
 stale-bundle surprises). One Playwright config, two projects:
 `playwright.editing.config.ts`. See `tests/editing/README.md` for the details.
+
