@@ -22,11 +22,16 @@
  * value about to be painted is recognisable at a glance (TM-517).
  */
 
-import type { SegmentColor } from "#src/editing/edit_session_host.js";
 import { StatusMessage } from "#src/status.js";
 import { RefCounted } from "#src/util/disposable.js";
 
 const DEFAULT_DISMISS_MS = 1200;
+
+/** A segment's colour as CSS, and the text colour that reads on it. */
+export interface SegmentColor {
+  readonly background: string;
+  readonly text: "black" | "white";
+}
 
 /**
  * The readout's colours: a segment's, or `"none"` for a value with no segment
@@ -82,10 +87,12 @@ export class ParamStatusOverlay extends RefCounted {
  * design token; clearing it gives the box back its usual look.
  */
 function applyTint(messageElement: HTMLElement, tint: StatusTint | undefined) {
+  // Neuroglancer's modal StatusMessage sits in a wrapper inside the modal
+  // container; that wrapper is the grey box. Anything else means upstream
+  // changed the layout, so leave it untouched rather than colour a stranger.
   const box = messageElement.parentElement;
-  if (box === null) return;
+  if (box?.parentElement?.id !== "neuroglancer-status-container-modal") return;
   const segment = tint === undefined || tint === "none" ? undefined : tint;
   box.style.backgroundColor = segment?.background ?? "";
   box.style.color = segment?.text ?? "";
-  box.dataset.segmentTint = segment === undefined ? "" : "true";
 }

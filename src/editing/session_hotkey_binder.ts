@@ -901,10 +901,22 @@ export class EditSessionHotkeyBinder extends RefCounted {
     direction: number,
   ): void {
     value.adjust(direction, 1);
-    this.statusOverlay.show(`${value.label}: ${value.format()}`, {
-      tint: this.targetValueTint(),
-      dismissAfterMs: TARGET_VALUE_READOUT_MS,
-    });
+    this.showTargetValue(`${value.label}: ${value.format()}`);
+  }
+
+  /**
+   * The target value readout, in the colour of the value the brush now paints.
+   * It stays up longer so the colour can be read; without a colour (no
+   * painting runtime) it is an ordinary readout.
+   */
+  private showTargetValue(text: string): void {
+    const tint = this.targetValueTint();
+    this.statusOverlay.show(
+      text,
+      tint === undefined
+        ? {}
+        : { tint, dismissAfterMs: TARGET_VALUE_READOUT_MS },
+    );
   }
 
   /** The colour of the value the brush now paints, for the readout. */
@@ -934,10 +946,7 @@ export class EditSessionHotkeyBinder extends RefCounted {
     if (sel === undefined) return;
     // Target value, reached with Ctrl/Option+Arrows too, carries its colour.
     if (sel.id === TARGET_VALUE_PARAM_ID) {
-      this.statusOverlay.show(`${sel.label}: ${sel.format()}`, {
-        tint: this.targetValueTint(),
-        dismissAfterMs: TARGET_VALUE_READOUT_MS,
-      });
+      this.showTargetValue(`${sel.label}: ${sel.format()}`);
       return;
     }
     this.statusOverlay.show(`${sel.label}: ${sel.format()}`);

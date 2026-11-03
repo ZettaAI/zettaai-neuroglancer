@@ -118,6 +118,7 @@ import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volu
 import type { PaintedVolumePreviewSummary } from "#src/editing/painted_volume/painted_volume_preview_summary.js";
 import type { PaintedVolumeSessionInputs } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import { createSessionPaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_session_preview.js";
+import type { SegmentColor } from "#src/editing/param_status_overlay.js";
 import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 // Side-effect: attaches `window.__editPaintBench` for the Playwright paint
 // benchmark (a dev tool, like `window.__paintProfiler` — only does work when
@@ -573,12 +574,6 @@ export const DEFAULT_EXIT_LOCK_REASON =
 // ---------------------------------------------------------------------------
 // EditSessionHost
 // ---------------------------------------------------------------------------
-
-/** A segment's colour as CSS, and the text colour that reads on it. */
-export interface SegmentColor {
-  readonly background: string;
-  readonly text: "black" | "white";
-}
 
 export class EditSessionHost extends RefCounted {
   // -- Public reactive state ------------------------------------------------
