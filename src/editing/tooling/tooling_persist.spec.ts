@@ -105,18 +105,24 @@ describe("tooling_persist", () => {
     expect(patch!.fillMode).toBe("2d");
   });
 
-  it("round-trips fill-closed-paths turned on (TM-268)", () => {
+  it("round-trips fill-inside turned off (TM-268)", () => {
     const serialized = serializeTooling(
       "painting.brush",
-      state({ fillClosedPaths: true }),
+      state({ fillClosedPaths: false }),
     );
     const parsed = parseTooling(roundTrip(serialized));
     const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
-    expect(patch!.fillClosedPaths).toBe(true);
+    expect(patch!.fillClosedPaths).toBe(false);
   });
 
-  it("keeps fill-closed-paths off for configs lacking the field or holding junk (TM-268)", () => {
-    for (const persisted of [{}, { fillClosedPaths: "true" }]) {
+  // On by default: only an explicit `fillInside: false` turns it off. The old
+  // `fillClosedPaths` key held the old off-default, so it is ignored.
+  it("defaults fill-inside on for configs lacking the field, holding junk, or only the old key (TM-268)", () => {
+    for (const persisted of [
+      {},
+      { fillInside: "true" },
+      { fillClosedPaths: false },
+    ]) {
       const parsed = parseTooling({
         activeToolId: "painting.brush",
         painting: {
@@ -133,8 +139,25 @@ describe("tooling_persist", () => {
         parsed!.painting!,
         allowed(TARGET),
       );
-      expect(patch!.fillClosedPaths).toBe(false);
+      expect(patch!.fillClosedPaths).toBe(true);
     }
+  });
+
+  it("keeps fill-inside off when it was saved off under its own key (TM-268)", () => {
+    const parsed = parseTooling({
+      activeToolId: "painting.brush",
+      painting: {
+        targetLayerId: "target",
+        targetResolution: RES.toString(),
+        radius: 9,
+        activeValue: { t: "b", v: "42" },
+        eraseValue: { t: "n", v: 0 },
+        mask: null,
+        fillInside: false,
+      },
+    });
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.fillClosedPaths).toBe(false);
   });
 
   it("round-trips auto-select turned off (TM-490)", () => {

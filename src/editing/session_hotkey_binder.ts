@@ -50,7 +50,10 @@ import {
   accelStepsPerSecond,
   nextPresetSize,
 } from "#src/editing/painting_hotkey_math.js";
-import { ParamStatusOverlay } from "#src/editing/param_status_overlay.js";
+import {
+  ParamStatusOverlay,
+  type StatusTint,
+} from "#src/editing/param_status_overlay.js";
 import { isFieldKeyForSession } from "#src/editing/tool_panel_field_keys.js";
 import type { PaintingState } from "#src/editing/tool_runtimes/painting_tools.js";
 import type { PaintParamCursor } from "#src/editing/tool_runtimes/param_cursor.js";
@@ -80,6 +83,9 @@ import type { Viewer } from "#src/viewer.js";
 // `viewer.inputEventMap` (e.g. neuroglancer's global `keyb` → "toggle-scale-bar"
 // in `src/ui/default_input_event_bindings.ts:28`).
 const SESSION_HOTKEY_PRIORITY = 100;
+
+/** How long the target value readout, with its colour, stays up. */
+const TARGET_VALUE_READOUT_MS = 2000;
 
 export { isMacPlatform };
 
@@ -165,17 +171,16 @@ export function paramArrowDefaults(mac: boolean): {
   };
 }
 
-// Single letters as in Photoshop: a text field never receives them as shortcuts
-// (see `KeyboardEventBinder`) and the session layer only shadows the global keys
-// while a session is open. The Ctrl chords are the previous defaults, kept for
-// one release so habits keep working; Ctrl+F is gone because it took the
-// browser's Find away.
+// Tools take Ctrl, as before TM-517: plain letters belong to neuroglancer in the
+// data panels (E / R rotate the view, B the scale bar, V the default
+// annotations), and a session must not take them away. Fill is Ctrl+G, not
+// Ctrl+F, which is the browser's Find.
 const DEFAULT_EDIT_KEYBINDS: Record<EditKeybindName, readonly string[]> = {
-  brush: ["keyb", "control+keyb"],
-  erase: ["keye", "control+keye"],
-  fill: ["keyg"],
-  zextrap: ["keyx", "control+keyx"],
-  cursor: ["keyv", "control+keyv"],
+  brush: ["control+keyb"],
+  erase: ["control+keye"],
+  fill: ["control+keyg"],
+  zextrap: ["control+keyx"],
+  cursor: ["control+keyv"],
   undo: ["control+keyz", "meta+keyz"],
   redo: ["control+shift+keyz", "meta+shift+keyz"],
   saveAll: ["control+keys", "meta+keys"],
@@ -393,8 +398,8 @@ export function editModeShortcuts(
   if (toolId === TOOL_ID_BRUSH) {
     shortcuts.push({
       keys: keys.fillClosedPaths,
-      label: "Fill closed paths",
-      description: "fill closed paths on / off",
+      label: "Fill inside",
+      description: "fill inside on / off",
       detailOnly: true,
     });
   }
@@ -845,16 +850,14 @@ export class EditSessionHotkeyBinder extends RefCounted {
     painting.patchState({ radius: sizeToRadius(nextSize) });
   }
 
-  /** `I`: the brush's "Fill closed paths" switch, read back where it shows. */
+  /** `I`: the brush's "Fill inside" switch, read back where it shows. */
   private toggleFillClosedPaths(): void {
     if (this.host.activeToolId.value !== TOOL_ID_BRUSH) return;
     const painting = this.getPainting();
     if (painting === undefined) return;
     const fillClosedPaths = !painting.getState().fillClosedPaths;
     painting.patchState({ fillClosedPaths });
-    this.statusOverlay.show(
-      `Fill closed paths: ${fillClosedPaths ? "on" : "off"}`,
-    );
+    this.statusOverlay.show(`Fill inside: ${fillClosedPaths ? "on" : "off"}`);
   }
 
   /**
@@ -898,7 +901,31 @@ export class EditSessionHotkeyBinder extends RefCounted {
     direction: number,
   ): void {
     value.adjust(direction, 1);
-    this.statusOverlay.show(`${value.label}: ${value.format()}`);
+    this.showTargetValue(`${value.label}: ${value.format()}`);
+  }
+
+  /**
+   * The target value readout, in the colour of the value the brush now paints.
+   * It stays up longer so the colour can be read; without a colour (no
+   * painting runtime) it is an ordinary readout.
+   */
+  private showTargetValue(text: string): void {
+    const tint = this.targetValueTint();
+    this.statusOverlay.show(
+      text,
+      tint === undefined
+        ? {}
+        : { tint, dismissAfterMs: TARGET_VALUE_READOUT_MS },
+    );
+  }
+
+  /** The colour of the value the brush now paints, for the readout. */
+  private targetValueTint(): StatusTint | undefined {
+    const painting = this.getPainting();
+    if (painting === undefined) return undefined;
+    const { targetLayerId, activeValue } = painting.getState();
+    if (BigInt(activeValue) === 0n) return "none";
+    return this.host.segmentColorFor(targetLayerId, activeValue);
   }
 
   // -- Ctrl+Arrow parameter scheme (TM-337) ---------------------------------
@@ -916,9 +943,13 @@ export class EditSessionHotkeyBinder extends RefCounted {
   /** Surface the currently-selected parameter + its value in the center readout. */
   private showSelected(cursor: PaintParamCursor): void {
     const sel = cursor.selected();
-    if (sel !== undefined) {
-      this.statusOverlay.show(`${sel.label}: ${sel.format()}`);
+    if (sel === undefined) return;
+    // Target value, reached with Ctrl/Option+Arrows too, carries its colour.
+    if (sel.id === TARGET_VALUE_PARAM_ID) {
+      this.showTargetValue(`${sel.label}: ${sel.format()}`);
+      return;
     }
+    this.statusOverlay.show(`${sel.label}: ${sel.format()}`);
   }
 
   /**

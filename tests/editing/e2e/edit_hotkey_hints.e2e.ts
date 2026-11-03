@@ -88,23 +88,43 @@ test.describe("hotkey hints", () => {
     await page?.context().close();
   });
 
-  test("single letters pick a tool with a data panel focused", async () => {
+  // Tools take Ctrl (as before TM-517): plain letters stay neuroglancer's in
+  // the data panels, where E and R rotate the view.
+  test("Ctrl picks a tool with a data panel focused", async () => {
     test.skip(setupError !== undefined, setupError);
     for (const [key, toolId] of [
-      ["KeyB", "painting.brush"],
-      ["KeyE", "painting.erase"],
-      ["KeyG", "painting.fill"],
+      ["Control+KeyB", "painting.brush"],
+      ["Control+KeyE", "painting.erase"],
+      ["Control+KeyG", "painting.fill"],
     ] as const) {
       await page.keyboard.press(key);
       expect(await activeTool(page)).toBe(toolId);
     }
-    await page.keyboard.press("KeyV");
+    await page.keyboard.press("Control+KeyV");
     expect(await activeTool(page)).toBeUndefined();
   });
 
-  test("the previous Ctrl chord still works, but Ctrl+F is the browser's", async () => {
+  test("plain E still rotates the view during a session, and Ctrl+F is the browser's", async () => {
     test.skip(setupError !== undefined, setupError);
     await page.keyboard.press("Control+KeyB");
+    const orientation = () =>
+      page.evaluate(() =>
+        Array.from(
+          (globalThis as any).viewer.navigationState.pose.orientation
+            .orientation as Float32Array,
+        ).join(","),
+      );
+    const before = await orientation();
+    const panelBox = (await page
+      .locator(".neuroglancer-rendered-data-panel")
+      .first()
+      .boundingBox())!;
+    await page.mouse.move(
+      panelBox.x + panelBox.width / 2,
+      panelBox.y + panelBox.height / 2,
+    );
+    await page.keyboard.press("KeyE");
+    await expect.poll(orientation).not.toBe(before);
     expect(await activeTool(page)).toBe("painting.brush");
     await page.keyboard.press("Control+KeyF");
     expect(await activeTool(page)).toBe("painting.brush");
@@ -134,7 +154,10 @@ test.describe("hotkey hints", () => {
     test.skip(setupError !== undefined, setupError);
     await page.locator('button[aria-label^="Brush"]').hover();
     const tooltip = page.locator(".neuroglancer-fast-tooltip.visible");
-    await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText("B");
+    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText(
+      mac ? ["⌃", "B"] : ["Ctrl", "B"],
+    );
     await expect(tooltip).toContainText("Paint voxels");
     await page.screenshot({ path: test.info().outputPath("tooltip.png") });
     await page.keyboard.press("Escape");
@@ -145,7 +168,7 @@ test.describe("hotkey hints", () => {
     test.skip(setupError !== undefined, setupError);
     const strip = page.locator(".neuroglancer-mode-strip");
     await expect(strip).toContainText("Edit session");
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     await expect(strip).toContainText("Brush");
     await expect(strip).toContainText("Size");
     await expect(strip).not.toContainText("Choose setting");
@@ -157,7 +180,7 @@ test.describe("hotkey hints", () => {
       .boundingBox())!;
     expect(stripBox.x).toBeGreaterThanOrEqual(panelBox.x);
     await page.screenshot({ path: test.info().outputPath("strip.png") });
-    await page.keyboard.press("KeyG");
+    await page.keyboard.press("Control+KeyG");
     await expect(strip).toContainText("Fill");
     await expect(strip).not.toContainText("Size");
     await page.keyboard.press("Escape");
@@ -168,7 +191,7 @@ test.describe("hotkey hints", () => {
     test.skip(setupError !== undefined, setupError);
     const dataPanel = page.locator(".neuroglancer-rendered-data-panel").first();
     const heightBefore = (await dataPanel.boundingBox())!.height;
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     await expect(page.locator(".neuroglancer-tool-panel-keys")).toBeVisible();
     // A tall tool panel scrolls by itself; it must not resize the data panels.
     expect((await dataPanel.boundingBox())!.height).toBe(heightBefore);
@@ -183,7 +206,11 @@ test.describe("hotkey hints", () => {
       "smaller / larger brush",
     );
     await expect(keys.locator("dt").nth(1)).toHaveText("I");
-    await expect(keys.locator("dt").nth(2)).toHaveText("{ / }");
+    // Shift is named: "{" would read as a key of its own.
+    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    await expect(keys.locator("dt").nth(2)).toHaveText(
+      mac ? "⇧[ / ⇧]" : "Shift+[ / Shift+]",
+    );
     await page.screenshot({ path: test.info().outputPath("panel.png") });
   });
 
@@ -195,7 +222,7 @@ test.describe("hotkey hints", () => {
     const meanings = async () =>
       (await visibleList.locator("dd").allTextContents()).join(" | ");
 
-    await page.keyboard.press("KeyV");
+    await page.keyboard.press("Control+KeyV");
     await expect
       .poll(meanings)
       .toBe(
@@ -207,23 +234,23 @@ test.describe("hotkey hints", () => {
       "move between the settings | change the selected setting | " +
       "undo the last edit | redo the undone edit | save all edited layers | " +
       "back to the cursor | all shortcuts";
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     await expect
       .poll(meanings)
       .toBe(
-        "smaller / larger brush | fill closed paths on / off | " +
+        "smaller / larger brush | fill inside on / off | " +
           "previous / next target value | " +
           sizeAndSettings,
       );
-    await page.keyboard.press("KeyE");
+    await page.keyboard.press("Control+KeyE");
     await expect
       .poll(meanings)
       .toBe("smaller / larger brush | " + sizeAndSettings);
-    await page.keyboard.press("KeyG");
+    await page.keyboard.press("Control+KeyG");
     await expect
       .poll(meanings)
       .toBe("previous / next target value | " + sizeAndSettings);
-    await page.keyboard.press("KeyX");
+    await page.keyboard.press("Control+KeyX");
     expect(await activeTool(page)).toBe("z-extrapolation");
     await expect
       .poll(meanings)
@@ -242,12 +269,12 @@ test.describe("hotkey hints", () => {
         ).viewer.editSessionHost.painting.state.getState();
         return { radius: painting.radius, value: String(painting.activeValue) };
       });
-    await page.keyboard.press("KeyE");
+    await page.keyboard.press("Control+KeyE");
     const beforeErase = await state();
     await page.keyboard.press("Shift+Equal");
     expect((await state()).radius).toBeGreaterThan(beforeErase.radius);
 
-    await page.keyboard.press("KeyG");
+    await page.keyboard.press("Control+KeyG");
     await expect(
       page.locator(
         ".neuroglancer-painting-fill-panel .neuroglancer-tool-panel-keys",
@@ -267,7 +294,7 @@ test.describe("hotkey hints", () => {
             .activeValue,
         ),
       );
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     const panel = page.locator(".neuroglancer-painting-brush-panel");
     await expect(panel).toBeVisible();
     await page.evaluate(() => {
@@ -292,7 +319,7 @@ test.describe("hotkey hints", () => {
     await expect.poll(async () => BigInt(await value())).toBe(before + 1n);
   });
 
-  test("I switches Fill closed paths, and its hint names the key", async () => {
+  test("Fill inside starts on, I switches it, and its hint names the key", async () => {
     test.skip(setupError !== undefined, setupError);
     const fillClosedPaths = () =>
       page.evaluate(
@@ -300,10 +327,13 @@ test.describe("hotkey hints", () => {
           (globalThis as any).viewer.editSessionHost.painting.state.getState()
             .fillClosedPaths as boolean,
       );
-    await page.keyboard.press("KeyB");
-    const toggle = page.getByRole("switch", { name: "Fill closed paths" });
+    await page.keyboard.press("Control+KeyB");
+    const toggle = page.getByRole("switch", { name: "Fill inside" });
     await expect(toggle).toBeVisible();
+    // On by default.
     const before = await fillClosedPaths();
+    expect(before).toBe(true);
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
     await focusDataPanel(page);
     await page.keyboard.press("KeyI");
     expect(await fillClosedPaths()).toBe(!before);
@@ -312,12 +342,14 @@ test.describe("hotkey hints", () => {
     expect(await fillClosedPaths()).toBe(before);
 
     await page
-      .locator(".neuroglancer-tool-panel-row", { hasText: "Fill closed paths" })
+      .locator(".neuroglancer-tool-panel-row", { hasText: "Fill inside" })
       .locator(".neuroglancer-param-hint")
       .hover();
     const tooltip = page.locator(".neuroglancer-fast-tooltip.visible");
     await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText("I");
-    await expect(tooltip).toContainText("When a stroke closes on itself");
+    await expect(tooltip).toContainText(
+      "Drawing around an object in one stroke",
+    );
 
     // The Size hint shows its pair of keys the same way.
     await page.mouse.move(0, 0);
@@ -334,18 +366,18 @@ test.describe("hotkey hints", () => {
     const sheet = page.locator(".neuroglancer-shortcut-sheet");
     await expect(
       sheet.locator(".neuroglancer-shortcut-now .neuroglancer-shortcut-row", {
-        hasText: "Fill closed paths",
+        hasText: "Fill inside",
       }),
-    ).toHaveText("Fill closed pathsI");
-    await sheet.getByLabel("Search shortcuts").fill("closed");
+    ).toHaveText("Fill insideI");
+    await sheet.getByLabel("Search shortcuts").fill("inside");
     await expect(sheet.locator(".neuroglancer-shortcut-row")).toHaveText([
-      "Fill closed paths on / offI",
+      "Fill inside on / offI",
     ]);
   });
 
   test("every setting's info hint says how to reach and change it", async () => {
     test.skip(setupError !== undefined, setupError);
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     const tooltip = page.locator(".neuroglancer-fast-tooltip.visible");
     const hintOf = (label: string) =>
       page
@@ -380,9 +412,14 @@ test.describe("hotkey hints", () => {
     // A setting with keys of its own keeps them as the caps.
     await page.mouse.move(0, 0);
     await hintOf("Target value").hover();
+    const shift = (await page.evaluate(() => /Mac/.test(navigator.platform)))
+      ? "⇧"
+      : "Shift";
     await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText([
-      "{",
-      "}",
+      shift,
+      "[",
+      shift,
+      "]",
     ]);
     await expect(tooltip).toContainText(`Choose it with ${chord("←")}`);
   });
@@ -396,13 +433,47 @@ test.describe("hotkey hints", () => {
             .activeValue,
         ),
       );
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     await expect(page.locator(".neuroglancer-tool-panel-keys")).toBeVisible();
     const before = BigInt(await value());
     await page.keyboard.press("Shift+BracketRight");
     expect(BigInt(await value())).toBe(before + 1n);
     await page.keyboard.press("Shift+BracketLeft");
     expect(BigInt(await value())).toBe(before);
+  });
+
+  // The readout shows the colour neuroglancer draws that segment in, so the
+  // value about to be painted is recognisable at a glance.
+  test("a target value step shows the segment's colour", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("Control+KeyB");
+    await page.keyboard.press("Shift+BracketRight");
+    const [expected, activeValue] = await page.evaluate(() => {
+      const host = (globalThis as any).viewer.editSessionHost;
+      const { targetLayerId, activeValue } = host.painting.state.getState();
+      return [
+        host.segmentColorFor(targetLayerId, activeValue) as {
+          background: string;
+          text: string;
+        },
+        String(activeValue),
+      ];
+    });
+    expect(expected.background).toMatch(/^#[0-9a-f]{6}$/);
+    // The whole readout box takes the colour, with text that reads on it.
+    const box = page.locator("#neuroglancer-status-container-modal > div");
+    await expect(box).toContainText(`Value: ${activeValue}`);
+    const shown = await box.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, text: style.color };
+    });
+    const [red, green, blue] = [1, 3, 5].map((offset) =>
+      parseInt(expected.background.slice(offset, offset + 2), 16),
+    );
+    expect(shown.background).toBe(`rgb(${red}, ${green}, ${blue})`);
+    expect(shown.text).toBe(
+      expected.text === "white" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)",
+    );
   });
 
   test("session keys still work after a click on a number field", async () => {
@@ -414,7 +485,7 @@ test.describe("hotkey hints", () => {
             .activeValue,
         ),
       );
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     const sizeField = page
       .locator(".neuroglancer-tool-panel input[type=number]")
       .first();
@@ -429,7 +500,7 @@ test.describe("hotkey hints", () => {
     await page.keyboard.type("9");
     await expect(sizeField).toHaveValue("9");
 
-    await page.keyboard.press("KeyG");
+    await page.keyboard.press("Control+KeyG");
     expect(await activeTool(page)).toBe("painting.fill");
   });
 
@@ -439,9 +510,36 @@ test.describe("hotkey hints", () => {
     await expect(page.locator(".neuroglancer-shortcut-sheet")).toBeVisible();
   });
 
+  // A key changed without a session would not be saved, so the sheet only
+  // lists the edit keys then.
+  test("the sheet offers no rebinding without a session", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.evaluate(() =>
+      (globalThis as any).viewer.editSessionHost.discardActive(),
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (globalThis as any).viewer.editSessionHost.activeSession.value ===
+            undefined,
+        ),
+      )
+      .toBe(true);
+    await focusDataPanel(page);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    await expect(sheet).toContainText("Open an edit session to change keys.");
+    await expect(sheet.locator(".neuroglancer-shortcut-rebind")).toHaveCount(0);
+    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    await expect(
+      sheet.locator(".neuroglancer-shortcut-row", { hasText: /^Brush/ }),
+    ).toHaveText(mac ? "Brush⌃B" : "BrushCtrlB");
+  });
+
   test("the sheet searches, rebinds and refuses a taken key", async () => {
     test.skip(setupError !== undefined, setupError);
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     await page.keyboard.press("KeyH");
     const sheet = page.locator(".neuroglancer-shortcut-sheet");
     await expect(sheet).toContainText("Now: Brush");
@@ -450,11 +548,11 @@ test.describe("hotkey hints", () => {
     // A letter typed into the search is text, not a tool change.
     await page.keyboard.type("fil");
     expect(await activeTool(page)).toBe("painting.brush");
-    // "fil" finds both Fill and Fill closed paths.
+    // "fil" finds both Fill and Fill inside.
     await expect(sheet.locator(".neuroglancer-shortcut-row")).toHaveCount(2);
 
     await sheet.getByLabel("Change the key for Fill", { exact: true }).click();
-    await page.keyboard.press("KeyB");
+    await page.keyboard.press("Control+KeyB");
     await expect(sheet.getByRole("alert")).toContainText(
       'already does "brush"',
     );
