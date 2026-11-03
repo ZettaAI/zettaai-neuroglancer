@@ -21,8 +21,17 @@ bakes them into the bundle. They live on the service so they can be changed with
 or the console instead of a commit, and so previews inherit them. A change only takes
 effect on the next deploy.
 
-Current values: `neuroglancer` carries `NEUROGLANCER_ZETTA_BACKEND_URL` and
-`NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP`; `neuroglancer-dev` and previews carry neither.
+Current values: `neuroglancer` and `neuroglancer-dev` carry `NEUROGLANCER_ZETTA_BACKEND_URL`
+and `NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP`; previews inherit dev's.
+
+A preview's own `google_oauth2_redirect.html` is not an authorized redirect URI of the
+IAP client, so standalone backend login (edit-session save) goes through
+`neuroglancer-dev`: set `NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL=https://neuroglancer-dev.research.zetta.ai`
+on `neuroglancer-dev`, which previews inherit. Google returns to dev's redirect page, which
+posts the token to the preview origin named in the OAuth state, but only to origins
+matching the `neuroglancer-pr-<N>` pattern hardcoded in that page. Dev must be serving
+that page before previews use it, and previews built before the var was set need a
+redeploy.
 
 ## PR previews
 

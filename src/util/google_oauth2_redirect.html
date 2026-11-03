@@ -6,11 +6,31 @@
       const data = Object.fromEntries(
         new URLSearchParams(location.hash.substring(1)).entries(),
       );
+      // Origins that log in through this page as their redirect proxy; see
+      // `redirectProxyOrigin` in google_oauth2.ts.
+      const proxiedOrigin =
+        /^https:\/\/neuroglancer-pr-[0-9]+-(?:349854005841\.us-east1\.run\.app|hhtsusnvoq-ue\.a\.run\.app)$/;
+      function responseOrigin() {
+        const encoded = (data.state || "").split(".")[1];
+        if (encoded === undefined) return window.location.origin;
+        let origin;
+        try {
+          origin = atob(encoded.replace(/-/g, "+").replace(/_/g, "/"));
+        } catch {
+          return undefined;
+        }
+        return proxiedOrigin.test(origin) ? origin : undefined;
+      }
+      const origin = responseOrigin();
       const target = window.opener || window.parent;
-      if (target === window) {
+      if (origin === undefined) {
+        console.error(
+          "OAuth2 response names an origin this page does not serve",
+        );
+      } else if (target === window) {
         console.error("No opener/parent to receive successful oauth2 response");
       } else {
-        target.postMessage(data, window.location.origin);
+        target.postMessage(data, origin);
       }
     </script>
   </head>

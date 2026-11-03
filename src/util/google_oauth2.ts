@@ -72,13 +72,14 @@ function extractEmailFromIdToken(idToken: string): string {
 function waitForAuthResponseMessage(
   source: Window,
   state: string,
+  responseOrigin: string,
   signal: AbortSignal,
 ): Promise<OAuth2Token> {
   return new Promise((resolve, reject) => {
     window.addEventListener(
       "message",
       (event: MessageEvent) => {
-        if (event.origin !== location.origin) {
+        if (event.origin !== responseOrigin) {
           return;
         }
 
@@ -122,8 +123,44 @@ function waitForAuthResponseMessage(
   });
 }
 
+interface AuthRedirect {
+  redirectUri: string;
+  responseOrigin: string;
+  stateSuffix: string;
+}
+
+/**
+ * Where Google sends the response. With a `redirectProxyOrigin` other than this
+ * page's own, the response lands on the proxy's `google_oauth2_redirect.html`,
+ * which forwards it to the origin named in the state — so only the proxy's
+ * redirect URI has to be authorized on the OAuth client (e.g. for previews).
+ */
+function authRedirect(redirectProxyOrigin: string | undefined): AuthRedirect {
+  if (
+    redirectProxyOrigin === undefined ||
+    redirectProxyOrigin === location.origin
+  ) {
+    return {
+      redirectUri: new URL("./google_oauth2_redirect.html", import.meta.url)
+        .href,
+      responseOrigin: location.origin,
+      stateSuffix: "",
+    };
+  }
+  return {
+    redirectUri: `${redirectProxyOrigin}/google_oauth2_redirect.html`,
+    responseOrigin: redirectProxyOrigin,
+    stateSuffix: "." + base64UrlEncode(location.origin),
+  };
+}
+
+function base64UrlEncode(value: string) {
+  return btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 function makeAuthRequestUrl(options: {
   clientId: string;
+  redirectUri: string;
   scopes: string[];
   nonce?: string;
   approvalPrompt?: "force" | "auto";
@@ -135,9 +172,7 @@ function makeAuthRequestUrl(options: {
   prompt?: string;
 }) {
   let url = `${AUTH_SERVER}?client_id=${encodeURIComponent(options.clientId)}`;
-  const redirectUri = new URL("./google_oauth2_redirect.html", import.meta.url)
-    .href;
-  url += `&redirect_uri=${redirectUri}`;
+  url += `&redirect_uri=${options.redirectUri}`;
   let responseType = "token";
   const { scopes } = options;
   if (scopes.includes("email") && scopes.includes("openid")) {
@@ -169,9 +204,14 @@ function makeAuthRequestUrl(options: {
   return url;
 }
 
+// A proxied response page is cross-origin even on success, so it gets this long
+// to post its message before the iframe counts as failed.
+const PROXIED_IMMEDIATE_RESPONSE_GRACE_MS = 2000;
+
 function createAuthIframe(
   url: string,
   abortController: AbortController,
+  proxied: boolean,
 ): Window {
   const iframe = document.createElement("iframe");
   iframe.src = url;
@@ -181,7 +221,13 @@ function createAuthIframe(
     () => {
       if (iframe.contentDocument == null) {
         // Error received
-        abortController.abort(new Error("Immediate authentication failed"));
+        const fail = () =>
+          abortController.abort(new Error("Immediate authentication failed"));
+        if (proxied) {
+          setTimeout(fail, PROXIED_IMMEDIATE_RESPONSE_GRACE_MS);
+        } else {
+          fail();
+        }
       }
     },
     { signal: abortController.signal },
@@ -207,15 +253,20 @@ export async function authenticateGoogleOAuth2(
     authUser?: number;
     /** OAuth `prompt` (e.g. `select_account`, `login`) to force re-auth. */
     prompt?: "login" | "select_account" | "consent";
+    /** Origin whose redirect page receives the response; see {@link authRedirect}. */
+    redirectProxyOrigin?: string;
   },
   signal: AbortSignal,
 ) {
-  const state = getRandomHexString();
+  const redirect = authRedirect(options.redirectProxyOrigin);
+  const proxied = redirect.responseOrigin !== location.origin;
+  const state = getRandomHexString() + redirect.stateSuffix;
   const nonce = getRandomHexString();
   const url = makeAuthRequestUrl({
     state,
     nonce,
     clientId: options.clientId,
+    redirectUri: redirect.redirectUri,
     scopes: options.scopes,
     approvalPrompt: options.approvalPrompt,
     loginHint: options.loginHint,
@@ -228,7 +279,7 @@ export async function authenticateGoogleOAuth2(
   try {
     let source: Window;
     if (options.immediate) {
-      source = createAuthIframe(url, abortController);
+      source = createAuthIframe(url, abortController, proxied);
     } else {
       const newWindow = open(url);
       if (newWindow === null) {
@@ -238,7 +289,12 @@ export async function authenticateGoogleOAuth2(
       source = newWindow!;
     }
     return await raceWithAbort(
-      waitForAuthResponseMessage(source, state, abortController.signal),
+      waitForAuthResponseMessage(
+        source,
+        state,
+        redirect.responseOrigin,
+        abortController.signal,
+      ),
       signal,
     );
   } finally {
@@ -254,6 +310,8 @@ export class GoogleOAuth2CredentialsProvider extends CredentialsProvider<OAuth2T
       description: string;
       /** OAuth `prompt` forwarded to each auth request (e.g. `select_account`). */
       prompt?: "login" | "select_account" | "consent";
+      /** Forwarded to {@link authenticateGoogleOAuth2}. */
+      redirectProxyOrigin?: string;
     },
   ) {
     super();
@@ -279,6 +337,7 @@ export class GoogleOAuth2CredentialsProvider extends CredentialsProvider<OAuth2T
               // it there makes Google reject the request as `invalid_request`.
               // Apply it only to the interactive attempt.
               prompt: immediate ? undefined : this.options.prompt,
+              redirectProxyOrigin: this.options.redirectProxyOrigin,
             },
             signal,
           ),

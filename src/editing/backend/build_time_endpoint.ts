@@ -55,6 +55,7 @@ import {
 declare let NEUROGLANCER_ZETTA_BACKEND_URL: string | undefined;
 declare let NEUROGLANCER_ZETTA_BACKEND_TOKEN: string | undefined;
 declare let NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP: string | undefined;
+declare let NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL: string | undefined;
 
 /** Refresh this many ms before the token's stated expiry to avoid edge misses. */
 const TOKEN_EXPIRY_SKEW_MS = 60_000;
@@ -119,6 +120,7 @@ function makeGoogleOAuthAuthorize(
       scopes: [OPENID_SCOPE, EMAIL_SCOPE],
       description: "Zetta backend",
       prompt,
+      redirectProxyOrigin: googleRedirectProxyOrigin(),
     });
 
   let provider: GoogleOAuth2CredentialsProvider | undefined;
@@ -165,6 +167,15 @@ function makeStaticTokenAuthorize(token: string): BackendEndpoint["authorize"] {
     headers.set("Authorization", token);
     return { ...init, headers };
   };
+}
+
+function googleRedirectProxyOrigin(): string | undefined {
+  const proxyUrl =
+    typeof NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL !== "undefined"
+      ? NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL
+      : undefined;
+  if (proxyUrl === undefined || !URL.canParse(proxyUrl)) return undefined;
+  return new URL(proxyUrl).origin;
 }
 
 /**
