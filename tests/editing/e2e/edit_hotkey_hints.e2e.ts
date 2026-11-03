@@ -206,7 +206,11 @@ test.describe("hotkey hints", () => {
       "smaller / larger brush",
     );
     await expect(keys.locator("dt").nth(1)).toHaveText("I");
-    await expect(keys.locator("dt").nth(2)).toHaveText("{ / }");
+    // Shift is named: "{" would read as a key of its own.
+    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    await expect(keys.locator("dt").nth(2)).toHaveText(
+      mac ? "⇧[ / ⇧]" : "Shift+[ / Shift+]",
+    );
     await page.screenshot({ path: test.info().outputPath("panel.png") });
   });
 
@@ -403,9 +407,14 @@ test.describe("hotkey hints", () => {
     // A setting with keys of its own keeps them as the caps.
     await page.mouse.move(0, 0);
     await hintOf("Target value").hover();
+    const shift = (await page.evaluate(() => /Mac/.test(navigator.platform)))
+      ? "⇧"
+      : "Shift";
     await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText([
-      "{",
-      "}",
+      shift,
+      "[",
+      shift,
+      "]",
     ]);
     await expect(tooltip).toContainText(`Choose it with ${chord("←")}`);
   });
