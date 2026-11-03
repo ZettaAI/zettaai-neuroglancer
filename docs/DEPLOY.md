@@ -29,7 +29,8 @@ IAP client, so standalone backend login (edit-session save) goes through
 `neuroglancer-dev`: set `NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL=https://neuroglancer-dev.research.zetta.ai`
 on `neuroglancer-dev`, which previews inherit. Google returns to dev's redirect page, which
 posts the token to the preview origin named in the OAuth state, but only to origins
-matching the `neuroglancer-pr-<N>` pattern hardcoded in that page. Dev must be serving
+matching the `neuroglancer-pr-<N>` pattern hardcoded in that page
+(`src/util/google_oauth2_redirect.html`); update it if the preview URL format changes. Dev must be serving
 that page before previews use it, and previews built before the var was set need a
 redeploy.
 

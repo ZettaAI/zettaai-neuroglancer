@@ -147,6 +147,7 @@ function authRedirect(redirectProxyOrigin: string | undefined): AuthRedirect {
       stateSuffix: "",
     };
   }
+  // The proxy must serve this page at its origin root.
   return {
     redirectUri: `${redirectProxyOrigin}/google_oauth2_redirect.html`,
     responseOrigin: redirectProxyOrigin,
@@ -224,7 +225,12 @@ function createAuthIframe(
         const fail = () =>
           abortController.abort(new Error("Immediate authentication failed"));
         if (proxied) {
-          setTimeout(fail, PROXIED_IMMEDIATE_RESPONSE_GRACE_MS);
+          const timer = setTimeout(fail, PROXIED_IMMEDIATE_RESPONSE_GRACE_MS);
+          abortController.signal.addEventListener(
+            "abort",
+            () => clearTimeout(timer),
+            { once: true },
+          );
         } else {
           fail();
         }

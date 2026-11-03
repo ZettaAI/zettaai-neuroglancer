@@ -7,7 +7,8 @@
         new URLSearchParams(location.hash.substring(1)).entries(),
       );
       // Origins that log in through this page as their redirect proxy; see
-      // `redirectProxyOrigin` in google_oauth2.ts.
+      // `redirectProxyOrigin` in google_oauth2.ts and docs/DEPLOY.md. Keep in
+      // sync with google_oauth2_redirect.spec.ts.
       const proxiedOrigin =
         /^https:\/\/neuroglancer-pr-[0-9]+-(?:349854005841\.us-east1\.run\.app|hhtsusnvoq-ue\.a\.run\.app)$/;
       function responseOrigin() {
