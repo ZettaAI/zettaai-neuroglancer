@@ -73,6 +73,7 @@ import {
   saveBackendRegistryChanged,
 } from "#src/editing/adapters/save_backend.js";
 import { HttpSaveBackend } from "#src/editing/adapters/save_backends/http_save_backend.js";
+import { mountSegmentListWidget } from "#src/editing/adapters/segment_list_widget.js";
 import type { ChunkLoadProgressState } from "#src/editing/adapters/session_chunk_preloader.js";
 import { BackendClient } from "#src/editing/backend/backend_client.js";
 import type { BackendEndpoint } from "#src/editing/backend/backend_endpoint.js";
@@ -188,6 +189,7 @@ import {
 } from "#src/editing/tooling/tooling_persist.js";
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
 import type { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
+import { getSegmentEquivalences } from "#src/segmentation_display_state/base.js";
 import { SegmentationRenderLayer } from "#src/sliceview/volume/segmentation_renderlayer.js";
 import { StatusMessage } from "#src/status.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -3403,10 +3405,16 @@ export class EditSessionHost extends RefCounted {
       metadataByLayer,
       resolutionFor: (layerId) => allowedResolutionsByLayer.get(layerId)?.[0],
       globalVoxelSizeNm: () => this.globalVoxelSizeNm(),
-      trackedSegmentsFor: (maskLayerId) =>
-        this.trackedSegmentsForLayer(maskLayerId),
-      addTrackedSegments: (maskLayerId, ids) =>
-        this.addTrackedSegmentsForLayer(maskLayerId, ids),
+      listedSegmentsFor: (maskLayerId) =>
+        this.selectedSegmentsForLayer(maskLayerId),
+      isSegmentVisible: (maskLayerId, id) =>
+        this.isSegmentVisibleOnLayer(maskLayerId, id),
+      isMergedSegment: (maskLayerId, id) =>
+        this.isMergedSegmentOnLayer(maskLayerId, id),
+      showSegments: (maskLayerId, ids) =>
+        this.showSegmentsOnLayer(maskLayerId, ids),
+      onListedSegmentsRemoved: (maskLayerId, onRemoved) =>
+        this.onSelectedSegmentsRemoved(maskLayerId, onRemoved),
       getViewportPosition: () => this.viewer.position.value,
       setViewportPosition: (position) => {
         this.viewer.position.value = position;
@@ -4087,28 +4095,148 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
-   * The mask layer's currently-selected segment IDs — the z-extrapolation
-   * tracked set (TM-326). Reuses the segmentation layer's own selection, so the
-   * user manages it with the normal NG controls (and viewport double-click,
-   * which z-extrapolation is exempted from suppressing).
+   * The mask layer's selected segment IDs — the segments the z-extrapolation
+   * panel lists (TM-326; the tool tracks or untracks each, TM-518). Reuses the
+   * segmentation layer's own selection, so the user manages the list with the
+   * normal NG controls (and viewport double-click, which z-extrapolation is
+   * exempted from suppressing).
    */
-  private trackedSegmentsForLayer(maskLayerId: LayerId): readonly bigint[] {
+  private selectedSegmentsForLayer(maskLayerId: LayerId): readonly bigint[] {
     const layer = this.findSegmentationUserLayer(maskLayerId);
     const selected =
       layer?.displayState.segmentationGroupState.value.selectedSegments;
     return selected === undefined ? [] : [...selected];
   }
 
-  /** Add IDs to the mask layer's selection — z-extrapolation auto-detect (TM-326). */
-  private addTrackedSegmentsForLayer(
+  /** Whether a selected segment is shown in the viewer (its NG checkbox is on). */
+  private isSegmentVisibleOnLayer(maskLayerId: LayerId, id: bigint): boolean {
+    const layer = this.findSegmentationUserLayer(maskLayerId);
+    const visible =
+      layer?.displayState.segmentationGroupState.value.visibleSegments;
+    return visible?.has(id) ?? false;
+  }
+
+  /**
+   * Whether a segment is merged with others through the layer's equivalences
+   * (TM-518). Z-extrapolation matches raw mask voxels, so it cannot track one.
+   */
+  private isMergedSegmentOnLayer(maskLayerId: LayerId, id: bigint): boolean {
+    const group =
+      this.findSegmentationUserLayer(maskLayerId)?.displayState
+        .segmentationGroupState.value;
+    if (group === undefined) return false;
+    let memberCount = 0;
+    for (const _member of getSegmentEquivalences(group).setElements(id)) {
+      if (++memberCount > 1) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Select and show segments, the way a double-click does — z-extrapolation
+   * auto-detect (TM-326). Showing them (TM-518) puts them on screen, so the
+   * panel's swatches match what the user sees; NG adds a shown segment to the
+   * selection itself.
+   */
+  private showSegmentsOnLayer(
     maskLayerId: LayerId,
     ids: readonly bigint[],
   ): void {
-    const layer = this.findSegmentationUserLayer(maskLayerId);
+    const group =
+      this.findSegmentationUserLayer(maskLayerId)?.displayState
+        .segmentationGroupState.value;
+    if (group === undefined) return;
+    for (const id of ids) group.visibleSegments.add(id);
+  }
+
+  /**
+   * Call `onRemoved` with the segments that leave the mask layer's selection
+   * (`"all"` when it is cleared). Returns the unsubscribe (TM-518).
+   */
+  private onSelectedSegmentsRemoved(
+    maskLayerId: LayerId,
+    onRemoved: (ids: readonly bigint[] | "all") => void,
+  ): () => void {
     const selected =
-      layer?.displayState.segmentationGroupState.value.selectedSegments;
-    if (selected === undefined) return;
-    for (const id of ids) selected.add(id);
+      this.findSegmentationUserLayer(maskLayerId)?.displayState
+        .segmentationGroupState.value.selectedSegments;
+    if (selected === undefined) return () => {};
+    return selected.changed.add((ids, add) => {
+      if (add) return;
+      if (ids === null) onRemoved("all");
+      else onRemoved(Array.isArray(ids) ? ids : [ids]);
+    });
+  }
+
+  /**
+   * Mount NG's own segment-list row for segment `id` of a layer into `parent`
+   * — the widget the layer's segment list shows, so its colour, hover and
+   * controls match the viewer (TM-518). Returns the unmount, or `undefined`
+   * while the layer is not resolved.
+   */
+  mountSegmentListWidget(
+    layerId: LayerId,
+    parent: HTMLElement,
+    id: bigint,
+  ): (() => void) | undefined {
+    const displayState = this.findSegmentationUserLayer(layerId)?.displayState;
+    return displayState === undefined
+      ? undefined
+      : mountSegmentListWidget(displayState, parent, id);
+  }
+
+  /**
+   * Call `callback` whenever which of a layer's segments a panel lists may
+   * have changed, or what it says about them: the selection, which are shown,
+   * and which are merged. Follows the layer through removal and re-creation,
+   * and a swap of its segment group. Returns the unsubscribe (TM-518).
+   */
+  onSegmentDisplayChanged(layerId: LayerId, callback: () => void): () => void {
+    let unsubscribeLayer: () => void = () => {};
+    const subscribeLayer = () => {
+      unsubscribeLayer();
+      const displayState =
+        this.findSegmentationUserLayer(layerId)?.displayState;
+      if (displayState === undefined) {
+        unsubscribeLayer = () => {};
+        return;
+      }
+      let unsubscribeGroup: () => void = () => {};
+      const subscribeGroup = () => {
+        unsubscribeGroup();
+        const group = displayState.segmentationGroupState.value;
+        const unsubscribers = [
+          group.selectedSegments.changed.add(callback),
+          group.visibleSegments.changed.add(callback),
+          group.segmentEquivalences.changed.add(callback),
+          group.temporarySegmentEquivalences.changed.add(callback),
+          group.useTemporarySegmentEquivalences.changed.add(callback),
+        ];
+        unsubscribeGroup = () => {
+          for (const unsubscribe of unsubscribers) unsubscribe();
+        };
+      };
+      subscribeGroup();
+      const unsubscribeSwap = displayState.segmentationGroupState.changed.add(
+        () => {
+          subscribeGroup();
+          callback();
+        },
+      );
+      unsubscribeLayer = () => {
+        unsubscribeSwap();
+        unsubscribeGroup();
+      };
+    };
+    subscribeLayer();
+    const unsubscribeLayers = this.viewer.layerManager.layersChanged.add(() => {
+      subscribeLayer();
+      callback();
+    });
+    return () => {
+      unsubscribeLayers();
+      unsubscribeLayer();
+    };
   }
 
   /**
@@ -4464,6 +4592,7 @@ export class EditSessionHost extends RefCounted {
     this._toolRegistry = undefined;
     this.paintingTools = undefined;
     this.editScope = undefined;
+    this.zExtrapolationTool?.dispose();
     this.zExtrapolationTool = undefined;
     this.teardownHotkeyBinder();
     this.teardownCursorOverlays();

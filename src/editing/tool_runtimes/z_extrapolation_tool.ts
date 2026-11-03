@@ -22,13 +22,21 @@
  *
  * `runNextSlice` reads the region window from `session.sessionVoxelBoundsFor`
  * (global voxels), the current Z from the viewport (or the locked value), and
- * the tracked IDs from the mask layer's selection, then runs one
- * {@link propagateSlice} inside `EditScope.runOperation` — one native undo entry,
- * which is exactly what Reset undoes.
+ * the tracked IDs, then runs one {@link propagateSlice} inside
+ * `EditScope.runOperation` — one native undo entry, which is exactly what Reset
+ * undoes.
+ *
+ * Tracking (TM-518): the panel LISTS the mask layer's selected segments; each
+ * can be untracked in the tool without touching the viewer (it stays selected
+ * and visible). Tracked = listed − untracked. An untracked segment is also
+ * protected: the prediction never overwrites its voxels on the next slice.
+ *
+ * Speed (TM-518): image slices are kept across runs and the next run's slice is
+ * prefetched while the user reviews the result, so a "Run, Run, Run…" sequence
+ * mostly waits on the backend alone.
  */
 
 import type {
-  ChunkVoxelBuffer,
   EditSession,
   LayerId,
   LayerMetadata,
@@ -42,10 +50,17 @@ import { ChunkId, scaleFor } from "@zettaai/edit-session";
 import { BackendAuthExpiredError } from "#src/editing/backend/backend_endpoint.js";
 import { globalToTargetVoxel } from "#src/editing/raster/global_voxel_conversion.js";
 import { UnsupportedImageDataTypeError } from "#src/editing/tool_runtimes/image_scalar_to_uint8.js";
-import { TooManyTrackedSegmentsError } from "#src/editing/tool_runtimes/mask_label_codec.js";
+import {
+  distinctNonZeroSegmentIds,
+  MAX_TRACKED_SEGMENTS,
+  TooManyTrackedSegmentsError,
+} from "#src/editing/tool_runtimes/mask_label_codec.js";
 import type { ReadChunkAt } from "#src/editing/tool_runtimes/painting_tools.js";
 import type { MultipartPoster } from "#src/editing/tool_runtimes/propagate_mask_client.js";
+import { PropagationImageSlices } from "#src/editing/tool_runtimes/propagation_image_slices.js";
 import {
+  NoTrackedVoxelsError,
+  PROPAGATION_TIMING_PREFIX,
   propagateSlice,
   type ImageReadSpec,
   type MaskWriteSpec,
@@ -91,13 +106,28 @@ export interface ZExtrapolationDeps {
   readonly globalVoxelSizeNm: () =>
     | readonly [number, number, number]
     | undefined;
-  /** The mask layer's currently-selected segment IDs (the tracked set). */
-  readonly trackedSegmentsFor: (maskLayerId: LayerId) => readonly bigint[];
-  /** Add IDs to the mask layer's selection (auto-detect populates the set). */
-  readonly addTrackedSegments: (
+  /**
+   * The mask layer's selected segment IDs — the segments the panel lists.
+   * Those not untracked in the tool are propagated.
+   */
+  readonly listedSegmentsFor: (maskLayerId: LayerId) => readonly bigint[];
+  /** Whether a segment is shown in the viewer (a listed segment may be hidden). */
+  readonly isSegmentVisible: (maskLayerId: LayerId, id: bigint) => boolean;
+  /**
+   * Whether a segment is merged with others through the layer's equivalences.
+   * The mask holds the members' raw IDs, so a merged segment cannot be tracked.
+   */
+  readonly isMergedSegment: (maskLayerId: LayerId, id: bigint) => boolean;
+  /** Select and show IDs in the viewer (auto-detect populates the list). */
+  readonly showSegments: (maskLayerId: LayerId, ids: readonly bigint[]) => void;
+  /**
+   * Subscribe to segments leaving the list (`"all"` when it is cleared), so an
+   * untick does not outlive its segment. Returns the unsubscribe.
+   */
+  readonly onListedSegmentsRemoved: (
     maskLayerId: LayerId,
-    ids: readonly bigint[],
-  ) => void;
+    onRemoved: (ids: readonly bigint[] | "all") => void,
+  ) => () => void;
   readonly getViewportPosition: () => Float32Array;
   readonly setViewportPosition: (position: Float32Array) => void;
 }
@@ -112,6 +142,29 @@ const DEFAULT_STATE: ZExtrapolationRunState = {
   hasLastRun: false,
 };
 
+/** One row of the panel's segment list. */
+export interface ZExtrapolationSegmentRow {
+  readonly id: bigint;
+  /** Propagated by the next run. */
+  readonly isTracked: boolean;
+  /** Selected but hidden in the viewer — still propagated when tracked. */
+  readonly isHidden: boolean;
+  /** Merged with other segments through equivalences — cannot be tracked. */
+  readonly isMerged: boolean;
+}
+
+/**
+ * Asked before auto-detect pushes the tracked count past what one run can
+ * carry; resolves whether to add the segments anyway.
+ */
+export type ConfirmOverLimit = (detail: {
+  readonly detectedCount: number;
+  readonly trackedAfter: number;
+}) => Promise<boolean>;
+
+/** Wait after the current Z / direction settles before prefetching its slices. */
+const PREFETCH_DELAY_MS = 250;
+
 interface RunPlan {
   readonly image: ImageReadSpec;
   readonly mask: MaskWriteSpec;
@@ -120,6 +173,8 @@ interface RunPlan {
   /** Propagation window in the mask grid (read/write happen here). */
   readonly maskWindow: PropagateWindow;
   readonly trackedIds: readonly bigint[];
+  /** Untracked listed segments, whose next-slice voxels the write must keep. */
+  readonly protectedIds: readonly bigint[];
 }
 
 /** Captured before a run so Reset can restore the pre-run viewport + Z. */
@@ -138,8 +193,27 @@ export class ZExtrapolationTool implements EditTool {
   private state: ZExtrapolationRunState = DEFAULT_STATE;
   private abortController: AbortController | undefined;
   private lastRun: LastRunSnapshot | undefined;
+  /** Per mask layer: listed segments the user unticked. */
+  private readonly untrackedByLayer = new Map<LayerId, Set<bigint>>();
+  /** Per mask layer: the subscription that drops unticks of removed segments. */
+  private readonly unsubscribeRemovals = new Map<LayerId, () => void>();
+  private readonly imageSlices: PropagationImageSlices;
+  private prefetchTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(private readonly deps: ZExtrapolationDeps) {}
+  constructor(private readonly deps: ZExtrapolationDeps) {
+    this.imageSlices = new PropagationImageSlices(deps.readChunkAt);
+  }
+
+  /**
+   * Stop pending prefetches and drop the selection subscriptions; the host
+   * calls this when the session's tools go away.
+   */
+  dispose(): void {
+    clearTimeout(this.prefetchTimer);
+    this.prefetchTimer = undefined;
+    for (const unsubscribe of this.unsubscribeRemovals.values()) unsubscribe();
+    this.unsubscribeRemovals.clear();
+  }
 
   // -- Reactive state (panel) ---------------------------------------------
 
@@ -220,6 +294,8 @@ export class ZExtrapolationTool implements EditTool {
     const abortController = new AbortController();
     this.abortController = abortController;
     this.patchState({ isRunning: true });
+    const startedAt = performance.now();
+    let voxelsWritten = 0;
 
     try {
       await this.deps.scope.runOperation(
@@ -232,18 +308,35 @@ export class ZExtrapolationTool implements EditTool {
           propagateSlice({
             edit,
             readChunkAt: this.deps.readChunkAt,
+            imageSlices: this.imageSlices,
             client: this.deps.backendClient,
             image: plan.image,
             mask: plan.mask,
             imageWindow: plan.imageWindow,
             maskWindow: plan.maskWindow,
             trackedIds: plan.trackedIds,
+            protectedIds: plan.protectedIds,
             signal: abortController.signal,
-          }).then(() => undefined),
+          }).then((result) => {
+            voxelsWritten = result.voxelsWritten;
+          }),
       );
       if (abortController.signal.aborted) return;
+      performance.measure(PROPAGATION_TIMING_PREFIX + "step", {
+        start: startedAt,
+        end: performance.now(),
+      });
       this.lastRun = snapshot;
       this.advanceAfterRun(plan);
+      this.prefetchSliceAfter(plan);
+      if (voxelsWritten === 0) {
+        // The step still advances (and Reset undoes it), but an empty result
+        // must not look like success (TM-518).
+        this.notify(
+          `The model found no continuation of the tracked segments on ` +
+            `Z=${plan.maskWindow.nextZ} — nothing was painted there.`,
+        );
+      }
     } catch (error) {
       if (abortController.signal.aborted) return;
       this.notifyError(error);
@@ -277,12 +370,50 @@ export class ZExtrapolationTool implements EditTool {
 
   // -- Panel bindings -----------------------------------------------------
 
-  /** The tracked segment IDs (the mask layer's current selection). */
+  /** The segments the next run propagates: listed and not untracked. */
   trackedSegments(): readonly bigint[] {
+    return this.segmentRows()
+      .filter((row) => row.isTracked)
+      .map((row) => row.id);
+  }
+
+  /** Every listed segment (the mask layer's selection) with its tracking state. */
+  segmentRows(): readonly ZExtrapolationSegmentRow[] {
     const { maskLayerId } = this.state;
-    return maskLayerId === undefined
-      ? []
-      : this.deps.trackedSegmentsFor(maskLayerId);
+    if (maskLayerId === undefined) return [];
+    const untracked = this.untrackedByLayer.get(maskLayerId);
+    return this.deps.listedSegmentsFor(maskLayerId).map((id) => ({
+      id,
+      isTracked: untracked?.has(id) !== true,
+      isHidden: !this.deps.isSegmentVisible(maskLayerId, id),
+      isMerged: this.deps.isMergedSegment(maskLayerId, id),
+    }));
+  }
+
+  /** Track or untrack one listed segment. The viewer is not touched. */
+  setSegmentTracked(id: bigint, isTracked: boolean): void {
+    const { maskLayerId } = this.state;
+    if (maskLayerId === undefined) return;
+    const untracked = this.untrackedFor(maskLayerId);
+    const wasTracked = !untracked.has(id);
+    if (wasTracked === isTracked) return;
+    if (isTracked) untracked.delete(id);
+    else untracked.add(id);
+    this.changed.dispatch();
+  }
+
+  /** Track (or untrack) every listed segment at once. */
+  setAllSegmentsTracked(isTracked: boolean): void {
+    const { maskLayerId } = this.state;
+    if (maskLayerId === undefined) return;
+    const untracked = this.untrackedFor(maskLayerId);
+    untracked.clear();
+    if (!isTracked) {
+      for (const id of this.deps.listedSegmentsFor(maskLayerId)) {
+        untracked.add(id);
+      }
+    }
+    this.changed.dispatch();
   }
 
   /**
@@ -307,11 +438,13 @@ export class ZExtrapolationTool implements EditTool {
 
   setDirection(direction: ZExtrapolationDirection): void {
     this.patchState({ direction });
+    this.schedulePrefetch();
   }
 
   /** Set the current Z explicitly, which locks it (editing pins the slice). */
   setCurrentZ(z: number): void {
     this.patchState({ currentZ: z, isCurrentZLocked: true });
+    this.schedulePrefetch();
   }
 
   /** Toggle the Z lock; unlocking re-syncs the current Z to the viewport. */
@@ -334,15 +467,21 @@ export class ZExtrapolationTool implements EditTool {
     const z = this.viewportMaskZ(scaleFor(metadata, resolution));
     if (z !== undefined && z !== this.state.currentZ) {
       this.patchState({ currentZ: z });
+      this.schedulePrefetch();
     }
   }
 
   /**
    * Add every distinct non-zero segment ID present in the current slice's region
-   * to the tracked set (current-Z only, per TM-326). Reads the mask through the
-   * overlay in a throwaway edit so live paint counts.
+   * to the list, shown and tracked (current-Z only, per TM-326). Reads the mask
+   * through the overlay in a throwaway edit so live paint counts. When that
+   * would track more segments than one run carries, `confirmOverLimit` decides
+   * (TM-518): a large region easily holds hundreds, and adding them to the
+   * user's selection has no undo.
    */
-  async autoDetectTrackedSegments(): Promise<void> {
+  async autoDetectTrackedSegments(
+    confirmOverLimit?: ConfirmOverLimit,
+  ): Promise<void> {
     const window = this.resolveCurrentWindow();
     if (window === undefined) return; // resolveCurrentWindow surfaced the reason
     const edit = this.deps.session.beginEdit({
@@ -355,13 +494,83 @@ export class ZExtrapolationTool implements EditTool {
         { layerId: window.maskLayerId, resolution: window.maskResolution },
         window.box,
       );
-      ids = distinctNonZeroIds(region.data);
+      ids = distinctNonZeroSegmentIds(region.data);
     } finally {
       await edit.discard();
     }
-    if (ids.length > 0) {
-      this.deps.addTrackedSegments(window.maskLayerId, ids);
+    if (ids.length === 0) return;
+    const trackedAfter = new Set([...this.trackedSegments(), ...ids]).size;
+    if (trackedAfter > MAX_TRACKED_SEGMENTS && confirmOverLimit !== undefined) {
+      const proceed = await confirmOverLimit({
+        detectedCount: ids.length,
+        trackedAfter,
+      });
+      if (!proceed) return;
     }
+    // Asking for these segments means tracking them, even if unticked before.
+    const untracked = this.untrackedByLayer.get(window.maskLayerId);
+    for (const id of ids) untracked?.delete(id);
+    this.deps.showSegments(window.maskLayerId, ids);
+    this.changed.dispatch();
+  }
+
+  /**
+   * The unticked segments of a layer, created on first use together with the
+   * subscription that forgets an untick once its segment leaves the list — so
+   * a segment deselected and selected again comes back tracked.
+   */
+  private untrackedFor(maskLayerId: LayerId): Set<bigint> {
+    const existing = this.untrackedByLayer.get(maskLayerId);
+    if (existing !== undefined) return existing;
+    const untracked = new Set<bigint>();
+    this.untrackedByLayer.set(maskLayerId, untracked);
+    this.unsubscribeRemovals.set(
+      maskLayerId,
+      this.deps.onListedSegmentsRemoved(maskLayerId, (ids) => {
+        if (ids === "all") untracked.clear();
+        else for (const id of ids) untracked.delete(id);
+      }),
+    );
+    return untracked;
+  }
+
+  /** Listed segments the user unticked: protected from the next write. */
+  private untrackedListedSegments(): readonly bigint[] {
+    return this.segmentRows()
+      .filter((row) => !row.isTracked)
+      .map((row) => row.id);
+  }
+
+  // -- Prefetch -----------------------------------------------------------
+
+  /**
+   * After a run the user usually runs again: start reading the slice that run
+   * will need (one further along the direction) while they look at the result.
+   */
+  private prefetchSliceAfter(plan: RunPlan): void {
+    const { imageWindow, image } = plan;
+    const step = imageWindow.nextZ - imageWindow.currentZ;
+    const followingZ = imageWindow.nextZ + step;
+    const bounds = this.boundsFor(image.layerId, image.resolution);
+    if (bounds === undefined) return;
+    if (followingZ < bounds.loZ || followingZ >= bounds.hiZ) return;
+    this.imageSlices.prefetch(image, imageWindow, followingZ);
+  }
+
+  /**
+   * Once the current Z / direction settles (scrolling fires many changes),
+   * prefetch the current and next slices the Run button would read.
+   */
+  private schedulePrefetch(): void {
+    clearTimeout(this.prefetchTimer);
+    this.prefetchTimer = setTimeout(() => {
+      this.prefetchTimer = undefined;
+      const plan = this.buildRunPlan();
+      if (typeof plan === "string") return;
+      const { imageWindow, image } = plan;
+      this.imageSlices.prefetch(image, imageWindow, imageWindow.currentZ);
+      this.imageSlices.prefetch(image, imageWindow, imageWindow.nextZ);
+    }, PREFETCH_DELAY_MS);
   }
 
   private resolveCurrentWindow():
@@ -445,9 +654,29 @@ export class ZExtrapolationTool implements EditTool {
     if (imageScale.voxelSizeNm[2] !== maskScale.voxelSizeNm[2]) {
       return "Image and segmentation layers must share the Z (section) resolution.";
     }
-    const trackedIds = this.deps.trackedSegmentsFor(maskLayerId);
-    if (trackedIds.length === 0) {
+    const listedCount = this.deps.listedSegmentsFor(maskLayerId).length;
+    if (listedCount === 0) {
       return "Double-click segments in the viewer (or Auto-detect) to track them.";
+    }
+    const trackedIds = this.trackedSegments();
+    if (trackedIds.length === 0) {
+      return "All segments are untracked — tick at least one to run.";
+    }
+    const mergedId = trackedIds.find((id) =>
+      this.deps.isMergedSegment(maskLayerId, id),
+    );
+    if (mergedId !== undefined) {
+      return (
+        `Segment ${mergedId} is merged with other segments — z-extrapolation ` +
+        `tracks unmerged segments only. Untrack it to run.`
+      );
+    }
+    if (trackedIds.length > MAX_TRACKED_SEGMENTS) {
+      const excess = trackedIds.length - MAX_TRACKED_SEGMENTS;
+      return (
+        `Tracking ${trackedIds.length} segments — untrack ${excess} more ` +
+        `(at most ${MAX_TRACKED_SEGMENTS} per run).`
+      );
     }
     const windows = this.computeWindows(
       imageLayerId,
@@ -474,6 +703,7 @@ export class ZExtrapolationTool implements EditTool {
       imageWindow: windows.imageWindow,
       maskWindow: windows.maskWindow,
       trackedIds,
+      protectedIds: this.untrackedListedSegments(),
     };
   }
 
@@ -589,6 +819,11 @@ export class ZExtrapolationTool implements EditTool {
   }
 
   private notifyError(error: unknown): void {
+    if (error instanceof NoTrackedVoxelsError) {
+      // Not a failure: the run was pointed at an unpainted slice.
+      StatusMessage.showTemporaryMessage(error.message, 8000);
+      return;
+    }
     let message: string;
     if (error instanceof TooManyTrackedSegmentsError) {
       message = error.message;
@@ -604,17 +839,6 @@ export class ZExtrapolationTool implements EditTool {
       8000,
     );
   }
-}
-
-/** Distinct non-zero segment IDs in a dense mask block (widening numeric → bigint). */
-function distinctNonZeroIds(data: ChunkVoxelBuffer): bigint[] {
-  const found = new Set<bigint>();
-  for (let i = 0; i < data.length; i++) {
-    const raw = data[i];
-    const id = typeof raw === "bigint" ? raw : BigInt(raw);
-    if (id !== 0n) found.add(id);
-  }
-  return [...found];
 }
 
 /** The registry definition for the z-extrapolation tool (hotkey Ctrl+X). */

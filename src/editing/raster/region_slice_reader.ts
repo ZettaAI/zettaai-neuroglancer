@@ -25,6 +25,7 @@
  */
 
 import type {
+  ChunkCoord,
   ChunkVoxelBuffer,
   LayerId,
   Resolution,
@@ -50,6 +51,9 @@ export interface SliceWindow {
   readonly height: number;
 }
 
+/** The XY extent of a slice, without its Z — shared by every slice of a read. */
+export type SliceArea = Omit<SliceWindow, "z">;
+
 /**
  * Read a single-Z image slice as a dense, X-fastest `Float64Array`
  * (`y * width + x`, length `width * height`). Values are the layer's raw
@@ -67,34 +71,92 @@ export async function readBaselineImageSlice(
   scale: ScaleMetadata,
   window: SliceWindow,
 ): Promise<Float64Array> {
-  const values = new Float64Array(window.width * window.height);
-  const lo: VoxelTriple = [window.originX, window.originY, window.z];
-  const hiExclusive: VoxelTriple = [
-    window.originX + window.width,
-    window.originY + window.height,
-    window.z + 1,
-  ];
+  const [slice] = await readBaselineImageSlices(
+    readChunkAt,
+    layerId,
+    resolution,
+    scale,
+    window,
+    [window.z],
+  );
+  return slice;
+}
 
-  for (const coord of imageChunksCovering(lo, hiExclusive, scale)) {
-    const buffer = await readChunkAt(
-      layerId,
-      resolution,
-      ChunkId.fromCoord(coord),
+/**
+ * Read several single-Z slices of the same XY `area` at once, one dense
+ * `Float64Array` per entry of `zs` (same order), each as
+ * {@link readBaselineImageSlice} would return it.
+ *
+ * Every covering chunk is read exactly once, even when it holds more than one
+ * of the requested slices (adjacent Z usually share a chunk), and all chunk
+ * reads are in flight together rather than one after another (TM-518).
+ */
+export async function readBaselineImageSlices(
+  readChunkAt: ReadChunkAt,
+  layerId: LayerId,
+  resolution: Resolution,
+  scale: ScaleMetadata,
+  area: SliceArea,
+  zs: readonly number[],
+): Promise<Float64Array[]> {
+  const slices = zs.map(() => new Float64Array(area.width * area.height));
+  const reads = [...chunksHoldingSlices(area, zs, scale)].map(
+    async ({ coord, sliceIndices }) => {
+      const buffer = await readChunkAt(
+        layerId,
+        resolution,
+        ChunkId.fromCoord(coord),
+      );
+      const chunkOrigin: VoxelTriple = [
+        coord.x * scale.chunkDataSize[0] + scale.voxelOffset[0],
+        coord.y * scale.chunkDataSize[1] + scale.voxelOffset[1],
+        coord.z * scale.chunkDataSize[2] + scale.voxelOffset[2],
+      ];
+      for (const sliceIndex of sliceIndices) {
+        copyChunkSliceInto(
+          buffer.asView(),
+          scale.chunkDataSize,
+          chunkOrigin,
+          { ...area, z: zs[sliceIndex] },
+          slices[sliceIndex],
+        );
+      }
+    },
+  );
+  await Promise.all(reads);
+  return slices;
+}
+
+/** A chunk covering the area, and which requested slices (indices into `zs`) it holds. */
+interface ChunkHoldingSlices {
+  readonly coord: ChunkCoord;
+  readonly sliceIndices: number[];
+}
+
+/** The distinct chunks covering `area` at each Z in `zs`. */
+function chunksHoldingSlices(
+  area: SliceArea,
+  zs: readonly number[],
+  scale: ScaleMetadata,
+): Iterable<ChunkHoldingSlices> {
+  const byChunkKey = new Map<string, ChunkHoldingSlices>();
+  zs.forEach((z, sliceIndex) => {
+    const covering = imageChunksCovering(
+      [area.originX, area.originY, z],
+      [area.originX + area.width, area.originY + area.height, z + 1],
+      scale,
     );
-    const chunkOrigin: VoxelTriple = [
-      coord.x * scale.chunkDataSize[0] + scale.voxelOffset[0],
-      coord.y * scale.chunkDataSize[1] + scale.voxelOffset[1],
-      coord.z * scale.chunkDataSize[2] + scale.voxelOffset[2],
-    ];
-    copyChunkSliceInto(
-      buffer.asView(),
-      scale.chunkDataSize,
-      chunkOrigin,
-      window,
-      values,
-    );
-  }
-  return values;
+    for (const coord of covering) {
+      const key = `${coord.x},${coord.y},${coord.z}`;
+      const existing = byChunkKey.get(key);
+      if (existing === undefined) {
+        byChunkKey.set(key, { coord, sliceIndices: [sliceIndex] });
+      } else {
+        existing.sliceIndices.push(sliceIndex);
+      }
+    }
+  });
+  return byChunkKey.values();
 }
 
 /**
