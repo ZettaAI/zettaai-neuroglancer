@@ -150,12 +150,6 @@ test.describe("live 3D painted-volume preview", () => {
           glErrors.push(message.text());
         }
       });
-      // This file compares the 3D panel's pixels with and without a tool active,
-      // and the key strip that a tool brings up sits over that panel. Its text is
-      // not what these comparisons are about.
-      await page.addStyleTag({
-        content: ".neuroglancer-mode-strip { visibility: hidden; }",
-      });
       // The xy panel needs its slice transform before a click lands.
       await page.waitForTimeout(1500);
     } catch (e) {

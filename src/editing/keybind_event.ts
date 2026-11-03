@@ -20,8 +20,6 @@
  * `+`, modifiers ordered control→meta→shift→alt.
  */
 
-import { formatChord } from "#src/ui/key_chord_format.js";
-
 const MODIFIER_CODE = /^(?:Control|Shift|Alt|Meta|OS)(?:Left|Right)?$/;
 
 /**
@@ -46,7 +44,45 @@ export function keyboardEventToIdentifier(
   return parts.join("+");
 }
 
-/** Format an NG event identifier for a message, e.g. `"control+keyb"` → `"Ctrl+B"`. */
+const MODIFIER_LABEL: Record<string, string> = {
+  control: "Ctrl",
+  meta: "Cmd",
+  shift: "Shift",
+  alt: "Alt",
+};
+
+/** Pretty-print one segment of an identifier (a modifier or a key code). */
+function formatSegment(part: string): string {
+  const modifier = MODIFIER_LABEL[part];
+  if (modifier !== undefined) return modifier;
+  const key = /^key([a-z])$/.exec(part);
+  if (key !== null) return key[1].toUpperCase();
+  const digit = /^digit([0-9])$/.exec(part);
+  if (digit !== null) return digit[1];
+  const numpad = /^numpad(.+)$/.exec(part);
+  if (numpad !== null) return `Num${formatSegment(numpad[1])}`;
+  switch (part) {
+    case "minus":
+      return "-";
+    case "equal":
+      return "=";
+    case "bracketleft":
+      return "[";
+    case "bracketright":
+      return "]";
+    case "escape":
+      return "Esc";
+    case "add":
+      return "+";
+    case "subtract":
+      return "-";
+    default:
+      // Capitalise the first letter for anything else (e.g. "space" → "Space").
+      return part.length > 0 ? part[0].toUpperCase() + part.slice(1) : part;
+  }
+}
+
+/** Format an NG event identifier for display, e.g. `"control+keyb"` → `"Ctrl+B"`. */
 export function formatKeyIdentifier(identifier: string): string {
-  return formatChord(identifier, /*mac=*/ false).replaceAll("−", "-");
+  return identifier.split("+").map(formatSegment).join("+");
 }

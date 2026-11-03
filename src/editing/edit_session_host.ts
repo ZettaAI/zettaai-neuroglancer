@@ -668,12 +668,6 @@ export class EditSessionHost extends RefCounted {
     (preselectBboxKey?: string) => void
   >();
 
-  /**
-   * The save-all key was pressed. The topbar subscribes because it owns the save
-   * flow (progress, conflict dialogs, toasts) a key press has to go through too.
-   */
-  readonly requestSaveAll = new NullarySignal();
-
   /** Owns the in-flight quick-region capture; lazily constructed. */
   private quickRegionCapture: QuickRegionCapture | undefined;
 

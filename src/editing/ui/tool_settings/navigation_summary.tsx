@@ -29,7 +29,6 @@ import {
   formatBytes,
   MemoryMeter,
 } from "#src/editing/ui/session_entry/memory_estimate.js";
-import { ToolPanelKeys } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 import { setClipboard } from "#src/util/clipboard.js";
 // The summary reuses the entry modal's layer-row, role-control and memory-meter
 // markup, so it depends on the same stylesheet for those classes.
@@ -135,7 +134,6 @@ function SummaryBody({
         })}
       </div>
       <MemorySection host={host} />
-      <ToolPanelKeys host={host} toolId={undefined} />
     </div>
   );
 }

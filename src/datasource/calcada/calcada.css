@@ -597,51 +597,14 @@
   margin: 0;
 }
 
-/* The tooltip sits here because a disabled button fires no pointer events: the
-   button stops catching the pointer and hover falls through to this wrapper. */
-.calcada-trace-panel-button-hint {
-  display: inline-flex;
-}
-
-.calcada-trace-panel-button-hint button:disabled {
-  pointer-events: none;
-}
-
-.calcada-trace-panel-button-hint .neuroglancer-key-chip {
-  margin-inline: 1px;
-  font-weight: 400;
-}
-
-.calcada-trace-panel-score {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.calcada-trace-panel-score > :first-child {
-  flex: 1;
-  min-width: 0;
-}
-
-.calcada-trace-panel-radius-label {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-}
-
-/* Every key the tab answers to. Open by default: this list is how they get
-   learned, and it is generated from the maps that handle them. */
-.calcada-trace-panel-keys-section summary {
-  font-size: 12px;
-  cursor: pointer;
-}
-
+/* The keys the trace owns. Lives here rather than in a status bubble at the
+   bottom of the viewer: the tab is always open, so the bubble only repeated
+   what is already on screen. */
 .calcada-trace-panel-keys {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 2px 8px;
-  margin: 4px 0 0;
+  margin: 0;
   font-size: 11px;
   opacity: 0.8;
 }
@@ -653,6 +616,11 @@
 
 .calcada-trace-panel-keys dd {
   margin: 0;
+}
+
+.calcada-trace-panel-keys-section summary {
+  font-size: 12px;
+  cursor: pointer;
 }
 
 /* Without a legend "green or red" is a guess. The bar is the scale itself, so
@@ -698,7 +666,6 @@
 
 .calcada-trace-panel-buttons {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
 }

@@ -8,10 +8,7 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import type { EditSessionHost } from "#src/editing/edit_session_host.js";
-import { ToolPanelKeys } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
-
-export function Correspondence({ host }: { host: EditSessionHost }) {
+export function Correspondence() {
   return (
     <div class="neuroglancer-tool-panel neuroglancer-correspondence-panel">
       <p class="neuroglancer-tool-panel-placeholder">
@@ -25,7 +22,6 @@ export function Correspondence({ host }: { host: EditSessionHost }) {
           Apply warp
         </button>
       </div>
-      <ToolPanelKeys host={host} toolId="correspondence" />
     </div>
   );
 }

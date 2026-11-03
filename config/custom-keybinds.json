@@ -24,12 +24,6 @@
     "layer": "segmentation",
     "tool": "calcadaPieceSplit"
   },
-  "keyu": {
-    "layer": "segmentation",
-    "tool": {
-      "calcada": "calcadaMulticutSegments"
-    }
-  },
   "keyt": "calcada-toggle-zetta-trace",
   "keyd": "calcada-toggle-debug-mode",
   "shift+slash": "calcada-toggle-split-detection",
@@ -37,5 +31,14 @@
   "control+shift+keyx": "clear-segments",
   "bracketleft": "select-previous",
   "bracketright": "select-next",
-  "editSession": {}
+  "editSession": {
+    "brush": "control+keyb",
+    "erase": "control+keye",
+    "fill": "control+keyf",
+    "cursor": "control+keyv",
+    "undo": ["control+keyz", "meta+keyz"],
+    "redo": ["control+shift+keyz", "meta+shift+keyz"],
+    "sizeDecrease": ["minus", "numpadsubtract"],
+    "sizeIncrease": ["equal", "shift+equal", "numpadadd"]
+  }
 }

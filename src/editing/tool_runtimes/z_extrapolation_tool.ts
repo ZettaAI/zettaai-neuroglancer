@@ -617,7 +617,7 @@ function distinctNonZeroIds(data: ChunkVoxelBuffer): bigint[] {
   return [...found];
 }
 
-/** The registry definition for the z-extrapolation tool (hotkey X). */
+/** The registry definition for the z-extrapolation tool (hotkey Ctrl+X). */
 export function zExtrapolationToolDefinition(
   tool: ZExtrapolationTool,
 ): ToolDefinition {

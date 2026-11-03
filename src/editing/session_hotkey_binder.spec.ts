@@ -12,14 +12,11 @@ import { describe, it, expect } from "vitest";
 
 import {
   EDIT_KEYBIND_NAMES,
-  editModeShortcuts,
   effectiveEditKeybinds,
-  findEditKeybindConflict,
   isMacPlatform,
   mergeEditKeybinds,
   paramArrowDefaults,
 } from "#src/editing/session_hotkey_binder.js";
-import { EventActionMap } from "#src/util/event_action_map.js";
 
 const A = {
   brush: "edit-session-tool-brush",
@@ -41,19 +38,10 @@ const A = {
 describe("mergeEditKeybinds", () => {
   it("uses built-in defaults when there are no overrides", () => {
     const m = mergeEditKeybinds(undefined);
-    expect(m["keyb"]).toBe(A.brush);
-    expect(m["keye"]).toBe(A.erase);
-    expect(m["keyg"]).toBe(A.fill);
-    expect(m["keyv"]).toBe(A.cursor);
-    expect(m["keyx"]).toBe(A.zextrap);
-    // The previous Ctrl chords stay for one release, except Ctrl+F, which took
-    // the browser's Find away.
     expect(m["control+keyb"]).toBe(A.brush);
     expect(m["control+keye"]).toBe(A.erase);
+    expect(m["control+keyf"]).toBe(A.fill);
     expect(m["control+keyv"]).toBe(A.cursor);
-    expect(m["control+keyx"]).toBe(A.zextrap);
-    expect(m["control+keyf"]).toBeUndefined();
-    expect(m["keyf"]).toBeUndefined();
     // Multi-key defaults (undo/redo + size) all map to their action.
     expect(m["control+keyz"]).toBe(A.undo);
     expect(m["meta+keyz"]).toBe(A.undo);
@@ -64,9 +52,6 @@ describe("mergeEditKeybinds", () => {
     // navigation while a session is active (TM-439).
     expect(m["bracketleft"]).toBeUndefined();
     expect(m["bracketright"]).toBeUndefined();
-    expect(m["shift+bracketleft"]).toBe("edit-session-target-value-decr");
-    expect(m["shift+bracketright"]).toBe("edit-session-target-value-incr");
-    expect(m["keyi"]).toBe("edit-session-toggle-fill-closed-paths");
     // Ctrl+Arrow parameter scheme (TM-337), per-platform default keys.
     const arrows = paramArrowDefaults(isMacPlatform());
     expect(m[arrows.paramPrev[0]]).toBe(A.paramPrev);
@@ -130,7 +115,7 @@ describe("effectiveEditKeybinds", () => {
     // No `custom-keybinds.json` is injected in the test build, so the result
     // is exactly the built-in defaults.
     const e = effectiveEditKeybinds(undefined);
-    expect(e.brush).toEqual(["keyb", "control+keyb"]);
+    expect(e.brush).toEqual(["control+keyb"]);
     expect(e.undo).toEqual(["control+keyz", "meta+keyz"]);
     expect(e.sizeDecrease).toEqual(["minus", "numpadsubtract"]);
   });
@@ -139,7 +124,7 @@ describe("effectiveEditKeybinds", () => {
     const e = effectiveEditKeybinds({ brush: ["control+keyq"] });
     expect(e.brush).toEqual(["control+keyq"]);
     // Other actions keep their defaults.
-    expect(e.erase).toEqual(["keye", "control+keye"]);
+    expect(e.erase).toEqual(["control+keye"]);
   });
 
   it("covers every configurable action name", () => {
@@ -164,10 +149,6 @@ describe("effectiveEditKeybinds", () => {
       cursor: A.cursor,
       undo: A.undo,
       redo: A.redo,
-      saveAll: "edit-session-save-all",
-      targetValueDecrease: "edit-session-target-value-decr",
-      targetValueIncrease: "edit-session-target-value-incr",
-      fillClosedPaths: "edit-session-toggle-fill-closed-paths",
       sizeDecrease: A.sizeDecr,
       sizeIncrease: A.sizeIncr,
       paramPrev: A.paramPrev,
@@ -180,113 +161,5 @@ describe("effectiveEditKeybinds", () => {
         expect(keyToAction[key]).toBe(NAME_TO_ACTION[name]);
       }
     }
-  });
-});
-
-describe("findEditKeybindConflict", () => {
-  const effective = effectiveEditKeybinds(undefined);
-
-  it("names the action that already has the key", () => {
-    expect(findEditKeybindConflict("fill", "keyb", effective)).toBe("brush");
-    expect(findEditKeybindConflict("brush", "control+keyz", effective)).toBe(
-      "undo",
-    );
-  });
-
-  it("lets an action keep its own key and take a free one", () => {
-    expect(findEditKeybindConflict("brush", "keyb", effective)).toBeUndefined();
-    expect(findEditKeybindConflict("brush", "keyq", effective)).toBeUndefined();
-  });
-
-  it("refuses Esc, which is fixed", () => {
-    expect(findEditKeybindConflict("brush", "escape", effective)).toBe("exit");
-  });
-
-  it("refuses H and the annotation keys of TM-439", () => {
-    expect(findEditKeybindConflict("brush", "keyh", effective)).toBe(
-      "show all shortcuts",
-    );
-    expect(findEditKeybindConflict("brush", "bracketleft", effective)).toBe(
-      "previous annotation",
-    );
-  });
-
-  it("refuses a key the viewer binds, but not one the session itself binds", () => {
-    const viewerMap = EventActionMap.fromObject({
-      keyt: "calcada-toggle-zetta-trace",
-    });
-    viewerMap.addParent(
-      EventActionMap.fromObject({ keyq: "edit-session-tool-brush" }),
-      100,
-    );
-    expect(
-      findEditKeybindConflict("fill", "keyt", effective, [viewerMap]),
-    ).toBe("calcada-toggle-zetta-trace");
-    expect(
-      findEditKeybindConflict("fill", "keyq", effective, [viewerMap]),
-    ).toBeUndefined();
-  });
-});
-
-describe("editModeShortcuts", () => {
-  const keys = effectiveEditKeybinds(undefined);
-  const labels = (toolId: string) =>
-    editModeShortcuts(toolId, keys).map((shortcut) => shortcut.label);
-
-  it("offers each tool only the keys that apply to it", () => {
-    expect(labels("painting.brush")).toEqual([
-      "Size",
-      "Fill closed paths",
-      "Target value",
-      "Choose setting",
-      "Change setting",
-      "Undo",
-      "Redo",
-      "Save all",
-      "Cursor",
-    ]);
-    expect(labels("painting.fill")).toEqual([
-      "Target value",
-      "Choose setting",
-      "Change setting",
-      "Undo",
-      "Redo",
-      "Save all",
-      "Cursor",
-    ]);
-    expect(labels("z-extrapolation")).toEqual([
-      "Undo",
-      "Redo",
-      "Save all",
-      "Cursor",
-    ]);
-  });
-
-  it("shows the tools themselves on the plain cursor", () => {
-    expect(
-      editModeShortcuts(undefined, keys).map((shortcut) => shortcut.label),
-    ).toEqual([
-      "Brush",
-      "Eraser",
-      "Fill",
-      "Z-extrapolation",
-      "Undo",
-      "Redo",
-      "Save all",
-    ]);
-  });
-
-  it("pairs the two size keys", () => {
-    const size = editModeShortcuts("painting.brush", keys)[0];
-    expect(size.keys).toEqual(keys.sizeDecrease);
-    expect(size.pairKeys).toEqual(keys.sizeIncrease);
-  });
-
-  it("follows a rebound key", () => {
-    const rebound = effectiveEditKeybinds({ undo: ["keyq"] });
-    const undo = editModeShortcuts("painting.brush", rebound).find(
-      (shortcut) => shortcut.label === "Undo",
-    );
-    expect(undo?.keys).toEqual(["keyq"]);
   });
 });

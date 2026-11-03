@@ -94,32 +94,10 @@ async function paintedVoxels(page: Page, timeoutMs = 10000): Promise<number> {
   }, timeoutMs)) as number;
 }
 
-/**
- * Every data panel, as pixels: the area the panels cover together, as the canvas
- * spans the whole window and a shot of it also takes in the side panels. Key caps
- * there re-rasterize one level apart between shots, which says nothing about the
- * data. The key strip over the panels is hidden for the same reason.
- */
+/** The slice view, as pixels. */
 async function sliceShot(page: Page): Promise<Buffer> {
-  await page.addStyleTag({
-    content: ".neuroglancer-mode-strip { visibility: hidden; }",
-  });
-  const boxes = await page
-    .locator(".neuroglancer-rendered-data-panel")
-    .evaluateAll((panels) =>
-      panels.map((panel) => {
-        const rect = panel.getBoundingClientRect();
-        return [rect.left, rect.top, rect.right, rect.bottom];
-      }),
-    );
-  const left = Math.min(...boxes.map((box) => box[0]));
-  const top = Math.min(...boxes.map((box) => box[1]));
-  const right = Math.max(...boxes.map((box) => box[2]));
-  const bottom = Math.max(...boxes.map((box) => box[3]));
-  return await page.screenshot({
-    clip: { x: left, y: top, width: right - left, height: bottom - top },
-    animations: "disabled",
-  });
+  const canvas = page.locator("canvas").first();
+  return await canvas.screenshot({ animations: "disabled" });
 }
 
 test.describe("reloadLoadedChunks", () => {
