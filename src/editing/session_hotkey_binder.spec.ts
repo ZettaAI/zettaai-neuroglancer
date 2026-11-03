@@ -248,7 +248,7 @@ describe("editModeShortcuts", () => {
   it("offers each tool only the keys that apply to it", () => {
     expect(labels("painting.brush")).toEqual([
       "Size",
-      "Fill closed paths",
+      "Fill inside",
       "Target value",
       "Choose setting",
       "Change setting",

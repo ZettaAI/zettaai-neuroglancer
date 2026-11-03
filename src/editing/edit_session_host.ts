@@ -3343,9 +3343,9 @@ export class EditSessionHost extends RefCounted {
       // Painting selects its segment so the stroke shows in 2D and 3D without
       // a double-click (TM-490); the user turns it off in the brush/fill panel.
       autoSelectPaintedSegment: true,
-      // Off until the user opts in: with it off a stroke behaves exactly as it
-      // did before TM-268.
-      fillClosedPaths: false,
+      // On: drawing around an object in one motion fills the inside, which is
+      // what tracers expect; the brush panel switches it off.
+      fillClosedPaths: true,
     };
 
     const compute = new PaintingCompute(this.morphologyClient);

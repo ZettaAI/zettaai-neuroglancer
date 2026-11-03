@@ -392,8 +392,8 @@ export function editModeShortcuts(
   if (toolId === TOOL_ID_BRUSH) {
     shortcuts.push({
       keys: keys.fillClosedPaths,
-      label: "Fill closed paths",
-      description: "fill closed paths on / off",
+      label: "Fill inside",
+      description: "fill inside on / off",
       detailOnly: true,
     });
   }
@@ -844,16 +844,14 @@ export class EditSessionHotkeyBinder extends RefCounted {
     painting.patchState({ radius: sizeToRadius(nextSize) });
   }
 
-  /** `I`: the brush's "Fill closed paths" switch, read back where it shows. */
+  /** `I`: the brush's "Fill inside" switch, read back where it shows. */
   private toggleFillClosedPaths(): void {
     if (this.host.activeToolId.value !== TOOL_ID_BRUSH) return;
     const painting = this.getPainting();
     if (painting === undefined) return;
     const fillClosedPaths = !painting.getState().fillClosedPaths;
     painting.patchState({ fillClosedPaths });
-    this.statusOverlay.show(
-      `Fill closed paths: ${fillClosedPaths ? "on" : "off"}`,
-    );
+    this.statusOverlay.show(`Fill inside: ${fillClosedPaths ? "on" : "off"}`);
   }
 
   /**

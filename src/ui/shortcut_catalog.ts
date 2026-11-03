@@ -50,7 +50,7 @@ const EDIT_ROWS: ReadonlyArray<[EditKeybindName, string]> = [
   ["sizeIncrease", "Larger brush"],
   ["targetValueDecrease", "Previous target value"],
   ["targetValueIncrease", "Next target value"],
-  ["fillClosedPaths", "Fill closed paths on / off"],
+  ["fillClosedPaths", "Fill inside on / off"],
   ["undo", "Undo"],
   ["redo", "Redo"],
   ["saveAll", "Save all"],

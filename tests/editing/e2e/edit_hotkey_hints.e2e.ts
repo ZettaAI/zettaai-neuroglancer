@@ -238,7 +238,7 @@ test.describe("hotkey hints", () => {
     await expect
       .poll(meanings)
       .toBe(
-        "smaller / larger brush | fill closed paths on / off | " +
+        "smaller / larger brush | fill inside on / off | " +
           "previous / next target value | " +
           sizeAndSettings,
       );
@@ -319,7 +319,7 @@ test.describe("hotkey hints", () => {
     await expect.poll(async () => BigInt(await value())).toBe(before + 1n);
   });
 
-  test("I switches Fill closed paths, and its hint names the key", async () => {
+  test("Fill inside starts on, I switches it, and its hint names the key", async () => {
     test.skip(setupError !== undefined, setupError);
     const fillClosedPaths = () =>
       page.evaluate(
@@ -328,9 +328,12 @@ test.describe("hotkey hints", () => {
             .fillClosedPaths as boolean,
       );
     await page.keyboard.press("Control+KeyB");
-    const toggle = page.getByRole("switch", { name: "Fill closed paths" });
+    const toggle = page.getByRole("switch", { name: "Fill inside" });
     await expect(toggle).toBeVisible();
+    // On by default.
     const before = await fillClosedPaths();
+    expect(before).toBe(true);
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
     await focusDataPanel(page);
     await page.keyboard.press("KeyI");
     expect(await fillClosedPaths()).toBe(!before);
@@ -339,12 +342,14 @@ test.describe("hotkey hints", () => {
     expect(await fillClosedPaths()).toBe(before);
 
     await page
-      .locator(".neuroglancer-tool-panel-row", { hasText: "Fill closed paths" })
+      .locator(".neuroglancer-tool-panel-row", { hasText: "Fill inside" })
       .locator(".neuroglancer-param-hint")
       .hover();
     const tooltip = page.locator(".neuroglancer-fast-tooltip.visible");
     await expect(tooltip.locator(".neuroglancer-key-chip")).toHaveText("I");
-    await expect(tooltip).toContainText("When a stroke closes on itself");
+    await expect(tooltip).toContainText(
+      "Drawing around an object in one stroke",
+    );
 
     // The Size hint shows its pair of keys the same way.
     await page.mouse.move(0, 0);
@@ -361,12 +366,12 @@ test.describe("hotkey hints", () => {
     const sheet = page.locator(".neuroglancer-shortcut-sheet");
     await expect(
       sheet.locator(".neuroglancer-shortcut-now .neuroglancer-shortcut-row", {
-        hasText: "Fill closed paths",
+        hasText: "Fill inside",
       }),
-    ).toHaveText("Fill closed pathsI");
-    await sheet.getByLabel("Search shortcuts").fill("closed");
+    ).toHaveText("Fill insideI");
+    await sheet.getByLabel("Search shortcuts").fill("inside");
     await expect(sheet.locator(".neuroglancer-shortcut-row")).toHaveText([
-      "Fill closed paths on / offI",
+      "Fill inside on / offI",
     ]);
   });
 
@@ -509,7 +514,7 @@ test.describe("hotkey hints", () => {
     // A letter typed into the search is text, not a tool change.
     await page.keyboard.type("fil");
     expect(await activeTool(page)).toBe("painting.brush");
-    // "fil" finds both Fill and Fill closed paths.
+    // "fil" finds both Fill and Fill inside.
     await expect(sheet.locator(".neuroglancer-shortcut-row")).toHaveCount(2);
 
     await sheet.getByLabel("Change the key for Fill", { exact: true }).click();
