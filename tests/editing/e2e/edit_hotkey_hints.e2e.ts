@@ -442,6 +442,40 @@ test.describe("hotkey hints", () => {
     expect(BigInt(await value())).toBe(before);
   });
 
+  // The readout shows the colour neuroglancer draws that segment in, so the
+  // value about to be painted is recognisable at a glance.
+  test("a target value step shows the segment's colour", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("Control+KeyB");
+    await page.keyboard.press("Shift+BracketRight");
+    const [expected, activeValue] = await page.evaluate(() => {
+      const host = (globalThis as any).viewer.editSessionHost;
+      const { targetLayerId, activeValue } = host.painting.state.getState();
+      return [
+        host.segmentColorFor(targetLayerId, activeValue) as {
+          background: string;
+          text: string;
+        },
+        String(activeValue),
+      ];
+    });
+    expect(expected.background).toMatch(/^#[0-9a-f]{6}$/);
+    // The whole readout box takes the colour, with text that reads on it.
+    const box = page.locator("#neuroglancer-status-container-modal > div");
+    await expect(box).toContainText(`Value: ${activeValue}`);
+    const shown = await box.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, text: style.color };
+    });
+    const [red, green, blue] = [1, 3, 5].map((offset) =>
+      parseInt(expected.background.slice(offset, offset + 2), 16),
+    );
+    expect(shown.background).toBe(`rgb(${red}, ${green}, ${blue})`);
+    expect(shown.text).toBe(
+      expected.text === "white" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)",
+    );
+  });
+
   test("session keys still work after a click on a number field", async () => {
     test.skip(setupError !== undefined, setupError);
     const value = () =>

@@ -188,6 +188,7 @@ import {
 } from "#src/editing/tooling/tooling_persist.js";
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
 import type { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
+import { getBaseObjectColor } from "#src/segmentation_display_state/frontend.js";
 import { SegmentationRenderLayer } from "#src/sliceview/volume/segmentation_renderlayer.js";
 import { StatusMessage } from "#src/status.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -196,8 +197,9 @@ import {
   DEFAULT_SIDE_PANEL_LOCATION,
   TrackableSidePanelLocation,
 } from "#src/ui/side_panel_location.js";
+import { serializeColor, useWhiteBackground } from "#src/util/color.js";
 import { RefCounted } from "#src/util/disposable.js";
-import { vec3 } from "#src/util/geom.js";
+import { vec3, vec4 } from "#src/util/geom.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import type { Viewer } from "#src/viewer.js";
@@ -571,6 +573,12 @@ export const DEFAULT_EXIT_LOCK_REASON =
 // ---------------------------------------------------------------------------
 // EditSessionHost
 // ---------------------------------------------------------------------------
+
+/** A segment's colour as CSS, and the text colour that reads on it. */
+export interface SegmentColor {
+  readonly background: string;
+  readonly text: "black" | "white";
+}
 
 export class EditSessionHost extends RefCounted {
   // -- Public reactive state ------------------------------------------------
@@ -4115,6 +4123,34 @@ export class EditSessionHost extends RefCounted {
       layer?.displayState.segmentationGroupState.value.selectedSegments;
     if (selected === undefined) return;
     for (const id of ids) selected.add(id);
+  }
+
+  /**
+   * The colour neuroglancer draws segment `value` in on `layerId`, as a CSS
+   * colour, with the text colour that reads on it (WCAG luminance, as
+   * neuroglancer's own colour widgets pick it), or `undefined` when the layer
+   * is gone. Uses the same function as
+   * the segment list and the slices (`getBaseObjectColor`), on the segment's
+   * representative, so merges, the colour seed and user-set colours all show.
+   * One hash per call: cheap enough for every key press.
+   */
+  segmentColorFor(
+    layerId: LayerId,
+    value: number | bigint,
+  ): SegmentColor | undefined {
+    const layer = this.findSegmentationUserLayer(layerId);
+    if (layer === undefined) return undefined;
+    const { displayState } = layer;
+    const representative =
+      displayState.segmentationGroupState.value.segmentEquivalences.get(
+        BigInt(value),
+      );
+    const color = vec4.create();
+    getBaseObjectColor(displayState, representative, color);
+    return {
+      background: serializeColor(color),
+      text: useWhiteBackground(color) ? "white" : "black",
+    };
   }
 
   /**

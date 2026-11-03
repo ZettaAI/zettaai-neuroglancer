@@ -50,7 +50,10 @@ import {
   accelStepsPerSecond,
   nextPresetSize,
 } from "#src/editing/painting_hotkey_math.js";
-import { ParamStatusOverlay } from "#src/editing/param_status_overlay.js";
+import {
+  ParamStatusOverlay,
+  type StatusTint,
+} from "#src/editing/param_status_overlay.js";
 import { isFieldKeyForSession } from "#src/editing/tool_panel_field_keys.js";
 import type { PaintingState } from "#src/editing/tool_runtimes/painting_tools.js";
 import type { PaintParamCursor } from "#src/editing/tool_runtimes/param_cursor.js";
@@ -80,6 +83,9 @@ import type { Viewer } from "#src/viewer.js";
 // `viewer.inputEventMap` (e.g. neuroglancer's global `keyb` → "toggle-scale-bar"
 // in `src/ui/default_input_event_bindings.ts:28`).
 const SESSION_HOTKEY_PRIORITY = 100;
+
+/** How long the target value readout, with its colour, stays up. */
+const TARGET_VALUE_READOUT_MS = 2000;
 
 export { isMacPlatform };
 
@@ -895,7 +901,19 @@ export class EditSessionHotkeyBinder extends RefCounted {
     direction: number,
   ): void {
     value.adjust(direction, 1);
-    this.statusOverlay.show(`${value.label}: ${value.format()}`);
+    this.statusOverlay.show(`${value.label}: ${value.format()}`, {
+      tint: this.targetValueTint(),
+      dismissAfterMs: TARGET_VALUE_READOUT_MS,
+    });
+  }
+
+  /** The colour of the value the brush now paints, for the readout. */
+  private targetValueTint(): StatusTint | undefined {
+    const painting = this.getPainting();
+    if (painting === undefined) return undefined;
+    const { targetLayerId, activeValue } = painting.getState();
+    if (BigInt(activeValue) === 0n) return "none";
+    return this.host.segmentColorFor(targetLayerId, activeValue);
   }
 
   // -- Ctrl+Arrow parameter scheme (TM-337) ---------------------------------
@@ -913,9 +931,16 @@ export class EditSessionHotkeyBinder extends RefCounted {
   /** Surface the currently-selected parameter + its value in the center readout. */
   private showSelected(cursor: PaintParamCursor): void {
     const sel = cursor.selected();
-    if (sel !== undefined) {
-      this.statusOverlay.show(`${sel.label}: ${sel.format()}`);
+    if (sel === undefined) return;
+    // Target value, reached with Ctrl/Option+Arrows too, carries its colour.
+    if (sel.id === TARGET_VALUE_PARAM_ID) {
+      this.statusOverlay.show(`${sel.label}: ${sel.format()}`, {
+        tint: this.targetValueTint(),
+        dismissAfterMs: TARGET_VALUE_READOUT_MS,
+      });
+      return;
     }
+    this.statusOverlay.show(`${sel.label}: ${sel.format()}`);
   }
 
   /**
