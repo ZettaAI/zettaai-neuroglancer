@@ -225,9 +225,13 @@ export default defineConfig((env, args) => {
       //    bearer for an IAP-protected backend. Precedence over the static token.
       //  - NEUROGLANCER_ZETTA_BACKEND_TOKEN — static bearer token, DEV ONLY
       //    (ships in the bundle).
+      //  - NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL — origin whose
+      //    google_oauth2_redirect.html receives the Google login response, for
+      //    origins (PR previews) not authorized on the OAuth client.
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_URL"),
       ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP"),
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_TOKEN"),
+      ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL"),
 
       // NEUROGLANCER_GOOGLE_TAG_MANAGER: JSON.stringify('GTM-XXXXXX'),
     },
