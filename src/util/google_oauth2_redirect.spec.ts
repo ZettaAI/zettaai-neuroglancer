@@ -55,6 +55,11 @@ describe("google_oauth2_redirect.html", () => {
   it.each([
     PREVIEW_ORIGIN,
     "https://neuroglancer-pr-277-hhtsusnvoq-ue.a.run.app",
+    "https://portal.research.zetta.ai",
+    "https://portal-dev.research.zetta.ai",
+    "https://portal-pr-12-349854005841.us-east1.run.app",
+    "https://portal-pr-12-hhtsusnvoq-ue.a.run.app",
+    "https://portal-pr-12.research.zetta.ai",
   ])("forwards a response to the preview %s named in the state", (origin) => {
     const state = `cafe.${encode(origin)}`;
 
@@ -69,6 +74,8 @@ describe("google_oauth2_redirect.html", () => {
     `${PREVIEW_ORIGIN}.evil.example`,
     PREVIEW_ORIGIN.replace("https:", "http:"),
     "https://neuroglancer-pr-x-349854005841.us-east1.run.app",
+    "https://portal.research.zetta.ai.evil.example",
+    "https://portal-staging.research.zetta.ai",
   ])("refuses to post to %s", (origin) => {
     expect(loadRedirectPage(`cafe.${encode(origin)}`)).not.toHaveBeenCalled();
   });
