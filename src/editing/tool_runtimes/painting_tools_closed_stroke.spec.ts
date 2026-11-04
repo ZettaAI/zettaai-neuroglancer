@@ -26,9 +26,14 @@ import type {
   Resolution,
   VoxelDataType,
 } from "@zettaai/edit-session";
-import { layerId, Resolution as ResolutionCtor } from "@zettaai/edit-session";
+import {
+  DEFAULT_HISTORY_POLICY,
+  layerId,
+  Resolution as ResolutionCtor,
+} from "@zettaai/edit-session";
 import { describe, it, expect, vi } from "vitest";
 
+import { maxFillHistoryBytes } from "#src/editing/edit_history_budget.js";
 import type { PaintCompute } from "#src/editing/tool_runtimes/paint_types.js";
 import { PaintingCompute } from "#src/editing/tool_runtimes/painting_compute.js";
 import {
@@ -153,6 +158,7 @@ interface SetupOptions {
   chunk?: number;
   readChunkAt?: ConsumerPaintingToolsOptions["readChunkAt"];
   compute?: PaintCompute;
+  maxFillHistoryBytes?: number;
 }
 type ConsumerPaintingToolsOptions = ConstructorParameters<
   typeof ConsumerPaintingTools
@@ -201,6 +207,9 @@ function setup(options: SetupOptions = {}): Harness {
         byteLength: CHUNK ** 3,
         asView: () => new Uint8Array(CHUNK ** 3),
       })),
+    maxFillHistoryBytes:
+      options.maxFillHistoryBytes ??
+      maxFillHistoryBytes(DEFAULT_HISTORY_POLICY),
     initialState: {
       targetLayerId: TARGET,
       targetResolution: RESOLUTION,
@@ -404,6 +413,23 @@ describe("StrokeTool closed-stroke fill (TM-268)", () => {
     ]);
     expect(harness.lifecycle.records).toBe(1);
     expect(paintedAtCenter(await harness.redo())).toBeUndefined();
+  });
+
+  it("takes the fill's history limit from the session, not the library default (TM-373)", async () => {
+    // 512-voxel chunks of uint32: 512 MiB per tile, refused under the default
+    // limit (above). A session whose budget holds the tile fills it.
+    const roomy = setup({ chunk: 512, maxFillHistoryBytes: 512 * 1024 ** 2 });
+    await drawLoop(roomy);
+    expect(paintedAtCenter(roomy.stores[0])).toBe(VALUE);
+    expect(roomy.notices).toEqual([]);
+
+    // And a tighter session refuses what the default would allow.
+    const tight = setup({ maxFillHistoryBytes: 1 });
+    await drawLoop(tight);
+    expect(paintedAtCenter(tight.stores[0])).toBeUndefined();
+    expect(tight.notices).toEqual([
+      "The stroke was kept, but the area inside it is too large to fill.",
+    ]);
   });
 
   it("a failing fill still commits the stroke and frees the edit", async () => {

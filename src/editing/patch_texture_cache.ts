@@ -49,8 +49,10 @@
  * every declared sampler stays texture-complete regardless of which branch
  * the uniform selects.
  *
- * Lazy upload semantics: textures are created and fully uploaded on the
- * first `bindPatchValueTextures` / `bindPatchedMaskTextures` for each chunk.
+ * Lazy upload semantics: textures are created on the first
+ * `bindPatchValueTextures` / `bindPatchedMaskTextures` for each chunk, empty
+ * (all zero) with only the chunk's `paintedBounds` uploaded (TM-373, PR 6;
+ * a full upload for the rare non-separable layout).
  * After that, uploads are driven by the chunk's own `pendingUpload`
  * obligation (set by `PatchMirror` / voxel writes): chunks with no pending
  * upload skip GL work entirely on bind, and chunks with a pending sub-box
@@ -320,6 +322,25 @@ export class PatchTextureCache
       chunk.data.byteOffset,
       chunk.data.length * 2,
     );
+    if (layout.separable && (mustFullUpload || pending?.box === null)) {
+      createWithPaintedBounds(
+        gl,
+        target,
+        layout,
+        chunk,
+        WebGL2RenderingContext.RG32UI,
+        WebGL2RenderingContext.RG_INTEGER,
+        WebGL2RenderingContext.UNSIGNED_INT,
+        u32,
+        /* bytesPerVoxel */ 8,
+        prof ? "gpu.upload.value" : undefined,
+      );
+      if (prof) {
+        paintProfiler.record("6.gpu.upload(value)", performance.now() - t0);
+      }
+      this.consumePendingUpload(chunk, "value");
+      return;
+    }
     const box =
       mustFullUpload || pending === null || !layout.separable
         ? null
@@ -392,6 +413,27 @@ export class PatchTextureCache
     // 4-aligned, so pack rows tightly (neuroglancer's own upload helpers set
     // this per call too — see `webgl/texture_access.ts`).
     gl.pixelStorei(WebGL2RenderingContext.UNPACK_ALIGNMENT, 1);
+    if (layout.separable && (mustFullUpload || pending?.box === null)) {
+      createWithPaintedBounds(
+        gl,
+        target,
+        layout,
+        chunk,
+        WebGL2RenderingContext.R8UI,
+        WebGL2RenderingContext.RED_INTEGER,
+        WebGL2RenderingContext.UNSIGNED_BYTE,
+        chunk.patched,
+        /* bytesPerVoxel */ 1,
+        prof ? "gpu.upload.mask" : undefined,
+      );
+      gl.pixelStorei(WebGL2RenderingContext.UNPACK_ALIGNMENT, 4);
+      if (prof) {
+        paintProfiler.record("6.gpu.upload(mask)", performance.now() - t0);
+      }
+      chunk.dirty = false;
+      this.consumePendingUpload(chunk, "mask");
+      return;
+    }
     const box =
       mustFullUpload || pending === null || !layout.separable
         ? null
@@ -566,13 +608,67 @@ function uploadFull(
   td: number,
   format: number,
   type: number,
-  data: ArrayBufferView,
+  data: ArrayBufferView | null,
 ): void {
   if (target === WebGL2RenderingContext.TEXTURE_3D) {
     gl.texImage3D(target, 0, internalFormat, tw, th, td, 0, format, type, data);
   } else {
     gl.texImage2D(target, 0, internalFormat, tw, th, 0, format, type, data);
   }
+}
+
+/**
+ * (Re)specify the bound texture from the chunk as a whole (TM-373, PR 6): for
+ * a texture the chunk has none of yet, or a full upload obligation (a new
+ * `LocalPatchChunk` on a key whose texture outlived the old one, or
+ * `writeFullChunk`). Allocates it with no data — WebGL2 fills it with zeros,
+ * i.e. mask 0 ("show the baseline"), which also drops anything a previous
+ * chunk left — and uploads only the chunk's `paintedBounds`, the box holding
+ * every voxel that has ever been patched. Outside it the mask is 0 in the CPU
+ * array too, and the shader reads the value only where the mask is 1. After
+ * `writeFullChunk` the bounds are the whole chunk. Separable layouts only.
+ */
+function createWithPaintedBounds(
+  gl: GL,
+  target: number,
+  layout: PatchLayout,
+  chunk: LocalPatchChunk,
+  internalFormat: number,
+  format: number,
+  type: number,
+  data: ArrayBufferView,
+  bytesPerVoxel: number,
+  profilePrefix: string | undefined,
+): void {
+  const [textureX, textureY, textureZ] = layout.textureShape;
+  uploadFull(
+    gl,
+    target,
+    internalFormat,
+    textureX,
+    textureY,
+    textureZ,
+    format,
+    type,
+    null,
+  );
+  applyTextureParams(gl, target);
+  if (profilePrefix !== undefined) {
+    paintProfiler.count(`${profilePrefix}.create`, 1);
+  }
+  const painted = chunk.paintedBounds;
+  if (painted === null) return;
+  uploadSubBox(
+    gl,
+    target,
+    layout,
+    painted,
+    format,
+    type,
+    data,
+    bytesPerVoxel,
+    profilePrefix === undefined ? undefined : `${profilePrefix}.sub`,
+  );
 }
 
 /**

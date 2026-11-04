@@ -27,6 +27,7 @@ import type {
   CommitResult,
   EditSessionAdapters,
   EditSessionConfig,
+  HistoryPolicy,
   LayerId,
   LayerMetadata,
   LayerSelection,
@@ -40,6 +41,7 @@ import type {
 import {
   ChunkId as ChunkIdFactory,
   collectDirtyChunks,
+  DEFAULT_HISTORY_POLICY,
   EditSession,
   InvalidSessionConfigError,
   OverlayKey,
@@ -56,6 +58,8 @@ import {
   coordinateSpaceFromJson,
   coordinateSpaceToJson,
 } from "#src/coordinate_transform.js";
+import { deferContentHashing } from "#src/editing/adapters/deferred_content_hash.js";
+import { boundHistoryReplayScans } from "#src/editing/adapters/history_replay_hints.js";
 import { createChunkBufferAllocator } from "#src/editing/adapters/ng_chunk_buffer_allocator.js";
 import { NgChunkSource } from "#src/editing/adapters/ng_chunk_source.js";
 import { NgClock } from "#src/editing/adapters/ng_clock.js";
@@ -103,6 +107,10 @@ import {
 import type { DraftReason, EditDraft } from "#src/editing/draft/edit_draft.js";
 import { draftIdForRegion } from "#src/editing/draft/edit_draft.js";
 import { EditDraftStore } from "#src/editing/draft/edit_draft_store.js";
+import {
+  editHistoryPolicy,
+  maxFillHistoryBytes,
+} from "#src/editing/edit_history_budget.js";
 import { IdleEditHotkeyBinder } from "#src/editing/idle_edit_hotkey_binder.js";
 import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // PatchMirror is created by step 9 of Phase 1; this file's runtime import
@@ -111,6 +119,8 @@ import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // where the mirror subscribes to `session.dirty` chunk events for `layerId`
 // and writes the resulting overlay bytes into `store.writeFullChunk(...)`.
 import { PatchMirror } from "#src/editing/overlay/patch_mirror.js";
+import { sessionChunkDataSize } from "#src/editing/overlay/session_chunk_data_size.js";
+import { sessionEditBaselineReader } from "#src/editing/overlay/session_edit_baseline.js";
 import type { PaintedVolumeHostPort } from "#src/editing/painted_volume/painted_volume_host_binding.js";
 import { PaintedVolumeHostBinding } from "#src/editing/painted_volume/painted_volume_host_binding.js";
 import type { LockedLayerRegion } from "#src/editing/painted_volume/painted_volume_memory_budget.js";
@@ -404,12 +414,6 @@ interface PerLayerMachinery {
    * teardown so committed patches stay visible.
    */
   readonly textureCache: PatchTextureCache;
-  /**
-   * Reference to the base segmentation render layer for this layer. Used
-   * by host-internal helpers that need to walk visible scales (e.g.
-   * `chunkDataSizeForLayer`); the cache itself is layer-agnostic.
-   */
-  readonly baseRenderLayer: SegmentationRenderLayer;
   /**
    * Subscription bridging the active library overlay → `patchStore`. Set
    * while a session is active, replaced on each new `openSession`, and
@@ -1279,7 +1283,17 @@ export class EditSessionHost extends RefCounted {
 
     let session: EditSession;
     try {
-      session = await EditSession.open(libraryConfig, adapters);
+      const historyPolicy = await this.historyPolicyFor(config);
+      session = await EditSession.open(
+        { ...libraryConfig, historyPolicy },
+        adapters,
+      );
+      // Before the first write: stroke before-images and after-images copy the
+      // chunk but hash it only when a save reads the hash (TM-373).
+      deferContentHashing(session.overlay);
+      // Undo / redo / discard commit whole chunks without a paint hint; give
+      // the mirror the chunk's write envelope instead of a full rescan.
+      boundHistoryReplayScans(session);
     } catch (err) {
       this.chunkSource.writableLayerIds = new Set();
       this.handleOpenFailure(err);
@@ -1622,7 +1636,7 @@ export class EditSessionHost extends RefCounted {
     try {
       await session.discard();
     } finally {
-      this.rollbackDirtyChunks([...dirty, ...unconfirmedKeys]);
+      this.rollbackDirtyChunks(session, [...dirty, ...unconfirmedKeys]);
       // Before the teardown, which is what still knows the session's writable
       // layers. Discarding is the user asking to see what storage holds, and
       // rolling our own patches back only uncovers the datasource chunks this
@@ -1632,7 +1646,10 @@ export class EditSessionHost extends RefCounted {
     }
   }
 
-  private rollbackDirtyChunks(overlayKeys: readonly string[]): void {
+  private rollbackDirtyChunks(
+    session: EditSession,
+    overlayKeys: readonly string[],
+  ): void {
     for (const key of overlayKeys) {
       let coord;
       try {
@@ -1664,37 +1681,14 @@ export class EditSessionHost extends RefCounted {
       const view = committed.bytes.asView();
       const data =
         view instanceof BigUint64Array ? view : widenToBigUint64(view);
-      const chunkDataSize = this.chunkDataSizeForLayer(
+      const chunkDataSize = sessionChunkDataSize(
+        session,
         coord.layerId,
         coord.resolution,
       );
       if (chunkDataSize === undefined) continue;
       entry.patchStore.writeFullChunk(chunkGridPosition, chunkDataSize, data);
     }
-  }
-
-  private chunkDataSizeForLayer(
-    layerId: LayerId,
-    _resolution: ResolutionType,
-  ): readonly [number, number, number] | undefined {
-    // The size is layer-resolution-specific. Pull it from the base
-    // segmentation render layer's first source (the same source the
-    // patch texture cache mirrors voxel-for-voxel).
-    const entry = this.perLayer.get(layerId);
-    if (entry === undefined) return undefined;
-    const sources = entry.baseRenderLayer.visibleSourcesList;
-    for (const v of sources) {
-      const size = v.source.spec.chunkDataSize;
-      if (size.length >= 3) {
-        // We don't strictly check resolution match here — chunk sizes are
-        // typically consistent across scales for a given layer at editing
-        // time and the rollback is best-effort. The library's metadata
-        // source is the authoritative answer but it's async; this path
-        // runs synchronously inside discard.
-        return [size[0], size[1], size[2]];
-      }
-    }
-    return undefined;
   }
 
   /**
@@ -3172,6 +3166,27 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
+   * Undo-history bounds sized to the session's largest writable chunk
+   * (TM-373). The library reads the policy once, in `EditSession.open`, so the
+   * chunk sizes are resolved before it. `resolve` is the adapter `open` reads
+   * metadata through, so the sizes are the ones the library will see; it has
+   * the same precondition as `open` (the layer's source has loaded).
+   */
+  private async historyPolicyFor(
+    config: HostSessionConfig,
+  ): Promise<HistoryPolicy> {
+    const writable = await Promise.all(
+      config.layers
+        .filter((layer) => layer.writable)
+        .map(async (layer) => ({
+          metadata: await this.layerMetadataSource.resolve(layer.layerId),
+          resolutions: layer.resolutions,
+        })),
+    );
+    return editHistoryPolicy(writable);
+  }
+
+  /**
    * Construct the consumer-owned painting tools for a freshly-opened session
    * (TM-315). Resolves per-layer metadata (the library no longer exposes its
    * internal `metadataByLayer`), wires `PaintingCompute` to read the host's
@@ -3374,6 +3389,11 @@ export class EditSessionHost extends RefCounted {
       allowedResolutionsByLayer,
       readChunkAt,
       initialState,
+      // From the policy the session was opened with (TM-373), so the fill
+      // limit grows with the history budget.
+      maxFillHistoryBytes: maxFillHistoryBytes(
+        session.config.historyPolicy ?? DEFAULT_HISTORY_POLICY,
+      ),
       // Drive the cursor-attached fill spinner (TM-269). `start`/`end` bracket
       // every fill (including canceled / failed); `update` fires per flush.
       fillProgress: {
@@ -3580,8 +3600,8 @@ export class EditSessionHost extends RefCounted {
       // user's in-memory commits and must stay visible/editable.
       let entry = this.perLayer.get(layer.layerId);
       if (entry === undefined) {
-        const baseRenderLayer = findBaseSegmentationRenderLayer(userLayer);
-        if (baseRenderLayer === undefined) {
+        // The patch textures only show through the base render layer.
+        if (findBaseSegmentationRenderLayer(userLayer) === undefined) {
           this.logger.warn(
             "session",
             `Layer ${layer.layerId} has no SegmentationRenderLayer yet; skipping patch-overlay attach`,
@@ -3593,7 +3613,6 @@ export class EditSessionHost extends RefCounted {
         entry = {
           patchStore,
           textureCache,
-          baseRenderLayer,
           mirror: undefined,
         };
         this.perLayer.set(layer.layerId, entry);
@@ -3623,29 +3642,34 @@ export class EditSessionHost extends RefCounted {
             coord.chunkId,
             ChunkIdFactory.toCoord(coord.chunkId),
           ),
-        // This session's own baseline, for `resyncAfterRefetch` only.
-        //
-        // Deliberately NOT `readBaselineChunk`: that one falls through to the
-        // datasource when it has no saved or committed copy, and the datasource
-        // is precisely what a refetch is replacing — so for a chunk painted but
-        // never saved it would hand back the colleague's incoming bytes and the
-        // mask would mark everything they moved. The chain here ends at the
-        // session-open baseline and returns undefined rather than guessing.
-        async (coord) => {
-          const committed = this.commitTarget.getChunk(
+        // This session's own baseline, for `resyncAfterRefetch` only — see
+        // `sessionEditBaselineReader` for why it is not `readBaselineChunk`.
+        sessionEditBaselineReader({
+          committed: (coord) =>
+            this.commitTarget.getChunk(
+              coord.layerId,
+              coord.resolution,
+              coord.chunkId,
+            )?.bytes,
+          saved: (coord) =>
+            this.chunkSource.getSavedBytes(
+              coord.layerId,
+              coord.resolution,
+              coord.chunkId,
+            ),
+          sessionOpen: (coord) =>
+            session.overlay.baselineRefOf(coord)?.retain(),
+        }),
+        // The datasource render base of one box, for a bounded pass (TM-373):
+        // a brush move reads its box, not the whole chunk.
+        (coord, box) =>
+          this.chunkSource.readDatasourceBaselineBox(
             coord.layerId,
             coord.resolution,
             coord.chunkId,
-          );
-          if (committed !== undefined) return committed.bytes;
-          const saved = this.chunkSource.getSavedBytes(
-            coord.layerId,
-            coord.resolution,
-            coord.chunkId,
-          );
-          if (saved !== undefined) return saved;
-          return session.overlay.baselineRefOf(coord)?.retain();
-        },
+            ChunkIdFactory.toCoord(coord.chunkId),
+            box,
+          ),
       );
     }
 
@@ -3667,13 +3691,26 @@ export class EditSessionHost extends RefCounted {
     // be recomputed when those change — otherwise chunks visually disappear
     // (TM-298).
     this.activeSessionConfig = config;
-    if (this.detachDisplayDimWatch === undefined) {
-      this.detachDisplayDimWatch =
-        this.viewer.displayDimensionRenderInfo.changed.add(() =>
-          this.recomputeActiveRegions(),
-        );
-    }
+    this.watchDisplayDimensions();
     this.paintedVolumeBinding.sync();
+  }
+
+  /**
+   * Subscribe once to display-dimension changes; the handler outlives the
+   * session it was made under (it is kept across commit → re-open).
+   *
+   * Its own method on purpose (TM-373): V8 gives every closure made in one
+   * function a shared context, so a handler created inside `attachPerLayer`
+   * kept that call's `session` — and with it every overlay copy and history
+   * entry of the first session (1.5 GB on four 4096² chunks) — alive for as
+   * long as the subscription.
+   */
+  private watchDisplayDimensions(): void {
+    if (this.detachDisplayDimWatch !== undefined) return;
+    this.detachDisplayDimWatch =
+      this.viewer.displayDimensionRenderInfo.changed.add(() =>
+        this.recomputeActiveRegions(),
+      );
   }
 
   /**
