@@ -2512,7 +2512,12 @@ export function UserLayerWithAnnotationsMixin<
                   relationships,
                   properties: { value: properties },
                 } = annotationLayer.source;
-                const sourceReadonly = annotationLayer.source.readonly;
+                const { source } = annotationLayer;
+                const ownSource =
+                  source instanceof AnnotationSource ? source : undefined;
+                const sourceReadonly =
+                  ownSource?.isAnnotationReadonly(reference.id) ??
+                  source.readonly;
                 const defaultProperties =
                   annotationTypeHandlers[annotation.type].defaultProperties(
                     annotation,
@@ -2817,11 +2822,8 @@ export function UserLayerWithAnnotationsMixin<
                   );
                 }
 
-                if (
-                  !annotationLayer.source.readonly ||
-                  annotation.description
-                ) {
-                  if (annotationLayer.source.readonly) {
+                if (!sourceReadonly || annotation.description) {
+                  if (sourceReadonly) {
                     const description = document.createElement("div");
                     description.className =
                       "neuroglancer-annotation-details-description";
@@ -2845,6 +2847,11 @@ export function UserLayerWithAnnotationsMixin<
                     parent.appendChild(description);
                   }
                 }
+                ownSource?.mountAnnotationDetails(
+                  reference.id,
+                  parent,
+                  context,
+                );
               }
               if (statusText !== undefined) {
                 const statusMessage = document.createElement("div");

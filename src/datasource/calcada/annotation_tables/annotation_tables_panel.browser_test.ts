@@ -190,6 +190,7 @@ function tableLayerState(isReadonly: () => boolean) {
       isReadonly,
       onDelete: () => Promise.resolve(),
       onCreate: () => Promise.reject(new Error("not placed in this test")),
+      mountDetails: () => {},
     },
   );
   return {

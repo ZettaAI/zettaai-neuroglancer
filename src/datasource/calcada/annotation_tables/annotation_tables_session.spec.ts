@@ -52,7 +52,6 @@ import {
   annotationTotals,
   assignColorSlots,
   classifyAnnotationError,
-  describeAnnotationRow,
   nanometresToTableVoxels,
   planAnnotationFetches,
   visibleAnnotationRoots,
@@ -67,6 +66,7 @@ import type {
   SelectedListAnnotation,
 } from "#src/ui/annotations.js";
 import { Uint64Set } from "#src/uint64_set.js";
+import { RefCounted } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
 import { HttpError } from "#src/util/http_request.js";
 import { Signal } from "#src/util/signal.js";
@@ -289,19 +289,6 @@ describe("annotationTotals and annotationLimitNote", () => {
   });
 });
 
-describe("describeAnnotationRow", () => {
-  it("is one line per payload field, then the id", () => {
-    expect(
-      describeAnnotationRow({
-        id: 9007199254740993n,
-        value: 0,
-        payload: { tag: "soma", size: 3, flags: [1, 2] },
-        points: [],
-      }),
-    ).toBe("tag: soma\nsize: 3\nflags: [1,2]\nid: 9007199254740993");
-  });
-});
-
 describe("classifyAnnotationError", () => {
   it("unticks a table the server forbids and leaves the others ticked", () => {
     expect(
@@ -468,6 +455,7 @@ interface FakeRow {
   /** The root of each of its points, in role order. */
   roots: bigint[];
   payload?: Record<string, unknown>;
+  value?: number;
 }
 
 const row = (id: bigint, ...pointRoots: bigint[]): FakeRow => ({
@@ -497,7 +485,7 @@ function pointsJson(rows: FakeRow[], pointNames: readonly string[]) {
   const columns = Math.max(0, ...rows.map(({ roots }) => roots.length));
   return {
     ids: rows.map(({ id }) => String(id)),
-    values: rows.map(() => 0),
+    values: rows.map(({ value = 0 }) => value),
     roots: rowRoots.map(String),
     points: pointNames.slice(0, columns).map((name, column) => ({
       name,
@@ -512,11 +500,11 @@ function pointsJson(rows: FakeRow[], pointNames: readonly string[]) {
 }
 
 const rowJson = (
-  { id, roots, payload = {} }: FakeRow,
+  { id, roots, payload = {}, value = 0 }: FakeRow,
   pointNames: readonly string[],
 ) => ({
   id: String(id),
-  value: 0,
+  value,
   payload,
   schema_version: 1,
   points: Object.fromEntries(
@@ -541,6 +529,8 @@ function fakeGraph(
     pointNames?: readonly string[];
     /** The root every created row's points land on. */
     createdOn?: bigint;
+    /** The payload field a row's value is taken from. */
+    valueField?: string;
     jsonSchema?: Record<string, unknown>;
   } = {},
 ) {
@@ -552,6 +542,7 @@ function fakeGraph(
     canWrite = false,
     pointNames = POINT_NAMES,
     createdOn = 10n,
+    valueField,
     jsonSchema = {},
   } = options;
   const created: FakeRow[] = [];
@@ -562,13 +553,24 @@ function fakeGraph(
   const deleted = new Set<bigint>();
   const answeredRows = new Map<string, FakeRow>();
   const deletes: { table: string; ids: string[] }[] = [];
+  const updates: { table: string; body: unknown }[] = [];
+  const updated = new Map<bigint, Record<string, unknown>>();
+  const valueOf = (payload: Record<string, unknown>) =>
+    valueField === undefined ? 0 : Number(payload[valueField] ?? 0);
   const liveRows: RowsOf = (root, table, filter) =>
     [
       ...rowsOf(root, table, filter),
       ...created.filter(
         ({ roots }) => root === undefined || roots.includes(root),
       ),
-    ].filter(({ id }) => !deleted.has(id));
+    ]
+      .filter(({ id }) => !deleted.has(id))
+      .map((live) => {
+        const payload = updated.get(live.id);
+        return payload === undefined
+          ? live
+          : { ...live, payload, value: valueOf(payload) };
+      });
   const answer = (
     endpoint: Endpoint,
     root: bigint | undefined,
@@ -589,6 +591,8 @@ function fakeGraph(
     held,
     deletes,
     creates,
+    updates,
+    failUpdate: false,
     hold: (_read: HeldRead, _scope: bigint | string) => false,
     failRows: false,
     failPoints: false,
@@ -611,6 +615,9 @@ function fakeGraph(
       if (tableEndpoint === "annotations") {
         if (init?.method === "POST") {
           return createRow(tableName, JSON.parse(String(init.body)));
+        }
+        if (init?.method === "PUT") {
+          return updateRows(tableName, JSON.parse(String(init.body)));
         }
         return init?.method === "DELETE"
           ? deleteRows(tableName, JSON.parse(String(init.body)).ids)
@@ -677,6 +684,23 @@ function fakeGraph(
     answeredRows.set(String(id), createdRow);
     return jsonResponse({ ids: [String(id)] });
   };
+  const updateRows = (
+    table: string,
+    body: { annotations: { id: string; payload: Record<string, unknown> }[] },
+  ) => {
+    updates.push({ table, body });
+    if (graph.failUpdate) {
+      throw httpError(422, "payload does not match the schema");
+    }
+    for (const { id, payload } of body.annotations) {
+      updated.set(BigInt(id), payload);
+      const answered = answeredRows.get(id);
+      if (answered !== undefined) {
+        answeredRows.set(id, { ...answered, payload, value: valueOf(payload) });
+      }
+    }
+    return jsonResponse({ ids: body.annotations.map(({ id }) => id) });
+  };
   const deleteRows = (table: string, ids: string[]) => {
     deletes.push({ table, ids });
     if (graph.failDelete) throw new Error("delete refused");
@@ -734,6 +758,7 @@ function startSession(
   const moveToAnnotation = vi.fn();
   const makeListElement = vi.fn();
   const renderListHeader = vi.fn();
+  const mountRowEditor = vi.fn();
   const selectedAnnotation = new WatchableValue<
     SelectedListAnnotation | undefined
   >(undefined);
@@ -776,6 +801,7 @@ function startSession(
     moveToAnnotation,
     makeListElement,
     renderListHeader,
+    mountRowEditor,
     selectedAnnotation,
     listCoordinatesChanged: new Signal(),
     clearHover: vi.fn(),
@@ -809,6 +835,7 @@ function startSession(
     moveToAnnotation,
     makeListElement,
     renderListHeader,
+    mountRowEditor,
     selectedAnnotation,
     armPlacement,
     disarmPlacement,
@@ -1127,32 +1154,91 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(live.sources.get("syn")!.readonly).toBe(true);
   });
 
-  it("select fills description from the fetched row and still selects when the fetch fails", async () => {
+  it("reads a row's payload and saves an edit of it, then draws its new value", async () => {
     const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      valueField: "size",
       rows: (root) =>
         root === undefined
           ? []
           : [{ id: root, roots: [root], payload: { tag: "soma", size: 3 } }],
     });
-    const { session, sources, selectAnnotation, visibleSegments } =
-      startSession(graph, { ticked: ["syn"], visible: [10n] });
+    const { session, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
     await settle();
-    const [item] = drawnItems(session);
-    session.select(item);
-    expect(selectAnnotation).toHaveBeenCalledTimes(1);
+    const editing = session.rowEditing("syn", "syn:10")!;
+    expect(editing.readonly).toBe(false);
+    expect(await editing.read()).toEqual({ tag: "soma", size: 3 });
+    await editing.save({ tag: "soma", size: 7 });
     await settle();
-    const description = "tag: soma\nsize: 3\nid: 10";
-    expect(sources.get("syn")!.get("syn:10")?.description).toBe(description);
-    visibleSegments.add(20n);
+    expect(graph.updates).toEqual([
+      {
+        table: "syn",
+        body: {
+          annotations: [{ id: "10", payload: { tag: "soma", size: 7 } }],
+        },
+      },
+    ]);
+    expect(sources.get("syn")!.get("syn:10")?.properties).toEqual([7]);
+    expect(await editing.read()).toEqual({ tag: "soma", size: 7 });
+  });
+
+  it("mounts the row's payload editor into the Selection panel", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { session, sources, mountRowEditor } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
     await settle();
-    expect(sources.get("syn")!.get("syn:10")?.description).toBe(description);
-    graph.failRows = true;
-    selectAnnotation.mockClear();
-    const other = drawnItems(session).find(({ id }) => id === 20n)!;
-    session.select(other);
+    const parent = document.createElement("div");
+    const context = new RefCounted();
+    sources.get("syn")!.mountAnnotationDetails("syn:10", parent, context);
+    expect(mountRowEditor).toHaveBeenCalledTimes(1);
+    const [mountedInto, mountedContext, editing] = mountRowEditor.mock.calls[0];
+    expect([mountedInto, mountedContext]).toEqual([parent, context]);
+    expect(editing.readonly).toBe(
+      session.rowEditing("syn", "syn:10")!.readonly,
+    );
+    expect(await editing.read()).toEqual({});
+  });
+
+  it("passes on the server's refusal of an edited payload", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { session } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
     await settle();
-    expect(selectAnnotation).toHaveBeenCalledTimes(1);
-    expect(sources.get("syn")!.get("syn:20")?.description).toBeUndefined();
+    graph.failUpdate = true;
+    const refused = await session
+      .rowEditing("syn", "syn:10")!
+      .save({ size: "big" })
+      .catch((error: Error) => error.message);
+    expect(refused).toBe(
+      "Could not save the annotation: payload does not match the schema",
+    );
+  });
+
+  it("a row of a table it cannot write is read-only", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")?.readonly).toBe(true);
+  });
+
+  it("has nothing to edit for an annotation that is not a row", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { session } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.rowEditing("syn", "syn:999")).toBeUndefined();
   });
 
   it("makes the list entry from the item's annotation state, none once unticked", async () => {
@@ -1219,18 +1305,12 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(moveToAnnotation).not.toHaveBeenCalled();
   });
 
-  it("knows the selected item and gives the selected one its details", async () => {
-    const graph = fakeGraph(["syn"], {
-      rows: (root) =>
-        root === undefined ? [] : [{ id: root, roots: [root], payload: {} }],
+  it("knows the selected item", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session, layerStates, selectedAnnotation } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
     });
-    const { session, sources, layerStates, selectedAnnotation } = startSession(
-      graph,
-      {
-        ticked: ["syn"],
-        visible: [10n, 20n],
-      },
-    );
     await settle();
     const [first, second] = drawnItems(session);
     selectedAnnotation.value = {
@@ -1239,38 +1319,6 @@ describe("CalcadaAnnotationTablesSession", () => {
     };
     expect(session.isSelected(first)).toBe(true);
     expect(session.isSelected(second)).toBe(false);
-    session.select(second);
-    await settle();
-    expect(sources.get("syn")!.get(second.layerId)?.description).toContain(
-      `id: ${second.id}`,
-    );
-  });
-
-  it("keeps only the details of the latest select", async () => {
-    const graph = fakeGraph(["syn"], {
-      rows: (root) =>
-        root === undefined
-          ? []
-          : [{ id: root, roots: [root], payload: { root: String(root) } }],
-    });
-    const { session, sources } = startSession(graph, {
-      ticked: ["syn"],
-      visible: [10n, 20n],
-    });
-    await settle();
-    graph.hold = (read) => read === "rows";
-    const [first, second] = drawnItems(session);
-    session.select(first);
-    session.select(second);
-    await settle();
-    expect(graph.held).toHaveLength(2);
-    graph.held[1]();
-    await settle();
-    graph.held[0]();
-    await settle();
-    const source = sources.get("syn")!;
-    expect(source.get("syn:20")?.description).toBe("root: 20\nid: 20");
-    expect(source.get("syn:10")?.description).toBeUndefined();
   });
 
   it("keeps a table missing at an explicit timestamp ticked and notes it", async () => {
