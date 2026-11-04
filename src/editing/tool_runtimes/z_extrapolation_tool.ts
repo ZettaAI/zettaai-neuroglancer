@@ -199,6 +199,8 @@ export class ZExtrapolationTool implements EditTool {
   private readonly unsubscribeRemovals = new Map<LayerId, () => void>();
   private readonly imageSlices: PropagationImageSlices;
   private prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Whether an auto-detect is reading or waiting for the over-limit answer. */
+  private isAutoDetecting = false;
 
   constructor(private readonly deps: ZExtrapolationDeps) {
     this.imageSlices = new PropagationImageSlices(deps.readChunkAt);
@@ -482,6 +484,20 @@ export class ZExtrapolationTool implements EditTool {
   async autoDetectTrackedSegments(
     confirmOverLimit?: ConfirmOverLimit,
   ): Promise<void> {
+    // A second click while one is in flight would ask a second over-limit
+    // question, leaving the first unanswered.
+    if (this.isAutoDetecting) return;
+    this.isAutoDetecting = true;
+    try {
+      await this.detectAndTrackSegments(confirmOverLimit);
+    } finally {
+      this.isAutoDetecting = false;
+    }
+  }
+
+  private async detectAndTrackSegments(
+    confirmOverLimit: ConfirmOverLimit | undefined,
+  ): Promise<void> {
     const window = this.resolveCurrentWindow();
     if (window === undefined) return; // resolveCurrentWindow surfaced the reason
     const edit = this.deps.session.beginEdit({
@@ -554,7 +570,7 @@ export class ZExtrapolationTool implements EditTool {
     const bounds = this.boundsFor(image.layerId, image.resolution);
     if (bounds === undefined) return;
     if (followingZ < bounds.loZ || followingZ >= bounds.hiZ) return;
-    this.imageSlices.prefetch(image, imageWindow, followingZ);
+    this.imageSlices.prefetch(image, imageWindow, [followingZ]);
   }
 
   /**
@@ -568,8 +584,10 @@ export class ZExtrapolationTool implements EditTool {
       const plan = this.buildRunPlan();
       if (typeof plan === "string") return;
       const { imageWindow, image } = plan;
-      this.imageSlices.prefetch(image, imageWindow, imageWindow.currentZ);
-      this.imageSlices.prefetch(image, imageWindow, imageWindow.nextZ);
+      this.imageSlices.prefetch(image, imageWindow, [
+        imageWindow.currentZ,
+        imageWindow.nextZ,
+      ]);
     }, PREFETCH_DELAY_MS);
   }
 

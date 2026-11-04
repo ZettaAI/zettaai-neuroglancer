@@ -333,6 +333,26 @@ describe("ZExtrapolationTool tracking (TM-518)", () => {
     expect(shown).toEqual([100n, 200n]);
   });
 
+  it("ignores a second auto-detect while the first awaits its answer", async () => {
+    const alreadyListed = Array.from(
+      { length: MAX_TRACKED_SEGMENTS - 1 },
+      (_, i) => BigInt(1000 + i),
+    );
+    const { tool, shown } = makeTool({ listed: alreadyListed });
+    let answer: (proceed: boolean) => void = () => {};
+    const confirm = vi.fn(
+      () => new Promise<boolean>((resolve) => (answer = resolve)),
+    );
+    const first = tool.autoDetectTrackedSegments(confirm);
+    const second = tool.autoDetectTrackedSegments(confirm);
+    await second;
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    answer(true);
+    await first;
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(shown).toEqual([100n, 200n]);
+  });
+
   it("does not ask when auto-detect stays within the limit", async () => {
     const { tool } = makeTool({ listed: [] });
     const confirm = vi.fn(() => Promise.resolve(false));

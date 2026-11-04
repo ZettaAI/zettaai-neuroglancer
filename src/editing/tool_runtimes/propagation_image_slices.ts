@@ -56,7 +56,13 @@ export class PropagationImageSlices {
   ): Promise<Uint8Array[]> {
     const keys = zs.map((z) => sliceKey(image, area, z));
     // Take the held slices first, so adding the missing ones cannot evict them.
-    const slices = keys.map((key) => this.takeHeld(key));
+    // A held slice may be a prefetch still in flight; if it fails, read that
+    // slice once more instead of sharing the prefetch's failure.
+    const slices = keys.map((key, index) =>
+      this.takeHeld(key)?.catch(() =>
+        this.read(image, area, [zs[index]]).then(([slice]) => slice),
+      ),
+    );
     const missingIndices = [...slices.keys()].filter(
       (index) => slices[index] === undefined,
     );
@@ -76,12 +82,13 @@ export class PropagationImageSlices {
   }
 
   /**
-   * Start reading the slice at `z` in the background, so a later {@link read}
-   * finds it ready. Failures are swallowed here; the run that needs the slice
-   * reads it again and reports the error.
+   * Start reading the slices at each Z of `zs` in the background (together, so
+   * they share chunk reads), so a later {@link read} finds them ready. Failures
+   * are swallowed here; the run that needs a slice reads it again and reports
+   * the error.
    */
-  prefetch(image: ImageReadSpec, area: SliceArea, z: number): void {
-    this.read(image, area, [z]).catch(() => {});
+  prefetch(image: ImageReadSpec, area: SliceArea, zs: readonly number[]): void {
+    this.read(image, area, zs).catch(() => {});
   }
 
   private readSlices(

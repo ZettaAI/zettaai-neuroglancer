@@ -112,7 +112,7 @@ describe("PropagationImageSlices", () => {
   it("lets a run reuse a prefetched slice", async () => {
     const { reader, totalReads } = countingReader();
     const slices = new PropagationImageSlices(reader);
-    slices.prefetch(IMAGE, AREA, 9);
+    slices.prefetch(IMAGE, AREA, [9]);
     const [slice] = await slices.read(IMAGE, AREA, [9]);
     expect([...slice]).toEqual([9, 9, 9, 9]);
     expect(totalReads()).toBe(1);
@@ -167,11 +167,30 @@ describe("PropagationImageSlices", () => {
     const { reader, totalReads, failNextRead } = countingReader();
     const slices = new PropagationImageSlices(reader);
     failNextRead();
-    slices.prefetch(IMAGE, AREA, 5);
+    slices.prefetch(IMAGE, AREA, [5]);
     // Let the failed prefetch settle: no unhandled rejection, entry dropped.
     await new Promise((resolve) => setTimeout(resolve, 0));
     const [slice] = await slices.read(IMAGE, AREA, [5]);
     expect([...slice]).toEqual([5, 5, 5, 5]);
     expect(totalReads()).toBe(2);
+  });
+
+  it("reads again when a prefetch still in flight fails under a run", async () => {
+    const { reader, totalReads, failNextRead } = countingReader();
+    const slices = new PropagationImageSlices(reader);
+    failNextRead();
+    slices.prefetch(IMAGE, AREA, [5]);
+    // The run takes the in-flight prefetch before it has failed.
+    const [slice] = await slices.read(IMAGE, AREA, [5]);
+    expect([...slice]).toEqual([5, 5, 5, 5]);
+    expect(totalReads()).toBe(2);
+  });
+
+  it("prefetches several slices together, sharing chunk reads", async () => {
+    const { reader, totalReads } = countingReader();
+    const slices = new PropagationImageSlices(reader);
+    slices.prefetch(IMAGE, AREA, [5, 6]); // both in chunk z=1
+    await slices.read(IMAGE, AREA, [5, 6]);
+    expect(totalReads()).toBe(1);
   });
 });
