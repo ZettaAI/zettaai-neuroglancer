@@ -441,10 +441,32 @@ export const moveToAnnotation = (
     layerRank,
   );
   setLayerPosition(layer, chunkTransform, layerPosition);
+  showSegmentsOnMove(annotation, state);
+};
+
+function showSegmentsOnMove(
+  annotation: Annotation,
+  state: AnnotationLayerState,
+) {
   if (state.displayState.swapVisibleSegmentsOnMove.value) {
     showAnnotationSegments(annotation, state, true);
   }
-};
+}
+
+export function showSegmentsOnMoveToAnnotation(
+  state: AnnotationLayerState,
+  id: AnnotationId,
+) {
+  const reference = state.source.getReference(id);
+  const showOnceLoaded = () => {
+    const annotation = reference.value;
+    if (annotation === undefined) return;
+    if (annotation !== null) showSegmentsOnMove(annotation, state);
+    reference.dispose();
+  };
+  reference.changed.add(showOnceLoaded);
+  showOnceLoaded();
+}
 
 function visitTransformedAnnotationGeometry(
   annotation: Annotation,
