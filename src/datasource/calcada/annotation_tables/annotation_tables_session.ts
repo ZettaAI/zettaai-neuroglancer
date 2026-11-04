@@ -97,6 +97,14 @@ export const TABLE_UNLISTED_NOTE = "Not in the current table list";
 export const PLACE_ONE_TABLE_NOTE = "Select exactly one table to add to it";
 export const PLACE_NO_WRITE_NOTE = "You cannot write to this table";
 export const PLACE_PAST_NOTE = "Adding is off while viewing a past state";
+
+/** The viewer's selection once pinned; unpinned, it is only what the mouse hovers. */
+export function pinnedSelection<T>(selection: {
+  readonly pin: WatchableValueInterface<boolean>;
+  readonly value: T;
+}): T | undefined {
+  return selection.pin.value ? selection.value : undefined;
+}
 export const PLACE_POINT_COUNT_NOTE =
   "Only tables of one or two points can be added to here";
 
