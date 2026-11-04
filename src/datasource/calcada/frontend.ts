@@ -39,7 +39,10 @@ import { LayerChunkProgressInfo } from "#src/chunk_manager/base.js";
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { WithParameters } from "#src/chunk_manager/frontend.js";
 import { makeIdentityTransform } from "#src/coordinate_transform.js";
-import { CalcadaAnnotationTablesSession } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import {
+  CalcadaAnnotationTablesSession,
+  pinnedSelection,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import {
   ANNOTATION_TABLES_TAB_LABEL,
@@ -5879,11 +5882,11 @@ void main() {
     const { selectionState } = layer.manager.root;
     const selectedTableAnnotation = this.registerDisposer(
       makeCachedLazyDerivedWatchableValue(
-        (selection) =>
+        (_selection) =>
           selectedListAnnotation(
             layer,
             layer.annotationStates.states,
-            selection,
+            pinnedSelection(selectionState),
           ),
         selectionState,
       ),

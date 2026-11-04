@@ -38,6 +38,7 @@ import {
   PLACE_NO_WRITE_NOTE,
   PLACE_ONE_TABLE_NOTE,
   PLACE_PAST_NOTE,
+  pinnedSelection,
   PLACE_POINT_COUNT_NOTE,
   RootFailures,
   TABLE_ABSENT_AT_TIMESTAMP_NOTE,
@@ -1949,5 +1950,14 @@ describe("nanometresToTableVoxels", () => {
     expect(nanometresToTableVoxels([17, 9.9, 81], [8, 4, 40])).toEqual([
       2, 2, 2,
     ]);
+  });
+});
+
+describe("pinnedSelection", () => {
+  it("is the selection only while it is pinned, never what the mouse hovers", () => {
+    const selection = { pin: new WatchableValue(false), value: "hovered" };
+    expect(pinnedSelection(selection)).toBeUndefined();
+    selection.pin.value = true;
+    expect(pinnedSelection(selection)).toBe("hovered");
   });
 });
