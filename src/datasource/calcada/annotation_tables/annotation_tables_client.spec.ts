@@ -16,6 +16,7 @@ import type {
 import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
+  createAnnotationRow,
   deleteAnnotationRows,
   fetchAnnotationRows,
   fetchSegmentCounts,
@@ -84,6 +85,7 @@ const info = (name: string, schemaName = "synapse"): AnnotationTableInfo => ({
   voxelResolution: [4, 4, 40],
   points: ["pre", "post"],
   properties: {},
+  requiredProperties: [],
   canWrite: true,
 });
 
@@ -132,6 +134,7 @@ describe("listAnnotationTables", () => {
         voxelResolution: [4, 4, 40],
         points: ["pre", "post"],
         properties: {},
+        requiredProperties: [],
         canWrite: true,
       },
       expect.objectContaining({ name: "b", points: ["pre", "post"] }),
@@ -166,6 +169,26 @@ describe("listAnnotationTables", () => {
       kind: "string",
       checked: "boolean",
     });
+  });
+
+  it("reads which typed properties the schema requires", async () => {
+    const fetchOk = vi.fn(async (url: RequestInfo) =>
+      String(url).endsWith("/annotation/tables")
+        ? json({ tables: [tableJson("a")] })
+        : json({
+            ...schemaJson("synapse", 2, ["pre", "post"]),
+            json_schema: {
+              properties: {
+                size: { type: "number" },
+                tags: { type: "array" },
+                kind: { type: "string" },
+              },
+              required: ["size", "tags"],
+            },
+          }),
+    );
+    const [table] = await listAnnotationTables(fetchOk, BASE);
+    expect(table.requiredProperties).toEqual(["size"]);
   });
 
   it("orders schema points by role", async () => {
@@ -538,6 +561,7 @@ describe("deleteAnnotationRows", () => {
     ).catch((e) => e);
     expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
     expect(forbidden.table).toBe("a");
+    expect(forbidden.message).toBe("No write permission on annotation table a");
     const missing = await deleteAnnotationRows(
       vi.fn(() => failing(404, "annotation table not found")),
       BASE,
@@ -556,6 +580,64 @@ describe("deleteAnnotationRows", () => {
     expect(String(url)).toBe(`${BASE}/annotation/tables/a/annotations`);
     expect(init?.method).toBe("DELETE");
     expect(JSON.parse(String(init?.body))).toEqual({ ids: [BIG_ID, "2"] });
+  });
+});
+
+describe("createAnnotationRow", () => {
+  it("posts the points and the payload, and returns the id", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ ids: [BIG_ID] }),
+    );
+    const id = await createAnnotationRow(
+      fetchOk,
+      BASE,
+      "a",
+      new Map([
+        ["pre", [1, 2, 3]],
+        ["post", [4, 5, 6]],
+      ]),
+      { size: 2.5, kind: "spine" },
+    );
+    expect(id).toBe(BigInt(BIG_ID));
+    const [url, init] = fetchOk.mock.calls[0];
+    expect(String(url)).toBe(`${BASE}/annotation/tables/a/annotations`);
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      annotations: [
+        {
+          points: {
+            pre: { position: [1, 2, 3] },
+            post: { position: [4, 5, 6] },
+          },
+          payload: { size: 2.5, kind: "spine" },
+        },
+      ],
+    });
+  });
+
+  it("names the server's reason when it refuses the row", async () => {
+    const refused = await createAnnotationRow(
+      vi.fn(() => failing(422, "no piece at the position of point at")),
+      BASE,
+      "a",
+      new Map([["at", [1, 2, 3]]]),
+      {},
+    ).catch((e) => e);
+    expect(refused.message).toBe(
+      "Could not add the annotation: no piece at the position of point at",
+    );
+  });
+
+  it("maps 403 to the table's forbidden error, naming write", async () => {
+    const forbidden = await createAnnotationRow(
+      vi.fn(() => failing(403, "forbidden")),
+      BASE,
+      "a",
+      new Map([["pt", [1, 2, 3]]]),
+      {},
+    ).catch((e) => e);
+    expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
+    expect(forbidden.message).toBe("No write permission on annotation table a");
   });
 });
 

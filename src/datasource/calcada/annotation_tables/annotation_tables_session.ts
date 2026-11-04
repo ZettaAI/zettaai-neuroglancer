@@ -12,19 +12,20 @@ import { chunk, debounce, isEqual } from "lodash-es";
 import type { AnnotationLayerState } from "#src/annotation/annotation_layer_state.js";
 import type {
   Annotation,
+  AnnotationId,
   AnnotationPropertySpec,
 } from "#src/annotation/index.js";
-import type {
-  FetchedTablePoints,
-  LayerRow,
-} from "#src/datasource/calcada/annotation_tables/annotation_render.js";
+import { AnnotationType } from "#src/annotation/index.js";
+import type { FetchedTablePoints } from "#src/datasource/calcada/annotation_tables/annotation_render.js";
 import {
   COORDINATES_PER_POSITION,
   annotationRowId,
   colorForTable,
-  toLayerAnnotations,
+  rowAnnotationId,
 } from "#src/datasource/calcada/annotation_tables/annotation_render.js";
 import type {
+  AnnotationPayload,
+  AnnotationPayloadValue,
   AnnotationReadCoordinates,
   AnnotationTableInfo,
   AnnotationTableQuery,
@@ -36,6 +37,7 @@ import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
   MAX_TABLES_PER_SEGMENT_REQUEST,
+  createAnnotationRow,
   deleteAnnotationRows,
   fetchAnnotationRows,
   fetchSegmentCounts,
@@ -47,9 +49,26 @@ import {
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import type { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import type {
+  DrawnAnnotation,
+  DrawnRows,
+} from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
+import {
+  drawnRowsOf,
+  NO_DRAWN_ROWS,
+} from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
+import type {
   CalcadaTableAnnotationSource,
   TableAnnotationSourceOptions,
 } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import type {
+  SourceScale,
+  TableRows,
+} from "#src/datasource/calcada/annotation_tables/table_rows.js";
+import {
+  buildTableRows,
+  EMPTY_TABLE_ROWS,
+  rowCount,
+} from "#src/datasource/calcada/annotation_tables/table_rows.js";
 import type { HttpSource } from "#src/datasource/calcada/base.js";
 import { hasExplicitTimestamp } from "#src/datasource/calcada/graph_coordinates.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -59,6 +78,7 @@ import type {
   SelectedListAnnotation,
 } from "#src/ui/annotations.js";
 import type { Uint64Set } from "#src/uint64_set.js";
+import { arraysEqual } from "#src/util/array.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { vec3 } from "#src/util/geom.js";
 import type { ReadonlySignal } from "#src/util/signal.js";
@@ -74,12 +94,33 @@ export const VISIBLE_SEGMENTS_DEBOUNCE_MS = 150;
 export const TABLE_ABSENT_AT_TIMESTAMP_NOTE = "Not present at this time";
 export const TABLE_UNLISTED_NOTE = "Not in the current table list";
 
+export const PLACE_ONE_TABLE_NOTE = "Select exactly one table to add to it";
+export const PLACE_NO_WRITE_NOTE = "You cannot write to this table";
+export const PLACE_PAST_NOTE = "Adding is off while viewing a past state";
+export const PLACE_POINT_COUNT_NOTE =
+  "Only tables of one or two points can be added to here";
+
+export type PlacementType = AnnotationType.POINT | AnnotationType.LINE;
+
+const PLACEMENT_TYPE_BY_POINT_COUNT = new Map<number, PlacementType>([
+  [1, AnnotationType.POINT],
+  [2, AnnotationType.LINE],
+]);
+
+/** The one ticked table NG's tools may add to, or why there is none. */
+export type TablePlacement =
+  | { table: string; type: PlacementType; blockedBy?: undefined }
+  | { table?: undefined; type?: undefined; blockedBy: string };
+
 const VALUE_PROPERTY: AnnotationPropertySpec = {
   type: "float32",
   identifier: "value",
   description: undefined,
   default: 0,
 };
+
+const NO_NANOMETRE_SCALE =
+  "The layer's coordinate space has no nanometre scale";
 
 const THOUSANDS_GROUP = /\B(?=(\d{3})+$)/g;
 
@@ -123,16 +164,10 @@ export interface AnnotationTableStatus {
   table: string;
   annotations: number;
   fetchedRoots: number;
+  /** A count or points request is on its way, or received points wait to be drawn. */
+  loading: boolean;
   error?: string;
   note?: string;
-}
-
-export interface DrawnAnnotation {
-  table: string;
-  /** The id of its (first) annotation in the table's annotation state. */
-  layerId: string;
-  id: bigint;
-  value: number;
 }
 
 export interface AnnotationFetchFailure {
@@ -151,6 +186,16 @@ interface SelectedDetails {
   table: string;
   layerId: string;
   description: string;
+}
+
+/** The voxel of the table's resolution that holds the point. */
+export function nanometresToTableVoxels(
+  nanometres: readonly number[],
+  voxelResolution: readonly number[],
+): number[] {
+  return voxelResolution.map((resolution, dim) =>
+    Math.floor(nanometres[dim] / resolution),
+  );
 }
 
 export function formatCount(count: number): string {
@@ -484,17 +529,54 @@ export function fetchedTablePoints(
   });
 }
 
+/** What a table's redraw is made of; one equal to the last needs no redraw. */
+interface RedrawInputs {
+  info: AnnotationTableInfo | undefined;
+  fetched: readonly FetchedTablePoints[];
+  limitNote: string | undefined;
+  scale: SourceScale | undefined;
+}
+
+function sameRedrawInputs(a: RedrawInputs, b: RedrawInputs): boolean {
+  return (
+    a.info === b.info &&
+    a.limitNote === b.limitNote &&
+    isEqual(a.scale, b.scale) &&
+    a.fetched.length === b.fetched.length &&
+    a.fetched.every(
+      ({ fetchedUnder, points }, index) =>
+        fetchedUnder === b.fetched[index].fetchedUnder &&
+        points === b.fetched[index].points,
+    )
+  );
+}
+
+/** A scale is needed only once there is a row to place. */
+function drawableRows(
+  fetched: readonly FetchedTablePoints[],
+  info: AnnotationTableInfo,
+  scale: SourceScale | undefined,
+): TableRows {
+  if (fetched.every(({ points }) => points.ids.length === 0)) {
+    return EMPTY_TABLE_ROWS(info.name);
+  }
+  if (scale === undefined) throw new Error(NO_NANOMETRE_SCALE);
+  return buildTableRows(fetched, info, scale);
+}
+
 export function annotationTableStatus(input: {
   table: string;
   fetched: readonly FetchedTablePoints[];
   annotations: number;
+  loading: boolean;
   error?: string;
   note?: string;
 }): AnnotationTableStatus {
-  const { table, fetched, annotations, error, note } = input;
+  const { table, fetched, annotations, loading, error, note } = input;
   return {
     table,
     annotations,
+    loading,
     fetchedRoots: fetched.filter(
       ({ fetchedUnder }) => fetchedUnder !== undefined,
     ).length,
@@ -569,9 +651,9 @@ export interface AnnotationTablesConnection {
   readonly graphEdited: ReadonlySignal<
     (oldRoots: Iterable<bigint>, newRoots: Iterable<bigint>) => void
   >;
-  nanometresToSource(
-    nanometres: [number, number, number],
-  ): Float32Array | undefined;
+  /** Undefined while the layer's coordinate space has no nanometre scale. */
+  sourceScale(): SourceScale | undefined;
+  sourceToNanometres(point: Float32Array): [number, number, number] | undefined;
   makeAnnotationState(
     subsubsourceId: string,
     color: vec3,
@@ -597,8 +679,16 @@ export interface AnnotationTablesConnection {
   /** List entries show positions in these coordinates. */
   readonly listCoordinatesChanged: ReadonlySignal<() => void>;
   clearHover(): void;
-  /** Runs the callback before the next frame is drawn. */
+  /** Runs the callback once the next frame is painted. */
   scheduleFrame(callback: () => void): void;
+  /** NG's point or line tool, placing into the state on ctrl+click. */
+  armPlacement(state: AnnotationLayerState, type: PlacementType): void;
+  /** Takes the tool off, if it is one `armPlacement` set. */
+  disarmPlacement(): void;
+  /** The state the armed placement tool adds to. */
+  readonly armedPlacement: WatchableValueInterface<
+    AnnotationLayerState | undefined
+  >;
 }
 
 export class CalcadaAnnotationTablesSession extends RefCounted {
@@ -606,7 +696,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     undefined,
   );
   readonly status = new WatchableValue<AnnotationTableStatus[]>([]);
-  readonly drawn = new WatchableValue<DrawnAnnotation[]>([]);
+  readonly drawn = new WatchableValue<DrawnRows>(NO_DRAWN_ROWS);
   readonly listError = new WatchableValue<string | undefined>(undefined);
   readonly rootsNote = new WatchableValue<string | undefined>(undefined);
   /** Set while the selected tables hold more than MAX_DRAWN_ANNOTATIONS. */
@@ -619,6 +709,12 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   });
   /** A table's colour changed; drawn entries keep their place. */
   readonly colorsChanged = new Signal<() => void>();
+  /** Undefined while no table is ticked. */
+  readonly placement = new WatchableValue<TablePlacement | undefined>(
+    undefined,
+  );
+  /** Typed in the panel; every row added to the placement table carries it. */
+  readonly newRowPayload = new WatchableValue<AnnotationPayload>({});
   private readonly schemas: SchemaCache = new Map();
   private readonly cache = new Map<string, AnnotationScopeEntry>();
   // Per cache key, the request each table was last asked in: in flight, or
@@ -627,7 +723,9 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   private readonly pending = new Map<string, Map<string, number>>();
   private readonly layerStates = new Map<string, TableAnnotationState>();
   private readonly rendered = new Map<string, number>();
-  private readonly drawnByTable = new Map<string, DrawnAnnotation[]>();
+  private readonly rowsByTable = new Map<string, TableRows>();
+  private readonly lastRedraw = new Map<string, RedrawInputs>();
+  private publishedRows: readonly TableRows[] = [];
   // Redrawn together once per frame: a burst of answers rebuilds each table
   // once, not once per answer.
   private readonly stale = new Set<string>();
@@ -637,6 +735,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   // Tables the server does not have at the explicit timestamp in view.
   private readonly absent = new Set<string>();
   private colorSlots = new Map<string, number>();
+  private readonly inFlight = new Map<string, number>();
   private shownTables: readonly string[] = [];
   private shownQueries = new Map<string, unknown>();
   private details: SelectedDetails | undefined;
@@ -685,6 +784,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         this.listError.value = undefined;
         this.tables.value = tables;
         this.untickUnlisted();
+        this.publishPlacement();
         this.invalidate(this.state.ticked);
         this.fetchVisible();
       },
@@ -729,6 +829,84 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (found === undefined) return false;
     this.connection.renderListHeader(found.layerState, header, columnWidths);
     return true;
+  }
+
+  /**
+   * Selects and moves to the drawn row `offset` places from the selected one,
+   * stopping at the ends; with none selected, the first or the last.
+   */
+  selectAdjacent(offset: number) {
+    const drawn = this.drawn.value;
+    if (drawn.length === 0) return;
+    const last = drawn.length - 1;
+    const selected = this.selectedDrawnIndex();
+    const target =
+      selected === undefined
+        ? offset > 0
+          ? 0
+          : last
+        : Math.min(Math.max(selected + offset, 0), last);
+    if (target === selected) return;
+    this.moveTo(drawn.at(target));
+  }
+
+  /** Where in `drawn` the selected annotation is, if it is one of them. */
+  selectedDrawnIndex(): number | undefined {
+    const selected = this.connection.selectedAnnotation.value;
+    if (selected === undefined) return undefined;
+    const table = [...this.layerStates].find(
+      ([, { layerState }]) => layerState === selected.annotationLayerState,
+    )?.[0];
+    return table === undefined
+      ? undefined
+      : this.drawn.value.indexOf(table, selected.annotationId);
+  }
+
+  get placingChanged(): ReadonlySignal<() => void> {
+    return this.connection.armedPlacement.changed;
+  }
+
+  isPlacing(): boolean {
+    const table = this.placement.value?.table;
+    const armed = this.connection.armedPlacement.value;
+    return (
+      table !== undefined &&
+      armed !== undefined &&
+      armed === this.layerStates.get(table)?.layerState
+    );
+  }
+
+  setNewRowValue(name: string, value: AnnotationPayloadValue | undefined) {
+    const { [name]: _replaced, ...others } = this.newRowPayload.value;
+    this.newRowPayload.value =
+      value === undefined ? others : { ...others, [name]: value };
+    if (this.isPlacing() && this.missingRequired().length > 0) {
+      this.connection.disarmPlacement();
+    }
+  }
+
+  /** Required properties of the placement table not yet typed. */
+  missingRequired(): string[] {
+    const table = this.placement.value?.table;
+    const info = table === undefined ? undefined : this.tableInfo(table);
+    const payload = this.newRowPayload.value;
+    return (info?.requiredProperties ?? []).filter(
+      (name) => !(name in payload),
+    );
+  }
+
+  togglePlacing() {
+    const { table, type } = this.placement.value ?? {};
+    if (table === undefined || type === undefined) return;
+    if (this.missingRequired().length > 0) return;
+    if (this.isPlacing()) {
+      this.connection.disarmPlacement();
+    } else {
+      this.connection.armPlacement(
+        this.annotationState(table).layerState,
+        type,
+      );
+    }
   }
 
   isSelected({ table, layerId }: DrawnAnnotation): boolean {
@@ -836,6 +1014,106 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.fetchVisible();
   }
 
+  /** Server first; the scopes holding the new row are then read again. */
+  private async createRow(
+    name: string,
+    annotation: Annotation,
+  ): Promise<AnnotationId> {
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    const coords = this.coords;
+    const info = this.tableInfo(name);
+    let rowId: bigint;
+    try {
+      if (info === undefined) throw new Error(TABLE_UNLISTED_NOTE);
+      rowId = await createAnnotationRow(
+        fetchOkImpl,
+        baseUrl,
+        name,
+        this.tableVoxels(info, annotation),
+        this.newRowPayload.value,
+      );
+    } catch (error) {
+      this.errors.set(name, errorMessage(error));
+      this.publishStatus();
+      throw error;
+    }
+    this.errors.delete(name);
+    await this.rereadScopesOf(info, rowId, coords);
+    return rowAnnotationId(name, rowId);
+  }
+
+  /** The annotation's points by the table's point names, in its voxels. */
+  private tableVoxels(
+    info: AnnotationTableInfo,
+    annotation: Annotation,
+  ): Map<string, number[]> {
+    const points =
+      annotation.type === AnnotationType.LINE
+        ? [annotation.pointA, annotation.pointB]
+        : annotation.type === AnnotationType.POINT
+          ? [annotation.point]
+          : [];
+    if (points.length !== info.points.length) {
+      throw new Error(PLACE_POINT_COUNT_NOTE);
+    }
+    return new Map(
+      points.map((point, index) => {
+        const nanometres = this.connection.sourceToNanometres(point);
+        if (nanometres === undefined) throw new Error(NO_NANOMETRE_SCALE);
+        return [
+          info.points[index],
+          nanometresToTableVoxels(nanometres, info.voxelResolution),
+        ];
+      }),
+    );
+  }
+
+  /**
+   * Only the scopes of the new row's roots, and the whole table, are read
+   * again; every scope when the row cannot be read back.
+   */
+  private async rereadScopesOf(
+    info: AnnotationTableInfo,
+    rowId: bigint,
+    coords: AnnotationReadCoordinates,
+  ) {
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    let roots: bigint[] | undefined;
+    try {
+      const rows = await fetchAnnotationRows(
+        fetchOkImpl,
+        baseUrl,
+        info,
+        [rowId],
+        coords,
+        this.schemas,
+      );
+      roots = rows.flatMap(({ points }) => points.map(({ rootId }) => rootId));
+    } catch {
+      roots = undefined;
+    }
+    if (this.wasDisposed || coords !== this.coords) return;
+    const { name } = info;
+    if (roots === undefined) {
+      this.forgetTable(name);
+    } else {
+      this.forgetTablePointsIn(name, [
+        wholeTableCacheKey(coords, name),
+        ...roots.map((root) => annotationCacheKey(coords, root)),
+      ]);
+    }
+    this.retireInFlight(name);
+    this.invalidate([name]);
+    this.fetchVisible();
+  }
+
+  private forgetTablePointsIn(name: string, keys: readonly string[]) {
+    for (const key of keys) {
+      this.cache.get(key)?.points.delete(name);
+      this.rootFailures.clear(name, key);
+    }
+  }
+
   /** A failed request keeps its mark: it is not retried until something changes. */
   private retireInFlight(name: string) {
     for (const [key, asked] of this.pending) {
@@ -872,11 +1150,13 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     }
     this.coords = coords;
     this.cache.clear();
+    this.lastRedraw.clear();
     this.pending.clear();
     this.rootFailures.reset();
     this.absent.clear();
     this.details = undefined;
     for (const table of this.state.ticked) this.errors.delete(table);
+    this.publishPlacement();
     this.invalidate(this.state.ticked);
     this.fetchVisible();
     this.untickUnlisted();
@@ -935,7 +1215,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     for (const name of unticked) {
       this.forgetTable(name);
       this.rendered.delete(name);
-      this.drawnByTable.delete(name);
+      this.rowsByTable.delete(name);
       this.stale.delete(name);
       this.clearAnnotations(name);
     }
@@ -945,6 +1225,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     }
     for (const name of added) this.errors.delete(name);
     this.syncColors(ticked);
+    this.publishPlacement();
     if (requeried.length > 0) this.invalidate(requeried);
     this.publishDrawn();
     this.publishStatus();
@@ -961,6 +1242,33 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       changed = true;
     }
     if (changed) this.colorsChanged.dispatch();
+  }
+
+  private currentPlacement(): TablePlacement | undefined {
+    const { ticked } = this.state;
+    if (ticked.length === 0) return undefined;
+    if (ticked.length > 1) return { blockedBy: PLACE_ONE_TABLE_NOTE };
+    const [table] = ticked;
+    const info = this.tableInfo(table);
+    if (info === undefined) return undefined;
+    if (!info.canWrite) return { blockedBy: PLACE_NO_WRITE_NOTE };
+    if (hasExplicitTimestamp(this.coords)) {
+      return { blockedBy: PLACE_PAST_NOTE };
+    }
+    const type = PLACEMENT_TYPE_BY_POINT_COUNT.get(info.points.length);
+    if (type === undefined) return { blockedBy: PLACE_POINT_COUNT_NOTE };
+    return { table, type };
+  }
+
+  /** A tool armed for what is no longer allowed comes off. */
+  private publishPlacement() {
+    const placement = this.currentPlacement();
+    if (isEqual(placement, this.placement.value)) return;
+    this.connection.disarmPlacement();
+    if (placement?.table !== this.placement.value?.table) {
+      this.newRowPayload.value = {};
+    }
+    this.placement.value = placement;
   }
 
   private tableInfo(name: string): AnnotationTableInfo | undefined {
@@ -1083,6 +1391,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
             (table) => this.pending.get(request.key)?.get(table) === requestId,
           );
     this.running++;
+    this.countInFlight(request.tables, 1);
     try {
       const accept = await this.read(request, queries, this.coords);
       const tables = stillAsked();
@@ -1099,6 +1408,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       if (tables.length > 0) this.failed({ ...request, tables }, error, asked);
     } finally {
       this.running--;
+      this.countInFlight(request.tables, -1);
       this.fetchVisible();
     }
   }
@@ -1142,6 +1452,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         {
           isReadonly: () => this.isReadonly(name),
           onDelete: (annotation) => this.deleteRow(name, annotation),
+          onCreate: (annotation) => this.createRow(name, annotation),
         },
       );
       this.layerStates.set(name, tableState);
@@ -1150,19 +1461,27 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   }
 
   private clearAnnotations(name: string) {
-    this.layerStates.get(name)?.source.replaceAll([]);
+    const source = this.layerStates.get(name)?.source;
+    source?.discardPlaced();
+    source?.showRows(EMPTY_TABLE_ROWS(name));
+    this.lastRedraw.delete(name);
   }
 
-  private nanometresToSource = (nanometres: [number, number, number]) => {
-    const point = this.connection.nanometresToSource(nanometres);
-    if (point === undefined) {
-      throw new Error("The layer's coordinate space has no nanometre scale");
+  private countInFlight(tables: readonly string[], change: number) {
+    for (const table of tables) {
+      const count = (this.inFlight.get(table) ?? 0) + change;
+      if (count === 0) this.inFlight.delete(table);
+      else this.inFlight.set(table, count);
     }
-    return point;
-  };
+  }
+
+  private isLoading(name: string): boolean {
+    return this.inFlight.has(name) || this.stale.has(name);
+  }
 
   private invalidate(names: readonly string[]) {
     for (const name of names) this.stale.add(name);
+    this.publishStatus();
     if (this.frameRequested) return;
     this.frameRequested = true;
     this.connection.scheduleFrame(() => this.redrawStale());
@@ -1184,58 +1503,76 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.frameRequested = false;
     if (this.wasDisposed) return;
     const scopes = this.scopes();
-    const visibleRoots = new Set(this.connection.visibleSegments);
     for (const name of this.stale) {
-      if (this.state.ticked.includes(name)) {
-        this.redraw(name, scopes, visibleRoots);
-      }
+      if (this.state.ticked.includes(name)) this.redraw(name, scopes);
     }
     this.stale.clear();
     this.publishDrawn();
     this.publishStatus();
   }
 
-  private redraw(
-    name: string,
-    scopes: readonly AnnotationScope[],
-    visibleRoots: ReadonlySet<bigint>,
-  ) {
+  private redraw(name: string, scopes: readonly AnnotationScope[]) {
     const info = this.tableInfo(name);
-    let layerRows: LayerRow[] = [];
-    if (info !== undefined && this.limitNote.value === undefined) {
+    const inputs: RedrawInputs = {
+      info,
+      fetched: fetchedTablePoints(name, scopes, this.cache),
+      limitNote: this.limitNote.value,
+      scale: this.connection.sourceScale(),
+    };
+    const last = this.lastRedraw.get(name);
+    this.lastRedraw.set(name, inputs);
+    const { source } = this.annotationState(name);
+    const unchanged = last !== undefined && sameRedrawInputs(last, inputs);
+    if (unchanged && !source.hasWritten()) {
+      this.showDetails(name);
+      return;
+    }
+    let rows = EMPTY_TABLE_ROWS(name);
+    if (info !== undefined && inputs.limitNote === undefined) {
       try {
-        layerRows = toLayerAnnotations(
-          fetchedTablePoints(name, scopes, this.cache),
-          info,
-          this.nanometresToSource,
-          visibleRoots,
-        );
+        rows = drawableRows(inputs.fetched, info, inputs.scale);
       } catch (error) {
         this.errors.set(name, errorMessage(error));
       }
     }
-    this.annotationState(name).source.replaceAll(
-      layerRows.flatMap(({ annotations }) => annotations),
-    );
+    const written = tablePointsSettled(name, scopes, this.cache, this.hasFailed)
+      ? source.takeWritten()
+      : new Map<AnnotationId, AnnotationId>();
+    source.showRows(rows);
+    this.selectWritten(name, written);
     this.showDetails(name);
-    this.rendered.set(name, layerRows.length);
-    this.drawnByTable.set(
-      name,
-      layerRows
-        .map(({ id, value, annotations }) => ({
-          table: name,
-          layerId: annotations[0].id,
-          id,
-          value,
-        }))
-        .sort((a, b) => compareIds(a.id, b.id)),
-    );
+    this.rendered.set(name, rowCount(rows));
+    this.rowsByTable.set(name, rows);
+  }
+
+  /** A placed annotation that was selected hands the selection to its row. */
+  private selectWritten(
+    name: string,
+    written: ReadonlyMap<AnnotationId, AnnotationId>,
+  ) {
+    const selected = this.connection.selectedAnnotation.value;
+    const tableState = this.layerStates.get(name);
+    if (
+      selected === undefined ||
+      tableState === undefined ||
+      selected.annotationLayerState !== tableState.layerState
+    ) {
+      return;
+    }
+    const rowId = written.get(selected.annotationId);
+    const row = rowId === undefined ? undefined : tableState.source.get(rowId);
+    if (row !== undefined) {
+      this.connection.selectAnnotation(tableState.layerState, row);
+    }
   }
 
   private publishDrawn() {
-    this.drawn.value = this.state.ticked.flatMap(
-      (name) => this.drawnByTable.get(name) ?? [],
+    const tables = this.state.ticked.flatMap(
+      (name) => this.rowsByTable.get(name) ?? [],
     );
+    if (arraysEqual(tables, this.publishedRows)) return;
+    this.publishedRows = tables;
+    this.drawn.value = drawnRowsOf(tables);
   }
 
   private tableNote(name: string): string | undefined {
@@ -1258,6 +1595,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         table: name,
         fetched: fetchedTablePoints(name, scopes, this.cache),
         annotations: this.rendered.get(name) ?? 0,
+        loading: this.isLoading(name),
         error: this.errors.get(name) ?? this.rootFailures.messageFor(name),
         note: this.tableNote(name),
       }),

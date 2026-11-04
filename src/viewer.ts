@@ -85,6 +85,7 @@ import {
 } from "#src/navigation_state.js";
 import { overlaysOpen } from "#src/overlay.js";
 import { ScreenshotHandler } from "#src/python_integration/screenshots.js";
+import { RenderedDataPanel } from "#src/rendered_data_panel.js";
 import { allRenderLayerRoles, RenderLayerRole } from "#src/renderlayer.js";
 import { StatusMessage } from "#src/status.js";
 import {
@@ -94,6 +95,7 @@ import {
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import {
   makeDerivedWatchableValue,
+  WatchableValue,
   observeWatchable,
   TrackableValue,
 } from "#src/trackable_value.js";
@@ -108,6 +110,7 @@ import { LayerSidePanelManager } from "#src/ui/layer_side_panel.js";
 import { setupPositionDropHandlers } from "#src/ui/position_drag_and_drop.js";
 import { ScreenshotDialog } from "#src/ui/screenshot_menu.js";
 import { SelectionDetailsPanel } from "#src/ui/selection_details.js";
+import { ModeShortcutStrip, ShortcutSheet } from "#src/ui/shortcut_help.js";
 import { SidePanelManager } from "#src/ui/side_panel.js";
 import { StateEditorDialog } from "#src/ui/state_editor.js";
 import { StatisticsDisplayState, StatisticsPanel } from "#src/ui/statistics.js";
@@ -1101,6 +1104,7 @@ export class Viewer extends RefCounted implements ViewerState {
           host: this.editSessionHost,
         }),
       );
+      this.installShortcutHelp();
       const editingTopbarRightSpacer = document.createElement("div");
       editingTopbarRightSpacer.style.flex = "1 1 0";
       editingTopbarRightSpacer.style.minWidth = "0";
@@ -1340,7 +1344,9 @@ export class Viewer extends RefCounted implements ViewerState {
       });
     }
 
-    this.bindAction("help", () => this.toggleHelpPanel());
+    this.bindAction("help", () => {
+      this.shortcutSheetOpen.value = !this.shortcutSheetOpen.value;
+    });
 
     for (let i = 1; i <= 9; ++i) {
       this.bindAction(`toggle-layer-${i}`, () => {
@@ -1406,6 +1412,70 @@ export class Viewer extends RefCounted implements ViewerState {
     );
     this.bindAction("edit-json-state", () => this.editJsonState());
     this.bindAction("screenshot", () => this.showScreenshotDialog());
+  }
+
+  /** Shows on H; the older reference panel stays one click away from it. */
+  readonly shortcutSheetOpen = new WatchableValue<boolean>(false);
+
+  private installShortcutHelp() {
+    const stripMount = document.createElement("div");
+    stripMount.className = "neuroglancer-mode-strip-mount";
+    this.display.container.appendChild(stripMount);
+    this.registerDisposer(
+      this.display.updateFinished.add(() => this.placeModeStrip(stripMount)),
+    );
+    this.registerDisposer(mountComponent(stripMount, ModeShortcutStrip, {}));
+    const sheetMount = document.createElement("div");
+    document.body.appendChild(sheetMount);
+    const { inputEventBindings, editSessionHost } = this;
+    this.registerDisposer(
+      mountComponent(sheetMount, ShortcutSheet, {
+        open: this.shortcutSheetOpen,
+        editKeybindOverrides: editSessionHost.editKeybindOverrides,
+        setEditKeybind: (name, keys) =>
+          editSessionHost.setEditKeybind(name, keys),
+        inputMaps: [
+          inputEventBindings.global,
+          inputEventBindings.sliceView,
+          inputEventBindings.perspectiveView,
+        ],
+        activeSession: editSessionHost.activeSession,
+        openFullReference: () => {
+          this.shortcutSheetOpen.value = false;
+          this.toggleHelpPanel();
+        },
+      }),
+    );
+    this.registerDisposer(() => {
+      stripMount.remove();
+      sheetMount.remove();
+    });
+  }
+
+  private modeStripPlacedForGeneration = -1;
+
+  /** Keeps the strip along the bottom of the data panels as the layout changes. */
+  private placeModeStrip(mount: HTMLElement) {
+    const { display } = this;
+    if (display.resizeGeneration === this.modeStripPlacedForGeneration) return;
+    let left = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const panel of display.panels) {
+      if (!(panel instanceof RenderedDataPanel)) continue;
+      const rect = panel.element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      left = Math.min(left, rect.left);
+      right = Math.max(right, rect.right);
+      bottom = Math.max(bottom, rect.bottom);
+    }
+    if (left === Infinity) return;
+    this.modeStripPlacedForGeneration = display.resizeGeneration;
+    const container = display.container.getBoundingClientRect();
+    const margin = 16;
+    mount.style.left = `${left - container.left}px`;
+    mount.style.width = `${right - left}px`;
+    mount.style.bottom = `${container.bottom - bottom + margin}px`;
   }
 
   toggleHelpPanel() {

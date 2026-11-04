@@ -597,14 +597,51 @@
   margin: 0;
 }
 
-/* The keys the trace owns. Lives here rather than in a status bubble at the
-   bottom of the viewer: the tab is always open, so the bubble only repeated
-   what is already on screen. */
+/* The tooltip sits here because a disabled button fires no pointer events: the
+   button stops catching the pointer and hover falls through to this wrapper. */
+.calcada-trace-panel-button-hint {
+  display: inline-flex;
+}
+
+.calcada-trace-panel-button-hint button:disabled {
+  pointer-events: none;
+}
+
+.calcada-trace-panel-button-hint .neuroglancer-key-chip {
+  margin-inline: 1px;
+  font-weight: 400;
+}
+
+.calcada-trace-panel-score {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calcada-trace-panel-score > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.calcada-trace-panel-radius-label {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+/* Every key the tab answers to. Open by default: this list is how they get
+   learned, and it is generated from the maps that handle them. */
+.calcada-trace-panel-keys-section summary {
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .calcada-trace-panel-keys {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 2px 8px;
-  margin: 0;
+  margin: 4px 0 0;
   font-size: 11px;
   opacity: 0.8;
 }
@@ -616,11 +653,6 @@
 
 .calcada-trace-panel-keys dd {
   margin: 0;
-}
-
-.calcada-trace-panel-keys-section summary {
-  font-size: 12px;
-  cursor: pointer;
 }
 
 /* Without a legend "green or red" is a guess. The bar is the scale itself, so
@@ -666,6 +698,7 @@
 
 .calcada-trace-panel-buttons {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
 }
@@ -1632,6 +1665,43 @@
   font-weight: 600;
 }
 
+.calcada-annotations-place {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.calcada-annotations-place-tools {
+  display: flex;
+}
+
+.calcada-annotations-place-tools .neuroglancer-icon[aria-pressed="true"] {
+  background-color: #db4437;
+}
+
+.calcada-annotations-limit {
+  color: #f6c344;
+}
+
+.calcada-annotations-payload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.calcada-annotations-payload-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-annotations-payload-value {
+  width: 7em;
+}
+
 .calcada-annotations-picker {
   min-width: 0;
 }
@@ -1679,6 +1749,11 @@
   height: 10px;
   border: 1px solid #666;
   border-radius: 2px;
+}
+
+.calcada-annotations-loading {
+  margin-left: 8px;
+  color: #aaa;
 }
 
 .calcada-annotations-color {

@@ -15,8 +15,18 @@ import { Tab } from "#src/widget/tab_view.js";
 
 export const ANNOTATION_TABLES_TAB_LABEL = "Tables";
 
+/** The viewer's "select-previous" / "select-next" events, sent to the selected layer. */
+const ADJACENT_ROW_EVENTS = [
+  ["select-previous", -1],
+  ["select-next", 1],
+] as const;
+
+export interface LayerEvents {
+  registerLayerEvent(type: string, handler: () => void): () => boolean;
+}
+
 export class CalcadaAnnotationTablesTab extends Tab {
-  constructor(connection: AnnotationTablesPanelConnection) {
+  constructor(connection: AnnotationTablesPanelConnection, layer: LayerEvents) {
     super();
     this.element.classList.add("calcada-annotations-tab");
     this.registerDisposer(
@@ -24,5 +34,14 @@ export class CalcadaAnnotationTablesTab extends Tab {
         connection,
       }),
     );
+    for (const [event, offset] of ADJACENT_ROW_EVENTS) {
+      this.registerDisposer(
+        layer.registerLayerEvent(event, () => {
+          if (this.visible) {
+            connection.annotationTablesSession.selectAdjacent(offset);
+          }
+        }),
+      );
+    }
   }
 }

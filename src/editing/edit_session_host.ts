@@ -119,6 +119,7 @@ import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volu
 import type { PaintedVolumePreviewSummary } from "#src/editing/painted_volume/painted_volume_preview_summary.js";
 import type { PaintedVolumeSessionInputs } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import { createSessionPaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_session_preview.js";
+import type { SegmentColor } from "#src/editing/param_status_overlay.js";
 import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 // Side-effect: attaches `window.__editPaintBench` for the Playwright paint
 // benchmark (a dev tool, like `window.__paintProfiler` — only does work when
@@ -190,6 +191,7 @@ import {
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
 import type { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
 import { getSegmentEquivalences } from "#src/segmentation_display_state/base.js";
+import { getBaseObjectColor } from "#src/segmentation_display_state/frontend.js";
 import { SegmentationRenderLayer } from "#src/sliceview/volume/segmentation_renderlayer.js";
 import { StatusMessage } from "#src/status.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -198,8 +200,9 @@ import {
   DEFAULT_SIDE_PANEL_LOCATION,
   TrackableSidePanelLocation,
 } from "#src/ui/side_panel_location.js";
+import { serializeColor, useWhiteBackground } from "#src/util/color.js";
 import { RefCounted } from "#src/util/disposable.js";
-import { vec3 } from "#src/util/geom.js";
+import { vec3, vec4 } from "#src/util/geom.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import type { Viewer } from "#src/viewer.js";
@@ -669,6 +672,12 @@ export class EditSessionHost extends RefCounted {
   readonly requestSessionEntry = new Signal<
     (preselectBboxKey?: string) => void
   >();
+
+  /**
+   * The save-all key was pressed. The topbar subscribes because it owns the save
+   * flow (progress, conflict dialogs, toasts) a key press has to go through too.
+   */
+  readonly requestSaveAll = new NullarySignal();
 
   /** Owns the in-flight quick-region capture; lazily constructed. */
   private quickRegionCapture: QuickRegionCapture | undefined;
@@ -3339,9 +3348,9 @@ export class EditSessionHost extends RefCounted {
       // Painting selects its segment so the stroke shows in 2D and 3D without
       // a double-click (TM-490); the user turns it off in the brush/fill panel.
       autoSelectPaintedSegment: true,
-      // Off until the user opts in: with it off a stroke behaves exactly as it
-      // did before TM-268.
-      fillClosedPaths: false,
+      // On: drawing around an object in one motion fills the inside, which is
+      // what tracers expect; the brush panel switches it off.
+      fillClosedPaths: true,
     };
 
     const compute = new PaintingCompute(this.morphologyClient);
@@ -4236,6 +4245,34 @@ export class EditSessionHost extends RefCounted {
     return () => {
       unsubscribeLayers();
       unsubscribeLayer();
+    };
+  }
+
+  /**
+   * The colour neuroglancer draws segment `value` in on `layerId`, as a CSS
+   * colour, with the text colour that reads on it (WCAG luminance, as
+   * neuroglancer's own colour widgets pick it), or `undefined` when the layer
+   * is gone. Uses the same function as
+   * the segment list and the slices (`getBaseObjectColor`), on the segment's
+   * representative, so merges, the colour seed and user-set colours all show.
+   * One hash per call: cheap enough for every key press.
+   */
+  segmentColorFor(
+    layerId: LayerId,
+    value: number | bigint,
+  ): SegmentColor | undefined {
+    const layer = this.findSegmentationUserLayer(layerId);
+    if (layer === undefined) return undefined;
+    const { displayState } = layer;
+    const representative =
+      displayState.segmentationGroupState.value.segmentEquivalences.get(
+        BigInt(value),
+      );
+    const color = vec4.create();
+    getBaseObjectColor(displayState, representative, color);
+    return {
+      background: serializeColor(color),
+      text: useWhiteBackground(color) ? "white" : "black",
     };
   }
 

@@ -33,6 +33,7 @@ import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
 import { ParamInput } from "#src/editing/ui/tool_settings/param_input.js";
+import { ToolPanelKeys } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 import { TrackedSegmentList } from "#src/editing/ui/tool_settings/tracked_segment_list.js";
 import "#src/editing/ui/tool_settings/z_extrapolation.css";
 
@@ -268,6 +269,7 @@ function ZExtrapolationBody({
       >
         Reset
       </button>
+      <ToolPanelKeys host={host} toolId="z-extrapolation" />
     </div>
   );
 }

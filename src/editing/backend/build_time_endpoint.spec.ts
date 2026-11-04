@@ -115,6 +115,36 @@ describe("buildTimeBackendEndpoint — google-oauth mode", () => {
     expect(getSpy).toHaveBeenCalledOnce();
   });
 
+  it("logs in through the redirect proxy origin when one is baked in", async () => {
+    getSpy.mockResolvedValue(tokenResult("id-tok", 1));
+    vi.stubGlobal("NEUROGLANCER_ZETTA_BACKEND_URL", "https://backend.dev/api");
+    vi.stubGlobal("NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP", "client-abc");
+    vi.stubGlobal(
+      "NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL",
+      "https://neuroglancer-dev.example/",
+    );
+
+    await buildTimeBackendEndpoint()!.authorize({});
+
+    expect(ctorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        redirectProxyOrigin: "https://neuroglancer-dev.example",
+      }),
+    );
+  });
+
+  it("logs in without a redirect proxy when none is baked in", async () => {
+    getSpy.mockResolvedValue(tokenResult("id-tok", 1));
+    vi.stubGlobal("NEUROGLANCER_ZETTA_BACKEND_URL", "https://backend.dev/api");
+    vi.stubGlobal("NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP", "client-abc");
+
+    await buildTimeBackendEndpoint()!.authorize({});
+
+    expect(ctorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ redirectProxyOrigin: undefined }),
+    );
+  });
+
   it("takes precedence over a static token define", async () => {
     getSpy.mockResolvedValue(tokenResult("id-tok", 1));
     vi.stubGlobal("NEUROGLANCER_ZETTA_BACKEND_URL", "https://backend.dev/api");

@@ -46,6 +46,11 @@ import {
   CalcadaAnnotationTablesTab,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import {
+  TableLineTool,
+  TablePointTool,
+  tableStateOfTool,
+} from "#src/datasource/calcada/annotation_tables/table_place_tools.js";
 import type {
   ChunkedGraphChunkSource as ChunkedGraphChunkSourceInterface,
   ChunkedGraphChunkSpecification,
@@ -136,12 +141,14 @@ import {
   FilterLibrary,
 } from "#src/datasource/calcada/filter_library.js";
 import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
+import { nanometresPerGlobalUnit } from "#src/datasource/calcada/global_nanometres.js";
 import { appendCoordParams } from "#src/datasource/calcada/graph_coordinates.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import type { PieceSphere } from "#src/datasource/calcada/piece_centers.js";
 import {
+  globalToNanometres,
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
@@ -194,6 +201,20 @@ import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/tr
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
+import {
+  AIM_KEYS_MODE,
+  CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
+  CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
+  CALCADA_TRACE_TOGGLE_ACTION,
+  PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP,
+  SPLIT_DETECTION_INPUT_EVENT_MAP,
+  SPLIT_DETECTION_KEYS_MODE,
+  SPLIT_DETECTION_MODE_SHORTCUTS,
+  TRACE_AIM_MODE_SHORTCUTS,
+  TRACE_KEYS_MODE,
+  TRACE_MODE_SHORTCUTS,
+  ZETTA_TRACE_INPUT_EVENT_MAP,
+} from "#src/datasource/calcada/trace_key_bindings.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
 import {
   currentCandidateFilter,
@@ -326,7 +347,17 @@ import {
   renderAnnotationListHeader,
   selectedListAnnotation,
 } from "#src/ui/annotations.js";
+import {
+  keysForCustomAction,
+  keysForCustomTool,
+} from "#src/ui/custom_keybinds.js";
 import { getDefaultAnnotationListBindings } from "#src/ui/default_input_event_bindings.js";
+import { makeKeyChips } from "#src/ui/key_chips.js";
+import {
+  preferredChord,
+  shortcutAttributes,
+} from "#src/ui/key_chord_format.js";
+import { modeShortcuts, publishModeWhile } from "#src/ui/mode_shortcuts.js";
 import { SidePanelManager } from "#src/ui/side_panel.js";
 import type { Tool } from "#src/ui/tool.js";
 import {
@@ -2469,20 +2500,16 @@ const MESSAGE_DURATION_MS = 4000;
 // all ending in stepPlusMinus. Two maps can be bound at once (aiming over a
 // trace, or with detection on) and each has a document binder, so one press
 // can arrive more than once; the press itself, the action's detail, is what
-// is counted. The keys are the brush's own (config/custom-keybinds.json,
-// editSession.sizeIncrease / sizeDecrease), deliberately rather than a second
-// vocabulary for the gesture.
-function plusMinusBindings(mode: string) {
-  const plus = { action: `${mode}-plus` };
-  const minus = { action: `${mode}-minus` };
-  return {
-    "at:equal": plus,
-    "at:shift+equal": plus,
-    "at:numpadadd": plus,
-    "at:minus": minus,
-    "at:numpadsubtract": minus,
-  };
-}
+// is counted. The keys are the brush's own (the edit session's sizeIncrease /
+// sizeDecrease defaults), deliberately rather than a second vocabulary for the
+// gesture.
+// Which keys the strip shows when modes overlap: aiming is the narrowest, and an
+// edit tool (priority 1) yields to all of them.
+const SPLIT_DETECTION_MODE_PRIORITY = 2;
+let traceModeInstances = 0;
+let splitDetectionModeInstances = 0;
+const TRACE_MODE_PRIORITY = 3;
+const TRACE_AIM_MODE_PRIORITY = 4;
 
 const steppedPresses = new WeakSet<object>();
 
@@ -2497,35 +2524,6 @@ function plusMinusHandlers(mode: string, state: ZettaTraceState) {
   };
   return { [`${mode}-plus`]: step(1), [`${mode}-minus`]: step(-1) };
 }
-
-const TRACE_KEYS_MODE = "trace";
-const AIM_KEYS_MODE = "trace-aim";
-const SPLIT_DETECTION_KEYS_MODE = "split-detection";
-
-const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:arrowleft": { action: "reject-candidate" },
-  "at:arrowright": { action: "accept-candidate" },
-  "at:arrowdown": { action: "skip-candidate" },
-  // Its own action name, not the shared "undo": the merge and cut tools listen
-  // for that one on window, and a keypress resolving to it would run their
-  // handler and this one both — two reverts from a single press.
-  "at:control+keyz": { action: "trace-undo" },
-  "at:meta+keyz": { action: "trace-undo" },
-  "at:escape": { action: "exit-trace" },
-  ...plusMinusBindings(TRACE_KEYS_MODE),
-});
-
-// Held only while the sights are up. The placing click is bound HERE and
-// nowhere else on purpose: during a trace a click has to stay an ordinary
-// click, because a proofreader checking a candidate selects neighbouring
-// segments to look at, and that must not move the trace.
-const CALCADA_TRACE_AIM_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  ...plusMinusBindings(AIM_KEYS_MODE),
-  // Ctrl, not a plain click: in the 3D panel a bare drag orbits the camera, and
-  // aiming is exactly when you want to keep turning the view to find the spot.
-  "at:control+mousedown0": { action: "trace-place-sphere" },
-  "at:escape": { action: "trace-cancel-aim" },
-});
 
 // A merge is not instantly visible to a read that lands on another replica, so
 // the enlarged segment can come back empty for a moment. Asking the server for
@@ -3082,6 +3080,24 @@ class ZettaTraceSession extends RefCounted {
         signal.changed.add(() => void this.splitPoints.refresh()),
       );
     }
+    // Each layer's trace is its own entry, so ending one leaves another's.
+    const traceModeInstance = ++traceModeInstances;
+    this.registerDisposer(
+      publishModeWhile(modeShortcuts, state.active, {
+        id: `trace-${traceModeInstance}`,
+        title: "Trace",
+        priority: TRACE_MODE_PRIORITY,
+        shortcuts: TRACE_MODE_SHORTCUTS,
+      }),
+    );
+    this.registerDisposer(
+      publishModeWhile(modeShortcuts, state.aiming, {
+        id: `trace-aim-${traceModeInstance}`,
+        title: "Aiming",
+        priority: TRACE_AIM_MODE_PRIORITY,
+        shortcuts: TRACE_AIM_MODE_SHORTCUTS,
+      }),
+    );
     this.registerDisposer(
       state.active.changed.add(() => {
         if (state.active.value) {
@@ -4633,17 +4649,6 @@ class ZettaTraceSession extends RefCounted {
  * at where the work is only pays off if you can then pick up a tool and go
  * there, and a tool activation would tear this down at that exact moment.
  */
-// Held only while split error detection is on.
-const SPLIT_DETECTION_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:arrowleft": { action: "split-detection-previous" },
-  "at:arrowright": { action: "split-detection-next" },
-  ...plusMinusBindings(SPLIT_DETECTION_KEYS_MODE),
-});
-// Ctrl like the trace's sphere, so a plain click stays a click.
-const PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP = EventActionMap.fromObject({
-  "at:control+mousedown0": { action: "proofread-segment-pick" },
-});
-
 /**
  * Selecting the segment being proofread, with a click in 2D: in 3D the pick
  * is whatever mesh face is nearest, which after a cut can be a piece of a
@@ -4786,6 +4791,16 @@ class CandidateOverviewSession extends RefCounted {
     private segmentSession: ProofreadSegmentSession,
   ) {
     super();
+    // Each layer's detection is its own entry, like the trace's.
+    const detectionModeInstance = ++splitDetectionModeInstances;
+    this.registerDisposer(
+      publishModeWhile(modeShortcuts, state.active, {
+        id: `split-detection-${detectionModeInstance}`,
+        title: "Split errors",
+        priority: SPLIT_DETECTION_MODE_PRIORITY,
+        shortcuts: SPLIT_DETECTION_MODE_SHORTCUTS,
+      }),
+    );
     this.registerDisposer(
       state.active.changed.add(() => {
         if (state.active.value) {
@@ -5348,7 +5363,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
     layer.tabs.add(CALCADA_ANNOTATIONS_TAB_ID, {
       label: ANNOTATION_TABLES_TAB_LABEL,
       order: -18,
-      getter: () => new CalcadaAnnotationTablesTab(this),
+      getter: () => new CalcadaAnnotationTablesTab(this, layer),
     });
     // The side panel snapshots the layer's tab list before this
     // datasource-driven tab exists (nothing listens to tabs.optionsChanged),
@@ -5873,6 +5888,20 @@ void main() {
         selectionState,
       ),
     );
+    const armedPlacement = new WatchableValue<AnnotationLayerState | undefined>(
+      undefined,
+    );
+    this.registerDisposer(
+      layer.tool.changed.add(() => {
+        armedPlacement.value = tableStateOfTool(layer.tool.value);
+      }),
+    );
+    const disarmPlacement = () => {
+      if (tableStateOfTool(layer.tool.value) !== undefined) {
+        layer.tool.value = undefined;
+      }
+    };
+    this.registerDisposer(disarmPlacement);
     this.annotationTablesSession = this.registerDisposer(
       new CalcadaAnnotationTablesSession(
         {
@@ -5881,9 +5910,20 @@ void main() {
           timestamp: segmentsState.timestamp,
           visibleSegments: segmentsState.visibleSegments,
           graphEdited: this.graphEdited,
-          nanometresToSource: (nanometres) =>
-            nanometresToGlobal(
-              nanometres,
+          sourceScale: () => {
+            const { inputSpace } =
+              loadedSubsource.loadedDataSource.transform.value;
+            const nanometresPerUnit = nanometresPerGlobalUnit(inputSpace);
+            return nanometresPerUnit === undefined
+              ? undefined
+              : {
+                  rank: inputSpace.rank,
+                  nanometresPerUnit: Array.from(nanometresPerUnit),
+                };
+          },
+          sourceToNanometres: (point) =>
+            globalToNanometres(
+              point,
               loadedSubsource.loadedDataSource.transform.value.inputSpace,
             ),
           makeAnnotationState: (subsubsourceId, color, properties, options) => {
@@ -5922,7 +5962,17 @@ void main() {
           clearHover: () => {
             layer.annotationDisplayState.hoverState.value = undefined;
           },
-          scheduleFrame: (callback) => requestAnimationFrame(callback),
+          // After the paint, so a "Loading…" set before a heavy redraw shows first.
+          scheduleFrame: (callback) =>
+            requestAnimationFrame(() => setTimeout(callback)),
+          armPlacement: (annotationState, type) => {
+            layer.tool.value =
+              type === AnnotationType.LINE
+                ? new TableLineTool(layer, annotationState)
+                : new TablePointTool(layer, annotationState);
+          },
+          disarmPlacement,
+          armedPlacement,
         },
         state.annotationTables,
       ),
@@ -8374,37 +8424,42 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
     );
     parent.appendChild(layerControls);
     toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
+      makeCalcadaToolButton(context, layer.toolBinder, {
         toolJson: CALCADA_MULTICUT_SEGMENTS_TOOL_ID,
         label: "Multicut",
         title: "Multicut segments",
+        keys: keysForCustomTool(CALCADA_MULTICUT_SEGMENTS_TOOL_ID),
       }),
     );
     toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
+      makeCalcadaToolButton(context, layer.toolBinder, {
         toolJson: CALCADA_MERGE_SEGMENTS_TOOL_ID,
         label: "Merge",
         title: "Merge segments",
+        keys: keysForCustomTool(CALCADA_MERGE_SEGMENTS_TOOL_ID),
       }),
     );
     toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
+      makeCalcadaToolButton(context, layer.toolBinder, {
         toolJson: CALCADA_FIND_PATH_TOOL_ID,
         label: "Find Path",
         title: "Find Path",
+        keys: keysForCustomTool(CALCADA_FIND_PATH_TOOL_ID),
       }),
     );
     toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
+      makeCalcadaToolButton(context, layer.toolBinder, {
         toolJson: CALCADA_PIECE_SPLIT_TOOL_ID,
         label: "Cut",
         title: "Cut a segment using blue/red points",
+        keys: keysForCustomTool(CALCADA_PIECE_SPLIT_TOOL_ID),
       }),
     );
     toolbox.appendChild(
-      makeToolButton(context, layer.toolBinder, {
+      makeCalcadaToolButton(context, layer.toolBinder, {
         toolJson: CALCADA_DEBUG_TOOL_ID,
         label: "Debug",
+        keys: keysForCustomAction(CALCADA_DEBUG_TOGGLE_ACTION),
         title:
           "Debug overlay: colour every piece of the visible segments and draw " +
           "a line per edge in its segment's colour. Bind a key to " +
@@ -8656,15 +8711,43 @@ void main() {
   setPointMarkerBorderColor(vec4(0.0, 0.0, 0.0, 1.0));
 }
 `;
-// Bound straight to a key like the debug toggle: both are modes that must
-// survive the proofreader picking up a tool.
-const CALCADA_TRACE_TOGGLE_ACTION = "calcada-toggle-zetta-trace";
 const CALCADA_DEBUG_TOOL_ID = "calcadaDebug";
 // Bound straight to a key in config/custom-keybinds.json, bypassing the tool
 // slot so toggling the overlay never puts down the tool in hand.
 const CALCADA_DEBUG_TOGGLE_ACTION = "calcada-toggle-debug-mode";
-// A mode like the other two, bound straight to a key for the same reason.
-const CALCADA_SPLIT_DETECTION_TOGGLE_ACTION = "calcada-toggle-split-detection";
+
+/**
+ * A tool button that also shows the key `custom-keybinds.json` gives the tool.
+ * That key activates the tool directly, so the button's own binding widget, which
+ * only knows its Shift+key slot, cannot show it. Its hover hint moves to the
+ * shared tooltip so the label does not carry a second, slower native one.
+ *
+ * A temporary bridge over the upstream widget, kept here rather than in
+ * `makeToolButton` until these buttons move to the React layer tab. If the
+ * label class changes upstream the button is returned as it is, without keys.
+ */
+function makeCalcadaToolButton(
+  context: RefCounted,
+  binder: Parameters<typeof makeToolButton>[1],
+  options: Parameters<typeof makeToolButton>[2] & {
+    keys: readonly string[];
+  },
+) {
+  const { keys, ...buttonOptions } = options;
+  const element = makeToolButton(context, binder, buttonOptions);
+  const label = element.querySelector<HTMLElement>(
+    ".neuroglancer-tool-button-label",
+  );
+  const chord = preferredChord(keys);
+  if (label === null || chord === undefined) return element;
+  label.removeAttribute("title");
+  label.dataset.tooltip = options.title;
+  const attributes = shortcutAttributes(keys);
+  label.dataset.shortcut = attributes["data-shortcut"];
+  label.setAttribute("aria-keyshortcuts", attributes["aria-keyshortcuts"]);
+  label.append(" ", makeKeyChips(chord));
+  return element;
+}
 
 class MulticutAnnotationLayerView extends AnnotationLayerView {
   declare private _annotationStates: MergedAnnotationStates;

@@ -299,3 +299,16 @@
     transition: none;
   }
 }
+
+/* A tool panel scrolls inside its own height. Without these a panel taller than
+   the window stretches the whole side column, and the data panels, resized with
+   it, shift the view. */
+.neuroglancer-side-panel:has(> .neuroglancer-edit-session-tool-panel) {
+  min-height: 0;
+}
+
+.neuroglancer-edit-session-tool-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+}
