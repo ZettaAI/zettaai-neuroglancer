@@ -462,6 +462,7 @@ export function showSegmentsOnMoveToAnnotation(
     const annotation = reference.value;
     if (annotation === undefined) return;
     if (annotation !== null) showSegmentsOnMove(annotation, state);
+    reference.changed.remove(showOnceLoaded);
     reference.dispose();
   };
   reference.changed.add(showOnceLoaded);
