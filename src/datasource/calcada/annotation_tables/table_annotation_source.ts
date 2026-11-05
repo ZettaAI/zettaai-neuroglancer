@@ -34,26 +34,34 @@ import {
   withoutRow,
 } from "#src/datasource/calcada/annotation_tables/table_rows.js";
 import type { WatchableValue } from "#src/trackable_value.js";
+import type { RefCounted } from "#src/util/disposable.js";
 
 export interface TableAnnotationSourceOptions {
   isReadonly: () => boolean;
   onDelete: (annotation: Annotation) => Promise<void>;
   /** Writes a placed annotation as a row; resolves to the id the row is drawn under. */
   onCreate: (annotation: Annotation) => Promise<AnnotationId>;
+  /** The row's own details in the Selection panel. */
+  mountDetails: (
+    id: AnnotationId,
+    parent: HTMLElement,
+    context: RefCounted,
+  ) => void;
 }
 
 /**
  * A local source that takes a whole table at once as columns and writes
  * server-first. A row's annotation is made only when asked for. The rows
- * belong to the server, so NG's edits of them (moving, editing a description,
- * changing the property schema) are ignored; placing a new annotation and
- * deleting one stay. Placed annotations live in `annotationMap`.
+ * belong to the server, so NG's own fields of them are read-only and its edits
+ * (moving, changing the property schema) are ignored; a row's payload is edited
+ * by `mountDetails`, and placing a new annotation and deleting one stay. Placed
+ * annotations live in `annotationMap`.
  */
 export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
   private tableRows = EMPTY_TABLE_ROWS("");
-  private readonly descriptions = new Map<AnnotationId, string>();
   private readonly onDelete: TableAnnotationSourceOptions["onDelete"];
   private readonly onCreate: TableAnnotationSourceOptions["onCreate"];
+  private readonly mountDetails: TableAnnotationSourceOptions["mountDetails"];
   private readonly deletesInFlight = new Map<AnnotationId, Promise<void>>();
   // Placed here and not yet drawn from the server, so carried across
   // showRows; once written, the id its row is drawn under.
@@ -63,11 +71,17 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     watchableTransform: WatchableCoordinateSpaceTransform,
     properties: WatchableValue<AnnotationPropertySpec[]>,
     relationships: string[],
-    { isReadonly, onDelete, onCreate }: TableAnnotationSourceOptions,
+    {
+      isReadonly,
+      onDelete,
+      onCreate,
+      mountDetails,
+    }: TableAnnotationSourceOptions,
   ) {
     super(watchableTransform, properties, relationships);
     this.onDelete = onDelete;
     this.onCreate = onCreate;
+    this.mountDetails = mountDetails;
     // The base class declares `readonly` as an own field, which would shadow a getter.
     Object.defineProperty(this, "readonly", { get: isReadonly });
   }
@@ -79,9 +93,6 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
   showRows(rows: TableRows) {
     this.ensureUpdated();
     this.tableRows = rows;
-    for (const id of this.descriptions.keys()) {
-      if (instanceOfId(rows, id) === undefined) this.descriptions.delete(id);
-    }
     for (const id of this.annotationMap.keys()) {
       if (!this.placed.has(id)) this.annotationMap.delete(id);
     }
@@ -100,7 +111,7 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
       length: rowInstances + placed.length,
       at: (index) =>
         index < rowInstances
-          ? this.described(annotationOfInstance(rows, index))
+          ? annotationOfInstance(rows, index)
           : placed.at(index - rowInstances),
       indexOf: (id) => {
         const instance = instanceOfId(rows, id);
@@ -109,6 +120,24 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
         return index === undefined ? undefined : rowInstances + index;
       },
     };
+  }
+
+  /** Drawn from the table, not placed here. */
+  isRow(id: AnnotationId): boolean {
+    return instanceOfId(this.tableRows, id) !== undefined;
+  }
+
+  /** A row's fields are the server's: only its payload is edited, by mountDetails. */
+  isAnnotationReadonly(id: AnnotationId): boolean {
+    return this.readonly || this.isRow(id);
+  }
+
+  mountAnnotationDetails(
+    id: AnnotationId,
+    parent: HTMLElement,
+    context: RefCounted,
+  ) {
+    if (this.isRow(id)) this.mountDetails(id, parent, context);
   }
 
   get(id: AnnotationId): Annotation | undefined {
@@ -126,7 +155,7 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     this.ensureUpdated();
     const rows = this.tableRows;
     for (let instance = 0; instance < instanceCount(rows); ++instance) {
-      yield this.described(annotationOfInstance(rows, instance));
+      yield annotationOfInstance(rows, instance);
     }
     yield* this.annotationMap.values();
   }
@@ -149,35 +178,10 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
     );
   }
 
-  /**
-   * Tells only the annotation's reference, which the Selection panel watches:
-   * a description is not drawn, so the table's buffer and list stay as they are.
-   */
-  setDescription(id: AnnotationId, description: string) {
-    const annotation = this.get(id);
-    if (annotation === undefined || annotation.description === description) {
-      return;
-    }
-    const described = { ...annotation, description };
-    if (this.annotationMap.has(id)) this.annotationMap.set(id, described);
-    else this.descriptions.set(id, description);
-    const reference = this.references.get(id);
-    if (reference === undefined) return;
-    reference.value = described;
-    reference.changed.dispatch();
-  }
-
   private rowAnnotation(id: AnnotationId): Annotation | undefined {
     const instance = instanceOfId(this.tableRows, id);
     if (instance === undefined) return undefined;
-    return this.described(annotationOfInstance(this.tableRows, instance));
-  }
-
-  private described(annotation: Annotation): Annotation {
-    const description = this.descriptions.get(annotation.id);
-    return description === undefined
-      ? annotation
-      : { ...annotation, description };
+    return annotationOfInstance(this.tableRows, instance);
   }
 
   private refreshReferences() {
@@ -279,7 +283,6 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
       this.tableRows,
       rowOfInstance(this.tableRows, instance),
     );
-    this.descriptions.delete(id);
     this.refreshReferences();
     this.changed.dispatch();
     this.childDeleted.dispatch(id);

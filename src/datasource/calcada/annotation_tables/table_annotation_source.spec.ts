@@ -20,6 +20,7 @@ import {
   makeIdentityTransform,
   WatchableCoordinateSpaceTransform,
 } from "#src/coordinate_transform.js";
+import type { TableAnnotationSourceOptions } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import {
   annotationOfInstance,
@@ -34,6 +35,7 @@ import {
   HALF_NANOMETRE_SCALE,
 } from "#src/datasource/calcada/annotation_tables/table_rows_fixture.js";
 import { WatchableValue } from "#src/trackable_value.js";
+import { RefCounted } from "#src/util/disposable.js";
 
 const LARGE_TABLE_SIZE = 100_000;
 const TABLE = "syn";
@@ -42,12 +44,14 @@ const makeSource = ({
   isReadonly = () => false,
   onDelete = () => Promise.resolve(),
   onCreate = () => Promise.reject(new Error("not written")),
+  mountDetails = () => {},
   properties = [],
 }: {
   properties?: AnnotationPropertySpec[];
   isReadonly?: () => boolean;
   onDelete?: (annotation: Annotation) => Promise<void>;
   onCreate?: (annotation: Annotation) => Promise<AnnotationId>;
+  mountDetails?: TableAnnotationSourceOptions["mountDetails"];
 } = {}) =>
   new CalcadaTableAnnotationSource(
     new WatchableCoordinateSpaceTransform(
@@ -61,7 +65,7 @@ const makeSource = ({
     ),
     new WatchableValue(properties),
     ["associated segments"],
-    { isReadonly, onDelete, onCreate },
+    { isReadonly, onDelete, onCreate, mountDetails },
   );
 
 const pointAnnotation = (id: string): Annotation => ({
@@ -119,14 +123,10 @@ describe("CalcadaTableAnnotationSource", () => {
     });
     const rows = tableRows([4, 7], 3);
     source.showRows(rows);
-    source.setDescription("syn:7:1", "payload");
     const placed = source.add(pointAnnotation(""));
     const list = source.annotationList();
     expect(list.length).toBe(7);
-    expect(list.at(4)).toEqual({
-      ...annotationOfInstance(rows, 4),
-      description: "payload",
-    });
+    expect(list.at(4)).toEqual(annotationOfInstance(rows, 4));
     expect(list.at(6).id).toBe(placed.id);
     expect(list.indexOf("syn:7:1")).toBe(4);
     expect(list.indexOf(placed.id)).toBe(6);
@@ -241,24 +241,32 @@ describe("CalcadaTableAnnotationSource", () => {
     ).toBe(LARGE_TABLE_SIZE);
   });
 
-  it("keeps the description of a described row across showRows", () => {
-    const source = makeSource();
-    source.showRows(tableRows([5, 6]));
-    source.setDescription("syn:5", "payload");
-    source.showRows(tableRows([5, 6]));
-    expect(source.get("syn:5")?.description).toBe("payload");
-    const reference = source.getReference("syn:5");
-    expect(reference.value?.description).toBe("payload");
-    reference.dispose();
+  it("keeps NG's own fields of a row read-only; a placed annotation's follow the source", () => {
+    const source = makeSource({
+      onCreate: () => new Promise<AnnotationId>(() => {}),
+    });
+    source.showRows(tableRows([5]));
+    const placed = source.add(pointAnnotation(""));
+    expect(source.isAnnotationReadonly("syn:5")).toBe(true);
+    expect(source.isAnnotationReadonly(placed.id)).toBe(false);
+    placed.dispose();
   });
 
-  it("drops the description of a row that left", () => {
-    const source = makeSource();
+  it("mounts its own details for a row only", () => {
+    const mountDetails = vi.fn();
+    const source = makeSource({
+      mountDetails,
+      onCreate: () => new Promise<AnnotationId>(() => {}),
+    });
     source.showRows(tableRows([5]));
-    source.setDescription("syn:5", "payload");
-    source.showRows(tableRows([]));
-    source.showRows(tableRows([5]));
-    expect(source.get("syn:5")?.description).toBeUndefined();
+    const placed = source.add(pointAnnotation(""));
+    const parent = document.createElement("div");
+    const context = new RefCounted();
+    source.mountAnnotationDetails(placed.id, parent, context);
+    expect(mountDetails).not.toHaveBeenCalled();
+    source.mountAnnotationDetails("syn:5", parent, context);
+    expect(mountDetails).toHaveBeenCalledWith("syn:5", parent, context);
+    placed.dispose();
   });
 
   it("delete waits for onDelete and keeps the row when it rejects", async () => {
@@ -388,7 +396,7 @@ describe("CalcadaTableAnnotationSource", () => {
     reference.dispose();
   });
 
-  it("ignores NG's edits of a row but takes the session's description", () => {
+  it("ignores NG's edits of a row", () => {
     const source = makeSource();
     const rows = tableRows([1]);
     source.showRows(rows);
@@ -405,28 +413,7 @@ describe("CalcadaTableAnnotationSource", () => {
     });
     expect([...source]).toEqual([annotationOfInstance(rows, 0)]);
     expect(source.properties.value).toEqual([]);
-    const referenceChanged = vi.fn();
-    reference.changed.add(referenceChanged);
-    source.setDescription("syn:1", "tag: soma");
-    expect(source.get("syn:1")?.description).toBe("tag: soma");
-    expect(reference.value?.description).toBe("tag: soma");
-    expect(referenceChanged).toHaveBeenCalledTimes(1);
-    source.setDescription("syn:1", "tag: soma");
-    expect(referenceChanged).toHaveBeenCalledTimes(1);
     reference.dispose();
-  });
-
-  it("a description reaches its reference without redrawing the table", () => {
-    const source = makeSource();
-    source.showRows(tableRows([1]));
-    const changed = vi.fn();
-    const childUpdated = vi.fn();
-    source.changed.add(changed);
-    source.childUpdated.add(childUpdated);
-    source.setDescription("syn:1", "size: 1242");
-    expect(source.get("syn:1")?.description).toBe("size: 1242");
-    expect(changed).not.toHaveBeenCalled();
-    expect(childUpdated).not.toHaveBeenCalled();
   });
 
   it("a placed point is written and stays drawn until its row is", async () => {

@@ -26,11 +26,11 @@ import {
 import type {
   AnnotationPayload,
   AnnotationPayloadValue,
+  AnnotationPropertyType,
   AnnotationReadCoordinates,
   AnnotationTableInfo,
   AnnotationTableQuery,
   SchemaCache,
-  SegmentAnnotation,
   TablePoints,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import {
@@ -46,6 +46,7 @@ import {
   fetchTablePoints,
   listAnnotationTables,
   retryOnceIfUnauthorized,
+  updateAnnotationRow,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import type { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import type {
@@ -190,11 +191,16 @@ export interface TableAnnotationState {
   source: CalcadaTableAnnotationSource;
 }
 
-interface SelectedDetails {
-  table: string;
-  layerId: string;
-  description: string;
+/** A drawn row's payload, as the Selection panel reads and saves it. */
+export interface RowPayloadEditing {
+  properties: Record<string, AnnotationPropertyType>;
+  requiredProperties: string[];
+  readonly: boolean;
+  read(): Promise<Record<string, unknown>>;
+  save(payload: Record<string, unknown>): Promise<void>;
 }
+
+const ROW_GONE_NOTE = "The annotation is no longer in its table";
 
 /** The voxel of the table's resolution that holds the point. */
 export function nanometresToTableVoxels(
@@ -593,20 +599,6 @@ export function annotationTableStatus(input: {
   };
 }
 
-/** The row's payload, one `<field>: <value>` line each, then its id. */
-export function describeAnnotationRow({
-  id,
-  payload,
-}: SegmentAnnotation): string {
-  return [
-    ...Object.entries(payload).map(
-      ([field, value]) =>
-        `${field}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
-    ),
-    `id: ${id}`,
-  ].join("\n");
-}
-
 /**
  * Palette slots by tick order: a table keeps its slot while it stays ticked,
  * and a newly ticked one takes the lowest slot nobody holds.
@@ -675,6 +667,12 @@ export interface AnnotationTablesConnection {
     state: AnnotationLayerState,
     annotation: Annotation,
   ): [HTMLElement, number[]];
+  /** The row's payload editor, in its Selection panel details. */
+  mountRowEditor(
+    parent: HTMLElement,
+    context: RefCounted,
+    editing: RowPayloadEditing,
+  ): void;
   /** NG's list header row for the state's entries. */
   renderListHeader(
     state: AnnotationLayerState,
@@ -746,8 +744,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   private readonly inFlight = new Map<string, number>();
   private shownTables: readonly string[] = [];
   private shownQueries = new Map<string, unknown>();
-  private details: SelectedDetails | undefined;
-  private lastSelect = 0;
   private lastRequest = 0;
   private tablesToken = 0;
   private running = 0;
@@ -805,12 +801,10 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     );
   }
 
-  /** Selects it and reads the row's payload into the annotation's description. */
   select(item: DrawnAnnotation) {
     const found = this.findDrawn(item);
     if (found === undefined) return;
     this.connection.selectAnnotation(found.layerState, found.annotation);
-    void this.readDetails(item);
   }
 
   moveTo(item: DrawnAnnotation) {
@@ -951,47 +945,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     return { layerState: tableState.layerState, annotation };
   }
 
-  private async readDetails({ table, layerId, id }: DrawnAnnotation) {
-    const info = this.tableInfo(table);
-    if (info === undefined) return;
-    const selectId = ++this.lastSelect;
-    const coords = this.coords;
-    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
-    let rows: SegmentAnnotation[];
-    try {
-      rows = await fetchAnnotationRows(
-        fetchOkImpl,
-        baseUrl,
-        info,
-        [id],
-        coords,
-        this.schemas,
-      );
-    } catch {
-      return;
-    }
-    const stale =
-      this.wasDisposed ||
-      selectId !== this.lastSelect ||
-      coords !== this.coords;
-    if (stale || rows.length === 0) return;
-    this.details = {
-      table,
-      layerId,
-      description: describeAnnotationRow(rows[0]),
-    };
-    this.showDetails(table);
-  }
-
-  /** A redraw replaces the annotation objects; the selected one keeps its description. */
-  private showDetails(name: string) {
-    const { details } = this;
-    if (details?.table !== name) return;
-    this.layerStates
-      .get(name)
-      ?.source.setDescription(details.layerId, details.description);
-  }
-
   private isReadonly(name: string): boolean {
     return (
       !(this.tableInfo(name)?.canWrite ?? false) ||
@@ -1020,6 +973,53 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.retireInFlight(name);
     this.invalidate([name]);
     this.fetchVisible();
+  }
+
+  /** A drawn row's payload to read and save; none for an annotation that is not a row. */
+  rowEditing(
+    name: string,
+    annotationId: AnnotationId,
+  ): RowPayloadEditing | undefined {
+    const info = this.tableInfo(name);
+    const isRow = this.layerStates.get(name)?.source.isRow(annotationId);
+    if (info === undefined || !isRow) return undefined;
+    const rowId = annotationRowId(name, annotationId);
+    return {
+      properties: info.properties,
+      requiredProperties: info.requiredProperties,
+      readonly: this.isReadonly(name),
+      read: () => this.readRowPayload(info, rowId),
+      save: (payload) => this.saveRowPayload(info, rowId, payload),
+    };
+  }
+
+  private async readRowPayload(
+    info: AnnotationTableInfo,
+    rowId: bigint,
+  ): Promise<Record<string, unknown>> {
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    const [row] = await fetchAnnotationRows(
+      fetchOkImpl,
+      baseUrl,
+      info,
+      [rowId],
+      this.coords,
+      this.schemas,
+    );
+    if (row === undefined) throw new Error(ROW_GONE_NOTE);
+    return row.payload;
+  }
+
+  /** Server first; the scopes holding the row are then read again for its new value. */
+  private async saveRowPayload(
+    info: AnnotationTableInfo,
+    rowId: bigint,
+    payload: Record<string, unknown>,
+  ) {
+    const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    const coords = this.coords;
+    await updateAnnotationRow(fetchOkImpl, baseUrl, info.name, rowId, payload);
+    await this.rereadScopesOf(info, rowId, coords);
   }
 
   /** Server first; the scopes holding the new row are then read again. */
@@ -1162,7 +1162,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.pending.clear();
     this.rootFailures.reset();
     this.absent.clear();
-    this.details = undefined;
     for (const table of this.state.ticked) this.errors.delete(table);
     this.publishPlacement();
     this.invalidate(this.state.ticked);
@@ -1461,6 +1460,12 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
           isReadonly: () => this.isReadonly(name),
           onDelete: (annotation) => this.deleteRow(name, annotation),
           onCreate: (annotation) => this.createRow(name, annotation),
+          mountDetails: (id, parent, context) => {
+            const editing = this.rowEditing(name, id);
+            if (editing !== undefined) {
+              this.connection.mountRowEditor(parent, context, editing);
+            }
+          },
         },
       );
       this.layerStates.set(name, tableState);
@@ -1531,10 +1536,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.lastRedraw.set(name, inputs);
     const { source } = this.annotationState(name);
     const unchanged = last !== undefined && sameRedrawInputs(last, inputs);
-    if (unchanged && !source.hasWritten()) {
-      this.showDetails(name);
-      return;
-    }
+    if (unchanged && !source.hasWritten()) return;
     let rows = EMPTY_TABLE_ROWS(name);
     if (info !== undefined && inputs.limitNote === undefined) {
       try {
@@ -1548,7 +1550,6 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       : new Map<AnnotationId, AnnotationId>();
     source.showRows(rows);
     this.selectWritten(name, written);
-    this.showDetails(name);
     this.rendered.set(name, rowCount(rows));
     this.rowsByTable.set(name, rows);
   }
