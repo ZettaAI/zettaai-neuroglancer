@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RowPayloadEditing } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { RowPayloadEditor } from "#src/datasource/calcada/annotation_tables/row_payload_editor.js";
+import { Signal } from "#src/util/signal.js";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,6 +41,7 @@ function editing(overrides: Partial<RowPayloadEditing> = {}) {
     properties: { size: "number", kind: "string" },
     requiredProperties: ["size"],
     readonly: false,
+    readonlyChanged: new Signal<() => void>(),
     read: vi.fn(async () => ({ ...SAVED })),
     save: vi.fn(async () => {}),
     ...overrides,
@@ -104,6 +106,23 @@ describe("RowPayloadEditor", () => {
     await mount(editing({ readonly: true }));
     expect(field("size").disabled).toBe(true);
     expect(field("kind").disabled).toBe(true);
+  });
+
+  it("unlocks and locks the fields as the row's writability changes", async () => {
+    const readonlyChanged = new Signal<() => void>();
+    const live = editing({ readonly: true, readonlyChanged });
+    await mount(live);
+    expect(field("size").disabled).toBe(true);
+    await act(async () => {
+      live.readonly = false;
+      readonlyChanged.dispatch();
+    });
+    expect(field("size").disabled).toBe(false);
+    await act(async () => {
+      live.readonly = true;
+      readonlyChanged.dispatch();
+    });
+    expect(field("size").disabled).toBe(true);
   });
 
   it("names why the row could not be read", async () => {

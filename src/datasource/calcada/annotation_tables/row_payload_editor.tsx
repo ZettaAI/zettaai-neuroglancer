@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from "react";
 import type { RowPayloadEditing } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { PayloadField } from "#src/datasource/calcada/annotation_tables/payload_field.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
+import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import type { RefCounted } from "#src/util/disposable.js";
 
 const LOADING_TEXT = "Loading…";
@@ -33,6 +34,7 @@ export function RowPayloadEditor({ editing }: { editing: RowPayloadEditing }) {
   // Bumped to put the fields back to the saved payload after a refusal.
   const [revision, setRevision] = useState(0);
   const draft = useRef<Payload>({});
+  useSignalRerender(editing.readonlyChanged);
 
   useEffect(() => {
     let current = true;

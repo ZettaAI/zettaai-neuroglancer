@@ -42,6 +42,7 @@ import {
   annotationLimitNote,
   MAX_DRAWN_ANNOTATIONS,
   PLACE_ONE_TABLE_NOTE,
+  TABLES_ON_MAIN_NOTE,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import { ANNOTATION_TABLES_TAB_LABEL } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
@@ -50,6 +51,7 @@ import type {
   DrawnRows,
 } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type {
@@ -337,16 +339,20 @@ class FakeSession {
   }
 }
 
+const BRANCH_ID = 3;
+
 function makeConnection(
   tables: AnnotationTableInfo[] | undefined,
   statuses: AnnotationTableStatus[] = [],
   ticked: string[] = [],
+  branchId = BRANCH_ID,
 ) {
   const annotationTables = new CalcadaAnnotationTablesState();
   annotationTables.setTicked(ticked);
   const session = new FakeSession(tables);
   session.status.value = statuses;
   const connection: AnnotationTablesPanelConnection = {
+    graph: { branchId: new WatchableValue(branchId) },
     state: { annotationTables },
     annotationTablesSession: session,
   };
@@ -474,6 +480,24 @@ async function pickOption(name: string) {
 }
 
 describe("CalcadaAnnotationTablesPanel", () => {
+  it("warns on main that rows change on a branch, and lists the tables as usual", async () => {
+    const { connection } = makeConnection(
+      [synapses],
+      [],
+      ["synapses"],
+      MAIN_BRANCH_ID,
+    );
+    await mountPanel(connection);
+    expect(tab.textContent).toContain(TABLES_ON_MAIN_NOTE);
+    expect(chips()).toHaveLength(1);
+  });
+
+  it("shows no main warning on a branch", async () => {
+    const { connection } = makeConnection([synapses], [], ["synapses"]);
+    await mountPanel(connection);
+    expect(tab.textContent).not.toContain(TABLES_ON_MAIN_NOTE);
+  });
+
   it("selects tables in the picker, in selection order", async () => {
     const { connection, annotationTables } = makeConnection([synapses, nuclei]);
     await mountPanel(connection);

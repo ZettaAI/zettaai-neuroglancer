@@ -37,6 +37,7 @@ import {
   MAX_DRAWN_ANNOTATIONS,
   PLACE_NO_WRITE_NOTE,
   PLACE_ONE_TABLE_NOTE,
+  PLACE_ON_MAIN_NOTE,
   PLACE_PAST_NOTE,
   pinnedSelection,
   PLACE_POINT_COUNT_NOTE,
@@ -60,6 +61,7 @@ import {
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type {
   AnnotationListColumnWidths,
@@ -72,6 +74,9 @@ import { HttpError } from "#src/util/http_request.js";
 import { Signal } from "#src/util/signal.js";
 
 const MAIN = { branchId: 0, timestamp: 0 };
+const BRANCH_ID = 3;
+const OTHER_BRANCH_ID = 4;
+const SINGLE_POINT = ["at"];
 
 const roots = (count: number) =>
   Array.from({ length: count }, (_, i) => BigInt(i + 1));
@@ -727,6 +732,7 @@ function startSession(
     ticked: string[];
     visible: bigint[];
     timestamp?: number;
+    branchId?: number;
     filters?: Record<string, AnnotationTableFilter>;
     wholeTables?: string[];
     excluded?: bigint[];
@@ -767,7 +773,7 @@ function startSession(
       fetchOkImpl: graph.fetchOkImpl,
       baseUrl: "https://host/g",
     } as unknown as AnnotationTablesConnection["httpSource"],
-    branchId: new WatchableValue(0),
+    branchId: new WatchableValue(options.branchId ?? BRANCH_ID),
     timestamp: new WatchableValue<number | undefined>(options.timestamp),
     visibleSegments,
     graphEdited,
@@ -1132,6 +1138,30 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(statusOf("syn")?.error).toContain("delete refused");
   });
 
+  it("delete is read-only on main: no request, the row stays; on a branch it deletes", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { connection, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+      branchId: MAIN_BRANCH_ID,
+    });
+    await settle();
+    const source = sources.get("syn")!;
+    const reference = source.getReference("syn:10");
+    await source.delete(reference);
+    await settle();
+    expect(graph.deletes).toEqual([]);
+    expect(source.get("syn:10")).toBeDefined();
+    (connection.branchId as WatchableValue<number>).value = BRANCH_ID;
+    await settle();
+    const onBranch = source.getReference("syn:10");
+    await source.delete(onBranch);
+    await settle();
+    expect(graph.deletes).toEqual([{ table: "syn", ids: ["10"] }]);
+    reference.dispose();
+    onBranch.dispose();
+  });
+
   it("delete is readonly at an explicit timestamp", async () => {
     const graph = fakeGraph(["syn", "mine"], { canWrite: true });
     const { connection, sources } = startSession(graph, {
@@ -1219,6 +1249,30 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(refused).toBe(
       "Could not save the annotation: payload does not match the schema",
     );
+  });
+
+  it("rows are read-only on main and writable on a branch, live", async () => {
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      pointNames: SINGLE_POINT,
+    });
+    const { session, connection, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+      branchId: MAIN_BRANCH_ID,
+    });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.readonly).toBe(true);
+    expect(sources.get("syn")!.readonly).toBe(true);
+    expect(session.placement.value).toEqual({ blockedBy: PLACE_ON_MAIN_NOTE });
+    (connection.branchId as WatchableValue<number>).value = BRANCH_ID;
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.readonly).toBe(false);
+    expect(sources.get("syn")!.readonly).toBe(false);
+    expect(session.placement.value).toEqual({
+      table: "syn",
+      type: AnnotationType.POINT,
+    });
   });
 
   it("a row of a table it cannot write is read-only", async () => {
@@ -1490,7 +1544,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     });
     graph.hold = (read) => read === "points";
     await settle();
-    (connection.branchId as WatchableValue<number>).value = 3;
+    (connection.branchId as WatchableValue<number>).value = OTHER_BRANCH_ID;
     await settle();
     expect(graph.held).toHaveLength(2);
     graph.held[0]();
@@ -1736,7 +1790,6 @@ describe("CalcadaAnnotationTablesSession", () => {
   });
 
   describe("placing", () => {
-    const SINGLE_POINT = ["at"];
     const LINE_POINTS = ["pre", "post"];
     const placedPoint = (point: number[]): Annotation => ({
       id: "",

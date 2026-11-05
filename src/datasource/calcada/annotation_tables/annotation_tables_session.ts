@@ -71,6 +71,7 @@ import {
   rowCount,
 } from "#src/datasource/calcada/annotation_tables/table_rows.js";
 import type { HttpSource } from "#src/datasource/calcada/base.js";
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { hasExplicitTimestamp } from "#src/datasource/calcada/graph_coordinates.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
@@ -98,6 +99,9 @@ export const TABLE_UNLISTED_NOTE = "Not in the current table list";
 export const PLACE_ONE_TABLE_NOTE = "Select exactly one table to add to it";
 export const PLACE_NO_WRITE_NOTE = "You cannot write to this table";
 export const PLACE_PAST_NOTE = "Adding is off while viewing a past state";
+export const PLACE_ON_MAIN_NOTE = "Adding is off on main: switch to a branch";
+export const TABLES_ON_MAIN_NOTE =
+  "Tables can be viewed on main, but rows are added and changed only on a branch and reach main when it merges. Switch to a branch, or create one, with the Branch control.";
 
 /** The viewer's selection once pinned; unpinned, it is only what the mouse hovers. */
 export function pinnedSelection<T>(selection: {
@@ -196,6 +200,8 @@ export interface RowPayloadEditing {
   properties: Record<string, AnnotationPropertyType>;
   requiredProperties: string[];
   readonly: boolean;
+  /** Fires when `readonly` may have changed under a mounted editor. */
+  readonly readonlyChanged: ReadonlySignal<() => void>;
   read(): Promise<Record<string, unknown>>;
   save(payload: Record<string, unknown>): Promise<void>;
 }
@@ -715,6 +721,8 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   });
   /** A table's colour changed; drawn entries keep their place. */
   readonly colorsChanged = new Signal<() => void>();
+  /** Rows may have become writable or read-only: the branch or timestamp changed. */
+  readonly readonlyChanged = new Signal<() => void>();
   /** Undefined while no table is ticked. */
   readonly placement = new WatchableValue<TablePlacement | undefined>(
     undefined,
@@ -948,6 +956,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   private isReadonly(name: string): boolean {
     return (
       !(this.tableInfo(name)?.canWrite ?? false) ||
+      this.coords.branchId === MAIN_BRANCH_ID ||
       hasExplicitTimestamp(this.coords)
     );
   }
@@ -961,7 +970,13 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     const { fetchOkImpl, baseUrl } = this.connection.httpSource;
     const rowId = annotationRowId(name, annotation.id);
     try {
-      await deleteAnnotationRows(fetchOkImpl, baseUrl, name, [rowId]);
+      await deleteAnnotationRows(
+        fetchOkImpl,
+        baseUrl,
+        name,
+        this.connection.branchId.value,
+        [rowId],
+      );
     } catch (error) {
       this.errors.set(name, errorMessage(error));
       this.publishStatus();
@@ -984,10 +999,14 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     const isRow = this.layerStates.get(name)?.source.isRow(annotationId);
     if (info === undefined || !isRow) return undefined;
     const rowId = annotationRowId(name, annotationId);
+    const isReadonly = () => this.isReadonly(name);
     return {
       properties: info.properties,
       requiredProperties: info.requiredProperties,
-      readonly: this.isReadonly(name),
+      get readonly() {
+        return isReadonly();
+      },
+      readonlyChanged: this.readonlyChanged,
       read: () => this.readRowPayload(info, rowId),
       save: (payload) => this.saveRowPayload(info, rowId, payload),
     };
@@ -1018,7 +1037,14 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   ) {
     const { fetchOkImpl, baseUrl } = this.connection.httpSource;
     const coords = this.coords;
-    await updateAnnotationRow(fetchOkImpl, baseUrl, info.name, rowId, payload);
+    await updateAnnotationRow(
+      fetchOkImpl,
+      baseUrl,
+      info.name,
+      this.connection.branchId.value,
+      rowId,
+      payload,
+    );
     await this.rereadScopesOf(info, rowId, coords);
   }
 
@@ -1037,6 +1063,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         fetchOkImpl,
         baseUrl,
         name,
+        this.connection.branchId.value,
         this.tableVoxels(info, annotation),
         this.newRowPayload.value,
       );
@@ -1164,6 +1191,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.absent.clear();
     for (const table of this.state.ticked) this.errors.delete(table);
     this.publishPlacement();
+    this.readonlyChanged.dispatch();
     this.invalidate(this.state.ticked);
     this.fetchVisible();
     this.untickUnlisted();
@@ -1258,6 +1286,9 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     const [table] = ticked;
     const info = this.tableInfo(table);
     if (info === undefined) return undefined;
+    if (this.coords.branchId === MAIN_BRANCH_ID) {
+      return { blockedBy: PLACE_ON_MAIN_NOTE };
+    }
     if (!info.canWrite) return { blockedBy: PLACE_NO_WRITE_NOTE };
     if (hasExplicitTimestamp(this.coords)) {
       return { blockedBy: PLACE_PAST_NOTE };

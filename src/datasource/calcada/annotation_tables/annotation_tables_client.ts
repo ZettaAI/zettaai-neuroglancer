@@ -604,11 +604,16 @@ function rowsUrl(baseUrl: string, table: string) {
   return `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`;
 }
 
+function rowWriteUrl(baseUrl: string, table: string, branchId: number) {
+  return appendCoordParams(rowsUrl(baseUrl, table), { branchId });
+}
+
 /** Writes rows; a refusal is named by the server's reason after `refusedPrefix`. */
 async function writeRows(
   fetchOk: FetchOk,
   baseUrl: string,
   table: string,
+  branchId: number,
   method: "POST" | "PUT",
   annotations: unknown[],
   refusedPrefix: string,
@@ -616,7 +621,7 @@ async function writeRows(
   try {
     return await fetchTableOk(
       fetchOk,
-      rowsUrl(baseUrl, table),
+      rowWriteUrl(baseUrl, table, branchId),
       { method, body: JSON.stringify({ annotations }) },
       [table],
       "write",
@@ -635,6 +640,7 @@ export async function createAnnotationRow(
   fetchOk: FetchOk,
   baseUrl: string,
   table: string,
+  branchId: number,
   positions: ReadonlyMap<string, readonly number[]>,
   payload: AnnotationPayload,
 ): Promise<bigint> {
@@ -645,6 +651,7 @@ export async function createAnnotationRow(
     fetchOk,
     baseUrl,
     table,
+    branchId,
     "POST",
     [{ points, payload }],
     CREATE_REFUSED_PREFIX,
@@ -659,6 +666,7 @@ export async function updateAnnotationRow(
   fetchOk: FetchOk,
   baseUrl: string,
   table: string,
+  branchId: number,
   id: bigint,
   payload: Record<string, unknown>,
 ): Promise<void> {
@@ -666,6 +674,7 @@ export async function updateAnnotationRow(
     fetchOk,
     baseUrl,
     table,
+    branchId,
     "PUT",
     [{ id: String(id), payload }],
     UPDATE_REFUSED_PREFIX,
@@ -676,11 +685,12 @@ export async function deleteAnnotationRows(
   fetchOk: FetchOk,
   baseUrl: string,
   table: string,
+  branchId: number,
   ids: bigint[],
 ): Promise<void> {
   await fetchTableOk(
     fetchOk,
-    rowsUrl(baseUrl, table),
+    rowWriteUrl(baseUrl, table, branchId),
     { method: "DELETE", body: JSON.stringify({ ids: ids.map(String) }) },
     [table],
     "write",

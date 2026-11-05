@@ -32,13 +32,17 @@ import type {
   PlacementType,
   TablePlacement,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
-import { formatCount } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import {
+  formatCount,
+  TABLES_ON_MAIN_NOTE,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import type {
   DrawnAnnotation,
   DrawnRows,
 } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { NO_DRAWN_ROWS } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { PayloadField } from "#src/datasource/calcada/annotation_tables/payload_field.js";
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -130,6 +134,7 @@ export interface AnnotationTablesPanelSession {
  * file never imports `frontend.ts` at runtime.
  */
 export interface AnnotationTablesPanelConnection {
+  readonly graph: { readonly branchId: WatchableValueInterface<number> };
   readonly state: {
     readonly annotationTables: {
       readonly changed: NullarySignal;
@@ -544,6 +549,7 @@ export function CalcadaAnnotationTablesPanel({
   const { annotationTables } = connection.state;
   const session = connection.annotationTablesSession;
   useSignalRerender(annotationTables.changed);
+  const branchId = useWatchable(connection.graph.branchId);
   const tables = useWatchable(session.tables);
   const statuses = useWatchable(session.status);
   const drawn = useWatchable(session.drawn);
@@ -563,6 +569,9 @@ export function CalcadaAnnotationTablesPanel({
   const tableColor = (name: string) => session.tableColor(name);
   return (
     <div className="calcada-annotations-panel">
+      {branchId === MAIN_BRANCH_ID && (
+        <div className="calcada-trace-panel-warning">{TABLES_ON_MAIN_NOTE}</div>
+      )}
       <div className="calcada-annotations-controls">
         <div className="calcada-annotations-header">
           <span>Annotation tables</span>
