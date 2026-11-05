@@ -939,6 +939,28 @@ describe("CalcadaAnnotationTablesPanel", () => {
     await vi.waitFor(() => expect(isDisabled(line)).toBe(true));
   });
 
+  it("shows the payload a new row starts with in its fields", async () => {
+    const { connection, session } = makeConnection(
+      [{ ...synapses, canWrite: true, requiredProperties: ["size"] }],
+      [],
+      ["synapses"],
+    );
+    session.newRowPayload.value = { size: 0 };
+    session.placement.value = {
+      table: "synapses",
+      type: AnnotationType.LINE,
+    };
+    await mountPanel(connection);
+    const size = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLInputElement>(
+        'input[aria-label="size (required)"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(size.value).toBe("0");
+  });
+
   it("takes no fraction for an integer property", async () => {
     const { connection, session } = makeConnection(
       [{ ...synapses, canWrite: true }],

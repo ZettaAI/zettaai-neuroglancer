@@ -57,6 +57,11 @@ async function mount(rowEditing: RowPayloadEditing) {
 const field = (name: string) =>
   container.querySelector<HTMLInputElement>(`[aria-label^="${name}"]`)!;
 
+const saveButton = () =>
+  [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Save",
+  );
+
 async function type(name: string, text: string) {
   const input = field(name);
   await act(async () => {
@@ -71,6 +76,12 @@ async function type(name: string, text: string) {
   });
 }
 
+async function clickSave() {
+  await act(async () => {
+    saveButton()!.click();
+  });
+}
+
 describe("RowPayloadEditor", () => {
   it("shows each schema field with the row's saved value", async () => {
     await mount(editing());
@@ -78,18 +89,47 @@ describe("RowPayloadEditor", () => {
     expect(field("kind").value).toBe("spine");
   });
 
-  it("saves the whole payload with the edited field once it is left", async () => {
+  it("does not save an edited field when it is left", async () => {
     const rowEditing = editing();
     await mount(rowEditing);
     await type("size", "7");
+    expect(rowEditing.save).not.toHaveBeenCalled();
+  });
+
+  it("saves the whole payload with the edited field on Save", async () => {
+    const rowEditing = editing();
+    await mount(rowEditing);
+    await type("size", "7");
+    await clickSave();
     expect(rowEditing.save).toHaveBeenCalledWith({ ...SAVED, size: 7 });
   });
 
-  it("does not save a field left unchanged", async () => {
+  it("saves on Enter in a field", async () => {
     const rowEditing = editing();
     await mount(rowEditing);
+    await type("size", "7");
+    await act(async () => {
+      field("size").dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(rowEditing.save).toHaveBeenCalledWith({ ...SAVED, size: 7 });
+  });
+
+  it("offers Save only while the payload differs from the saved one", async () => {
+    await mount(editing());
+    expect(saveButton()!.disabled).toBe(true);
+    await type("size", "7");
+    expect(saveButton()!.disabled).toBe(false);
     await type("size", "3");
-    expect(rowEditing.save).not.toHaveBeenCalled();
+    expect(saveButton()!.disabled).toBe(true);
+  });
+
+  it("offers no Save again once the edit is saved", async () => {
+    await mount(editing());
+    await type("size", "7");
+    await clickSave();
+    expect(saveButton()!.disabled).toBe(true);
   });
 
   it("names a refusal and returns the field to its saved value", async () => {
@@ -98,6 +138,7 @@ describe("RowPayloadEditor", () => {
     });
     await mount(rowEditing);
     await type("kind", "shaft");
+    await clickSave();
     expect(container.textContent).toContain(REFUSAL);
     expect(field("kind").value).toBe("spine");
   });
@@ -106,6 +147,7 @@ describe("RowPayloadEditor", () => {
     await mount(editing({ readonly: true }));
     expect(field("size").disabled).toBe(true);
     expect(field("kind").disabled).toBe(true);
+    expect(saveButton()).toBeUndefined();
   });
 
   it("unlocks and locks the fields as the row's writability changes", async () => {

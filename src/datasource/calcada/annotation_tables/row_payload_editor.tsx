@@ -10,16 +10,18 @@
  */
 
 import { isEqual } from "lodash-es";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { RowPayloadEditing } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { PayloadField } from "#src/datasource/calcada/annotation_tables/payload_field.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import type { RefCounted } from "#src/util/disposable.js";
+import { Button } from "@/components/ui/button";
 
 const LOADING_TEXT = "Loading…";
 const SAVE_KEY = "Enter";
+const SAVE_LABEL = "Save";
 
 type Payload = Record<string, unknown>;
 
@@ -27,13 +29,14 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The row's payload, one field per schema property, saved once a field is left. */
+/** The row's payload, one field per schema property, saved with the Save button or Enter. */
 export function RowPayloadEditor({ editing }: { editing: RowPayloadEditing }) {
   const [saved, setSaved] = useState<Payload>();
+  const [draft, setDraft] = useState<Payload>({});
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   // Bumped to put the fields back to the saved payload after a refusal.
   const [revision, setRevision] = useState(0);
-  const draft = useRef<Payload>({});
   useSignalRerender(editing.readonlyChanged);
 
   useEffect(() => {
@@ -41,7 +44,7 @@ export function RowPayloadEditor({ editing }: { editing: RowPayloadEditing }) {
     editing.read().then(
       (payload) => {
         if (!current) return;
-        draft.current = { ...payload };
+        setDraft({ ...payload });
         setSaved(payload);
       },
       (readError: unknown) => current && setError(errorText(readError)),
@@ -59,26 +62,30 @@ export function RowPayloadEditor({ editing }: { editing: RowPayloadEditing }) {
     );
   }
 
+  const changed = !isEqual(draft, saved);
   const save = () => {
-    const payload = { ...draft.current };
-    if (isEqual(payload, saved)) return;
-    editing.save(payload).then(
-      () => {
-        setSaved(payload);
-        setError(undefined);
-      },
-      (saveError: unknown) => {
-        draft.current = { ...saved };
-        setError(errorText(saveError));
-        setRevision((count) => count + 1);
-      },
-    );
+    if (!changed || saving) return;
+    const payload = draft;
+    setSaving(true);
+    editing
+      .save(payload)
+      .then(
+        () => {
+          setSaved(payload);
+          setError(undefined);
+        },
+        (saveError: unknown) => {
+          setDraft({ ...saved });
+          setError(errorText(saveError));
+          setRevision((count) => count + 1);
+        },
+      )
+      .finally(() => setSaving(false));
   };
 
   return (
     <div
       className="calcada-annotations-payload"
-      onBlur={save}
       onKeyDown={(event) => event.key === SAVE_KEY && save()}
     >
       {Object.entries(editing.properties).map(([name, type]) => (
@@ -89,12 +96,24 @@ export function RowPayloadEditor({ editing }: { editing: RowPayloadEditing }) {
           required={editing.requiredProperties.includes(name)}
           initialValue={saved[name]}
           disabled={editing.readonly}
-          onValue={(value) => {
-            if (value === undefined) delete draft.current[name];
-            else draft.current[name] = value;
-          }}
+          onValue={(value) =>
+            setDraft((current) => {
+              const { [name]: _previous, ...rest } = current;
+              return value === undefined ? rest : { ...rest, [name]: value };
+            })
+          }
         />
       ))}
+      {!editing.readonly && (
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!changed || saving}
+          onClick={save}
+        >
+          {SAVE_LABEL}
+        </Button>
+      )}
       {error !== undefined && (
         <div className="calcada-annotations-error">{error}</div>
       )}

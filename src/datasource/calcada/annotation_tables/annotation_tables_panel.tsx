@@ -227,6 +227,7 @@ function PlacementControl({
   info,
   placing,
   missing,
+  payload,
   onToggle,
   onValue,
 }: {
@@ -234,6 +235,7 @@ function PlacementControl({
   info: AnnotationTableInfo | undefined;
   placing: boolean;
   missing: readonly string[];
+  payload: AnnotationPayload;
   onToggle: () => void;
   onValue: (name: string, value: AnnotationPayloadValue | undefined) => void;
 }) {
@@ -273,6 +275,7 @@ function PlacementControl({
               name={name}
               type={propertyType}
               required={info.requiredProperties.includes(name)}
+              initialValue={payload[name]}
               onValue={(value) => onValue(name, value)}
             />
           ))}
@@ -656,6 +659,7 @@ export function CalcadaAnnotationTablesPanel({
             info={tables?.find(({ name }) => name === placement.table)}
             placing={session.isPlacing()}
             missing={session.missingRequired()}
+            payload={session.newRowPayload.value}
             onToggle={() => session.togglePlacing()}
             onValue={(name, value) => session.setNewRowValue(name, value)}
           />

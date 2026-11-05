@@ -132,6 +132,21 @@ const VALUE_PROPERTY: AnnotationPropertySpec = {
   default: 0,
 };
 
+const NUMERIC_PROPERTY_TYPES: ReadonlySet<AnnotationPropertyType> = new Set([
+  "number",
+  "integer",
+]);
+const NEW_ROW_NUMBER = 0;
+
+/** A new row's payload before anything is typed: each required number at 0. */
+function newRowDefaults(info: AnnotationTableInfo): AnnotationPayload {
+  return Object.fromEntries(
+    info.requiredProperties
+      .filter((name) => NUMERIC_PROPERTY_TYPES.has(info.properties[name]))
+      .map((name) => [name, NEW_ROW_NUMBER]),
+  );
+}
+
 const NO_NANOMETRE_SCALE =
   "The layer's coordinate space has no nanometre scale";
 
@@ -1304,7 +1319,11 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (isEqual(placement, this.placement.value)) return;
     this.connection.disarmPlacement();
     if (placement?.table !== this.placement.value?.table) {
-      this.newRowPayload.value = {};
+      const info =
+        placement?.table === undefined
+          ? undefined
+          : this.tableInfo(placement.table);
+      this.newRowPayload.value = info === undefined ? {} : newRowDefaults(info);
     }
     this.placement.value = placement;
   }

@@ -1952,6 +1952,7 @@ describe("CalcadaAnnotationTablesSession", () => {
         { ticked: ["syn"], visible: [10n] },
       );
       await settle();
+      session.setNewRowValue("size", undefined);
       expect(session.missingRequired()).toEqual(["size"]);
       session.togglePlacing();
       expect(armPlacement).not.toHaveBeenCalled();
@@ -1963,6 +1964,20 @@ describe("CalcadaAnnotationTablesSession", () => {
       session.setNewRowValue("size", undefined);
       expect(disarmPlacement).toHaveBeenCalled();
       expect(session.isPlacing()).toBe(false);
+    });
+
+    it("starts a new row with every required number at 0", async () => {
+      const { session } = startSession(
+        fakeGraph(["syn"], {
+          canWrite: true,
+          pointNames: SINGLE_POINT,
+          jsonSchema: SIZED_SCHEMA,
+        }),
+        { ticked: ["syn"], visible: [10n] },
+      );
+      await settle();
+      expect(session.newRowPayload.value).toEqual({ size: 0 });
+      expect(session.missingRequired()).toEqual([]);
     });
 
     it("forgets the typed payload when another table is the one to add to", async () => {
@@ -1978,7 +1993,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       session.setNewRowValue("size", 1);
       state.setTicked(["mark"]);
       await settle();
-      expect(session.newRowPayload.value).toEqual({});
+      expect(session.newRowPayload.value).toEqual({ size: 0 });
     });
 
     it("a point written onto a root out of view leaves the placed one even with no new points", async () => {
