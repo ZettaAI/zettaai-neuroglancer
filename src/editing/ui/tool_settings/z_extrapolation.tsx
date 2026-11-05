@@ -13,21 +13,28 @@
  *
  * Presentational: all logic lives on `host.zExtrapolation` (the tool + run
  * controller). The panel reads its reactive state, offers layer/direction/Z
- * controls, lists the tracked segments (the mask layer's selection), and drives
- * Auto-detect / Run / Reset. Run is gated on the backend being reachable.
+ * controls, lists the segments (the mask layer's selection) with their colours
+ * and a track/untrack tick each (TM-518), and drives Auto-detect / Run / Reset.
+ * Run is gated on the backend being reachable.
  */
 
 import type { EditSession, LayerId } from "@zettaai/edit-session";
-import { useCallback, useEffect } from "preact/hooks";
+import type { JSX } from "preact";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
-import type { ZExtrapolationTool } from "#src/editing/tool_runtimes/z_extrapolation_tool.js";
+import { MAX_TRACKED_SEGMENTS } from "#src/editing/tool_runtimes/mask_label_codec.js";
+import type {
+  ConfirmOverLimit,
+  ZExtrapolationTool,
+} from "#src/editing/tool_runtimes/z_extrapolation_tool.js";
+import { ConfirmDialog } from "#src/editing/ui/confirm_dialog.js";
 import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
 import { ParamInput } from "#src/editing/ui/tool_settings/param_input.js";
 import { ToolPanelKeys } from "#src/editing/ui/tool_settings/tool_panel_keys.js";
-import type { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
+import { TrackedSegmentList } from "#src/editing/ui/tool_settings/tracked_segment_list.js";
 import "#src/editing/ui/tool_settings/z_extrapolation.css";
 
 type Props = { session: EditSession; host: EditSessionHost };
@@ -111,24 +118,29 @@ function ZExtrapolationBody({
     return position.changed.add(() => tool.followViewportZ());
   }, [tool, host]);
 
-  // Re-render when the mask layer's selection (the tracked set) changes.
+  // Re-render when the mask layer's selection (the listed segments), which of
+  // them are shown, or their colours change.
   const maskLayerId = state.maskLayerId;
   useEvent(
     useCallback(
-      (h: () => void) => {
-        if (maskLayerId === undefined) return () => {};
-        const layer = layerManager.getLayerByName(maskLayerId)?.layer as
-          | SegmentationUserLayer
-          | null
-          | undefined;
-        const selected =
-          layer?.displayState.segmentationGroupState.value.selectedSegments;
-        return selected ? selected.changed.add(() => h()) : () => {};
-      },
-      [maskLayerId, layerManager],
+      (h: () => void) =>
+        maskLayerId === undefined
+          ? () => {}
+          : host.onSegmentDisplayChanged(maskLayerId, h),
+      [maskLayerId, host],
     ),
   );
-  const trackedIds = tool.trackedSegments();
+  // Stable per layer, so a re-render does not remount the NG rows.
+  const mountSegment = useCallback(
+    (parent: HTMLElement, id: bigint) =>
+      maskLayerId === undefined
+        ? undefined
+        : host.mountSegmentListWidget(maskLayerId, parent, id),
+    [maskLayerId, host],
+  );
+  const overLimit = useOverLimitConfirm();
+  const rows = tool.segmentRows();
+  const trackedCount = rows.filter((row) => row.isTracked).length;
 
   // Backend reachability is host-level; every domain reason (layers, tracked
   // segments, current/next slice in region) comes from the tool so the button
@@ -219,29 +231,16 @@ function ZExtrapolationBody({
         </button>
       </div>
 
-      <div class="neuroglancer-z-extrapolation-tracked">
-        <div class="neuroglancer-z-extrapolation-tracked-head">
-          <span>Tracking {trackedIds.length}</span>
-          <button
-            type="button"
-            disabled={state.maskLayerId === undefined}
-            onClick={() => void tool.autoDetectTrackedSegments()}
-          >
-            Auto-detect (Z)
-          </button>
-        </div>
-        {trackedIds.length === 0 ? (
-          <div class="neuroglancer-z-extrapolation-tracked-empty">
-            No segments tracked yet.
-          </div>
-        ) : (
-          <ul class="neuroglancer-z-extrapolation-tracked-list">
-            {trackedIds.map((id) => (
-              <li key={String(id)}>{String(id)}</li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <TrackedSegmentList
+        rows={rows}
+        maxTracked={MAX_TRACKED_SEGMENTS}
+        mountSegment={mountSegment}
+        canAutoDetect={maskLayerId !== undefined}
+        onAutoDetect={() => void tool.autoDetectTrackedSegments(overLimit.ask)}
+        onSetTracked={(id, isTracked) => tool.setSegmentTracked(id, isTracked)}
+        onSetAllTracked={(isTracked) => tool.setAllSegmentsTracked(isTracked)}
+      />
+      {overLimit.dialog}
 
       <button
         type="button"
@@ -250,7 +249,11 @@ function ZExtrapolationBody({
         data-tooltip={disabledReason}
         onClick={() => void tool.runNextSlice()}
       >
-        {state.isRunning ? "Running…" : "Run next slice"}
+        {state.isRunning
+          ? "Running…"
+          : canRun
+            ? `Run next slice (${trackedCount} ${trackedCount === 1 ? "segment" : "segments"})`
+            : "Run next slice"}
       </button>
       {state.isRunning && (
         <button type="button" onClick={() => tool.cancel()}>
@@ -269,4 +272,56 @@ function ZExtrapolationBody({
       <ToolPanelKeys host={host} toolId="z-extrapolation" />
     </div>
   );
+}
+
+interface PendingOverLimit {
+  readonly detectedCount: number;
+  readonly trackedAfter: number;
+  readonly answer: (proceed: boolean) => void;
+}
+
+/**
+ * The confirmation auto-detect asks for when it would track more segments
+ * than one run carries (TM-518). `ask` opens the dialog and resolves with the
+ * answer; walking away (Escape, backdrop, the panel closing) means "no".
+ */
+function useOverLimitConfirm(): {
+  ask: ConfirmOverLimit;
+  dialog: JSX.Element | null;
+} {
+  const [pending, setPending] = useState<PendingOverLimit | undefined>();
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  useEffect(() => () => pendingRef.current?.answer(false), []);
+
+  const ask: ConfirmOverLimit = ({ detectedCount, trackedAfter }) =>
+    new Promise((resolve) => {
+      setPending({
+        detectedCount,
+        trackedAfter,
+        answer: (proceed) => {
+          setPending(undefined);
+          resolve(proceed);
+        },
+      });
+    });
+
+  const dialog =
+    pending === undefined ? null : (
+      <ConfirmDialog
+        open
+        title="Track this many segments?"
+        message={
+          `Auto-detect found ${pending.detectedCount} segments on this slice. ` +
+          `Adding them selects and shows them all and tracks ` +
+          `${pending.trackedAfter} segments — more than the ` +
+          `${MAX_TRACKED_SEGMENTS} one run can carry, so you would untrack ` +
+          `some before running.`
+        }
+        confirmLabel="Add segments"
+        onConfirm={() => pending.answer(true)}
+        onCancel={() => pending.answer(false)}
+      />
+    );
+  return { ask, dialog };
 }

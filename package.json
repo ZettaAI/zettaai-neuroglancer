@@ -191,6 +191,7 @@
     "#src/editing/ui/tool_settings/param_label.js": "./src/editing/ui/tool_settings/param_label.tsx",
     "#src/editing/ui/tool_settings/painting_threshold.js": "./src/editing/ui/tool_settings/painting_threshold.tsx",
     "#src/editing/ui/tool_settings/z_extrapolation.js": "./src/editing/ui/tool_settings/z_extrapolation.tsx",
+    "#src/editing/ui/tool_settings/tracked_segment_list.js": "./src/editing/ui/tool_settings/tracked_segment_list.tsx",
     "#src/widget/react/truncated_label.js": "./src/widget/react/truncated_label.tsx",
     "#src/widget/react/searchable_select.js": "./src/widget/react/searchable_select.tsx",
     "#src/datasource/calcada/react/rejected_by_picker.js": "./src/datasource/calcada/react/rejected_by_picker.tsx",

@@ -1,0 +1,159 @@
+/**
+ * @license
+ * Copyright 2026 Calcada AI / Zetta AI
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ */
+
+.neuroglancer-tracked-segments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nge-space-2);
+  padding: var(--nge-space-3);
+  border: 1px solid var(--nge-border);
+  border-radius: var(--nge-radius-md);
+  background: var(--nge-control-bg-inert);
+}
+
+.neuroglancer-tracked-segments-head,
+.neuroglancer-tracked-segments-bulk {
+  display: flex;
+  align-items: center;
+  gap: var(--nge-space-2);
+  font-size: var(--nge-text-size-sm);
+  color: var(--nge-text-muted);
+}
+
+.neuroglancer-tracked-segments-head {
+  justify-content: space-between;
+}
+
+.neuroglancer-tracked-segments-head button {
+  height: var(--nge-control-h-compact);
+  padding: 0 var(--nge-space-3);
+  border: 1px solid var(--nge-border);
+  border-radius: var(--nge-radius-sm);
+  background: var(--nge-control-bg);
+  color: var(--nge-text);
+  font: inherit;
+  cursor: pointer;
+  transition: var(--nge-transition);
+}
+
+.neuroglancer-tracked-segments-head button:hover:not(:disabled) {
+  background: var(--nge-control-bg-hover);
+}
+
+/* "Track: All · None" — quiet text buttons, secondary to the list itself. */
+.neuroglancer-tracked-segments-bulk button {
+  padding: 0 var(--nge-space-1);
+  border: none;
+  border-radius: var(--nge-radius-sm);
+  background: none;
+  color: var(--nge-accent-fg-soft);
+  font: inherit;
+  cursor: pointer;
+}
+
+.neuroglancer-tracked-segments-bulk button:hover:not(:disabled) {
+  color: var(--nge-text);
+  text-decoration: underline;
+}
+
+.neuroglancer-tracked-segments-head button:disabled,
+.neuroglancer-tracked-segments-bulk button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.neuroglancer-tracked-segments-empty {
+  font-size: var(--nge-text-size-sm);
+  color: var(--nge-text-faint);
+}
+
+.neuroglancer-tracked-segments-list {
+  display: flex;
+  flex-direction: column;
+  max-height: var(--nge-list-max-h);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+/* Crosshair toggle (not a checkbox: in the NG segment list a checkbox means
+   "shown"), then NG's own segment row, then badges. */
+.neuroglancer-tracked-segments-row {
+  display: flex;
+  align-items: center;
+  gap: var(--nge-space-2);
+  padding: var(--nge-space-1) var(--nge-space-2);
+  border-radius: var(--nge-radius-sm);
+}
+
+.neuroglancer-tracked-segments-row:hover {
+  background: var(--nge-control-bg-hover);
+}
+
+.neuroglancer-tracked-segments-target {
+  display: flex;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--nge-radius-sm);
+  background: none;
+  color: var(--nge-text-faint);
+  cursor: pointer;
+}
+
+.neuroglancer-tracked-segments-target:focus-visible {
+  outline: 2px solid var(--nge-accent-ring);
+}
+
+.neuroglancer-tracked-segments-target[aria-pressed="true"] {
+  color: var(--nge-accent-fg-soft);
+}
+
+/* NG's row brings its own layout and colours; it only has to fit the row. */
+.neuroglancer-tracked-segments-native {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.neuroglancer-tracked-segments-native .neuroglancer-segment-list-entry {
+  background: none;
+}
+
+.neuroglancer-tracked-segments-id {
+  font-family: var(--nge-font-mono);
+  font-size: var(--nge-text-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Untracked: kept in the list, visibly out of the next run. */
+.neuroglancer-tracked-segments-row[data-tracked="false"]
+  .neuroglancer-tracked-segments-native {
+  opacity: 0.35;
+}
+
+.neuroglancer-tracked-segments-badge {
+  flex: 0 0 auto;
+  padding: 0 var(--nge-space-1);
+  border: 1px solid var(--nge-border);
+  border-radius: var(--nge-radius-pill);
+  font-size: var(--nge-text-size-sm);
+  color: var(--nge-text-muted);
+}
+
+.neuroglancer-tracked-segments-limit {
+  padding: var(--nge-space-2);
+  border: 1px solid var(--nge-warning-border);
+  border-radius: var(--nge-radius-sm);
+  background: var(--nge-warning-bg);
+  color: var(--nge-warning-fg);
+  font-size: var(--nge-text-size-sm);
+}
