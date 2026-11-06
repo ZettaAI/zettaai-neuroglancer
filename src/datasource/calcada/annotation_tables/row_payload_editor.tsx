@@ -31,8 +31,8 @@ function errorText(error: unknown): string {
 
 /** The row's payload, one field per schema property, saved with the Save button or Enter. */
 export function RowPayloadEditor({ editing }: { editing: RowPayloadEditing }) {
-  const [saved, setSaved] = useState<Payload>();
-  const [draft, setDraft] = useState<Payload>({});
+  const [saved, setSaved] = useState<Payload | undefined>(editing.known);
+  const [draft, setDraft] = useState<Payload>({ ...editing.known });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   // Bumped to put the fields back to the saved payload after a refusal.

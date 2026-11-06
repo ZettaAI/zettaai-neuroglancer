@@ -42,6 +42,7 @@ function editing(overrides: Partial<RowPayloadEditing> = {}) {
     requiredProperties: ["size"],
     readonly: false,
     readonlyChanged: new Signal<() => void>(),
+    known: undefined,
     read: vi.fn(async () => ({ ...SAVED })),
     save: vi.fn(async () => {}),
     ...overrides,
@@ -87,6 +88,14 @@ describe("RowPayloadEditor", () => {
     await mount(editing());
     expect(field("size").value).toBe("3");
     expect(field("kind").value).toBe("spine");
+  });
+
+  it("shows a payload it already knows while the row is read again", async () => {
+    await mount(
+      editing({ known: { size: 5 }, read: () => new Promise(() => {}) }),
+    );
+    expect(container.textContent).not.toContain("Loading");
+    expect(field("size").value).toBe("5");
   });
 
   it("does not save an edited field when it is left", async () => {

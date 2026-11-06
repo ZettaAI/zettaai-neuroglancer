@@ -94,6 +94,7 @@ const entry = (
 ): AnnotationScopeEntry => ({
   counts: new Map(Object.entries(counts)),
   points: new Map(points.map((table) => [table, NO_POINTS])),
+  rereading: new Set(),
 });
 
 const rootScopes = (
@@ -1215,6 +1216,58 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(await editing.read()).toEqual({ tag: "soma", size: 7 });
   });
 
+  it("keeps a saved row drawn with its old value until its scope is read again", async () => {
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      valueField: "size",
+      rows: (root) =>
+        root === undefined
+          ? []
+          : [{ id: root, roots: [root], payload: { size: 3 }, value: 3 }],
+    });
+    const { session, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
+    });
+    await settle();
+    const source = sources.get("syn")!;
+    graph.hold = (read) => read === "points";
+    await session.rowEditing("syn", "syn:10")!.save({ size: 7 });
+    await settle();
+    expect(graph.held).toHaveLength(1);
+    expect(source.get("syn:10")?.properties).toEqual([3]);
+    expect(source.get("syn:20")).toBeDefined();
+    graph.hold = () => false;
+    for (const release of graph.held.splice(0)) release();
+    await settle();
+    expect(source.get("syn:10")?.properties).toEqual([7]);
+    expect(source.get("syn:20")).toBeDefined();
+  });
+
+  it("a row's editor mounted again knows the payload last read or saved, on that branch only", async () => {
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      rows: (root) =>
+        root === undefined
+          ? []
+          : [{ id: root, roots: [root], payload: { size: 3 } }],
+    });
+    const { session, connection } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.known).toBeUndefined();
+    await session.rowEditing("syn", "syn:10")!.read();
+    expect(session.rowEditing("syn", "syn:10")!.known).toEqual({ size: 3 });
+    await session.rowEditing("syn", "syn:10")!.save({ size: 7 });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.known).toEqual({ size: 7 });
+    (connection.branchId as WatchableValue<number>).value = OTHER_BRANCH_ID;
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.known).toBeUndefined();
+  });
+
   it("mounts the row's payload editor into the Selection panel", async () => {
     const graph = fakeGraph(["syn"], { canWrite: true });
     const { session, sources, mountRowEditor } = startSession(graph, {
@@ -1907,6 +1960,32 @@ describe("CalcadaAnnotationTablesSession", () => {
         layerStates.get("syn"),
         source.get(`syn:${CREATED_ROW_ID}`),
       );
+      reference.dispose();
+    });
+
+    it("keeps the root's other rows and the placed point drawn until the root is read again", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+        createdOn: 10n,
+      });
+      const { sources, drawnIds } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n, 20n],
+      });
+      await settle();
+      const source = sources.get("syn")!;
+      graph.hold = (read) => read === "points";
+      const reference = source.add(placedPoint([1, 1, 1]));
+      await settle();
+      expect(graph.held).toHaveLength(1);
+      expect(drawnIds("syn")).toEqual([10n, 20n]);
+      expect(source.get(reference.id)).toBeDefined();
+      graph.hold = () => false;
+      for (const release of graph.held.splice(0)) release();
+      await settle();
+      expect(drawnIds("syn")).toEqual([10n, 20n, CREATED_ROW_ID]);
+      expect(source.get(reference.id)).toBeUndefined();
       reference.dispose();
     });
 

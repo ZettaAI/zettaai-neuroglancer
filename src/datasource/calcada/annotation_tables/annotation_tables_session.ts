@@ -179,6 +179,8 @@ export interface AnnotationFetchRequest {
 export interface AnnotationScopeEntry {
   counts: Map<string, number>;
   points: Map<string, TablePoints>;
+  /** Tables whose points stay drawn while they are read again. */
+  rereading: Set<string>;
 }
 
 export interface AnnotationTotals {
@@ -217,6 +219,8 @@ export interface RowPayloadEditing {
   readonly: boolean;
   /** Fires when `readonly` may have changed under a mounted editor. */
   readonly readonlyChanged: ReadonlySignal<() => void>;
+  /** The payload last read or saved here, shown while the row is read again. */
+  known: Record<string, unknown> | undefined;
   read(): Promise<Record<string, unknown>>;
   save(payload: Record<string, unknown>): Promise<void>;
 }
@@ -426,7 +430,7 @@ export function planAnnotationFetches(input: {
       (entry, table) =>
         entry !== undefined &&
         entry.counts.has(table) &&
-        !entry.points.has(table),
+        (!entry.points.has(table) || entry.rereading.has(table)),
     );
   }
   return requests;
@@ -438,7 +442,7 @@ function scopeEntry(
 ): AnnotationScopeEntry {
   let entry = cache.get(key);
   if (entry === undefined) {
-    entry = { counts: new Map(), points: new Map() };
+    entry = { counts: new Map(), points: new Map(), rereading: new Set() };
     cache.set(key, entry);
   }
   return entry;
@@ -469,6 +473,7 @@ export function acceptAnnotationPoints(
     const received = points.get(table) ?? EMPTY_TABLE_POINTS;
     entry.points.set(table, received);
     entry.counts.set(table, received.ids.length);
+    entry.rereading.delete(table);
   }
 }
 
@@ -535,6 +540,14 @@ export function classifyAnnotationError(
   return { untick: [], absent: [], failed: [...requested], message };
 }
 
+function isTableRead(entry: AnnotationScopeEntry | undefined, table: string) {
+  return (
+    entry !== undefined &&
+    entry.points.has(table) &&
+    !entry.rereading.has(table)
+  );
+}
+
 /** Every scope of the table has its points or has failed. */
 export function tablePointsSettled(
   table: string,
@@ -545,7 +558,7 @@ export function tablePointsSettled(
   return scopes.every(
     ({ key, tables }) =>
       !tables.includes(table) ||
-      cache.get(key)?.points.has(table) === true ||
+      isTableRead(cache.get(key), table) ||
       hasFailed(table, key),
   );
 }
@@ -746,6 +759,10 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
   readonly newRowPayload = new WatchableValue<AnnotationPayload>({});
   private readonly schemas: SchemaCache = new Map();
   private readonly cache = new Map<string, AnnotationScopeEntry>();
+  private readonly knownPayloads = new Map<
+    AnnotationId,
+    { coords: AnnotationReadCoordinates; payload: Record<string, unknown> }
+  >();
   // Per cache key, the request each table was last asked in: in flight, or
   // failed and not to be retried until something changes. An answer counts
   // only for the tables still marked with its request.
@@ -999,6 +1016,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     }
     if (this.wasDisposed) return;
     this.errors.delete(name);
+    this.knownPayloads.delete(annotation.id);
     removeAnnotationRow(this.cache, name, rowId);
     this.retireInFlight(name);
     this.invalidate([name]);
@@ -1015,6 +1033,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (info === undefined || !isRow) return undefined;
     const rowId = annotationRowId(name, annotationId);
     const isReadonly = () => this.isReadonly(name);
+    const known = this.knownPayloads.get(annotationId);
     return {
       properties: info.properties,
       requiredProperties: info.requiredProperties,
@@ -1022,31 +1041,37 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
         return isReadonly();
       },
       readonlyChanged: this.readonlyChanged,
-      read: () => this.readRowPayload(info, rowId),
-      save: (payload) => this.saveRowPayload(info, rowId, payload),
+      known: known?.coords === this.coords ? known.payload : undefined,
+      read: () => this.readRowPayload(info, annotationId, rowId),
+      save: (payload) =>
+        this.saveRowPayload(info, annotationId, rowId, payload),
     };
   }
 
   private async readRowPayload(
     info: AnnotationTableInfo,
+    annotationId: AnnotationId,
     rowId: bigint,
   ): Promise<Record<string, unknown>> {
     const { fetchOkImpl, baseUrl } = this.connection.httpSource;
+    const coords = this.coords;
     const [row] = await fetchAnnotationRows(
       fetchOkImpl,
       baseUrl,
       info,
       [rowId],
-      this.coords,
+      coords,
       this.schemas,
     );
     if (row === undefined) throw new Error(ROW_GONE_NOTE);
+    this.knownPayloads.set(annotationId, { coords, payload: row.payload });
     return row.payload;
   }
 
   /** Server first; the scopes holding the row are then read again for its new value. */
   private async saveRowPayload(
     info: AnnotationTableInfo,
+    annotationId: AnnotationId,
     rowId: bigint,
     payload: Record<string, unknown>,
   ) {
@@ -1060,6 +1085,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
       rowId,
       payload,
     );
+    this.knownPayloads.set(annotationId, { coords, payload });
     await this.rereadScopesOf(info, rowId, coords);
   }
 
@@ -1147,7 +1173,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (roots === undefined) {
       this.forgetTable(name);
     } else {
-      this.forgetTablePointsIn(name, [
+      this.rereadTableIn(name, [
         wholeTableCacheKey(coords, name),
         ...roots.map((root) => annotationCacheKey(coords, root)),
       ]);
@@ -1157,9 +1183,9 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     this.fetchVisible();
   }
 
-  private forgetTablePointsIn(name: string, keys: readonly string[]) {
+  private rereadTableIn(name: string, keys: readonly string[]) {
     for (const key of keys) {
-      this.cache.get(key)?.points.delete(name);
+      this.cache.get(key)?.rereading.add(name);
       this.rootFailures.clear(name, key);
     }
   }
@@ -1236,6 +1262,7 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     for (const entry of this.cache.values()) {
       entry.counts.delete(name);
       entry.points.delete(name);
+      entry.rereading.delete(name);
     }
     for (const asked of this.pending.values()) asked.delete(name);
     this.rootFailures.dropTable(name);
