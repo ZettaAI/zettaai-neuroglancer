@@ -29,7 +29,7 @@ import {
   sliceQuadGlobalCorners,
   traceSphereSemiAxes,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_geometry.js";
-import type { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
+import type { TraceSphereView } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
 import type {
   SliceViewPanelReadyRenderContext,
   SliceViewPanelRenderContext,
@@ -114,7 +114,7 @@ export class TraceSphereSliceOverlay extends SliceViewPanelRenderLayer {
 
   constructor(
     public gl: GL,
-    public state: TraceSphereState,
+    public state: TraceSphereView,
   ) {
     super();
     this.renderer = this.registerDisposer(new TraceSphereSliceRenderer(gl));

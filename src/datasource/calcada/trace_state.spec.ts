@@ -4,7 +4,9 @@ import { minCandidateVoxels } from "#src/datasource/calcada/candidate_filter_tre
 import type { ScoreRange } from "#src/datasource/calcada/trace_state.js";
 import {
   stepScoreRangeLow,
+  TRACE_END_RADIUS_DEFAULT_NM,
   TRACE_SPHERE_RADIUS_DEFAULT_NM,
+  TRACE_SPHERE_RADIUS_MAX_NM,
   withinScoreRange,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
@@ -17,6 +19,28 @@ describe("ZettaTraceState", () => {
     expect(state.sphereRadiusNm.value).toBe(TRACE_SPHERE_RADIUS_DEFAULT_NM);
     expect(state.sphereCenter.value).toBeUndefined();
     state.dispose();
+  });
+
+  it("endRadiusNm defaults to 1000 and is left out of the JSON", () => {
+    const state = new ZettaTraceState();
+    expect(TRACE_END_RADIUS_DEFAULT_NM).toBe(1000);
+    expect(state.endRadiusNm.value).toBe(TRACE_END_RADIUS_DEFAULT_NM);
+    expect(JSON.stringify(state.toJSON())).not.toContain("endRadiusNm");
+    state.dispose();
+  });
+
+  it("endRadiusNm round-trips and is clamped on restore", () => {
+    const state = new ZettaTraceState();
+    state.endRadiusNm.value = 4321;
+    const json = JSON.parse(JSON.stringify(state.toJSON()));
+    expect(json.endRadiusNm).toBe(4321);
+    const restored = new ZettaTraceState();
+    restored.restoreState(json);
+    expect(restored.endRadiusNm.value).toBe(4321);
+    restored.restoreState({ endRadiusNm: 999999 });
+    expect(restored.endRadiusNm.value).toBe(TRACE_SPHERE_RADIUS_MAX_NM);
+    state.dispose();
+    restored.dispose();
   });
 
   it("keeps the trace alive while aiming over it", () => {

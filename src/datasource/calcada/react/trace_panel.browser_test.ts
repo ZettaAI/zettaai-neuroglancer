@@ -375,6 +375,27 @@ describe("CalcadaTracePanel", () => {
     );
   });
 
+  it("the end radius input sets endRadiusNm in both scopes", async () => {
+    const connection = await makeConnection();
+    const state = connection.state.zettaTraceState;
+    await mountPanel(connection);
+    const input = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLLabelElement>(".calcada-trace-panel-row"),
+      ].find((label) => label.textContent?.includes("End check radius"));
+      expect(found).toBeDefined();
+      return found!.querySelector<HTMLInputElement>("input")!;
+    });
+    for (const scope of ["sphere", "segment"] as const) {
+      state.scope.value = scope;
+      await vi.waitFor(() => expect(input.disabled).toBe(false));
+      await userEvent.fill(input, scope === "sphere" ? "3000" : "4000");
+      await vi.waitFor(() =>
+        expect(state.endRadiusNm.value).toBe(scope === "sphere" ? 3000 : 4000),
+      );
+    }
+  });
+
   it("starts a trace from the tab", async () => {
     await mountPanel(await makeConnection({ busy: false }));
     calls = [];

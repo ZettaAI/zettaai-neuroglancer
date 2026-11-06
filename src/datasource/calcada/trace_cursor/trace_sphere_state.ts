@@ -26,7 +26,15 @@ import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import { RefCounted } from "#src/util/disposable.js";
 
-export class TraceSphereState extends RefCounted {
+/** What the sphere overlays draw. */
+export interface TraceSphereView {
+  readonly visible: WatchableValueInterface<boolean>;
+  readonly center: WatchableValueInterface<Float32Array | undefined>;
+  readonly radiusNm: WatchableValueInterface<number>;
+  readonly coordinateSpace: WatchableValueInterface<CoordinateSpace>;
+}
+
+export class TraceSphereState extends RefCounted implements TraceSphereView {
   readonly visible = new WatchableValue<boolean>(false);
   readonly center = new WatchableValue<Float32Array | undefined>(undefined);
   readonly radiusNm: WatchableValue<number>;

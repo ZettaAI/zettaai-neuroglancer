@@ -122,6 +122,7 @@ import {
 } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
+  continueAt,
   nextDecidedEntry,
   nextEntry,
   prependChildren,
@@ -156,6 +157,12 @@ import {
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
+import { pieceFarEndNm } from "#src/datasource/calcada/piece_far_end.js";
+import type { GeometryInRadius } from "#src/datasource/calcada/piece_geometry.js";
+import {
+  parseGeometryInRadius,
+  pieceGeometryRequestBody,
+} from "#src/datasource/calcada/piece_geometry.js";
 import { PieceGraphContextCache } from "#src/datasource/calcada/piece_graph_context.js";
 import {
   PointPlacement,
@@ -171,7 +178,10 @@ import {
   CalcadaTimestampPicker,
   TIMESTAMP_CONTROL_TITLE,
 } from "#src/datasource/calcada/react/timestamp_picker.js";
-import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
+import type {
+  TraceEndActions,
+  TraceNotice,
+} from "#src/datasource/calcada/react/trace_notice.js";
 import { RetiredRoots } from "#src/datasource/calcada/retired_roots.js";
 import {
   interceptedRemovals,
@@ -196,6 +206,8 @@ import {
   stageBlockedReason,
   stageEnabled,
 } from "#src/datasource/calcada/split_steps.js";
+import type { EndPromptSphere } from "#src/datasource/calcada/trace_cursor/end_prompt_sphere.js";
+import { SphereShowingEndPrompt } from "#src/datasource/calcada/trace_cursor/end_prompt_sphere.js";
 import {
   traceSphereSemiAxes,
   pointInsideSphere,
@@ -203,6 +215,13 @@ import {
 import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_perspective_overlay.js";
 import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
+import {
+  endCheckVerdict,
+  scoreFloor,
+} from "#src/datasource/calcada/trace_end_check.js";
+import type { TraceEndPromptView } from "#src/datasource/calcada/trace_end_controller.js";
+import { TraceEndController } from "#src/datasource/calcada/trace_end_controller.js";
+import { TraceEndpointTable } from "#src/datasource/calcada/trace_endpoint_table.js";
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import {
@@ -215,11 +234,17 @@ import {
   SPLIT_DETECTION_KEYS_MODE,
   SPLIT_DETECTION_MODE_SHORTCUTS,
   TRACE_AIM_MODE_SHORTCUTS,
+  TRACE_END_MODE_SHORTCUTS,
   TRACE_KEYS_MODE,
   TRACE_MODE_SHORTCUTS,
   ZETTA_TRACE_INPUT_EVENT_MAP,
 } from "#src/datasource/calcada/trace_key_bindings.js";
 import { TraceNoticeOverlay } from "#src/datasource/calcada/trace_notice_overlay.js";
+import type {
+  TraceKeyHandler,
+  TracePromptKeyAction,
+} from "#src/datasource/calcada/trace_prompt_keys.js";
+import { traceKeyHandler } from "#src/datasource/calcada/trace_prompt_keys.js";
 import {
   currentCandidateFilter,
   piecesPassing,
@@ -2492,6 +2517,9 @@ function bindModeInputs(
 }
 
 const TRACE_IDLE_STATUS = "Press T to start a trace";
+const TRACE_END_CHECKING_STATUS = "Checking around the trace end…";
+// The undo mark of an endpoint written before any graph edit.
+const NO_GRAPH_EDIT = Symbol("no graph edit");
 const PICK_SEGMENT_MESSAGE = "Ctrl+click the segment to proofread in a 2D view";
 const SPHERE_OFF_SEGMENT_MESSAGE = "Place the sphere on the selected segment.";
 const SEGMENT_NOT_FOUND_MESSAGE =
@@ -2513,7 +2541,8 @@ const SPLIT_DETECTION_MODE_PRIORITY = 2;
 let traceModeInstances = 0;
 let splitDetectionModeInstances = 0;
 const TRACE_MODE_PRIORITY = 3;
-const TRACE_AIM_MODE_PRIORITY = 4;
+const TRACE_END_MODE_PRIORITY = 4;
+const TRACE_AIM_MODE_PRIORITY = 5;
 
 const steppedPresses = new WeakSet<object>();
 
@@ -2935,6 +2964,15 @@ class CalcadaDebugSession extends RefCounted {
 
 // The server walks history per root; it refuses more than this at once.
 const LATEST_ROOTS_BATCH = 200;
+
+// A branch that cannot be read is a branch with no children, not a failed
+// merge: the merge has already happened by the time this is awaited.
+function childrenOrNone(
+  read: Promise<EdgeCandidate[]>,
+): Promise<EdgeCandidate[]> {
+  return read.catch(() => []);
+}
+
 /** Whether a candidate is bound to any of these pieces, on either end. */
 function namesAny(candidate: EdgeCandidate, pieces: ReadonlySet<bigint>) {
   return (
@@ -3003,6 +3041,8 @@ class ZettaTraceSession extends RefCounted {
   // Re-seeding while a fetch is in flight would otherwise let the older
   // response land last and repopulate the list for the previous segment.
   private fetchToken = 0;
+  // Not fetchToken: a filter reload mid-merge must not drop its end check.
+  private traceGeneration = 0;
   private graphToken = 0;
   private graphFailed = false;
   // The candidate last put on screen, so one that comes back after waiting on
@@ -3030,6 +3070,23 @@ class ZettaTraceSession extends RefCounted {
   private readonly splitPoints: TraceSplitPoints;
   private priorUseTempSegmentStatedColors2d = false;
   private reassertingRoleColors = false;
+  // After each accept or reject: either the place goes on, or the prompt asks
+  // whether the neuron ends there.
+  private readonly endController: TraceEndController;
+  private readonly endPromptOpen = new WatchableValue(false);
+  readonly endSphere = new WatchableValue<EndPromptSphere | undefined>(
+    undefined,
+  );
+  private framedEndPoint: Float32Array | undefined;
+  // What the end check found to go on with; shown even below the filters,
+  // since look deeper finds exactly that.
+  private continuationLineId: bigint | undefined;
+  readonly endActions: TraceEndActions = {
+    certain: () => this.endController.answer("certain"),
+    uncertain: () => this.endController.answer("uncertain"),
+    deeper: () => void this.endController.deeper(),
+    back: () => void this.endController.back(),
+  };
 
   constructor(
     private connection: GraphConnection,
@@ -3068,6 +3125,57 @@ class ZettaTraceSession extends RefCounted {
         ),
     });
     this.registerDisposer(() => this.splitPoints.clear());
+    this.endController = new TraceEndController({
+      fetchAround: (seedRoot, center, radiusNm) => {
+        const semiAxes = traceSphereSemiAxes(
+          radiusNm,
+          layer.manager.root.coordinateSpace.value,
+        );
+        if (semiAxes === undefined) {
+          return Promise.reject(
+            new Error("the layer's coordinate space is unusable"),
+          );
+        }
+        return this.fetchInSphere(seedRoot, center, semiAxes);
+      },
+      acceptEndPoint: (candidate, mergedRoot, radiusNm) =>
+        this.partnerFarEnd(candidate, mergedRoot, radiusNm),
+      insideEndSphere: (point, center, radiusNm) => {
+        const semiAxes = traceSphereSemiAxes(
+          radiusNm,
+          layer.manager.root.coordinateSpace.value,
+        );
+        return (
+          semiAxes !== undefined && pointInsideSphere(point, center, semiAxes)
+        );
+      },
+      verdict: (threshold) => this.endCheckVerdicts(threshold),
+      fillGraph: async (candidates, threshold) => {
+        await connection.pieceGraph.fill((graph) => {
+          const verdict = this.endCheckVerdicts(threshold, graph);
+          for (const candidate of candidates) verdict(candidate);
+        });
+      },
+      startThreshold: () =>
+        scoreFloor(state.filter.value, state.scoreRange.value),
+      radiusNm: () => state.endRadiusNm.value,
+      branchId: () => this.branchId,
+      write: (row, branchId) => connection.traceEndpoints.write(branchId, row),
+      remove: (rowId, branchId) =>
+        connection.traceEndpoints.remove(branchId, rowId),
+      continueWith: (candidate, depth) => {
+        const passes = this.candidateVerdicts()(candidate) === true;
+        this.pool = continueAt(this.pool, candidate, depth, passes);
+        this.continuationLineId = passes ? undefined : candidate.lineId;
+        this.showCurrent();
+      },
+      showNext: () => this.showCurrent(),
+      undoMark: () => connection.undoTop() ?? NO_GRAPH_EDIT,
+      changed: () => this.onEndPromptChanged(),
+      reportError: (message) =>
+        StatusMessage.showTemporaryMessage(message, MESSAGE_DURATION_MS),
+    });
+    this.registerDisposer(() => this.resetEndCheck());
     // Switching the points on or off shows at once, not with the next
     // candidate. The server-side filters change the scores themselves.
     const rescoreSplitPoints = () => {
@@ -3092,6 +3200,14 @@ class ZettaTraceSession extends RefCounted {
         title: "Trace",
         priority: TRACE_MODE_PRIORITY,
         shortcuts: TRACE_MODE_SHORTCUTS,
+      }),
+    );
+    this.registerDisposer(
+      publishModeWhile(modeShortcuts, this.endPromptOpen, {
+        id: `trace-end-${traceModeInstance}`,
+        title: "End",
+        priority: TRACE_END_MODE_PRIORITY,
+        shortcuts: TRACE_END_MODE_SHORTCUTS,
       }),
     );
     this.registerDisposer(
@@ -3207,6 +3323,58 @@ class ZettaTraceSession extends RefCounted {
 
   private get branchId() {
     return this.connection.graph.branchId.value;
+  }
+
+  get endPrompt(): TraceEndPromptView | undefined {
+    return this.endController.prompt;
+  }
+
+  /** The far end of the partner piece inside the merged segment; undefined = unknown. */
+  private async partnerFarEnd(
+    candidate: EdgeCandidate,
+    mergedRoot: bigint,
+    radiusNm: number,
+  ): Promise<Float32Array | undefined> {
+    const coordinateSpace = this.layer.manager.root.coordinateSpace.value;
+    const contactNm = globalToNanometres(candidate.pointB, coordinateSpace);
+    if (contactNm === undefined) return undefined;
+    const geometry = await this.graphServer.fetchPieceGeometry(
+      mergedRoot,
+      candidate.partnerPieceId,
+      contactNm,
+      radiusNm,
+      this.branchId,
+    );
+    const partner = geometry.results[0]?.pieces.find(
+      (piece) => piece.pieceId === candidate.partnerPieceId,
+    );
+    if (partner === undefined) return undefined;
+    const farEndNm = pieceFarEndNm(
+      partner.centroidVoxels,
+      partner.covVoxels2,
+      geometry.resolutionNm,
+      contactNm,
+    );
+    return farEndNm && nanometresToGlobal(farEndNm, coordinateSpace);
+  }
+
+  private resetEndCheck() {
+    this.continuationLineId = undefined;
+    this.endController.reset();
+  }
+
+  private onEndPromptChanged() {
+    const prompt = this.endController.prompt;
+    this.endPromptOpen.value = prompt?.phase === "open";
+    this.endSphere.value = prompt?.endPointKnown
+      ? { center: prompt.endPoint, radiusNm: prompt.radiusNm }
+      : undefined;
+    if (prompt === undefined) {
+      this.framedEndPoint = undefined;
+      this.changed.dispatch();
+      return;
+    }
+    this.showCurrent();
   }
 
   private setStatus(text: string, notice?: TraceNotice) {
@@ -3385,12 +3553,25 @@ class ZettaTraceSession extends RefCounted {
     this.splitParts.clear();
 
     // Arrows review candidates instead of panning until the mode ends.
+    const keyHandlers: Record<TraceKeyHandler, () => void> = {
+      ...this.endActions,
+      dismiss: () => this.endController.dismiss(),
+      reject: () => this.reject(),
+      accept: () => void this.accept(),
+      skip: () => this.skip(),
+      cancel: () => this.state.cancelInnermost(),
+    };
+    const routed = (action: TracePromptKeyAction) => () => {
+      const handler = traceKeyHandler(action, this.endController.prompt?.phase);
+      if (handler !== undefined) keyHandlers[handler]();
+    };
     const bindings = bindModeInputs(this.layer, ZETTA_TRACE_INPUT_EVENT_MAP, {
-      "reject-candidate": () => this.reject(),
-      "accept-candidate": () => void this.accept(),
-      "skip-candidate": () => this.skip(),
+      "reject-candidate": routed("reject-candidate"),
+      "accept-candidate": routed("accept-candidate"),
+      "skip-candidate": routed("skip-candidate"),
+      "trace-end-back": routed("trace-end-back"),
       "trace-undo": () => void this.undoLast(),
-      "exit-trace": () => this.state.cancelInnermost(),
+      "exit-trace": routed("exit-trace"),
       ...plusMinusHandlers(TRACE_KEYS_MODE, this.state),
     });
     this.bindings = bindings;
@@ -3475,6 +3656,7 @@ class ZettaTraceSession extends RefCounted {
     this.bindings = undefined;
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.clock = undefined;
+    this.resetEndCheck();
     this.clearAnnotation();
     this.pool = [];
     this.current = undefined;
@@ -3483,6 +3665,7 @@ class ZettaTraceSession extends RefCounted {
     this.partnerCandidates = undefined;
     this.seedPieceId = undefined;
     ++this.fetchToken;
+    ++this.traceGeneration;
 
     // The seed does not outlive the mode: leaving means done with that segment.
     // Keeping it made re-entry snap the view back to the old candidate and wipe
@@ -3537,6 +3720,8 @@ class ZettaTraceSession extends RefCounted {
     if (!this.state.active.value) return;
     const seedPiece = this.seedPieceId ?? this.current?.selfPieceId;
     const token = ++this.fetchToken;
+    ++this.traceGeneration;
+    this.resetEndCheck();
     this.current = undefined;
     this.clearAnnotation();
     this.pool = [];
@@ -3563,6 +3748,7 @@ class ZettaTraceSession extends RefCounted {
   }
 
   clearSeed() {
+    this.resetEndCheck();
     this.state.aiming.value = false;
     this.state.active.value = false;
   }
@@ -3571,8 +3757,10 @@ class ZettaTraceSession extends RefCounted {
     this.clock?.markAction();
     this.state.seedRoot.value = rootId;
     this.seedPieceId = pieceId;
+    ++this.traceGeneration;
     this.splitParts.clear();
     this.undoFloor = this.connection.undoTop();
+    this.resetEndCheck();
     this.current = undefined;
     this.pool = [];
     this.dimmed.clear();
@@ -3703,7 +3891,20 @@ class ZettaTraceSession extends RefCounted {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     this.dimmed.clear();
-    const verdict = this.candidateVerdicts();
+    const prompt = this.endController.prompt;
+    if (prompt !== undefined) {
+      this.showEndPrompt(seedRoot, prompt);
+      return;
+    }
+    if (
+      this.continuationLineId !== undefined &&
+      this.decided.has(this.continuationLineId)
+    ) {
+      this.continuationLineId = undefined;
+    }
+    const traceVerdict = this.candidateVerdicts();
+    const verdict = (candidate: EdgeCandidate) =>
+      candidate.lineId === this.continuationLineId || traceVerdict(candidate);
     const shown = (candidate: EdgeCandidate) => verdict(candidate) === true;
     const pick = nextDecidedEntry(this.pool, this.decided, verdict);
     // The view is left as it is: after an edit it is the proofreader's, and
@@ -3737,6 +3938,13 @@ class ZettaTraceSession extends RefCounted {
           };
     this.currentDepth = entry?.depth ?? 0;
     if (entry !== undefined) this.clock?.markShown(entry.candidate.lineId);
+    if (
+      this.current !== undefined &&
+      this.current.lineId !== previousLineId &&
+      this.branchId !== MAIN_BRANCH_ID
+    ) {
+      this.endController.prepare(this.current, seedRoot);
+    }
     this.remaining = remainingCount(this.pool, this.decided, shown);
     if (this.current === undefined) {
       this.showOnly(seedRoot);
@@ -3812,26 +4020,44 @@ class ZettaTraceSession extends RefCounted {
       : line;
     this.annotationIds.push(source.add(annotation, true).id);
 
-    const midpoint = vec3.create();
-    vec3.add(midpoint, line.pointA as vec3, line.pointB as vec3);
-    vec3.scale(midpoint, midpoint, 0.5);
+    if (keepCameraOnSame && candidate.lineId === previousLineId) {
+      moveCamera = false;
+    }
+    if (moveCamera) this.frameView(candidate.pointA, candidate.pointB);
+
+    this.reportCandidate(candidate);
+    this.prefetchNext(candidate);
+  }
+
+  private showEndPrompt(seedRoot: bigint, prompt: TraceEndPromptView) {
+    this.current = undefined;
+    this.showOnly(seedRoot);
+    if (prompt.phase === "open" && this.framedEndPoint !== prompt.endPoint) {
+      this.framedEndPoint = prompt.endPoint;
+      this.frameView(prompt.endPoint, prompt.endPoint);
+    }
+    this.setStatus(
+      prompt.phase === "checking"
+        ? TRACE_END_CHECKING_STATUS
+        : `No candidate passes the filters within ${Math.round(prompt.radiusNm)} nm`,
+    );
+  }
+
+  private frameView(pointA: Float32Array, pointB: Float32Array) {
     // Assumes the layer's three dimensions are the global ones, which holds for
     // a calcada layer. Position.value ignores an array whose length does not
     // match the coordinate space rank, so on a higher-rank space this simply
     // does not move rather than moving somewhere wrong.
-    if (keepCameraOnSame && candidate.lineId === previousLineId) {
-      moveCamera = false;
-    }
-    if (moveCamera && this.state.centreOnCandidate.value) {
+    if (this.state.centreOnCandidate.value) {
+      const midpoint = vec3.create();
+      vec3.add(midpoint, pointA as vec3, pointB as vec3);
+      vec3.scale(midpoint, midpoint, 0.5);
       this.layer.manager.root.globalPosition.value =
         Float32Array.from(midpoint);
     }
-    if (moveCamera && this.state.zoomOnCandidate.value) {
-      framePerspective(this.layer, candidate.pointA, candidate.pointB);
+    if (this.state.zoomOnCandidate.value) {
+      framePerspective(this.layer, pointA, pointB);
     }
-
-    this.reportCandidate(candidate);
-    this.prefetchNext(candidate);
   }
 
   // The banner keeps to what a verdict turns on; interfaces and depth stay in
@@ -3978,6 +4204,8 @@ class ZettaTraceSession extends RefCounted {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     const token = ++this.fetchToken;
+    // The prepared end check was fetched under the filters being replaced.
+    this.endController.forgetPrepared();
     this.setProgress("Loading candidates…");
 
     let fetched: EdgeCandidate[];
@@ -4086,7 +4314,17 @@ class ZettaTraceSession extends RefCounted {
     const depth = this.currentDepth;
     const timing = this.clock?.decide();
     this.decided.add(decided.lineId);
-    this.showCurrent();
+    const seedRoot = this.state.seedRoot.value;
+    if (decision === "reject" && seedRoot !== undefined) {
+      void this.endController.afterReject(
+        decided,
+        seedRoot,
+        depth,
+        this.decided,
+      );
+    } else {
+      this.showCurrent();
+    }
     this.graphServer
       .postCandidateDecision(
         { lineId: decided.lineId, decision, timing, depth },
@@ -4109,13 +4347,18 @@ class ZettaTraceSession extends RefCounted {
     const accepted = this.current;
     const acceptedDepth = this.currentDepth;
     const timing = this.clock?.decide();
+    // Leaving the trace or switching branch mid-merge: the end check belongs
+    // to the trace this accept started in.
+    const generation = this.traceGeneration;
+    const sameTrace = () => generation === this.traceGeneration;
     this.setBusy(true);
     this.clearAnnotation();
     this.setProgress("Merging…");
 
     // Started before the merge on purpose: the partner root stops existing the
     // moment it is absorbed, so afterwards there is no id left to ask about.
-    const children = this.fetchChildren(accepted.partnerRootId);
+    const childrenRead = this.readChildren(accepted.partnerRootId);
+    const children = childrenOrNone(childrenRead);
 
     let merged: { root: bigint; operationId: number };
     try {
@@ -4140,6 +4383,7 @@ class ZettaTraceSession extends RefCounted {
     }
     this.decided.add(accepted.lineId);
     this.acceptedLines.push(accepted.lineId);
+    if (sameTrace()) this.endController.noteAccept(accepted.lineId);
     // The edit handler skips the trace's own merges (the trace is busy), so the
     // roots they retire are recorded here. Without this, leaving the trace put
     // the pre-merge seed back on screen: a dead id still drawn from cached mesh
@@ -4174,7 +4418,16 @@ class ZettaTraceSession extends RefCounted {
       acceptedDepth,
       this.decided,
     );
-    this.showCurrent();
+    if (sameTrace()) {
+      void this.endController.afterAccept(
+        accepted,
+        childrenRead,
+        seedRoot,
+        merged.root,
+        acceptedDepth,
+        this.decided,
+      );
+    }
     this.setBusy(false);
     void this.refreshGraphContext();
   }
@@ -4186,23 +4439,17 @@ class ZettaTraceSession extends RefCounted {
    * taken, following it is the whole point, and the branch may well leave the
    * region it started in.
    */
-  private async fetchChildren(
+  private readChildren(
     partnerRoot: bigint,
     { consistent = false }: { consistent?: boolean } = {},
   ): Promise<EdgeCandidate[]> {
-    try {
-      return await this.graphServer.fetchCandidates(partnerRoot, {
-        limit: CANDIDATE_FETCH_LIMIT,
-        minPieceVoxels: this.state.minPieceVoxels.value,
-        rejectedBy: this.state.rejectedBy.value,
-        branchId: this.branchId,
-        consistent,
-      });
-    } catch {
-      // A branch that cannot be read is a branch with no children, not a failed
-      // merge: the merge has already happened by the time this is awaited.
-      return [];
-    }
+    return this.graphServer.fetchCandidates(partnerRoot, {
+      limit: CANDIDATE_FETCH_LIMIT,
+      minPieceVoxels: this.state.minPieceVoxels.value,
+      rejectedBy: this.state.rejectedBy.value,
+      branchId: this.branchId,
+      consistent,
+    });
   }
 
   /**
@@ -4235,22 +4482,12 @@ class ZettaTraceSession extends RefCounted {
     );
     const around = async (candidate: EdgeCandidate) => {
       if (radius === undefined) {
-        return this.fetchChildren(seedRoot, { consistent: true });
+        return childrenOrNone(
+          this.readChildren(seedRoot, { consistent: true }),
+        );
       }
       try {
-        return await this.graphServer.fetchCandidates(seedRoot, {
-          limit: SPHERE_FETCH_LIMIT,
-          minPieceVoxels: this.state.minPieceVoxels.value,
-          rejectedBy: this.state.rejectedBy.value,
-          branchId: this.branchId,
-          consistent: true,
-          center: [
-            candidate.pointA[0],
-            candidate.pointA[1],
-            candidate.pointA[2],
-          ],
-          radius: [radius[0], radius[1], radius[2]],
-        });
+        return await this.fetchInSphere(seedRoot, candidate.pointA, radius);
       } catch {
         return [];
       }
@@ -4272,6 +4509,23 @@ class ZettaTraceSession extends RefCounted {
     return fresh;
   }
 
+  // Consistent: straight after an edit the roots asked about are brand new.
+  private fetchInSphere(
+    seedRoot: bigint,
+    center: ArrayLike<number>,
+    semiAxes: ArrayLike<number>,
+  ): Promise<EdgeCandidate[]> {
+    return this.graphServer.fetchCandidates(seedRoot, {
+      limit: SPHERE_FETCH_LIMIT,
+      minPieceVoxels: this.state.minPieceVoxels.value,
+      rejectedBy: this.state.rejectedBy.value,
+      branchId: this.branchId,
+      consistent: true,
+      center: [center[0], center[1], center[2]],
+      radius: [semiAxes[0], semiAxes[1], semiAxes[2]],
+    });
+  }
+
   /**
    * Whether a queued candidate passes the shared filters, as far as the queue
    * can answer: a side none of them has semantics for is not filtered.
@@ -4286,13 +4540,32 @@ class ZettaTraceSession extends RefCounted {
   ): (candidate: EdgeCandidate) => Verdict {
     const tree = this.state.filter.value;
     const range = this.state.scoreRange.value;
-    const known = semanticsKnown(
-      this.pool.map((entry) => edgeCandidateSubject(entry.candidate)),
-    );
+    const known = this.poolSemanticsKnown();
     return (candidate) =>
       withinScoreRange(candidate.score, range)
         ? subjectVerdict(edgeCandidateSubject(candidate), tree, known, graph)
         : false;
+  }
+
+  /** undefined = the trace's own filters, as the end check's `verdict` dep. */
+  private endCheckVerdicts(
+    threshold: number | undefined,
+    graph: GraphFacts = this.connection.pieceGraph,
+  ): (candidate: EdgeCandidate) => Verdict {
+    if (threshold === undefined) return this.candidateVerdicts(graph);
+    return endCheckVerdict(
+      this.state.filter.value,
+      this.state.scoreRange.value,
+      threshold,
+      this.poolSemanticsKnown(),
+      graph,
+    );
+  }
+
+  private poolSemanticsKnown() {
+    return semanticsKnown(
+      this.pool.map((entry) => edgeCandidateSubject(entry.candidate)),
+    );
   }
 
   /** The candidate partner's current root, or the one it was fetched with. */
@@ -4355,6 +4628,7 @@ class ZettaTraceSession extends RefCounted {
     if (this.bindings === undefined || this.busy) return;
     // A graph answer landing mid-refresh would re-pick against a cleared cache.
     ++this.graphToken;
+    this.endController.forgetPrepared();
     this.retired.retire([...oldRoots].filter((id) => !newRoots.has(id)));
     // Taken now, synchronously: the notification that fired this is the edit
     // the carved pieces belong to.
@@ -4397,10 +4671,21 @@ class ZettaTraceSession extends RefCounted {
 
   async undoLast() {
     if (this.bindings === undefined || this.busy) return;
+    const endpointMark = this.endController.newestEndpointMark();
+    const editedSinceEndpoint =
+      endpointMark !== (this.connection.undoTop() ?? NO_GRAPH_EDIT);
+    if (
+      endpointMark !== undefined &&
+      !editedSinceEndpoint &&
+      (await this.endController.undo())
+    ) {
+      return;
+    }
     if (!this.canUndo()) {
       this.setStatus("Nothing to undo for this seed");
       return;
     }
+    this.endController.dismiss();
     this.setBusy(true);
     this.setProgress("Undoing…");
     try {
@@ -4410,6 +4695,7 @@ class ZettaTraceSession extends RefCounted {
       // quietly draining the list.
       if (await this.connection.undo()) {
         const lastAccepted = this.acceptedLines.pop();
+        this.endController.forgetAccept();
         if (lastAccepted !== undefined) {
           this.decided.delete(lastAccepted);
           // Undo revives the seed and candidate that accept retired: hiding
@@ -5313,6 +5599,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public segmentSession!: ProofreadSegmentSession;
   public debugSession!: CalcadaDebugSession;
   public annotationTablesSession!: CalcadaAnnotationTablesSession;
+  public traceEndpoints!: TraceEndpointTable;
   // Fires after any edit that rewrote roots: merge, split or undo.
   readonly graphEdited = new Signal<
     (oldRoots: Uint64Set, newRoots: Uint64Set) => void
@@ -5861,12 +6148,15 @@ void main() {
         layer.manager.root.coordinateSpace,
       ),
     );
+    const sphere = this.registerDisposer(
+      new SphereShowingEndPrompt(sphereState, this.traceSession.endSphere),
+    );
     const { gl } = layer.manager.root.display;
     this.registerDisposer(
-      layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphereState)),
+      layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphere)),
     );
     this.registerDisposer(
-      layer.addRenderLayer(new TraceSpherePerspectiveOverlay(gl, sphereState)),
+      layer.addRenderLayer(new TraceSpherePerspectiveOverlay(gl, sphere)),
     );
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
@@ -5982,6 +6272,20 @@ void main() {
         state.annotationTables,
       ),
     );
+    const globalSpace = layer.manager.root.coordinateSpace;
+    this.traceEndpoints = new TraceEndpointTable({
+      fetchOk: graph.httpSource.fetchOkImpl,
+      baseUrl: graph.httpSource.baseUrl,
+      toNanometres: (point) => {
+        const nanometres = globalToNanometres(point, globalSpace.value);
+        return nanometres && Float32Array.from(nanometres);
+      },
+      nanometresPerUnit: () => {
+        const perUnit = nanometresPerGlobalUnit(globalSpace.value);
+        return perUnit && Array.from(perUnit);
+      },
+      tablesSession: this.annotationTablesSession,
+    });
     layer.displayState.annotationExcludedSegments.value =
       state.annotationTables.excludedSegments;
     this.registerDisposer(() => {
@@ -7653,6 +7957,27 @@ class CalcadaGraphServerInterface {
       );
     }
     return out;
+  }
+
+  /** One piece's geometry, when it belongs to `rootId` and has any. */
+  async fetchPieceGeometry(
+    rootId: bigint,
+    pieceId: bigint,
+    pointNm: readonly number[],
+    radiusNm: number,
+    branchId: number,
+  ): Promise<GeometryInRadius> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams();
+    if (branchId) params.set("branch_id", String(branchId));
+    const response = await fetchOkImpl(
+      `${baseUrl}/geometry_in_radius?${params.toString()}`,
+      {
+        method: "POST",
+        body: pieceGeometryRequestBody(rootId, pieceId, pointNm, radiusNm),
+      },
+    );
+    return parseGeometryInRadius(await response.text());
   }
 
   /** Who has rejected a candidate on this graph, not counting the caller. */

@@ -5,6 +5,7 @@ import {
   describePartnerChoice,
 } from "#src/datasource/calcada/candidate_ranking.js";
 import {
+  continueAt,
   nextDecidedEntry,
   nextEntry,
   prependChildren,
@@ -107,6 +108,32 @@ describe("prependChildren", () => {
       new Set([2n]),
     );
     expect(lineIds(next)).toEqual([3, 1]);
+  });
+});
+
+describe("continueAt", () => {
+  it("puts a candidate the pool lacks at the head at the given depth", () => {
+    const pool = seedPool([candidate(1, 0.9), candidate(2, 0.5)]);
+    const next = continueAt(pool, candidate(3, 0.1), 4, true);
+    expect(lineIds(next)).toEqual([3, 1, 2]);
+    expect(next[0].depth).toBe(4);
+  });
+
+  it("leaves the walk as it is for a queued candidate the filters pass", () => {
+    const pool = seedPool([candidate(1, 0.9), candidate(2, 0.5)]);
+    expect(continueAt(pool, candidate(2, 0.5), 0, true)).toBe(pool);
+  });
+
+  it("moves a queued candidate the filters hide to the head, keeping its depth", () => {
+    const pool = prependChildren(
+      seedPool([candidate(1, 0.9)]),
+      [candidate(2, 0.5), candidate(3, 0.4)],
+      1,
+      new Set(),
+    );
+    const next = continueAt(pool, candidate(3, 0.4), 0, false);
+    expect(lineIds(next)).toEqual([3, 2, 1]);
+    expect(next[0].depth).toBe(2);
   });
 });
 
