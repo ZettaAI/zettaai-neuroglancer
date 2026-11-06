@@ -53,6 +53,8 @@ export interface PatchReadbackSummary {
   }>;
   /** True if `maxVoxels` capped the collected set (count/bbox stay exact). */
   readonly truncated: boolean;
+  /** Patched voxels holding `options.countValue` (0 when not asked). Exact. */
+  readonly valueCount: number;
 }
 
 export interface PatchReadbackOptions {
@@ -67,6 +69,11 @@ export interface PatchReadbackOptions {
    * edit region and the saved data. Default `[0,0,0]` (no shift).
    */
   readonly originOffset?: readonly [number, number, number];
+  /**
+   * Count the patched voxels holding this value (decimal string), over all of
+   * them — unlike `distinctValues`, not capped by `maxVoxels`.
+   */
+  readonly countValue?: string;
 }
 
 function parseGridKey(key: string): [number, number, number] {
@@ -86,6 +93,9 @@ export function summarizePatchedVoxels(
   const maxVoxels = options.maxVoxels ?? 500000;
   const sampleSize = options.sampleSize ?? 8;
   const [offX, offY, offZ] = options.originOffset ?? [0, 0, 0];
+  const countedValue =
+    options.countValue === undefined ? undefined : BigInt(options.countValue);
+  let valueCount = 0;
 
   let paintedVoxels = 0;
   let chunkCount = 0;
@@ -108,6 +118,7 @@ export function summarizePatchedVoxels(
       if (chunk.patched[i] === 0) continue;
       chunkHasPatch = true;
       paintedVoxels++;
+      if (chunk.data[i] === countedValue) valueCount++;
       const lx = i % cx;
       const ly = Math.floor(i / cx) % cy;
       const lz = Math.floor(i / (cx * cy));
@@ -162,5 +173,6 @@ export function summarizePatchedVoxels(
     distinctValues: [...distinct].sort(),
     sample,
     truncated,
+    valueCount,
   };
 }

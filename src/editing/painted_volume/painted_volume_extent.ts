@@ -23,6 +23,11 @@
  * grid starts). Together these keep every factor block inside one chunk, so
  * the per-chunk occupancy kernel can write a texel from that chunk alone
  * without erasing a neighbour chunk's contribution.
+ *
+ * An axis the volume fills with one chunk has no neighbour to protect, so it
+ * takes any factor. It needs saying because there the chunk size is the
+ * volume's extent (`editChunkDataSize`, TM-373), often odd — which would
+ * otherwise allow no downsampling at all.
  */
 
 import type { SessionVoxelBounds } from "@zettaai/edit-session";
@@ -49,7 +54,9 @@ export const PAINTED_VOLUME_BYTES_PER_TEXEL = 2;
 /**
  * Plan the texture for the session region `bounds` (exclusive `hi`), or
  * `undefined` when the region is empty or no allowed factor fits both
- * `maxTextureDim` and `budgetBytes`.
+ * `maxTextureDim` and `budgetBytes`. `volumeSizeVoxels` (the scale's
+ * `sizeVoxels`) marks the axes the volume fills with one chunk; without it
+ * every axis is treated as having several.
  */
 export function planPaintedVolumeExtent(
   bounds: SessionVoxelBounds,
@@ -57,13 +64,18 @@ export function planPaintedVolumeExtent(
   voxelOffset: AxisTriple,
   maxTextureDim: number,
   budgetBytes: number,
+  volumeSizeVoxels?: AxisTriple,
 ): PaintedVolumeExtent | undefined {
   if (maxTextureDim <= 0 || budgetBytes <= 0) return undefined;
   const lo: AxisTriple = [bounds.loX, bounds.loY, bounds.loZ];
   const hi: AxisTriple = [bounds.hiX, bounds.hiY, bounds.hiZ];
   if (lo.some((low, axis) => hi[axis] <= low)) return undefined;
 
-  const maxFactor = chunkDataSize.map(largestPowerOfTwoDivisor);
+  const maxFactor = chunkDataSize.map((chunkSize, axis) =>
+    volumeSizeVoxels !== undefined && chunkSize >= volumeSizeVoxels[axis]
+      ? powerOfTwoAtLeast(hi[axis] - lo[axis])
+      : largestPowerOfTwoDivisor(chunkSize),
+  );
   const factor: [number, number, number] = [1, 1, 1];
   for (const axis of [X, Y, Z]) {
     const fitting = smallestFactorWithinDimension(
@@ -93,6 +105,16 @@ function largestPowerOfTwoDivisor(size: number): number {
   let divisor = 1;
   while (size % (divisor * 2) === 0) divisor *= 2;
   return divisor;
+}
+
+/**
+ * Smallest power of two ≥ `size`: on a one-chunk axis, the coarsest factor
+ * worth trying — at it the region is one texel wide.
+ */
+function powerOfTwoAtLeast(size: number): number {
+  let power = 1;
+  while (power < size) power *= 2;
+  return power;
 }
 
 /** Smallest power-of-two factor (≤ `maxFactor`) whose texel count fits. */

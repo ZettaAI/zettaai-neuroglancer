@@ -22,23 +22,35 @@ import type {
 import {
   ChunkReadAbortedError,
   ChunkReadFailedError,
-  contentRefFromBuffer,
 } from "@zettaai/edit-session";
 
 import type { ChunkManager, Chunk } from "#src/chunk_manager/frontend.js";
+import {
+  decodeCompressedBaseline,
+  padToEditSize,
+  type CompressedBaselineChunk,
+} from "#src/editing/adapters/baseline_chunk_decode.js";
+import { decodeBaselineOffMainThread } from "#src/editing/adapters/baseline_decode_pool.js";
+import {
+  boxSize,
+  boxVoxelCount,
+  readCompressedSegmentationBox,
+} from "#src/editing/adapters/compressed_segmentation_box_read.js";
+import { editChunkDataSize } from "#src/editing/adapters/edit_chunk_extent.js";
 import { makeChunkGridPosition } from "#src/editing/adapters/ng_chunk_grid.js";
 import { resolutionFor } from "#src/editing/adapters/ng_layer_metadata_source.js";
+import { SavedBaselineStore } from "#src/editing/adapters/saved_baseline_store.js";
 import type { ChunkLoadProgressState } from "#src/editing/adapters/session_chunk_preloader.js";
 import {
   pinBudgetFor,
   preloadPoolSizeFor,
   SessionChunkPreloader,
 } from "#src/editing/adapters/session_chunk_preloader.js";
+import type { ChunkVoxelBox } from "#src/editing/local_patch_chunk.js";
 import type { OwnedRegion } from "#src/editing/region/owned_chunk_write.js";
 import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
 import type { LayerManager, UserLayer } from "#src/layer/index.js";
 import type { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
-import { decodeChannels } from "#src/sliceview/compressed_segmentation/decode_common.js";
 import type { SliceViewSingleResolutionSource } from "#src/sliceview/frontend.js";
 import type {
   VolumeChunkSpecification,
@@ -96,11 +108,11 @@ export class NgChunkSource implements LibraryChunkSource {
     | undefined;
 
   /**
-   * Client-retained copy of the bytes the host has SAVED this page-session
-   * (TM-352). `readBaselineChunk` consults it after `commitTarget` and before
-   * the datasource, so a re-entry reads the saved state without evicting the
-   * rendered chunk. Host-lifetime (survives session exit within the page; gone
-   * on reload). Also holds each chunk's content hash for save verification.
+   * The bytes the host has SAVED this session (TM-352). `readBaselineChunk`
+   * consults it after `commitTarget` and before the datasource, so a saved
+   * chunk reads as saved without evicting the rendered chunk. Session-lifetime:
+   * the host clears it on teardown ({@link clearSavedBaseline}). Shares its
+   * buffers with the library's history; see {@link SavedBaselineStore}.
    */
   private readonly savedBaseline = new SavedBaselineStore();
 
@@ -111,9 +123,9 @@ export class NgChunkSource implements LibraryChunkSource {
 
   /**
    * Record the bytes just written for `(layerId, resolution, chunkId)` as the
-   * client's authoritative saved copy + its content hash (TM-352). Called by the
-   * host right after a save write. The bytes are COPIED (detached from any
-   * pooled / overlay storage).
+   * client's authoritative saved copy (TM-352). Called by the host right after
+   * a save write. The bytes are KEPT, not copied (TM-373): they are the
+   * library's immutable content-ref buffer, which no one may mutate.
    */
   recordSavedBaseline(
     layerId: LayerId,
@@ -128,25 +140,6 @@ export class NgChunkSource implements LibraryChunkSource {
   }
 
   /**
-   * Content hash of the saved bytes for a chunk.
-   *
-   * No longer used for read-back comparison: `confirmChunkPersisted` compares
-   * through the pinned `OwnedRegion` instead, because a whole-chunk hash cannot
-   * match once a neighbouring task has repainted its half of a shared boundary
-   * chunk. Retained as a lookup over the saved-baseline store, whose bytes
-   * `getSavedBytes` still serves to the resend path.
-   */
-  getSavedBaselineHash(
-    layerId: LayerId,
-    resolution: Resolution,
-    chunkId: ChunkId,
-  ): string | undefined {
-    return this.savedBaseline.get(
-      savedBaselineKey(layerId, resolution, chunkId),
-    )?.hash;
-  }
-
-  /**
    * The client's stable saved copy of a chunk's bytes — used to RE-SEND on a
    * "Retry" after an unconfirmed save (the library is already rebaselined, so we
    * resend from here, not the overlay).
@@ -158,7 +151,7 @@ export class NgChunkSource implements LibraryChunkSource {
   ): ReadonlyChunkVoxelBuffer | undefined {
     return this.savedBaseline.get(
       savedBaselineKey(layerId, resolution, chunkId),
-    )?.bytes;
+    );
   }
 
   /**
@@ -359,7 +352,7 @@ export class NgChunkSource implements LibraryChunkSource {
       savedBaselineKey(layerId, resolution, chunkId),
     );
     if (saved !== undefined) {
-      return saved.bytes;
+      return saved;
     }
     return this.readDatasourceBaseline(
       layerId,
@@ -409,6 +402,39 @@ export class NgChunkSource implements LibraryChunkSource {
   }
 
   /**
+   * {@link readDatasourceBaseline} for one box only (TM-373, PR 2): the
+   * datasource render base of `box` (chunk-local, inclusive), as a dense
+   * box-sized buffer. What the patch mirror reads on every brush move, instead
+   * of decoding the whole chunk. Same retries and the same empty-chunk rule
+   * (a sparse chunk reads as zeros; a fetch error is never an empty chunk).
+   */
+  async readDatasourceBaselineBox(
+    layerId: LayerId,
+    resolution: Resolution,
+    chunkId: ChunkId,
+    chunkCoord: ChunkCoord,
+    box: ChunkVoxelBox,
+    signal?: AbortSignal,
+  ): Promise<ReadonlyChunkVoxelBuffer> {
+    const coord: OverlayCoord = { layerId, resolution, chunkId };
+    if (signal?.aborted) {
+      throw new ChunkReadAbortedError(coord);
+    }
+    let source: VolumeChunkSource;
+    try {
+      source = this.resolveVolumeChunkSource(layerId, resolution);
+    } catch (cause) {
+      throw new ChunkReadFailedError(coord, cause);
+    }
+    const chunkGridPosition = makeChunkGridPosition(source, chunkCoord);
+    return wrapAsReadonlyBuffer(
+      await fetchWithRetry(source, coord, chunkGridPosition, signal, (chunk) =>
+        readBaselineBox(source, chunk, box),
+      ),
+    );
+  }
+
+  /**
    * Fresh-read one chunk from the backend, decoded to per-voxel values, WITHOUT
    * evicting the resident/rendered chunk (TM-352 save verification). Routes
    * through `VolumeChunkSource.fetchFreshDecodedChunk` (a throwaway backend
@@ -431,10 +457,11 @@ export class NgChunkSource implements LibraryChunkSource {
     }
     const grid = makeChunkGridPosition(source, chunkCoord);
     // `fetchFreshDecodedChunk` returns the edge-clipped `chunkDataSize`; thread
-    // it through so `decodeBaselineChunk` pads boundary chunks to nominal (the
-    // resident-read path gets this from `VolumeChunk.chunkDataSize`). Without
-    // it the fresh-decoded baseline would be clipped-sized and mismatch the
-    // saved overlay bytes it's hashed against (TM-353 / TM-352).
+    // it through so `decodeBaselineChunk` pads boundary chunks to the edit
+    // chunk size (the resident-read path gets this from
+    // `VolumeChunk.chunkDataSize`). Without it the fresh-decoded baseline would
+    // be clipped-sized and mismatch the saved overlay bytes it's hashed against
+    // (TM-353 / TM-352).
     const { data, chunkDataSize } = await source.fetchFreshDecodedChunk(
       grid,
       signal ?? new AbortController().signal,
@@ -593,22 +620,29 @@ function cloneTypedArray(buf: ChunkVoxelBuffer): ChunkVoxelBuffer {
 }
 
 /**
- * Allocate an all-zero voxel buffer matching the source's chunk shape and
- * data type. Used when the underlying data source is sparse: a missing
- * chunk semantically means "no segments here" / "value 0 everywhere", and
- * the editing layer should let the brush paint into it.
+ * Allocate an all-zero voxel buffer of the edit-session chunk shape
+ * (`editChunkDataSize`) and the source's data type. Used when the underlying
+ * data source is sparse: a missing chunk semantically means "no segments
+ * here" / "value 0 everywhere", and the editing layer should let the brush
+ * paint into it.
  */
 function makeZeroFilledChunkBuffer(
   source: VolumeChunkSource,
 ): ChunkVoxelBuffer {
-  const { chunkDataSize, dataType } = source.spec;
+  const { chunkDataSize } = source.spec;
+  const [sizeX, sizeY, sizeZ] = editChunkDataSize(source.spec);
   // `chunkDataSize` is 4D `[x, y, z, channels]` for volumes — the channel
-  // count is folded into the last component.
-  let voxelCount = 1;
-  for (let i = 0; i < chunkDataSize.length; ++i) {
-    voxelCount *= chunkDataSize[i];
-  }
-  switch (dataType) {
+  // count is its fourth component.
+  const channels = chunkDataSize.length > 3 ? chunkDataSize[3] : 1;
+  return makeZeroFilledVoxelBuffer(source, sizeX * sizeY * sizeZ * channels);
+}
+
+/** An all-zero buffer of `voxelCount` values of the source's data type. */
+function makeZeroFilledVoxelBuffer(
+  source: VolumeChunkSource,
+  voxelCount: number,
+): ChunkVoxelBuffer {
+  switch (source.spec.dataType) {
     case DataType.UINT8:
       return new Uint8Array(voxelCount);
     case DataType.INT8:
@@ -646,45 +680,47 @@ function makeZeroFilledChunkBuffer(
  * clipped data only, so decoding it with nominal dims runs the block-index math
  * off the end of the small compressed buffer (`offset is out of bounds`,
  * TM-353). The returned buffer is therefore clipped-sized; `decodeBaselineChunk`
- * pads it up to nominal.
+ * pads it up to the edit-session chunk size.
  */
 function decodeCompressedSegmentationChunk(
   source: VolumeChunkSource,
   data: ChunkVoxelBuffer,
   clippedSize: readonly [number, number, number],
 ): ChunkVoxelBuffer {
-  const { dataType, compressedSegmentationBlockSize } = source.spec;
-  if (compressedSegmentationBlockSize === undefined) {
-    return cloneTypedArray(data);
-  }
-  const [cx, cy, cz] = clippedSize;
-  const voxelCount = cx * cy * cz;
-  const out =
-    dataType === DataType.UINT64
-      ? new BigUint64Array(voxelCount)
-      : new Uint32Array(voxelCount);
-  // `decodeChannels` indexes `chunkDataSize[3]` for the channel count.
-  // Segmentation (the only thing NG transcodes to compressed-segmentation) is
-  // single-channel, so pass an explicit 4D shape with one channel; otherwise
-  // `chunkDataSize[3]` is undefined and the decoder throws on a NaN expected
-  // length.
-  const chunkDataSize4d = [cx, cy, cz, 1];
-  decodeChannels(
-    out,
-    data as Uint32Array,
-    0,
-    chunkDataSize4d,
-    compressedSegmentationBlockSize,
-  );
-  return out as ChunkVoxelBuffer;
+  const chunk = compressedBaselineChunk(source, data, clippedSize);
+  if (chunk === undefined) return cloneTypedArray(data);
+  // Unpadded here: `decodeBaselineChunk` pads, as for the plain clone above.
+  return decodeCompressedBaseline({ ...chunk, editSize: clippedSize });
+}
+
+/**
+ * The parts of a compressed-segmentation `data` block a decode needs, with a
+ * COPY of the block (`fetchChunk` only guarantees `chunk.data` inside its
+ * transform), or undefined when the source is not compressed segmentation.
+ */
+function compressedBaselineChunk(
+  source: VolumeChunkSource,
+  data: ChunkVoxelBuffer,
+  clippedSize: readonly [number, number, number],
+): CompressedBaselineChunk | undefined {
+  const { dataType, compressedSegmentationBlockSize: blockSize } = source.spec;
+  if (blockSize === undefined) return undefined;
+  return {
+    compressed: (data as Uint32Array).slice(),
+    dataType: dataType === DataType.UINT64 ? "uint64" : "uint32",
+    blockSize: [blockSize[0], blockSize[1], blockSize[2]],
+    clippedSize,
+    editSize: editChunkDataSize(source.spec),
+  };
 }
 
 /**
  * The chunk's edge-clipped voxel extent `[x, y, z]`. NG clips boundary chunks
  * to the volume's data bounds, exposing the actual extent on
  * `VolumeChunk.chunkDataSize` (`sliceview/volume/frontend.ts`). Falls back to
- * the nominal `spec.chunkDataSize` when the size is absent (e.g. the
- * `readFreshDecoded` `{ data }` path must supply it explicitly).
+ * the edit-session chunk size when the size is absent (e.g. the
+ * `readFreshDecoded` `{ data }` path must supply it explicitly) — never larger
+ * than what `padChunkToEditSize` pads to.
  */
 function clippedSizeOf(
   source: VolumeChunkSource,
@@ -692,52 +728,44 @@ function clippedSizeOf(
 ): [number, number, number] {
   const clipped = (chunk as unknown as { chunkDataSize?: ArrayLike<number> })
     .chunkDataSize;
-  const nominal = source.spec.chunkDataSize;
+  const editSize = editChunkDataSize(source.spec);
   const dim = (i: number): number =>
-    clipped !== undefined && clipped[i] !== undefined ? clipped[i] : nominal[i];
+    clipped !== undefined && clipped[i] !== undefined
+      ? clipped[i]
+      : editSize[i];
   return [dim(0), dim(1), dim(2)];
 }
 
 /**
  * Pad a chunk buffer decoded at the edge-clipped `clippedSize` into a buffer of
- * the source's NOMINAL `chunkDataSize`, with the clipped data in the low corner
- * and the remainder zero. Returns `decoded` unchanged when the chunk already
- * fills the nominal extent (every interior chunk — the common case).
+ * the edit-session chunk size (`editChunkDataSize`: the NOMINAL
+ * `chunkDataSize`, except on an axis the volume fills with one chunk, where it
+ * already equals the clipped extent — TM-373, PR 9a), with the clipped data in
+ * the low corner and the remainder zero. Returns `decoded` unchanged when the
+ * chunk already fills that size (every interior chunk — the common case).
  *
  * NG decodes boundary chunks clipped to the data extent, but the edit-session
- * library indexes chunk slots with the nominal `chunkDataSize` (its
- * `writeRegion`/overlay copy uses nominal strides), so every baseline the
- * library sees must be nominal-sized. Handing it a clipped buffer makes the
- * nominal-stride copy run off the end (`offset is out of bounds`) and breaks
- * `PatchMirror.fuseOverlayIntoChunk`'s equal-length invariant (overlay/baseline
- * clipped vs. patch chunk nominal) — the two TM-353 crashes. Padding to nominal
- * fixes both without any change to the mirror, patch-texture cache, or shader:
- * the patch texture stays nominal and the base render already clamps its sample
- * to the clipped `uChunkDataSize` while indexing with nominal strides.
+ * library indexes chunk slots with its own `chunkDataSize` (the same
+ * `editChunkDataSize`, via `NgLayerMetadataSource`; its `writeRegion`/overlay
+ * copy uses those strides), so every baseline the library sees must be that
+ * size. Handing it a clipped buffer makes the strided copy run off the end
+ * (`offset is out of bounds`) and breaks `PatchMirror.fuseOverlayIntoChunk`'s
+ * equal-length invariant (overlay/baseline clipped vs. patch chunk) — the two
+ * TM-353 crashes. Padding fixes both without any change to the mirror,
+ * patch-texture cache, or shader: the patch texture takes the same size and
+ * strides (`uPatchStrides`), and the base render clamps its sample to the
+ * clipped `uChunkDataSize`.
  */
-function padChunkToNominal(
+function padChunkToEditSize(
   source: VolumeChunkSource,
   decoded: ChunkVoxelBuffer,
   clippedSize: readonly [number, number, number],
 ): ChunkVoxelBuffer {
-  const nominal = source.spec.chunkDataSize;
-  const [cx, cy, cz] = clippedSize;
-  const [nx, ny, nz] = [nominal[0], nominal[1], nominal[2]];
-  if (cx === nx && cy === ny && cz === nz) return decoded;
-  const out = makeZeroFilledChunkBuffer(source);
-  // Blit row-by-row: clipped index `(z*cy + y)*cx + x` → nominal index
-  // `(z*ny + y)*nx + x`. Both buffers share the source's element type at
-  // runtime; the `Uint8Array` casts only satisfy the typed-array union — `.set`
-  // / `.subarray` operate element-wise for every variant (incl. BigUint64Array).
-  const dst = out as Uint8Array;
-  const src = decoded as Uint8Array;
-  for (let z = 0; z < cz; ++z) {
-    for (let y = 0; y < cy; ++y) {
-      const srcStart = (z * cy + y) * cx;
-      dst.set(src.subarray(srcStart, srcStart + cx), (z * ny + y) * nx);
-    }
-  }
-  return out;
+  return padToEditSize(
+    decoded as Uint8Array,
+    clippedSize,
+    editChunkDataSize(source.spec),
+  ) as ChunkVoxelBuffer;
 }
 
 /**
@@ -761,8 +789,11 @@ const BASELINE_FETCH_BACKOFF_MS: readonly number[] = [50, 150];
  *     let the brush paint into it.
  *   • a THROWN error never reaches here — it's handled by the retry loop in
  *     `fetchBaselineWithRetry`; a genuine fetch failure is NEVER an empty chunk.
+ *
+ * Exported for `baseline_chunk_costs.benchmark.ts` (TM-373), which times it on
+ * 4096² chunks.
  */
-function decodeBaselineChunk(
+export function decodeBaselineChunk(
   source: VolumeChunkSource,
   chunk: Chunk,
 ): ChunkVoxelBuffer {
@@ -771,9 +802,9 @@ function decodeBaselineChunk(
     return makeZeroFilledChunkBuffer(source);
   }
   // NG decodes boundary chunks clipped to the volume's data bounds, so `raw`
-  // (and the compressed decode below) can be smaller than the nominal chunk.
-  // The edit library indexes slots with the nominal `chunkDataSize`, so every
-  // decoded baseline is padded up to nominal before it leaves here (TM-353).
+  // (and the compressed decode below) can be smaller than the chunk the edit
+  // library indexes slots with (`editChunkDataSize`), so every decoded baseline
+  // is padded up to that size before it leaves here (TM-353, TM-373).
   const clippedSize = clippedSizeOf(source, chunk);
   // Neuroglancer transcodes uint32/uint64 SEGMENTATION volumes to the
   // compressed-segmentation format for GPU rendering, so `chunk.data` is the
@@ -787,7 +818,75 @@ function decodeBaselineChunk(
     source.spec.compressedSegmentationBlockSize !== undefined
       ? decodeCompressedSegmentationChunk(source, raw, clippedSize)
       : cloneTypedArray(raw);
-  return padChunkToNominal(source, decoded, clippedSize);
+  return padChunkToEditSize(source, decoded, clippedSize);
+}
+
+/**
+ * The voxels of `box` (chunk-local, inclusive, within the edit-session chunk)
+ * of a fetched chunk, as a dense box-sized buffer of the source's data type —
+ * the same values `decodeBaselineChunk` gives there, without decoding or
+ * copying the rest of the chunk (TM-373, PR 2). Outside the clipped extent the
+ * values are 0, as the padding of an edge chunk; a sparse chunk is all zero.
+ *
+ * Single-channel only, like the patch mirror it serves.
+ *
+ * Exported for `baseline_chunk_costs.benchmark.ts`.
+ */
+export function readBaselineBox(
+  source: VolumeChunkSource,
+  chunk: Chunk,
+  box: ChunkVoxelBox,
+): ChunkVoxelBuffer {
+  const out = makeZeroFilledVoxelBuffer(source, boxVoxelCount(box));
+  const raw = (chunk as unknown as { data?: ChunkVoxelBuffer | null }).data;
+  if (raw == null) return out;
+  const clippedSize = clippedSizeOf(source, chunk);
+  const { compressedSegmentationBlockSize } = source.spec;
+  if (compressedSegmentationBlockSize !== undefined) {
+    readCompressedSegmentationBox(
+      raw as Uint32Array,
+      clippedSize,
+      compressedSegmentationBlockSize,
+      box,
+      out as Uint32Array | BigUint64Array,
+    );
+    return out;
+  }
+  copyRawBox(raw, clippedSize, box, out);
+  return out;
+}
+
+/**
+ * Copy the rows of `box` that lie inside the clipped extent from a raw chunk
+ * (clipped layout) into a box-sized buffer. As in `padChunkToEditSize`, the
+ * `Uint8Array` casts only satisfy the typed-array union; `.set` / `.subarray`
+ * work element-wise for every variant.
+ */
+function copyRawBox(
+  raw: ChunkVoxelBuffer,
+  clippedSize: readonly [number, number, number],
+  box: ChunkVoxelBox,
+  out: ChunkVoxelBuffer,
+): void {
+  const [clippedX, clippedY, clippedZ] = clippedSize;
+  const [boxSizeX, boxSizeY] = boxSize(box);
+  const lastX = Math.min(box.x1, clippedX - 1);
+  const lastY = Math.min(box.y1, clippedY - 1);
+  const lastZ = Math.min(box.z1, clippedZ - 1);
+  if (lastX < box.x0) return;
+  const rowLength = lastX - box.x0 + 1;
+  const source = raw as Uint8Array;
+  const target = out as Uint8Array;
+  for (let z = box.z0; z <= lastZ; z++) {
+    for (let y = box.y0; y <= lastY; y++) {
+      const rawRowStart = (z * clippedY + y) * clippedX + box.x0;
+      const boxRowStart = ((z - box.z0) * boxSizeY + (y - box.y0)) * boxSizeX;
+      target.set(
+        source.subarray(rawRowStart, rawRowStart + rowLength),
+        boxRowStart,
+      );
+    }
+  }
 }
 
 /**
@@ -806,6 +905,66 @@ export async function fetchBaselineWithRetry(
   chunkGridPosition: Float32Array,
   signal: AbortSignal | undefined,
 ): Promise<ReadonlyChunkVoxelBuffer> {
+  const snapshot = await fetchWithRetry(
+    source,
+    coord,
+    chunkGridPosition,
+    signal,
+    (chunk) => snapshotForDecode(source, chunk),
+  );
+  if (!isCompressedSnapshot(snapshot)) return wrapAsReadonlyBuffer(snapshot);
+  // The decode of a 4096² uint64 chunk is ~400 ms of main-thread work; only
+  // the copy of its compressed block happened inside the fetch (TM-373).
+  let decoded: ChunkVoxelBuffer;
+  try {
+    decoded = await decodeBaselineOffMainThread(snapshot);
+  } catch (cause) {
+    throw new ChunkReadFailedError(coord, cause);
+  }
+  if (signal?.aborted) throw new ChunkReadAbortedError(coord);
+  return wrapAsReadonlyBuffer(decoded);
+}
+
+type BaselineSnapshot = ChunkVoxelBuffer | CompressedBaselineChunk;
+
+function isCompressedSnapshot(
+  snapshot: BaselineSnapshot,
+): snapshot is CompressedBaselineChunk {
+  return "compressed" in snapshot;
+}
+
+/**
+ * What `fetchBaselineWithRetry` keeps of a fetched chunk inside the fetch:
+ * the compressed block to decode afterwards, or — for anything else (a plain
+ * dtype, a sparse chunk) — the finished baseline, exactly as
+ * {@link decodeBaselineChunk} gives it.
+ */
+function snapshotForDecode(
+  source: VolumeChunkSource,
+  chunk: Chunk,
+): BaselineSnapshot {
+  const raw = (chunk as unknown as { data?: ChunkVoxelBuffer | null }).data;
+  if (raw == null) return decodeBaselineChunk(source, chunk);
+  const compressed = compressedBaselineChunk(
+    source,
+    raw,
+    clippedSizeOf(source, chunk),
+  );
+  return compressed ?? decodeBaselineChunk(source, chunk);
+}
+
+/**
+ * The retry loop of {@link fetchBaselineWithRetry} around any snapshot of the
+ * fetched chunk: `snapshot` runs inside `fetchChunk`'s transform, the only
+ * point where `chunk.data` is guaranteed in memory.
+ */
+async function fetchWithRetry<Snapshot>(
+  source: VolumeChunkSource,
+  coord: OverlayCoord,
+  chunkGridPosition: Float32Array,
+  signal: AbortSignal | undefined,
+  snapshot: (chunk: Chunk) => Snapshot,
+): Promise<Snapshot> {
   const fetchSignal = signal ?? new AbortController().signal;
   let lastError: unknown;
   for (let attempt = 0; attempt < BASELINE_FETCH_ATTEMPTS; ++attempt) {
@@ -813,12 +972,9 @@ export async function fetchBaselineWithRetry(
       throw new ChunkReadAbortedError(coord);
     }
     try {
-      const data = await source.fetchChunk(
-        chunkGridPosition,
-        (chunk: Chunk) => decodeBaselineChunk(source, chunk),
-        { signal: fetchSignal },
-      );
-      return wrapAsReadonlyBuffer(data);
+      return await source.fetchChunk(chunkGridPosition, snapshot, {
+        signal: fetchSignal,
+      });
     } catch (cause) {
       if (signal?.aborted) {
         throw new ChunkReadAbortedError(coord);
@@ -891,42 +1047,4 @@ function savedBaselineKey(
   chunkId: ChunkId,
 ): string {
   return `${layerId}|${resolution}|${chunkId}`;
-}
-
-interface SavedBaselineEntry {
-  readonly bytes: ReadonlyChunkVoxelBuffer;
-  readonly hash: string;
-}
-
-/**
- * Bounded (FIFO) client-side store of saved chunk bytes + their content hash
- * (TM-352). Detaches the bytes it is given so it owns a stable copy that
- * `readBaselineChunk` can hand back without the caller mutating it.
- */
-class SavedBaselineStore {
-  private readonly entries = new Map<string, SavedBaselineEntry>();
-  constructor(private readonly capacity = 512) {}
-
-  set(key: string, bytes: ReadonlyChunkVoxelBuffer): void {
-    const view = bytes.asView();
-    const copied = (view as unknown as { slice(): ChunkVoxelBuffer }).slice();
-    const entry: SavedBaselineEntry = {
-      bytes: { byteLength: copied.byteLength, asView: () => copied },
-      hash: contentRefFromBuffer(copied).hash,
-    };
-    this.entries.delete(key); // refresh FIFO order
-    this.entries.set(key, entry);
-    if (this.entries.size > this.capacity) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest !== undefined) this.entries.delete(oldest);
-    }
-  }
-
-  get(key: string): SavedBaselineEntry | undefined {
-    return this.entries.get(key);
-  }
-
-  clear(): void {
-    this.entries.clear();
-  }
 }

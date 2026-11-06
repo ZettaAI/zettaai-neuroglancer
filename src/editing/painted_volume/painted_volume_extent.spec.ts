@@ -290,4 +290,50 @@ describe("planPaintedVolumeExtent", () => {
       planPaintedVolumeExtent(bounds, [64, 64, 64], ORIGIN, 2048, 0),
     ).toBeUndefined();
   });
+
+  describe("an axis the volume fills with one chunk (TM-373)", () => {
+    // After PR 9a the chunk on such an axis is the volume's extent, e.g. 4099
+    // voxels in an 8192 chunk: odd, so no factor above 1 divides it.
+    const oddVolume: Triple = [4099, 4099, 1];
+
+    it("downsamples it although its chunk size is odd", () => {
+      const extent = planPaintedVolumeExtent(
+        boundsOf([0, 0, 0], oddVolume),
+        oddVolume,
+        ORIGIN,
+        2048,
+        DEFAULT_BUDGET_BYTES,
+        oddVolume,
+      );
+      expect(extent).toEqual({
+        textureOrigin: [0, 0, 0],
+        factor: [4, 4, 1],
+        textureSize: [1025, 1025, 1],
+      });
+    });
+
+    it("finds no factor without the volume size, as before", () => {
+      expect(
+        planPaintedVolumeExtent(
+          boundsOf([0, 0, 0], oddVolume),
+          oddVolume,
+          ORIGIN,
+          2048,
+          DEFAULT_BUDGET_BYTES,
+        ),
+      ).toBeUndefined();
+    });
+
+    it("keeps the chunk-divisor limit on axes with several chunks", () => {
+      const extent = planPaintedVolumeExtent(
+        boundsOf([0, 0, 0], [4099, 4096, 1]),
+        [4099, 1024, 1],
+        ORIGIN,
+        2048,
+        DEFAULT_BUDGET_BYTES,
+        [4099, 4096, 1],
+      );
+      expect(extent?.factor).toEqual([4, 2, 1]);
+    });
+  });
 });

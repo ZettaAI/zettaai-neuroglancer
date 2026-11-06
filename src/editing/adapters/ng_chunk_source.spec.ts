@@ -25,9 +25,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import {
+  decodeBaselineChunk,
   fetchBaselineWithRetry,
   NgChunkSource,
+  readBaselineBox,
 } from "#src/editing/adapters/ng_chunk_source.js";
+import type { ChunkVoxelBox } from "#src/editing/local_patch_chunk.js";
 import type {
   ChunkOwnedGeometry,
   OwnedRegion,
@@ -35,7 +38,9 @@ import type {
 import { ownedRegionHash } from "#src/editing/region/owned_chunk_write.js";
 
 import type { LayerManager } from "#src/layer/index.js";
+import { encodeChannels } from "#src/sliceview/compressed_segmentation/encode_uint64.js";
 import type { VolumeChunkSource } from "#src/sliceview/volume/frontend.js";
+import { TypedArrayBuilder } from "#src/util/array.js";
 import { DataType } from "#src/util/data_type.js";
 
 const COORD: OverlayCoord = {
@@ -188,7 +193,12 @@ describe("fetchBaselineWithRetry", () => {
  */
 function makeEdgeSource(
   data: ArrayBufferView | null,
-  opts: { chunkDataSize: number[]; clipped?: number[] },
+  opts: {
+    chunkDataSize: number[];
+    clipped?: number[];
+    /** The volume's `upperVoxelBound` (lower is 0); absent → unknown extent. */
+    volumeSize?: number[];
+  },
 ): VolumeChunkSource {
   const source = {
     spec: {
@@ -196,6 +206,10 @@ function makeEdgeSource(
       chunkDataSize: opts.chunkDataSize,
       dataType: DataType.UINT8,
       compressedSegmentationBlockSize: undefined,
+      ...(opts.volumeSize !== undefined && {
+        lowerVoxelBound: [0, 0, 0],
+        upperVoxelBound: opts.volumeSize,
+      }),
     },
     async fetchChunk(
       _grid: Float32Array,
@@ -270,6 +284,60 @@ describe("decodeBaselineChunk edge-chunk padding (TM-353)", () => {
     const view = result.asView() as Uint8Array;
     expect(view.length).toBe(16);
     expect(Array.from(view).every((v) => v === 0)).toBe(true);
+  });
+});
+
+describe("decodeBaselineChunk on an axis the volume fills with one chunk (TM-373)", () => {
+  it("returns the volume-sized chunk without padding to nominal", async () => {
+    // A 2×2×1 volume in 4×4×1 chunks: the session chunk is the volume's 2×2×1.
+    const source = makeEdgeSource(Uint8Array.from([1, 2, 3, 4]), {
+      chunkDataSize: [4, 4, 1],
+      clipped: [2, 2, 1],
+      volumeSize: [2, 2, 1],
+    });
+
+    const result = await fetchBaselineWithRetry(source, COORD, GRID, undefined);
+
+    expect(Array.from(result.asView() as Uint8Array)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("still pads the axes that have several chunks", async () => {
+    // x fits one chunk (2 of 4); y has two chunks (6 of 4): an edge chunk
+    // clipped to 2×2 keeps x at 2 and pads y to the nominal 4.
+    const source = makeEdgeSource(Uint8Array.from([1, 2, 3, 4]), {
+      chunkDataSize: [4, 4, 1],
+      clipped: [2, 2, 1],
+      volumeSize: [2, 6, 1],
+    });
+
+    const result = await fetchBaselineWithRetry(source, COORD, GRID, undefined);
+
+    expect(Array.from(result.asView() as Uint8Array)).toEqual([
+      1, 2, 3, 4, 0, 0, 0, 0,
+    ]);
+  });
+
+  it("zero-fills a sparse chunk at the volume size", async () => {
+    const source = makeEdgeSource(null, {
+      chunkDataSize: [4, 4, 1],
+      clipped: [2, 2, 1],
+      volumeSize: [2, 2, 1],
+    });
+
+    const result = await fetchBaselineWithRetry(source, COORD, GRID, undefined);
+
+    expect(Array.from(result.asView() as Uint8Array)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("falls back to the volume size when NG gives no clipped size", async () => {
+    const source = makeEdgeSource(Uint8Array.from([1, 2, 3, 4]), {
+      chunkDataSize: [4, 4, 1],
+      volumeSize: [2, 2, 1],
+    });
+
+    const result = await fetchBaselineWithRetry(source, COORD, GRID, undefined);
+
+    expect(Array.from(result.asView() as Uint8Array)).toEqual([1, 2, 3, 4]);
   });
 });
 
@@ -398,13 +466,21 @@ describe("NgChunkSource saved-baseline (re-entry)", () => {
     ]);
   });
 
-  it("records the content hash of the saved bytes", () => {
+  it("keeps the saved buffer itself, without a copy (TM-373)", async () => {
+    // The saved bytes are the library's immutable content-ref buffer; a copy
+    // was +128 MB per saved 4096² uint64 chunk.
     const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
-    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
+    const saved = buffer(SAVED);
+    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, saved);
 
-    expect(chunkSource.getSavedBaselineHash(LAYER, RES_8, CHUNK_ID)).toBe(
-      contentRefFromBuffer(SAVED).hash,
+    expect(chunkSource.getSavedBytes(LAYER, RES_8, CHUNK_ID)).toBe(saved);
+    const read = await chunkSource.readBaselineChunk(
+      LAYER,
+      RES_8,
+      CHUNK_ID,
+      CHUNK_COORD,
     );
+    expect(read.asView()).toBe(SAVED);
   });
 });
 
@@ -535,15 +611,16 @@ describe("NgChunkSource exit reconciliation (TM-352)", () => {
   it("clearSavedBaseline drops the retained saved bytes", () => {
     const chunkSource = makeChunkSourceResolving(fakeSource(SAVED.slice()));
     chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
-    expect(chunkSource.getSavedBaselineHash(LAYER, RES_8, CHUNK_ID)).toBe(
-      contentRefFromBuffer(SAVED).hash,
-    );
+    expect(
+      Array.from(
+        chunkSource
+          .getSavedBytes(LAYER, RES_8, CHUNK_ID)!
+          .asView() as Uint32Array,
+      ),
+    ).toEqual(Array.from(SAVED));
 
     chunkSource.clearSavedBaseline();
 
-    expect(
-      chunkSource.getSavedBaselineHash(LAYER, RES_8, CHUNK_ID),
-    ).toBeUndefined();
     expect(chunkSource.getSavedBytes(LAYER, RES_8, CHUNK_ID)).toBeUndefined();
   });
 
@@ -653,5 +730,228 @@ describe("NgChunkSource exit reconciliation (TM-352)", () => {
     await expect(
       chunkSource.readBaselineChunk(LAYER, RES_8, CHUNK_ID, CHUNK_COORD),
     ).rejects.toBeInstanceOf(ChunkReadFailedError);
+  });
+});
+
+/** Cut `box` out of a dense chunk buffer of size `size`. */
+function cropBox<T extends { length: number; [index: number]: unknown }>(
+  full: T,
+  size: readonly number[],
+  box: ChunkVoxelBox,
+): unknown[] {
+  const out: unknown[] = [];
+  for (let z = box.z0; z <= box.z1; z++) {
+    for (let y = box.y0; y <= box.y1; y++) {
+      for (let x = box.x0; x <= box.x1; x++) {
+        out.push(full[(z * size[1] + y) * size[0] + x]);
+      }
+    }
+  }
+  return out;
+}
+
+/** The spec fields `decodeBaselineChunk` / `readBaselineBox` read. */
+function boxSource(opts: {
+  chunkDataSize: number[];
+  dataType: DataType;
+  blockSize?: number[];
+}): VolumeChunkSource {
+  return {
+    spec: {
+      rank: 3,
+      chunkDataSize: opts.chunkDataSize,
+      dataType: opts.dataType,
+      compressedSegmentationBlockSize:
+        opts.blockSize === undefined
+          ? undefined
+          : Uint32Array.from(opts.blockSize),
+    },
+  } as unknown as VolumeChunkSource;
+}
+
+function chunkWith(data: ArrayBufferView | null, clipped: number[]) {
+  return { data, chunkDataSize: Uint32Array.from(clipped) } as never;
+}
+
+describe("readBaselineBox (TM-373 PR 2)", () => {
+  // A 64×64 uint64 edge chunk holding 37×29 of data, compressed with NG's
+  // z=1 transcode block.
+  const nominal = [64, 64, 1, 1];
+  const clipped = [37, 29, 1];
+  const ids = BigUint64Array.from(
+    { length: 37 * 29 },
+    (_, i) => BigInt(((i * 7919) % 11) + 1) * 0x100000001n,
+  );
+  const output = new TypedArrayBuilder(Uint32Array);
+  encodeChannels(output, [16, 32, 1], ids, [...clipped, 1]);
+  const compressed = output.view.slice();
+  const uint64Source = boxSource({
+    chunkDataSize: nominal,
+    dataType: DataType.UINT64,
+    blockSize: [16, 32, 1],
+  });
+  const full = decodeBaselineChunk(
+    uint64Source,
+    chunkWith(compressed, clipped),
+  ) as BigUint64Array;
+
+  const boxes: Record<string, ChunkVoxelBox> = {
+    "inside the data": { x0: 3, y0: 4, z0: 0, x1: 30, y1: 27, z1: 0 },
+    "across the clipped edge": { x0: 30, y0: 20, z0: 0, x1: 45, y1: 40, z1: 0 },
+    "in the padding only": { x0: 50, y0: 50, z0: 0, x1: 63, y1: 63, z1: 0 },
+  };
+
+  for (const [label, box] of Object.entries(boxes)) {
+    it(`compressed uint64 edge chunk, box ${label}: same values as the full decode`, () => {
+      const read = readBaselineBox(
+        uint64Source,
+        chunkWith(compressed, clipped),
+        box,
+      );
+      expect(read).toBeInstanceOf(BigUint64Array);
+      expect(Array.from(read as BigUint64Array)).toEqual(
+        cropBox(full, nominal, box),
+      );
+    });
+
+    it(`raw uint8 edge chunk, box ${label}: same values as the full decode`, () => {
+      const source = boxSource({
+        chunkDataSize: nominal,
+        dataType: DataType.UINT8,
+      });
+      const raw = Uint8Array.from({ length: 37 * 29 }, (_, i) => (i % 250) + 1);
+      const fullRaw = decodeBaselineChunk(
+        source,
+        chunkWith(raw, clipped),
+      ) as Uint8Array;
+      const read = readBaselineBox(source, chunkWith(raw, clipped), box);
+      expect(read).toBeInstanceOf(Uint8Array);
+      expect(Array.from(read as Uint8Array)).toEqual(
+        cropBox(fullRaw, nominal, box),
+      );
+    });
+  }
+
+  it("reads a sparse chunk as zeros of the box size", () => {
+    const box = boxes["inside the data"];
+    const read = readBaselineBox(uint64Source, chunkWith(null, clipped), box);
+    expect(read).toBeInstanceOf(BigUint64Array);
+    expect(read.length).toBe(28 * 24);
+    expect(Array.from(read as BigUint64Array).every((v) => v === 0n)).toBe(
+      true,
+    );
+  });
+});
+
+describe("NgChunkSource.readDatasourceBaselineBox (TM-373 PR 2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reads the datasource render base of the box", async () => {
+    const DATASOURCE = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
+    const chunkSource = makeChunkSourceResolving(
+      fakeSource(SAVED.slice(), DATASOURCE),
+    );
+    // A saved copy must not shadow the datasource, as in the full read.
+    chunkSource.recordSavedBaseline(LAYER, RES_8, CHUNK_ID, buffer(SAVED));
+
+    const read = await chunkSource.readDatasourceBaselineBox(
+      LAYER,
+      RES_8,
+      CHUNK_ID,
+      CHUNK_COORD,
+      { x0: 1, y0: 0, z0: 0, x1: 1, y1: 1, z1: 1 },
+    );
+
+    // 2×2×2, x-fastest: x=1 of each (y, z) row.
+    expect(Array.from(read.asView() as Uint32Array)).toEqual([2, 4, 6, 8]);
+  });
+
+  it("propagates ChunkReadFailedError after the same retries as the full read", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const source = fakeSource(SAVED.slice(), null);
+    let attempts = 0;
+    source.fetchChunk = async () => {
+      attempts++;
+      throw new Error("network down");
+    };
+    const chunkSource = makeChunkSourceResolving(source);
+
+    await expect(
+      chunkSource.readDatasourceBaselineBox(
+        LAYER,
+        RES_8,
+        CHUNK_ID,
+        CHUNK_COORD,
+        { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 },
+      ),
+    ).rejects.toBeInstanceOf(ChunkReadFailedError);
+    expect(attempts).toBe(3);
+  });
+});
+
+describe("fetchBaselineWithRetry on compressed segmentation (TM-373 PR 6a)", () => {
+  // A 64×64 uint64 edge chunk holding 37×29 of data, NG's z=1 transcode block.
+  const nominal = [64, 64, 1, 1];
+  const clipped = [37, 29, 1];
+  const ids = BigUint64Array.from(
+    { length: 37 * 29 },
+    (_, i) => BigInt(((i * 104729) % 13) + 1) * 0x100000001n,
+  );
+  const output = new TypedArrayBuilder(Uint32Array);
+  encodeChannels(output, [16, 32, 1], ids, [...clipped, 1]);
+  const compressed = output.view.slice();
+
+  /**
+   * A source whose `chunk.data` is valid only inside the transform, like
+   * NG's: right after it the block is overwritten.
+   */
+  function compressedSource(): VolumeChunkSource {
+    const source = boxSource({
+      chunkDataSize: nominal,
+      dataType: DataType.UINT64,
+      blockSize: [16, 32, 1],
+    }) as unknown as {
+      fetchChunk: (
+        grid: Float32Array,
+        transform: (chunk: unknown) => unknown,
+      ) => Promise<unknown>;
+    };
+    source.fetchChunk = async (_grid, transform) => {
+      const data = compressed.slice();
+      const result = transform(chunkWith(data, clipped));
+      data.fill(0xdeadbeef);
+      return result;
+    };
+    return source as unknown as VolumeChunkSource;
+  }
+
+  it("gives the same padded baseline as the synchronous decode", async () => {
+    const source = compressedSource();
+    const expected = decodeBaselineChunk(
+      source,
+      chunkWith(compressed, clipped),
+    );
+    const result = await fetchBaselineWithRetry(source, COORD, GRID, undefined);
+    const view = result.asView();
+    expect(view).toBeInstanceOf(BigUint64Array);
+    expect(view.length).toBe(64 * 64);
+    expect(Array.from(view as BigUint64Array)).toEqual(
+      Array.from(expected as BigUint64Array),
+    );
+  });
+
+  it("throws an abort when the signal aborts during the decode", async () => {
+    const source = compressedSource();
+    const controller = new AbortController();
+    const pending = fetchBaselineWithRetry(
+      source,
+      COORD,
+      GRID,
+      controller.signal,
+    );
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(ChunkReadAbortedError);
   });
 });
