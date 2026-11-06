@@ -36,6 +36,11 @@ export interface TraceEndDeps {
     mergedRoot: bigint,
     radiusNm: number,
   ): Promise<Float32Array | undefined>;
+  insideEndSphere(
+    point: Float32Array,
+    center: Float32Array,
+    radiusNm: number,
+  ): boolean;
   /** undefined = the trace's own filters; a number = score in [threshold, range high] and the rest of the filters. */
   verdict(threshold: number | undefined): (candidate: EdgeCandidate) => Verdict;
   /** Loads the graph facts `verdict(threshold)` asks about for these candidates. */
@@ -93,6 +98,8 @@ export class TraceEndController {
   prompt: TraceEndPromptView | undefined;
   private check: EndCheck | undefined;
   private threshold = 0;
+  /** Where look deeper continued the trace; later checks in it start there. */
+  private reachedThreshold: number | undefined;
   private token = 0;
   private history: HistoryEntry[] = [];
   private prepared: PreparedReject | undefined;
@@ -171,12 +178,13 @@ export class TraceEndController {
     const token = this.invalidate();
     const endPoint = endPointOf(after, candidate);
     const radiusNm = this.deps.radiusNm();
-    const startThreshold = this.deps.startThreshold();
+    const reached = this.reachedThreshold;
+    const startThreshold = reached ?? this.deps.startThreshold();
     this.showChecking(radiusNm, startThreshold, endPoint, false);
     try {
       const found = await lookUp(endPoint, radiusNm);
       if (token !== this.token) return;
-      const verdict = this.deps.verdict(undefined);
+      const verdict = this.deps.verdict(reached);
       let outcome: CheckOutcome | undefined = checkOutcome(
         found,
         decided,
@@ -186,7 +194,7 @@ export class TraceEndController {
         outcome = await this.filledOutcome(
           found,
           decided,
-          undefined,
+          reached,
           verdict,
           token,
         );
@@ -205,7 +213,10 @@ export class TraceEndController {
         radiusNm,
         startThreshold,
         continueDepth: after === "accept" ? depth + 1 : depth,
-        found,
+        found:
+          after === "accept"
+            ? this.nearEnd(found, checkedEndPoint, radiusNm)
+            : found,
         decided,
       };
       this.settle(outcome, startThreshold);
@@ -214,6 +225,18 @@ export class TraceEndController {
       this.deps.reportError(`${lookUpError}: ${errorMessage(error)}`);
       this.close();
     }
+  }
+
+  private nearEnd(
+    found: readonly EdgeCandidate[],
+    endPoint: Float32Array,
+    radiusNm: number,
+  ): EdgeCandidate[] {
+    return found.filter(
+      (candidate) =>
+        this.deps.insideEndSphere(candidate.pointA, endPoint, radiusNm) ||
+        this.deps.insideEndSphere(candidate.pointB, endPoint, radiusNm),
+    );
   }
 
   private foundAround(
@@ -377,6 +400,7 @@ export class TraceEndController {
     this.invalidate();
     this.history = [];
     this.prepared = undefined;
+    this.reachedThreshold = undefined;
     this.setPrompt(undefined);
   }
 
@@ -385,7 +409,8 @@ export class TraceEndController {
       this.open(threshold);
       return;
     }
-    const { continueDepth } = this.check!;
+    const { continueDepth, startThreshold } = this.check!;
+    if (threshold < startThreshold) this.reachedThreshold = threshold;
     this.invalidate();
     this.setPrompt(undefined);
     this.deps.continueWith(outcome.candidate, continueDepth);

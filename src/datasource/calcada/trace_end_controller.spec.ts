@@ -119,6 +119,12 @@ class FakeDeps implements TraceEndDeps {
     return result.promise;
   }
 
+  insideEndSphere(point: Float32Array, center: Float32Array, radiusNm: number) {
+    return (
+      Math.hypot(...point.map((value, i) => value - center[i])) <= radiusNm
+    );
+  }
+
   verdict(threshold: number | undefined) {
     this.verdictThresholds.push(threshold);
     return (edge: EdgeCandidate): Verdict => {
@@ -572,6 +578,71 @@ describe("TraceEndController", () => {
     expect(deps.verdictThresholds.slice(-2)).toEqual([0.25, 0.2]);
     expect(deps.fills).toEqual([]);
     expect(deps.writes).toEqual([]);
+  });
+
+  it("look deeper after an accept skips children outside the end sphere", async () => {
+    const outside = new Float32Array([RADIUS_NM * 10, 0, 0]);
+    const far = candidate({
+      lineId: 31n,
+      score: 0.22,
+      pointA: outside,
+      pointB: outside,
+    });
+    const near = candidate({
+      lineId: 32n,
+      score: 0.12,
+      pointA: outside,
+      pointB: new Float32Array(FAR_END),
+    });
+    const { deps, controller } = setUp();
+    deps.farEnd = FAR_END;
+    await acceptWith(controller, [far, near]);
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt).toMatchObject({ phase: "open", threshold: 0.2 });
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued).toEqual([{ candidate: near, depth: DEPTH + 1 }]);
+  });
+
+  it("after look deeper continues, the next checks start at the lowered threshold", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
+
+    const passingAtLowered = candidate({ lineId: 40n, score: 0.21 });
+    await decide(controller, deps, "reject", [passingAtLowered]);
+    expect(deps.continued.at(-1)).toEqual({
+      candidate: passingAtLowered,
+      depth: DEPTH,
+    });
+
+    await decide(controller, deps, "reject", [LOW]);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      threshold: 0.2,
+      canGoBack: false,
+    });
+    controller.deeper();
+    expect(controller.prompt).toMatchObject({ threshold: 0.15 });
+  });
+
+  it("a new trace forgets the lowered threshold", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    controller.deeper();
+    controller.deeper();
+    controller.reset();
+    await decide(controller, deps, "reject", [
+      candidate({ lineId: 40n, score: 0.21 }),
+    ]);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      threshold: START_THRESHOLD,
+    });
   });
 
   it("deeper is unavailable at 0", async () => {

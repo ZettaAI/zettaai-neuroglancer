@@ -3140,6 +3140,15 @@ class ZettaTraceSession extends RefCounted {
       },
       acceptEndPoint: (candidate, mergedRoot, radiusNm) =>
         this.partnerFarEnd(candidate, mergedRoot, radiusNm),
+      insideEndSphere: (point, center, radiusNm) => {
+        const semiAxes = traceSphereSemiAxes(
+          radiusNm,
+          layer.manager.root.coordinateSpace.value,
+        );
+        return (
+          semiAxes !== undefined && pointInsideSphere(point, center, semiAxes)
+        );
+      },
       verdict: (threshold) => this.endCheckVerdicts(threshold),
       fillGraph: async (candidates, threshold) => {
         await connection.pieceGraph.fill((graph) => {
