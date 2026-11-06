@@ -184,27 +184,25 @@ export class TraceEndController {
     try {
       const found = await lookUp(endPoint, radiusNm);
       if (token !== this.token) return;
-      const verdict = this.deps.verdict(reached);
-      let outcome: CheckOutcome | undefined = checkOutcome(
+      const anywhereThreshold = after === "accept" ? undefined : reached;
+      let outcome = await this.outcomeAt(
         found,
         decided,
-        verdict,
+        anywhereThreshold,
+        token,
       );
-      if (outcome.kind === "waiting") {
-        outcome = await this.filledOutcome(
-          found,
-          decided,
-          reached,
-          verdict,
-          token,
-        );
-      }
       if (outcome === undefined) return;
       let checkedEndPoint = endPoint;
+      let considered = found;
       if (outcome.kind !== "continue" && endPointIfEnded !== undefined) {
         checkedEndPoint =
           (await endPointIfEnded(radiusNm).catch(() => undefined)) ?? endPoint;
         if (token !== this.token) return;
+        considered = this.nearEnd(found, checkedEndPoint, radiusNm);
+        if (reached !== undefined) {
+          outcome = await this.outcomeAt(considered, decided, reached, token);
+          if (outcome === undefined) return;
+        }
       }
       this.check = {
         after,
@@ -213,10 +211,7 @@ export class TraceEndController {
         radiusNm,
         startThreshold,
         continueDepth: after === "accept" ? depth + 1 : depth,
-        found:
-          after === "accept"
-            ? this.nearEnd(found, checkedEndPoint, radiusNm)
-            : found,
+        found: considered,
         decided,
       };
       this.settle(outcome, startThreshold);
@@ -225,6 +220,19 @@ export class TraceEndController {
       this.deps.reportError(`${lookUpError}: ${errorMessage(error)}`);
       this.close();
     }
+  }
+
+  /** undefined when the check was superseded or closed. */
+  private async outcomeAt(
+    found: readonly EdgeCandidate[],
+    decided: ReadonlySet<bigint>,
+    threshold: number | undefined,
+    token: number,
+  ): Promise<CheckOutcome | undefined> {
+    const verdict = this.deps.verdict(threshold);
+    const outcome = checkOutcome(found, decided, verdict);
+    if (outcome.kind !== "waiting") return outcome;
+    return this.filledOutcome(found, decided, threshold, verdict, token);
   }
 
   private nearEnd(

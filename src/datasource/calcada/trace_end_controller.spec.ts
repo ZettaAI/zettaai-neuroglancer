@@ -630,6 +630,36 @@ describe("TraceEndController", () => {
     expect(controller.prompt).toMatchObject({ threshold: 0.15 });
   });
 
+  it("after an accept the lowered threshold reaches only children in the end sphere", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    controller.deeper();
+    controller.deeper();
+    const outside = new Float32Array([RADIUS_NM * 10, 0, 0]);
+    const far = candidate({
+      lineId: 41n,
+      score: 0.21,
+      pointA: outside,
+      pointB: outside,
+    });
+    const farPassing = candidate({
+      lineId: 42n,
+      score: 0.5,
+      pointA: outside,
+      pointB: outside,
+    });
+
+    await acceptWith(controller, [far]);
+    expect(deps.continued).toHaveLength(1);
+    expect(controller.prompt).toMatchObject({ phase: "open", threshold: 0.2 });
+
+    await acceptWith(controller, [far, farPassing]);
+    expect(deps.continued.at(-1)).toEqual({
+      candidate: farPassing,
+      depth: DEPTH + 1,
+    });
+  });
+
   it("a new trace forgets the lowered threshold", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
     const { deps, controller } = await openPrompt("accept", [lower]);
