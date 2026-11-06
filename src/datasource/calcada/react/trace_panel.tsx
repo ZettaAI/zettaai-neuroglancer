@@ -23,6 +23,7 @@ import type {
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
 import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
+import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import { ScoreRangeSlider } from "#src/datasource/calcada/react/score_range_slider.js";
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
@@ -40,6 +41,7 @@ import type {
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 import {
+  clampTraceSphereRadiusNm,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
@@ -48,10 +50,8 @@ import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { keysForCustomAction } from "#src/ui/custom_keybinds.js";
 import {
-  chordKeyLabels,
   chordsForAction,
   formatShortcutKeys,
-  preferredChord,
   shortcutAttributes,
 } from "#src/ui/key_chord_format.js";
 import { SHORTCUT_SHEET_KEYS } from "#src/ui/mode_shortcuts.js";
@@ -226,20 +226,6 @@ const SPLIT_DETECTION_KEYS = keysForCustomAction(
 );
 const CONTROL_CLICK = ["control+mousedown0", "meta+mousedown0"];
 
-function KeyChips({ keys }: { keys: readonly string[] }) {
-  const chord = preferredChord(keys);
-  if (chord === undefined) return null;
-  return (
-    <span className="neuroglancer-key-chips" aria-hidden="true">
-      {chordKeyLabels(chord).map((label) => (
-        <kbd key={label} className="neuroglancer-key-chip">
-          {label}
-        </kbd>
-      ))}
-    </span>
-  );
-}
-
 const aimChords = (action: string) =>
   chordsForAction(CALCADA_TRACE_AIM_INPUT_EVENT_MAP, action);
 
@@ -324,13 +310,6 @@ function HintedButton({
 const NO_VALUE = "—";
 const SCORE_DIGITS = 2;
 
-function clampRadius(radiusNm: number): number {
-  return Math.min(
-    TRACE_SPHERE_RADIUS_MAX_NM,
-    Math.max(TRACE_SPHERE_RADIUS_MIN_NM, radiusNm),
-  );
-}
-
 /** One line that never wraps: a longer text is cut, and whole in its tooltip. */
 function StatusLine({ text, picking }: { text: string; picking?: boolean }) {
   return (
@@ -400,6 +379,7 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
   const tracing = useWatchable(traceState.active);
   const scope = useWatchable(traceState.scope);
   const radiusNm = useWatchable(traceState.sphereRadiusNm);
+  const endRadiusNm = useWatchable(traceState.endRadiusNm);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const keepSplitParts = useWatchable(traceState.keepSplitParts);
@@ -496,7 +476,22 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           disabled={scope === "segment"}
           value={Math.round(radiusNm)}
           onValueChange={(next) => {
-            traceState.sphereRadiusNm.value = clampRadius(next);
+            traceState.sphereRadiusNm.value = clampTraceSphereRadiusNm(next);
+          }}
+        />
+      </label>
+      <label className="calcada-trace-panel-row">
+        <span className="calcada-trace-panel-radius-label">
+          End check radius, nm
+        </span>
+        <FilterNumberInput
+          min={TRACE_SPHERE_RADIUS_MIN_NM}
+          max={TRACE_SPHERE_RADIUS_MAX_NM}
+          step={100}
+          title="After each decision, asks whether the line ends when no passing candidate lies within this radius."
+          value={Math.round(endRadiusNm)}
+          onValueChange={(next) => {
+            traceState.endRadiusNm.value = clampTraceSphereRadiusNm(next);
           }}
         />
       </label>

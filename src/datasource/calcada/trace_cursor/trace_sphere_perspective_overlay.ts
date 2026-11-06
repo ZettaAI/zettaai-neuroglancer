@@ -43,7 +43,7 @@ import {
   buildUnitSphereTriangles,
   traceSphereSemiAxes,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_geometry.js";
-import type { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
+import type { TraceSphereView } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import { PerspectiveViewRenderLayer } from "#src/perspective_view/render_layer.js";
 import { constantWatchableValue } from "#src/trackable_value.js";
@@ -77,7 +77,7 @@ export class TraceSpherePerspectiveOverlay extends PerspectiveViewRenderLayer {
 
   constructor(
     public gl: GL,
-    public state: TraceSphereState,
+    public state: TraceSphereView,
   ) {
     super();
     this.shaderGetter = parameterizedEmitterDependentShaderGetter(this, gl, {

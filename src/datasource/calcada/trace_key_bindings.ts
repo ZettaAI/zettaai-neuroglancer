@@ -46,6 +46,7 @@ export const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
   "at:arrowdown": { action: "skip-candidate" },
+  "at:arrowup": { action: "trace-end-back" },
   // Its own action name, not the shared "undo": the merge and cut tools listen
   // for that one on window, and a keypress resolving to it would run their
   // handler and this one both — two reverts from a single press.
@@ -103,6 +104,14 @@ export const TRACE_MODE_SHORTCUTS: readonly ModeShortcut[] = [
   },
   { keys: traceChords("trace-undo"), label: "Undo" },
   { keys: traceChords("exit-trace"), label: "Exit" },
+];
+
+export const TRACE_END_MODE_SHORTCUTS: readonly ModeShortcut[] = [
+  { keys: traceChords("accept-candidate"), label: "Certain end" },
+  { keys: traceChords("reject-candidate"), label: "Uncertain end" },
+  { keys: traceChords("skip-candidate"), label: "Look deeper" },
+  { keys: traceChords("trace-end-back"), label: "Back" },
+  { keys: traceChords("exit-trace"), label: "Close" },
 ];
 
 export const TRACE_AIM_MODE_SHORTCUTS: readonly ModeShortcut[] = [

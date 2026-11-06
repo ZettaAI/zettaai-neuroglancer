@@ -17,6 +17,7 @@ import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
   createAnnotationRow,
+  createAnnotationTable,
   deleteAnnotationRows,
   fetchAnnotationRows,
   fetchSegmentCounts,
@@ -754,5 +755,48 @@ describe("retryOnceIfUnauthorized", () => {
       HttpError,
     );
     expect(attempt).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createAnnotationTable", () => {
+  const request = {
+    tableName: "ends",
+    schemaType: "trace_endpoint",
+    schemaVersion: 1,
+    voxelResolution: [4, 4, 40],
+    description: "Trace ends",
+    readPermission: "PUBLIC",
+    writePermission: "PUBLIC",
+  } as const;
+
+  it("posts the server's fields", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({}),
+    );
+    expect(await createAnnotationTable(fetchOk, BASE, request)).toBe("created");
+    const [url, init] = fetchOk.mock.calls[0];
+    expect(String(url)).toBe(`${BASE}/annotation/tables`);
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      table_name: "ends",
+      schema_type: "trace_endpoint",
+      schema_version: 1,
+      voxel_resolution: [4, 4, 40],
+      description: "Trace ends",
+      read_permission: "PUBLIC",
+      write_permission: "PUBLIC",
+    });
+  });
+
+  it('a 409 is "exists"', async () => {
+    const fetchOk = vi.fn(() => failing(409, "table already exists"));
+    expect(await createAnnotationTable(fetchOk, BASE, request)).toBe("exists");
+  });
+
+  it("another refusal throws its message", async () => {
+    const fetchOk = vi.fn(() => failing(400, "unknown schema"));
+    await expect(createAnnotationTable(fetchOk, BASE, request)).rejects.toThrow(
+      "unknown schema",
+    );
   });
 });

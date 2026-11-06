@@ -241,7 +241,7 @@ export function formatCount(count: number): string {
   return String(count).replace(THOUSANDS_GROUP, " ");
 }
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -1017,10 +1017,27 @@ export class CalcadaAnnotationTablesSession extends RefCounted {
     if (this.wasDisposed) return;
     this.errors.delete(name);
     this.knownPayloads.delete(annotation.id);
-    removeAnnotationRow(this.cache, name, rowId);
-    this.retireInFlight(name);
-    this.invalidate([name]);
+    this.rowRemoved(name, rowId);
+  }
+
+  /** A row deleted elsewhere leaves every cached scope of its table. */
+  rowRemoved(table: string, rowId: bigint) {
+    if (this.wasDisposed) return;
+    removeAnnotationRow(this.cache, table, rowId);
+    this.retireInFlight(table);
+    this.invalidate([table]);
     this.fetchVisible();
+  }
+
+  /** A row written elsewhere is read in; a table not listed yet is listed first. */
+  rowWritten(table: string, rowId: bigint) {
+    if (this.wasDisposed) return;
+    const info = this.tableInfo(table);
+    if (info === undefined) {
+      this.refreshTables();
+      return;
+    }
+    void this.rereadScopesOf(info, rowId, this.coords);
   }
 
   /** A drawn row's payload to read and save; none for an annotation that is not a row. */

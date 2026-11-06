@@ -48,7 +48,15 @@ export type TraceScope = "sphere" | "segment";
 export const TRACE_SPHERE_RADIUS_DEFAULT_NM = 2000;
 export const TRACE_SPHERE_RADIUS_MIN_NM = 100;
 export const TRACE_SPHERE_RADIUS_MAX_NM = 50000;
+export const TRACE_END_RADIUS_DEFAULT_NM = 1000;
 const RADIUS_STEP_FACTOR = 1.25;
+
+export function clampTraceSphereRadiusNm(radiusNm: number): number {
+  return Math.min(
+    TRACE_SPHERE_RADIUS_MAX_NM,
+    Math.max(TRACE_SPHERE_RADIUS_MIN_NM, radiusNm),
+  );
+}
 
 export function stepTraceSphereRadiusNm(
   radiusNm: number,
@@ -58,14 +66,12 @@ export function stepTraceSphereRadiusNm(
     direction === 1
       ? radiusNm * RADIUS_STEP_FACTOR
       : radiusNm / RADIUS_STEP_FACTOR;
-  return Math.min(
-    TRACE_SPHERE_RADIUS_MAX_NM,
-    Math.max(TRACE_SPHERE_RADIUS_MIN_NM, next),
-  );
+  return clampTraceSphereRadiusNm(next);
 }
 
 const TRACE_SCOPE_KEY = "scope";
 const TRACE_SPHERE_RADIUS_KEY = "sphereRadiusNm";
+const TRACE_END_RADIUS_KEY = "endRadiusNm";
 const TRACE_SPHERE_CENTER_KEY = "sphereCenter";
 
 const TRACE_FILTER_KEY = "filter";
@@ -184,6 +190,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   aiming = new WatchableValue<boolean>(false);
   scope = new WatchableValue<TraceScope>("sphere");
   sphereRadiusNm = new WatchableValue<number>(TRACE_SPHERE_RADIUS_DEFAULT_NM);
+  endRadiusNm = new WatchableValue<number>(TRACE_END_RADIUS_DEFAULT_NM);
   sphereCenter = new WatchableValue<Float32Array | undefined>(undefined);
   seedRoot = new WatchableValue<bigint | undefined>(undefined);
   // The candidate filter, shared by the trace and split error detection so the
@@ -229,6 +236,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.aiming.changed.add(reemit));
     this.registerDisposer(this.scope.changed.add(reemit));
     this.registerDisposer(this.sphereRadiusNm.changed.add(reemit));
+    this.registerDisposer(this.endRadiusNm.changed.add(reemit));
     this.registerDisposer(this.sphereCenter.changed.add(reemit));
     this.registerDisposer(this.seedRoot.changed.add(reemit));
     this.registerDisposer(this.rejectedBy.changed.add(reemit));
@@ -324,6 +332,10 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       [TRACE_FILTER_EDITOR_KEY]: emptyToUndefined(this.filterEditor.toJSON()),
       [TRACE_SCOPE_KEY]: this.scope.value,
       [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
+      [TRACE_END_RADIUS_KEY]:
+        this.endRadiusNm.value === TRACE_END_RADIUS_DEFAULT_NM
+          ? undefined
+          : this.endRadiusNm.value,
       [TRACE_SPHERE_CENTER_KEY]: this.sphereCenter.value
         ? Array.from(this.sphereCenter.value)
         : undefined,
@@ -386,6 +398,11 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     });
     verifyOptionalObjectProperty(x, TRACE_SPHERE_RADIUS_KEY, (value) => {
       this.sphereRadiusNm.value = verifyFiniteFloat(value);
+    });
+    verifyOptionalObjectProperty(x, TRACE_END_RADIUS_KEY, (value) => {
+      this.endRadiusNm.value = clampTraceSphereRadiusNm(
+        verifyFiniteFloat(value),
+      );
     });
     verifyOptionalObjectProperty(x, TRACE_SPHERE_CENTER_KEY, (value) => {
       this.sphereCenter.value = Float32Array.from(

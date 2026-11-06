@@ -1,0 +1,904 @@
+import { describe, expect, it } from "vitest";
+import type { Verdict } from "#src/datasource/calcada/candidate_filter_tree.js";
+import type { PieceClasses } from "#src/datasource/calcada/candidate_heat.js";
+import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import type { TraceDecision } from "#src/datasource/calcada/trace_end_check.js";
+import { END_THRESHOLD_STEP } from "#src/datasource/calcada/trace_end_check.js";
+import type { TraceEndDeps } from "#src/datasource/calcada/trace_end_controller.js";
+import { TraceEndController } from "#src/datasource/calcada/trace_end_controller.js";
+import type { TraceEndpointRow } from "#src/datasource/calcada/trace_endpoint_table.js";
+
+const START_THRESHOLD = 0.3;
+const RADIUS_NM = 1000;
+const SEED_ROOT = 99n;
+const DEPTH = 2;
+const MAIN_BRANCH = 0;
+const OTHER_BRANCH = 7;
+const GRAPH_UNKNOWN_ERROR = "Could not load the piece graph for the end check";
+
+const noClasses: PieceClasses = {
+  perikaryon: 0,
+  dendrite: 0,
+  axon: 0,
+  glia: 0,
+  vasculature: 0,
+  nucleus: 0,
+  ecs: 0,
+  other: 0,
+};
+
+function candidate(overrides: Partial<EdgeCandidate> = {}): EdgeCandidate {
+  return {
+    lineId: 1n,
+    score: 0.5,
+    selfPieceId: 1n,
+    partnerPieceId: 2n,
+    partnerRootId: 2n,
+    pointA: new Float32Array([1, 2, 3]),
+    pointB: new Float32Array([4, 5, 6]),
+    nInterfaces: 1,
+    modelDecision: "",
+    partnerVoxels: 500,
+    partnerClasses: noClasses,
+    partnerHasInfo: false,
+    selfVoxels: 500,
+    selfClasses: noClasses,
+    selfHasInfo: false,
+    ...overrides,
+  };
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+class FakeDeps implements TraceEndDeps {
+  fetches: {
+    seedRoot: bigint;
+    center: Float32Array;
+    radiusNm: number;
+    result: Deferred<EdgeCandidate[]>;
+  }[] = [];
+  fills: {
+    candidates: readonly EdgeCandidate[];
+    threshold: number | undefined;
+    result: Deferred<void>;
+  }[] = [];
+  writes: {
+    row: TraceEndpointRow;
+    branchId: number;
+    result: Deferred<bigint>;
+  }[] = [];
+  removed: bigint[] = [];
+  removedOn: number[] = [];
+  branch = MAIN_BRANCH;
+  removeFails = false;
+  continued: { candidate: EdgeCandidate; depth: number }[] = [];
+  shownNext = 0;
+  changes = 0;
+  errors: string[] = [];
+  unknownUntilFill = new Set<bigint>();
+  graphFillLeavesUnknown = false;
+  verdictThresholds: (number | undefined)[] = [];
+  mark: unknown = "edit-1";
+
+  fetchAround(seedRoot: bigint, center: Float32Array, radiusNm: number) {
+    const result = deferred<EdgeCandidate[]>();
+    this.fetches.push({ seedRoot, center, radiusNm, result });
+    return result.promise;
+  }
+
+  verdict(threshold: number | undefined) {
+    this.verdictThresholds.push(threshold);
+    return (edge: EdgeCandidate): Verdict => {
+      if (edge.score < (threshold ?? START_THRESHOLD)) return false;
+      return this.unknownUntilFill.has(edge.lineId) ? undefined : true;
+    };
+  }
+
+  fillGraph(
+    candidates: readonly EdgeCandidate[],
+    threshold: number | undefined,
+  ) {
+    const result = deferred<void>();
+    this.fills.push({ candidates, threshold, result });
+    return result.promise.then(() => {
+      if (!this.graphFillLeavesUnknown) this.unknownUntilFill.clear();
+    });
+  }
+
+  startThreshold() {
+    return START_THRESHOLD;
+  }
+
+  radiusNm() {
+    return RADIUS_NM;
+  }
+
+  branchId() {
+    return this.branch;
+  }
+
+  write(row: TraceEndpointRow, branchId: number) {
+    const result = deferred<bigint>();
+    this.writes.push({ row, branchId, result });
+    return result.promise;
+  }
+
+  async remove(rowId: bigint, branchId: number) {
+    if (this.removeFails) throw new Error("HTTP 409");
+    this.removed.push(rowId);
+    this.removedOn.push(branchId);
+  }
+
+  continueWith(edge: EdgeCandidate, depth: number) {
+    this.continued.push({ candidate: edge, depth });
+  }
+
+  showNext() {
+    this.shownNext++;
+  }
+
+  undoMark() {
+    return this.mark;
+  }
+
+  changed() {
+    this.changes++;
+  }
+
+  reportError(message: string) {
+    this.errors.push(message);
+  }
+}
+
+function setUp() {
+  const deps = new FakeDeps();
+  return { deps, controller: new TraceEndController(deps) };
+}
+
+const LOW = candidate({ lineId: 20n, score: 0.1 });
+const DECIDED = candidate({ lineId: 10n });
+
+async function decide(
+  controller: TraceEndController,
+  deps: FakeDeps,
+  after: TraceDecision,
+  found: EdgeCandidate[],
+  decided: ReadonlySet<bigint> = new Set(),
+) {
+  const done = controller.afterDecision(
+    after,
+    DECIDED,
+    SEED_ROOT,
+    DEPTH,
+    decided,
+  );
+  deps.fetches.at(-1)!.result.resolve(found);
+  await done;
+}
+
+async function openPrompt(
+  after: TraceDecision = "accept",
+  found: EdgeCandidate[] = [LOW],
+) {
+  const setup = setUp();
+  await decide(setup.controller, setup.deps, after, found);
+  return setup;
+}
+
+async function answerWithRow(
+  controller: TraceEndController,
+  deps: FakeDeps,
+  rowId: bigint,
+) {
+  await decide(controller, deps, "accept", []);
+  controller.answer("certain");
+  deps.writes.at(-1)!.result.resolve(rowId);
+}
+
+const STEPS_TO_ZERO = Math.round(START_THRESHOLD / END_THRESHOLD_STEP);
+
+describe("TraceEndController", () => {
+  it("accept with no passing candidate nearby opens the prompt at pointB", async () => {
+    const { deps, controller } = setUp();
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    expect(controller.prompt?.phase).toBe("checking");
+    expect(deps.fetches[0]).toMatchObject({
+      seedRoot: SEED_ROOT,
+      center: DECIDED.pointB,
+      radiusNm: RADIUS_NM,
+    });
+    deps.fetches[0].result.resolve([LOW]);
+    await done;
+    expect(controller.prompt).toEqual({
+      phase: "open",
+      radiusNm: RADIUS_NM,
+      threshold: START_THRESHOLD,
+      canGoDeeper: true,
+      canGoBack: false,
+      endPoint: DECIDED.pointB,
+    });
+    expect(controller.isAnswering).toBe(true);
+    expect(deps.continued).toEqual([]);
+    expect(deps.shownNext).toBe(0);
+    expect(deps.changes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("accept with one passing candidate continues with it one level deeper and opens nothing", async () => {
+    const { deps, controller } = setUp();
+    const passing = candidate({ lineId: 30n, score: 0.8 });
+    await decide(controller, deps, "accept", [LOW, passing]);
+    expect(deps.continued).toEqual([{ candidate: passing, depth: DEPTH + 1 }]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("reject with none opens the prompt at pointA", async () => {
+    const { deps, controller } = setUp();
+    await decide(controller, deps, "reject", [LOW]);
+    expect(deps.fetches[0].center).toBe(DECIDED.pointA);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointA,
+    });
+  });
+
+  it("reject with one passing candidate continues at the same depth", async () => {
+    const { deps, controller } = setUp();
+    const passing = candidate({ lineId: 30n, score: 0.8 });
+    await decide(controller, deps, "reject", [passing]);
+    expect(deps.continued).toEqual([{ candidate: passing, depth: DEPTH }]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a candidate decided this session does not keep the prompt shut", async () => {
+    const { deps, controller } = setUp();
+    const skipped = candidate({ lineId: 30n, score: 0.8 });
+    await decide(controller, deps, "accept", [skipped], new Set([30n]));
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt?.phase).toBe("open");
+  });
+
+  it("waits for the graph when a verdict is unknown, then decides", async () => {
+    const { deps, controller } = setUp();
+    const pending = candidate({ lineId: 30n, score: 0.8 });
+    deps.unknownUntilFill.add(30n);
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    deps.fetches[0].result.resolve([pending]);
+    await settle();
+    expect(deps.fills).toHaveLength(1);
+    expect(deps.fills[0].candidates).toEqual([pending]);
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt?.phase).toBe("checking");
+    deps.fills[0].result.resolve();
+    await done;
+    expect(deps.continued).toEqual([{ candidate: pending, depth: DEPTH + 1 }]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a verdict still unknown after the fill reports and shows the next candidate", async () => {
+    const { deps, controller } = setUp();
+    deps.unknownUntilFill.add(30n);
+    deps.graphFillLeavesUnknown = true;
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    deps.fetches[0].result.resolve([candidate({ lineId: 30n })]);
+    await settle();
+    deps.fills[0].result.resolve();
+    await done;
+    expect(deps.errors).toEqual([GRAPH_UNKNOWN_ERROR]);
+    expect(deps.shownNext).toBe(1);
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a failed fetch shows the next candidate and reports", async () => {
+    const { deps, controller } = setUp();
+    const done = controller.afterDecision(
+      "reject",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    deps.fetches[0].result.reject(new Error("HTTP 503"));
+    await done;
+    expect(deps.errors).toHaveLength(1);
+    expect(deps.errors[0]).toContain("HTTP 503");
+    expect(deps.shownNext).toBe(1);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("certain writes one row with status, threshold, radius, after and line id, then shows the next candidate", async () => {
+    const { deps, controller } = await openPrompt("accept");
+    controller.answer("certain");
+    expect(deps.writes.map((write) => write.row)).toEqual([
+      {
+        status: "certain",
+        threshold: START_THRESHOLD,
+        radiusNm: RADIUS_NM,
+        after: "accept",
+        lineId: DECIDED.lineId,
+        position: DECIDED.pointB,
+      },
+    ]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("uncertain writes one row likewise, then shows the next candidate", async () => {
+    const { deps, controller } = await openPrompt("reject");
+    controller.answer("uncertain");
+    expect(deps.writes.map((write) => write.row)).toEqual([
+      {
+        status: "uncertain",
+        threshold: START_THRESHOLD,
+        radiusNm: RADIUS_NM,
+        after: "reject",
+        lineId: DECIDED.lineId,
+        position: DECIDED.pointA,
+      },
+    ]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("a failed write reports an error naming the failure", async () => {
+    const { deps, controller } = await openPrompt();
+    controller.answer("certain");
+    deps.writes[0].result.reject(new Error("HTTP 403"));
+    await settle();
+    expect(deps.errors).toHaveLength(1);
+    expect(deps.errors[0]).toMatch(/trace end.*HTTP 403/);
+  });
+
+  it("answer is ignored until the prompt is open", async () => {
+    const { deps, controller } = setUp();
+    controller.answer("certain");
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    controller.answer("certain");
+    expect(deps.writes).toEqual([]);
+    expect(deps.shownNext).toBe(0);
+    deps.fetches[0].result.resolve([LOW]);
+    await done;
+    expect(controller.prompt?.phase).toBe("open");
+  });
+
+  it("deeper steps 0.05 down and continues when a lower-score candidate passes, writing nothing", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    const atStart = controller.prompt;
+    controller.deeper();
+    expect(controller.prompt).not.toBe(atStart);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      threshold: 0.25,
+      canGoDeeper: true,
+      canGoBack: true,
+    });
+    controller.deeper();
+    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.fetches).toHaveLength(1);
+    expect(deps.fills).toEqual([]);
+    expect(deps.writes).toEqual([]);
+  });
+
+  it("deeper is unavailable at 0", async () => {
+    const { controller } = await openPrompt("accept", []);
+    for (let i = 0; i < STEPS_TO_ZERO; i++) controller.deeper();
+    expect(controller.prompt).toMatchObject({
+      threshold: 0,
+      canGoDeeper: false,
+    });
+    const atZero = controller.prompt;
+    controller.deeper();
+    expect(controller.prompt).toBe(atZero);
+  });
+
+  it("back stops at the start threshold", async () => {
+    const { controller } = await openPrompt("accept", []);
+    const atStart = controller.prompt;
+    controller.back();
+    expect(controller.prompt).toBe(atStart);
+    controller.deeper();
+    controller.back();
+    expect(controller.prompt).toMatchObject({
+      threshold: START_THRESHOLD,
+      canGoBack: false,
+      canGoDeeper: true,
+    });
+  });
+
+  it("a score equal to the threshold passes", async () => {
+    const atThreshold = candidate({ lineId: 30n, score: 0.25 });
+    const { deps, controller } = await openPrompt("reject", [atThreshold]);
+    controller.deeper();
+    expect(deps.verdictThresholds.at(-1)).toBe(0.25);
+    expect(deps.continued).toEqual([{ candidate: atThreshold, depth: DEPTH }]);
+  });
+
+  it("deeper and back are ignored while checking", async () => {
+    const { deps, controller } = setUp();
+    void controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    const checking = controller.prompt;
+    controller.deeper();
+    controller.back();
+    expect(controller.prompt).toBe(checking);
+    expect(deps.verdictThresholds).toEqual([]);
+  });
+
+  it("dismiss writes nothing and shows the next candidate", async () => {
+    const { deps, controller } = await openPrompt();
+    controller.dismiss();
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.writes).toEqual([]);
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("undo after an answer removes the row and reopens the same prompt", async () => {
+    const { deps, controller } = await openPrompt("accept", []);
+    controller.deeper();
+    const answered = controller.prompt;
+    controller.answer("uncertain");
+    deps.writes[0].result.resolve(55n);
+    expect(await controller.undo()).toBe(true);
+    expect(deps.removed).toEqual([55n]);
+    expect(controller.prompt).toEqual(answered);
+    controller.answer("certain");
+    expect(deps.writes.map((write) => write.row)).toMatchObject([
+      { status: "uncertain", threshold: 0.25 },
+      { status: "certain", threshold: 0.25 },
+    ]);
+  });
+
+  it("undo of an endpoint whose write failed reopens the prompt and removes nothing", async () => {
+    const { deps, controller } = await openPrompt();
+    const answered = controller.prompt;
+    controller.answer("certain");
+    deps.writes[0].result.reject(new Error("HTTP 500"));
+    expect(await controller.undo()).toBe(true);
+    expect(deps.removed).toEqual([]);
+    expect(controller.prompt).toEqual(answered);
+  });
+
+  it("undo with an accept on top returns false", async () => {
+    const { deps, controller } = setUp();
+    await answerWithRow(controller, deps, 55n);
+    controller.noteAccept(6n);
+    expect(await controller.undo()).toBe(false);
+    expect(deps.removed).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("endpoints above an accept are undone before it", async () => {
+    const { deps, controller } = setUp();
+    controller.noteAccept(5n);
+    await answerWithRow(controller, deps, 55n);
+    await answerWithRow(controller, deps, 56n);
+    expect(await controller.undo()).toBe(true);
+    expect(await controller.undo()).toBe(true);
+    expect(await controller.undo()).toBe(false);
+    expect(deps.removed).toEqual([56n, 55n]);
+  });
+
+  it("an endpoint carries the undo mark taken when it was answered", async () => {
+    const { deps, controller } = setUp();
+    expect(controller.newestEndpointMark()).toBeUndefined();
+    deps.mark = "edit-7";
+    await answerWithRow(controller, deps, 55n);
+    deps.mark = "edit-8";
+    expect(controller.newestEndpointMark()).toBe("edit-7");
+  });
+
+  it("has no endpoint mark when an accept is newest", async () => {
+    const { deps, controller } = setUp();
+    await answerWithRow(controller, deps, 55n);
+    controller.noteAccept(6n);
+    expect(controller.newestEndpointMark()).toBeUndefined();
+  });
+
+  it("forgetAccept drops the newest accept from the history", async () => {
+    const { deps, controller } = setUp();
+    await answerWithRow(controller, deps, 55n);
+    controller.noteAccept(6n);
+    controller.forgetAccept();
+    expect(await controller.undo()).toBe(true);
+    expect(deps.removed).toEqual([55n]);
+  });
+
+  it("a new decision while the prompt is open replaces it", async () => {
+    const { deps, controller } = await openPrompt("accept");
+    const done = controller.afterDecision(
+      "reject",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    expect(controller.prompt?.phase).toBe("checking");
+    deps.fetches[1].result.resolve([]);
+    await done;
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointA,
+    });
+  });
+
+  it("a check that resolves after dismiss opens nothing", async () => {
+    const { deps, controller } = setUp();
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    controller.dismiss();
+    expect(deps.shownNext).toBe(1);
+    deps.fetches[0].result.resolve([candidate({ lineId: 30n, score: 0.8 })]);
+    await done;
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.continued).toEqual([]);
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("a check that resolves after reset opens nothing", async () => {
+    const { deps, controller } = setUp();
+    deps.unknownUntilFill.add(30n);
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    deps.fetches[0].result.resolve([candidate({ lineId: 30n })]);
+    await settle();
+    controller.reset();
+    deps.fills[0].result.resolve();
+    await done;
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.continued).toEqual([]);
+    expect(deps.shownNext).toBe(0);
+    expect(deps.errors).toEqual([]);
+  });
+
+  it("reset clears the undo history", async () => {
+    const { deps, controller } = setUp();
+    await answerWithRow(controller, deps, 55n);
+    controller.reset();
+    expect(await controller.undo()).toBe(false);
+  });
+
+  it("an undo finishing after reset removes the row but reopens nothing", async () => {
+    const { deps, controller } = await openPrompt();
+    controller.answer("certain");
+    const undone = controller.undo();
+    controller.reset();
+    deps.writes[0].result.resolve(55n);
+    expect(await undone).toBe(true);
+    expect(deps.removed).toEqual([55n]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a failed remove reports and reopens nothing", async () => {
+    const { deps, controller } = setUp();
+    await answerWithRow(controller, deps, 55n);
+    deps.removeFails = true;
+    expect(await controller.undo()).toBe(true);
+    expect(deps.errors).toHaveLength(1);
+    expect(deps.errors[0]).toMatch(/trace end.*HTTP 409/);
+    expect(controller.prompt).toBeUndefined();
+    deps.removeFails = false;
+    expect(await controller.undo()).toBe(true);
+    expect(deps.removed).toEqual([55n]);
+  });
+
+  it("undo during a check whose remove fails shows the next candidate", async () => {
+    const { deps, controller } = setUp();
+    await answerWithRow(controller, deps, 55n);
+    void controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    expect(controller.prompt?.phase).toBe("checking");
+    deps.removeFails = true;
+    const shownBefore = deps.shownNext;
+    expect(await controller.undo()).toBe(true);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(shownBefore + 1);
+  });
+
+  it("an undo over an open prompt replaces it with the reopened one and shows next only once", async () => {
+    const { deps, controller } = setUp();
+    await decide(controller, deps, "accept", []);
+    const answered = controller.prompt;
+    controller.answer("certain");
+    deps.writes[0].result.resolve(55n);
+    await decide(controller, deps, "reject", []);
+    const shownBefore = deps.shownNext;
+    const undone = controller.undo();
+    expect(controller.prompt).toBeUndefined();
+    expect(await undone).toBe(true);
+    expect(controller.prompt).toEqual(answered);
+    expect(deps.shownNext).toBe(shownBefore);
+  });
+
+  it("a prepared check is reused by afterDecision for the same line", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(DECIDED, SEED_ROOT);
+    expect(deps.fetches.map((fetch) => fetch.center)).toEqual([
+      DECIDED.pointB,
+      DECIDED.pointB,
+      DECIDED.pointA,
+    ]);
+    for (const fetch of deps.fetches) fetch.result.resolve([LOW]);
+    await controller.afterDecision(
+      "reject",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    expect(deps.fetches).toHaveLength(3);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointA,
+    });
+  });
+
+  it("a prepared check for another line is dropped", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(candidate({ lineId: 40n }), SEED_ROOT);
+    controller.prepare(DECIDED, SEED_ROOT);
+    controller.prepare(candidate({ lineId: 41n }), SEED_ROOT);
+    for (const fetch of deps.fetches) fetch.result.resolve([LOW]);
+    await decide(controller, deps, "reject", [LOW]);
+    expect(deps.fetches).toHaveLength(10);
+    expect(deps.fetches[9]).toMatchObject({
+      seedRoot: SEED_ROOT,
+      center: DECIDED.pointA,
+    });
+  });
+
+  it("an accept's prepared check covers the partner's candidates and excludes the accepted line", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(DECIDED, SEED_ROOT);
+    expect(deps.fetches.slice(0, 2).map((fetch) => fetch.seedRoot)).toEqual([
+      SEED_ROOT,
+      DECIDED.partnerRootId,
+    ]);
+    const passing = candidate({ lineId: 30n, score: 0.8, partnerRootId: 7n });
+    const acceptedFromPartner = candidate({
+      lineId: DECIDED.lineId,
+      score: 0.9,
+      partnerRootId: SEED_ROOT,
+    });
+    const nowInside = candidate({
+      lineId: 31n,
+      score: 0.95,
+      partnerRootId: DECIDED.partnerRootId,
+    });
+    deps.fetches[0].result.resolve([LOW, DECIDED, nowInside]);
+    deps.fetches[1].result.resolve([passing, acceptedFromPartner]);
+    deps.fetches[2].result.resolve([]);
+    await controller.afterDecision("accept", DECIDED, 100n, DEPTH, new Set());
+    expect(deps.fetches).toHaveLength(3);
+    expect(deps.continued).toEqual([{ candidate: passing, depth: DEPTH + 1 }]);
+  });
+
+  it("a prepared check that failed is replaced by a fresh fetch", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(DECIDED, SEED_ROOT);
+    for (const fetch of deps.fetches)
+      fetch.result.reject(new Error("HTTP 500"));
+    const done = controller.afterDecision(
+      "reject",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    await settle();
+    expect(deps.fetches).toHaveLength(4);
+    deps.fetches[3].result.resolve([LOW]);
+    await done;
+    expect(deps.errors).toEqual([]);
+    expect(controller.prompt?.phase).toBe("open");
+  });
+
+  async function acceptPreparedWith(
+    fromSeed: EdgeCandidate,
+    fromPartner: EdgeCandidate,
+    decided: ReadonlySet<bigint>,
+  ) {
+    const setup = setUp();
+    setup.controller.prepare(DECIDED, SEED_ROOT);
+    setup.deps.fetches[0].result.resolve([fromSeed]);
+    setup.deps.fetches[1].result.resolve([fromPartner]);
+    setup.deps.fetches[2].result.resolve([]);
+    await setup.controller.afterDecision(
+      "accept",
+      DECIDED,
+      100n,
+      DEPTH,
+      decided,
+    );
+    return setup;
+  }
+
+  it("an accept's prepared check keeps only the better line into a root both sides touch", async () => {
+    const worse = candidate({ lineId: 50n, score: 0.6, partnerRootId: 7n });
+    const better = candidate({ lineId: 51n, score: 0.8, partnerRootId: 7n });
+    const { deps, controller } = await acceptPreparedWith(
+      worse,
+      better,
+      new Set([better.lineId]),
+    );
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt?.phase).toBe("open");
+  });
+
+  it("on equal scores the smaller line into a shared root wins", async () => {
+    const larger = candidate({ lineId: 61n, score: 0.8, partnerRootId: 7n });
+    const smaller = candidate({ lineId: 60n, score: 0.8, partnerRootId: 7n });
+    const { deps } = await acceptPreparedWith(larger, smaller, new Set());
+    expect(deps.continued).toEqual([{ candidate: smaller, depth: DEPTH + 1 }]);
+  });
+
+  it("a forgotten prepared check is not reused", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(DECIDED, SEED_ROOT);
+    for (const fetch of deps.fetches) fetch.result.resolve([LOW]);
+    controller.forgetPrepared();
+    await decide(controller, deps, "reject", [LOW]);
+    expect(deps.fetches).toHaveLength(4);
+  });
+
+  it("a prepared check is not reused after the radius changed or a reset", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(DECIDED, SEED_ROOT);
+    controller.reset();
+    await decide(controller, deps, "reject", [LOW]);
+    expect(deps.fetches).toHaveLength(4);
+    controller.prepare(DECIDED, SEED_ROOT);
+    deps.radiusNm = () => RADIUS_NM * 2;
+    await decide(controller, deps, "reject", [LOW]);
+    expect(deps.fetches).toHaveLength(8);
+    expect(deps.fetches[7].radiusNm).toBe(RADIUS_NM * 2);
+  });
+
+  it("deeper fills the graph for a candidate below the start threshold, then continues with it", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    deps.unknownUntilFill.add(30n);
+    void controller.deeper();
+    const done = controller.deeper();
+    expect(controller.prompt).toMatchObject({
+      phase: "checking",
+      threshold: 0.2,
+    });
+    expect(deps.fills.map((fill) => fill.threshold)).toEqual([0.2]);
+    expect(deps.fills[0].candidates).toEqual([lower]);
+    expect(deps.continued).toEqual([]);
+    deps.fills[0].result.resolve();
+    await done;
+    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.writes).toEqual([]);
+  });
+
+  it("deeper with the graph still unknown after the fill reports and shows the next candidate", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.27 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    deps.unknownUntilFill.add(30n);
+    deps.graphFillLeavesUnknown = true;
+    const done = controller.deeper();
+    deps.fills[0].result.resolve();
+    await done;
+    expect(deps.errors).toEqual([GRAPH_UNKNOWN_ERROR]);
+    expect(deps.shownNext).toBe(1);
+    expect(deps.continued).toEqual([]);
+    expect(deps.writes).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a look-deeper fill that resolves after dismiss opens nothing", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.27 });
+    const { deps, controller } = await openPrompt("accept", [lower]);
+    deps.unknownUntilFill.add(30n);
+    const done = controller.deeper();
+    controller.dismiss();
+    deps.fills[0].result.resolve();
+    await done;
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a failed graph fill reports the graph error with its cause", async () => {
+    const { deps, controller } = setUp();
+    deps.unknownUntilFill.add(30n);
+    const done = controller.afterDecision(
+      "accept",
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    deps.fetches[0].result.resolve([candidate({ lineId: 30n })]);
+    await settle();
+    deps.fills[0].result.reject(new Error("HTTP 500"));
+    await done;
+    expect(deps.errors).toEqual([`${GRAPH_UNKNOWN_ERROR}: HTTP 500`]);
+    expect(deps.shownNext).toBe(1);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a dismiss during a pending endpoint undo keeps its prompt shut", async () => {
+    const { deps, controller } = await openPrompt();
+    controller.answer("certain");
+    const undone = controller.undo();
+    controller.dismiss();
+    deps.writes[0].result.resolve(55n);
+    expect(await undone).toBe(true);
+    expect(deps.removed).toEqual([55n]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("undo removes the row on the branch it was written on", async () => {
+    const { deps, controller } = setUp();
+    deps.branch = OTHER_BRANCH;
+    await answerWithRow(controller, deps, 55n);
+    expect(deps.writes[0].branchId).toBe(OTHER_BRANCH);
+    deps.branch = MAIN_BRANCH;
+    expect(await controller.undo()).toBe(true);
+    expect(deps.removedOn).toEqual([OTHER_BRANCH]);
+  });
+});

@@ -1067,6 +1067,76 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(statusOf("syn")?.error).toBeUndefined();
   });
 
+  it("rowWritten rereads the row's scopes", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n]);
+    const response = await graph.fetchOkImpl(
+      "https://host/g/annotation/tables/syn/annotations",
+      { method: "POST", body: JSON.stringify({ annotations: [{}] }) },
+    );
+    const { ids } = await response.json();
+    session.rowWritten("syn", BigInt(ids[0]));
+    await settle();
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n, BigInt(ids[0])]);
+  });
+
+  it("rowWritten for a table not listed yet lists the tables again", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session } = startSession(graph, { ticked: [], visible: [] });
+    await settle();
+    const listings = () =>
+      graph.fetchOkImpl.mock.calls.filter(([url]) =>
+        String(url).endsWith("/annotation/tables"),
+      ).length;
+    const before = listings();
+    session.rowWritten("fresh", 1n);
+    await settle();
+    expect(listings()).toBe(before + 1);
+  });
+
+  it("rowWritten and rowRemoved after dispose send nothing", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined ? [] : [row(5n, root), row(root, root)],
+    });
+    const { session } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    session.dispose();
+    const callsBefore = graph.fetchOkImpl.mock.calls.length;
+    session.rowWritten("fresh", 1n);
+    session.rowWritten("syn", 5n);
+    session.rowRemoved("syn", 5n);
+    await settle();
+    expect(graph.fetchOkImpl.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("rowRemoved drops the row without a request", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined ? [] : [row(5n, root), row(root, root)],
+    });
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(drawnIds("syn")).toEqual([5n, 10n]);
+    graph.requests.length = 0;
+    session.rowRemoved("syn", 5n);
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n]);
+    expect(graph.requests).toEqual([]);
+  });
+
   it("a delete sends no count or points request and the other rows stay drawn throughout", async () => {
     const SHARED_ID = 5n;
     const graph = fakeGraph(["syn"], {

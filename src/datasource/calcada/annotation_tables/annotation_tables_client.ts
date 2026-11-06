@@ -132,6 +132,7 @@ export class AnnotationTableMissing extends Error {
 
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
+const HTTP_CONFLICT = 409;
 const HTTP_NOT_FOUND = 404;
 const QUOTED_TABLE_NAME = /annotation table "([^"]+)"/;
 const UNNAMED_TABLE_MISSING = "annotation table not found";
@@ -695,4 +696,44 @@ export async function deleteAnnotationRows(
     [table],
     "write",
   );
+}
+
+export type AnnotationTablePermission = "PUBLIC" | "PRIVATE";
+
+export interface AnnotationTableRequest {
+  tableName: string;
+  schemaType: string;
+  schemaVersion: number;
+  voxelResolution: readonly number[];
+  description: string;
+  readPermission: AnnotationTablePermission;
+  writePermission: AnnotationTablePermission;
+}
+
+/** A table that already exists is no failure: another client may have made it first. */
+export async function createAnnotationTable(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  request: AnnotationTableRequest,
+): Promise<"created" | "exists"> {
+  try {
+    await fetchOk(`${baseUrl}/annotation/tables`, {
+      method: "POST",
+      body: JSON.stringify({
+        table_name: request.tableName,
+        schema_type: request.schemaType,
+        schema_version: request.schemaVersion,
+        voxel_resolution: request.voxelResolution,
+        description: request.description,
+        read_permission: request.readPermission,
+        write_permission: request.writePermission,
+      }),
+    });
+    return "created";
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    if (error.status === HTTP_CONFLICT) return "exists";
+    const reason = await errorMessageOf(error);
+    throw reason === "" ? error : new Error(reason);
+  }
 }
