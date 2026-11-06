@@ -20,6 +20,8 @@ export interface TraceEndPromptView {
   canGoDeeper: boolean;
   canGoBack: boolean;
   endPoint: Float32Array;
+  /** False while the first check still looks for where the end is. */
+  endPointKnown: boolean;
 }
 
 export interface TraceEndDeps {
@@ -28,6 +30,12 @@ export interface TraceEndDeps {
     center: Float32Array,
     radiusNm: number,
   ): Promise<EdgeCandidate[]>;
+  /** Where the branch ends after `candidate` merged into `mergedRoot`; undefined = at the contact. */
+  acceptEndPoint(
+    candidate: EdgeCandidate,
+    mergedRoot: bigint,
+    radiusNm: number,
+  ): Promise<Float32Array | undefined>;
   /** undefined = the trace's own filters; a number = score in [threshold, range high] and the rest of the filters. */
   verdict(threshold: number | undefined): (candidate: EdgeCandidate) => Verdict;
   /** Loads the graph facts `verdict(threshold)` asks about for these candidates. */
@@ -115,6 +123,7 @@ export class TraceEndController {
     candidate: EdgeCandidate,
     children: Promise<readonly EdgeCandidate[]>,
     seedRoot: bigint,
+    mergedRoot: bigint,
     depth: number,
     decided: ReadonlySet<bigint>,
   ): Promise<void> {
@@ -126,6 +135,7 @@ export class TraceEndController {
       CHILDREN_READ_ERROR,
       async () =>
         (await children).filter((child) => child.partnerRootId !== seedRoot),
+      (radiusNm) => this.deps.acceptEndPoint(candidate, mergedRoot, radiusNm),
     );
   }
 
@@ -156,12 +166,13 @@ export class TraceEndController {
       endPoint: Float32Array,
       radiusNm: number,
     ) => Promise<readonly EdgeCandidate[]>,
+    endPointIfEnded?: (radiusNm: number) => Promise<Float32Array | undefined>,
   ): Promise<void> {
     const token = this.invalidate();
     const endPoint = endPointOf(after, candidate);
     const radiusNm = this.deps.radiusNm();
     const startThreshold = this.deps.startThreshold();
-    this.showChecking(radiusNm, startThreshold, endPoint);
+    this.showChecking(radiusNm, startThreshold, endPoint, false);
     try {
       const found = await lookUp(endPoint, radiusNm);
       if (token !== this.token) return;
@@ -181,10 +192,16 @@ export class TraceEndController {
         );
       }
       if (outcome === undefined) return;
+      let checkedEndPoint = endPoint;
+      if (outcome.kind !== "continue" && endPointIfEnded !== undefined) {
+        checkedEndPoint =
+          (await endPointIfEnded(radiusNm).catch(() => undefined)) ?? endPoint;
+        if (token !== this.token) return;
+      }
       this.check = {
         after,
         lineId: candidate.lineId,
-        endPoint,
+        endPoint: checkedEndPoint,
         radiusNm,
         startThreshold,
         continueDepth: after === "accept" ? depth + 1 : depth,
@@ -296,7 +313,7 @@ export class TraceEndController {
       this.settle(outcome, threshold);
       return;
     }
-    this.showChecking(check.radiusNm, threshold, check.endPoint);
+    this.showChecking(check.radiusNm, threshold, check.endPoint, true);
     const filled = await this.filledOutcome(
       check.found,
       check.decided,
@@ -384,6 +401,7 @@ export class TraceEndController {
       canGoDeeper: lowerEndThreshold(threshold) < threshold,
       canGoBack: raiseEndThreshold(threshold, check.startThreshold) > threshold,
       endPoint: check.endPoint,
+      endPointKnown: true,
     });
   }
 
@@ -391,6 +409,7 @@ export class TraceEndController {
     radiusNm: number,
     threshold: number,
     endPoint: Float32Array,
+    endPointKnown: boolean,
   ) {
     this.setPrompt({
       phase: "checking",
@@ -399,6 +418,7 @@ export class TraceEndController {
       canGoDeeper: false,
       canGoBack: false,
       endPoint,
+      endPointKnown,
     });
   }
 

@@ -157,6 +157,12 @@ import {
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
+import { pieceFarEndNm } from "#src/datasource/calcada/piece_far_end.js";
+import type { GeometryInRadius } from "#src/datasource/calcada/piece_geometry.js";
+import {
+  parseGeometryInRadius,
+  pieceGeometryRequestBody,
+} from "#src/datasource/calcada/piece_geometry.js";
 import { PieceGraphContextCache } from "#src/datasource/calcada/piece_graph_context.js";
 import {
   PointPlacement,
@@ -200,13 +206,14 @@ import {
   stageBlockedReason,
   stageEnabled,
 } from "#src/datasource/calcada/split_steps.js";
+import type { EndPromptSphere } from "#src/datasource/calcada/trace_cursor/end_prompt_sphere.js";
+import { SphereShowingEndPrompt } from "#src/datasource/calcada/trace_cursor/end_prompt_sphere.js";
 import {
   traceSphereSemiAxes,
   pointInsideSphere,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_geometry.js";
 import { TraceSpherePerspectiveOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_perspective_overlay.js";
 import { TraceSphereSliceOverlay } from "#src/datasource/calcada/trace_cursor/trace_sphere_slice_overlay.js";
-import type { TraceSphereView } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
 import { TraceSphereState } from "#src/datasource/calcada/trace_cursor/trace_sphere_state.js";
 import {
   endCheckVerdict,
@@ -3067,11 +3074,9 @@ class ZettaTraceSession extends RefCounted {
   // whether the neuron ends there.
   private readonly endController: TraceEndController;
   private readonly endPromptOpen = new WatchableValue(false);
-  private readonly endSphereCenter = new WatchableValue<
-    Float32Array | undefined
-  >(undefined);
-  private readonly endSphereRadiusNm: WatchableValue<number>;
-  readonly endSphere: TraceSphereView;
+  readonly endSphere = new WatchableValue<EndPromptSphere | undefined>(
+    undefined,
+  );
   private framedEndPoint: Float32Array | undefined;
   // What the end check found to go on with; shown even below the filters,
   // since look deeper finds exactly that.
@@ -3120,13 +3125,6 @@ class ZettaTraceSession extends RefCounted {
         ),
     });
     this.registerDisposer(() => this.splitPoints.clear());
-    this.endSphereRadiusNm = new WatchableValue(state.endRadiusNm.value);
-    this.endSphere = {
-      visible: this.endPromptOpen,
-      center: this.endSphereCenter,
-      radiusNm: this.endSphereRadiusNm,
-      coordinateSpace: layer.manager.root.coordinateSpace,
-    };
     this.endController = new TraceEndController({
       fetchAround: (seedRoot, center, radiusNm) => {
         const semiAxes = traceSphereSemiAxes(
@@ -3140,6 +3138,8 @@ class ZettaTraceSession extends RefCounted {
         }
         return this.fetchInSphere(seedRoot, center, semiAxes);
       },
+      acceptEndPoint: (candidate, mergedRoot, radiusNm) =>
+        this.partnerFarEnd(candidate, mergedRoot, radiusNm),
       verdict: (threshold) => this.endCheckVerdicts(threshold),
       fillGraph: async (candidates, threshold) => {
         await connection.pieceGraph.fill((graph) => {
@@ -3320,6 +3320,35 @@ class ZettaTraceSession extends RefCounted {
     return this.endController.prompt;
   }
 
+  /** The far end of the partner piece inside the merged segment; undefined = unknown. */
+  private async partnerFarEnd(
+    candidate: EdgeCandidate,
+    mergedRoot: bigint,
+    radiusNm: number,
+  ): Promise<Float32Array | undefined> {
+    const coordinateSpace = this.layer.manager.root.coordinateSpace.value;
+    const contactNm = globalToNanometres(candidate.pointB, coordinateSpace);
+    if (contactNm === undefined) return undefined;
+    const geometry = await this.graphServer.fetchPieceGeometry(
+      mergedRoot,
+      candidate.partnerPieceId,
+      contactNm,
+      radiusNm,
+      this.branchId,
+    );
+    const partner = geometry.results[0]?.pieces.find(
+      (piece) => piece.pieceId === candidate.partnerPieceId,
+    );
+    if (partner === undefined) return undefined;
+    const farEndNm = pieceFarEndNm(
+      partner.centroidVoxels,
+      partner.covVoxels2,
+      geometry.resolutionNm,
+      contactNm,
+    );
+    return farEndNm && nanometresToGlobal(farEndNm, coordinateSpace);
+  }
+
   private resetEndCheck() {
     this.continuationLineId = undefined;
     this.endController.reset();
@@ -3328,8 +3357,9 @@ class ZettaTraceSession extends RefCounted {
   private onEndPromptChanged() {
     const prompt = this.endController.prompt;
     this.endPromptOpen.value = prompt?.phase === "open";
-    this.endSphereCenter.value = prompt?.endPoint;
-    if (prompt !== undefined) this.endSphereRadiusNm.value = prompt.radiusNm;
+    this.endSphere.value = prompt?.endPointKnown
+      ? { center: prompt.endPoint, radiusNm: prompt.radiusNm }
+      : undefined;
     if (prompt === undefined) {
       this.framedEndPoint = undefined;
       this.changed.dispatch();
@@ -4384,6 +4414,7 @@ class ZettaTraceSession extends RefCounted {
         accepted,
         childrenRead,
         seedRoot,
+        merged.root,
         acceptedDepth,
         this.decided,
       );
@@ -6108,15 +6139,16 @@ void main() {
         layer.manager.root.coordinateSpace,
       ),
     );
+    const sphere = this.registerDisposer(
+      new SphereShowingEndPrompt(sphereState, this.traceSession.endSphere),
+    );
     const { gl } = layer.manager.root.display;
-    for (const sphere of [sphereState, this.traceSession.endSphere]) {
-      this.registerDisposer(
-        layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphere)),
-      );
-      this.registerDisposer(
-        layer.addRenderLayer(new TraceSpherePerspectiveOverlay(gl, sphere)),
-      );
-    }
+    this.registerDisposer(
+      layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphere)),
+    );
+    this.registerDisposer(
+      layer.addRenderLayer(new TraceSpherePerspectiveOverlay(gl, sphere)),
+    );
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
     );
@@ -7916,6 +7948,27 @@ class CalcadaGraphServerInterface {
       );
     }
     return out;
+  }
+
+  /** One piece's geometry, when it belongs to `rootId` and has any. */
+  async fetchPieceGeometry(
+    rootId: bigint,
+    pieceId: bigint,
+    pointNm: readonly number[],
+    radiusNm: number,
+    branchId: number,
+  ): Promise<GeometryInRadius> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams();
+    if (branchId) params.set("branch_id", String(branchId));
+    const response = await fetchOkImpl(
+      `${baseUrl}/geometry_in_radius?${params.toString()}`,
+      {
+        method: "POST",
+        body: pieceGeometryRequestBody(rootId, pieceId, pointNm, radiusNm),
+      },
+    );
+    return parseGeometryInRadius(await response.text());
   }
 
   /** Who has rejected a candidate on this graph, not counting the caller. */

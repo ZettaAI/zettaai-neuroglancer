@@ -48,6 +48,7 @@ const openPrompt: TraceEndPromptView = {
   canGoDeeper: true,
   canGoBack: true,
   endPoint: new Float32Array(3),
+  endPointKnown: true,
 };
 
 async function mountPrompt(

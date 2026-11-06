@@ -11,6 +11,8 @@ import type { TraceEndpointRow } from "#src/datasource/calcada/trace_endpoint_ta
 const START_THRESHOLD = 0.3;
 const RADIUS_NM = 1000;
 const SEED_ROOT = 99n;
+const MERGED_ROOT = 77n;
+const FAR_END = new Float32Array([40, 50, 60]);
 const DEPTH = 2;
 const MAIN_BRANCH = 0;
 const OTHER_BRANCH = 7;
@@ -95,10 +97,25 @@ class FakeDeps implements TraceEndDeps {
   graphFillLeavesUnknown = false;
   verdictThresholds: (number | undefined)[] = [];
   mark: unknown = "edit-1";
+  farEndReads: {
+    candidate: EdgeCandidate;
+    mergedRoot: bigint;
+    radiusNm: number;
+    result: Deferred<Float32Array | undefined>;
+  }[] = [];
+  farEnd: Float32Array | undefined = undefined;
+  holdFarEnd = false;
 
   fetchAround(seedRoot: bigint, center: Float32Array, radiusNm: number) {
     const result = deferred<EdgeCandidate[]>();
     this.fetches.push({ seedRoot, center, radiusNm, result });
+    return result.promise;
+  }
+
+  acceptEndPoint(edge: EdgeCandidate, mergedRoot: bigint, radiusNm: number) {
+    const result = deferred<Float32Array | undefined>();
+    this.farEndReads.push({ candidate: edge, mergedRoot, radiusNm, result });
+    if (!this.holdFarEnd) result.resolve(this.farEnd);
     return result.promise;
   }
 
@@ -183,6 +200,7 @@ function acceptWith(
     DECIDED,
     Promise.resolve(children),
     SEED_ROOT,
+    MERGED_ROOT,
     DEPTH,
     decided,
   );
@@ -229,7 +247,10 @@ describe("TraceEndController", () => {
   it("accept whose children all fail opens the prompt at pointB", async () => {
     const { deps, controller } = setUp();
     const done = acceptWith(controller, [LOW]);
-    expect(controller.prompt?.phase).toBe("checking");
+    expect(controller.prompt).toMatchObject({
+      phase: "checking",
+      endPointKnown: false,
+    });
     await done;
     expect(controller.prompt).toEqual({
       phase: "open",
@@ -238,11 +259,107 @@ describe("TraceEndController", () => {
       canGoDeeper: true,
       canGoBack: false,
       endPoint: DECIDED.pointB,
+      endPointKnown: true,
     });
     expect(controller.isAnswering).toBe(true);
     expect(deps.continued).toEqual([]);
     expect(deps.shownNext).toBe(0);
     expect(deps.changes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("an accept that ends opens the prompt at the merged piece's far end and writes it there", async () => {
+    const { deps, controller } = setUp();
+    deps.farEnd = FAR_END;
+    await acceptWith(controller, [LOW]);
+    expect(
+      deps.farEndReads.map(({ candidate: edge, mergedRoot, radiusNm }) => ({
+        edge,
+        mergedRoot,
+        radiusNm,
+      })),
+    ).toEqual([
+      { edge: DECIDED, mergedRoot: MERGED_ROOT, radiusNm: RADIUS_NM },
+    ]);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: FAR_END,
+    });
+    controller.answer("certain");
+    expect(deps.writes[0].row.position).toBe(FAR_END);
+  });
+
+  it("stays checking while the far end resolves", async () => {
+    const { deps, controller } = setUp();
+    deps.holdFarEnd = true;
+    const done = acceptWith(controller, [LOW]);
+    await settle();
+    expect(controller.prompt?.phase).toBe("checking");
+    deps.farEndReads[0].result.resolve(FAR_END);
+    await done;
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: FAR_END,
+    });
+  });
+
+  it("falls back to pointB when the far end is unknown or its read fails", async () => {
+    const unknown = setUp();
+    await acceptWith(unknown.controller, [LOW]);
+    expect(unknown.controller.prompt?.endPoint).toBe(DECIDED.pointB);
+
+    const failed = setUp();
+    failed.deps.holdFarEnd = true;
+    const done = acceptWith(failed.controller, [LOW]);
+    await settle();
+    failed.deps.farEndReads[0].result.reject(new Error("HTTP 500"));
+    await done;
+    expect(failed.controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointB,
+    });
+    expect(failed.deps.errors).toEqual([]);
+  });
+
+  it("a reset during the far-end read opens nothing", async () => {
+    const { deps, controller } = setUp();
+    deps.holdFarEnd = true;
+    const done = acceptWith(controller, [LOW]);
+    await settle();
+    controller.reset();
+    deps.farEndReads[0].result.resolve(FAR_END);
+    await done;
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(0);
+  });
+
+  it("a new decision during the far-end read keeps its own prompt", async () => {
+    const { deps, controller } = setUp();
+    deps.holdFarEnd = true;
+    const accepted = acceptWith(controller, [LOW]);
+    await settle();
+    const rejected = controller.afterReject(
+      DECIDED,
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    deps.farEndReads[0].result.resolve(FAR_END);
+    await accepted;
+    deps.fetches[0].result.resolve([]);
+    await rejected;
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointA,
+    });
+  });
+
+  it("reads no far end when the accept goes on or after a reject", async () => {
+    const { deps, controller } = setUp();
+    await decide(controller, deps, "accept", [
+      candidate({ lineId: 30n, score: 0.8 }),
+    ]);
+    await decide(controller, deps, "reject", []);
+    expect(deps.farEndReads).toEqual([]);
   });
 
   it("accept with a passing child far from the contact opens no prompt", async () => {
@@ -294,6 +411,7 @@ describe("TraceEndController", () => {
       DECIDED,
       Promise.reject(new Error("HTTP 503")),
       SEED_ROOT,
+      MERGED_ROOT,
       DEPTH,
       new Set(),
     );
@@ -756,6 +874,21 @@ describe("TraceEndController", () => {
     expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
     expect(controller.prompt).toBeUndefined();
     expect(deps.writes).toEqual([]);
+  });
+
+  it("a deeper re-check keeps the known end point while it waits for the graph", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = setUp();
+    deps.farEnd = FAR_END;
+    await acceptWith(controller, [lower]);
+    deps.unknownUntilFill.add(30n);
+    void controller.deeper();
+    void controller.deeper();
+    expect(controller.prompt).toMatchObject({
+      phase: "checking",
+      endPoint: FAR_END,
+      endPointKnown: true,
+    });
   });
 
   it("deeper with the graph still unknown after the fill reports and shows the next candidate", async () => {
