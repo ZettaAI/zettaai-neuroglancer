@@ -174,6 +174,20 @@ function setUp() {
 const LOW = candidate({ lineId: 20n, score: 0.1 });
 const DECIDED = candidate({ lineId: 10n });
 
+function acceptWith(
+  controller: TraceEndController,
+  children: EdgeCandidate[],
+  decided: ReadonlySet<bigint> = new Set(),
+) {
+  return controller.afterAccept(
+    DECIDED,
+    Promise.resolve(children),
+    SEED_ROOT,
+    DEPTH,
+    decided,
+  );
+}
+
 async function decide(
   controller: TraceEndController,
   deps: FakeDeps,
@@ -181,13 +195,11 @@ async function decide(
   found: EdgeCandidate[],
   decided: ReadonlySet<bigint> = new Set(),
 ) {
-  const done = controller.afterDecision(
-    after,
-    DECIDED,
-    SEED_ROOT,
-    DEPTH,
-    decided,
-  );
+  if (after === "accept") {
+    await acceptWith(controller, found, decided);
+    return;
+  }
+  const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, decided);
   deps.fetches.at(-1)!.result.resolve(found);
   await done;
 }
@@ -214,22 +226,10 @@ async function answerWithRow(
 const STEPS_TO_ZERO = Math.round(START_THRESHOLD / END_THRESHOLD_STEP);
 
 describe("TraceEndController", () => {
-  it("accept with no passing candidate nearby opens the prompt at pointB", async () => {
+  it("accept whose children all fail opens the prompt at pointB", async () => {
     const { deps, controller } = setUp();
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    const done = acceptWith(controller, [LOW]);
     expect(controller.prompt?.phase).toBe("checking");
-    expect(deps.fetches[0]).toMatchObject({
-      seedRoot: SEED_ROOT,
-      center: DECIDED.pointB,
-      radiusNm: RADIUS_NM,
-    });
-    deps.fetches[0].result.resolve([LOW]);
     await done;
     expect(controller.prompt).toEqual({
       phase: "open",
@@ -243,6 +243,66 @@ describe("TraceEndController", () => {
     expect(deps.continued).toEqual([]);
     expect(deps.shownNext).toBe(0);
     expect(deps.changes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("accept with a passing child far from the contact opens no prompt", async () => {
+    const { deps, controller } = setUp();
+    const farChild = candidate({
+      lineId: 30n,
+      score: 0.8,
+      pointA: new Float32Array([1e6, 1e6, 1e6]),
+      pointB: new Float32Array([1e6, 1e6, 1e6 + 1]),
+    });
+    await acceptWith(controller, [LOW, farChild]);
+    expect(deps.fetches).toEqual([]);
+    expect(deps.continued).toEqual([{ candidate: farChild, depth: DEPTH + 1 }]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(0);
+  });
+
+  it("accept does not fetch around pointB", async () => {
+    const { deps, controller } = setUp();
+    controller.prepare(DECIDED, SEED_ROOT);
+    expect(deps.fetches.map((fetch) => fetch.center)).toEqual([DECIDED.pointA]);
+    await acceptWith(controller, []);
+    expect(deps.fetches).toHaveLength(1);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointB,
+      radiusNm: RADIUS_NM,
+    });
+  });
+
+  it("a child leading back into the seed does not keep the prompt shut", async () => {
+    const { deps, controller } = setUp();
+    const intoSeed = candidate({
+      lineId: 30n,
+      score: 0.8,
+      partnerRootId: SEED_ROOT,
+    });
+    await acceptWith(controller, [intoSeed]);
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointB,
+    });
+  });
+
+  it("a failed children read after an accept reports and shows the next candidate", async () => {
+    const { deps, controller } = setUp();
+    await controller.afterAccept(
+      DECIDED,
+      Promise.reject(new Error("HTTP 503")),
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    expect(deps.errors).toEqual([
+      "Could not read the merged piece's candidates: HTTP 503",
+    ]);
+    expect(deps.shownNext).toBe(1);
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
   });
 
   it("accept with one passing candidate continues with it one level deeper and opens nothing", async () => {
@@ -283,14 +343,7 @@ describe("TraceEndController", () => {
     const { deps, controller } = setUp();
     const pending = candidate({ lineId: 30n, score: 0.8 });
     deps.unknownUntilFill.add(30n);
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
-    deps.fetches[0].result.resolve([pending]);
+    const done = acceptWith(controller, [pending]);
     await settle();
     expect(deps.fills).toHaveLength(1);
     expect(deps.fills[0].candidates).toEqual([pending]);
@@ -306,14 +359,7 @@ describe("TraceEndController", () => {
     const { deps, controller } = setUp();
     deps.unknownUntilFill.add(30n);
     deps.graphFillLeavesUnknown = true;
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
-    deps.fetches[0].result.resolve([candidate({ lineId: 30n })]);
+    const done = acceptWith(controller, [candidate({ lineId: 30n })]);
     await settle();
     deps.fills[0].result.resolve();
     await done;
@@ -325,13 +371,7 @@ describe("TraceEndController", () => {
 
   it("a failed fetch shows the next candidate and reports", async () => {
     const { deps, controller } = setUp();
-    const done = controller.afterDecision(
-      "reject",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     deps.fetches[0].result.reject(new Error("HTTP 503"));
     await done;
     expect(deps.errors).toHaveLength(1);
@@ -386,13 +426,7 @@ describe("TraceEndController", () => {
   it("answer is ignored until the prompt is open", async () => {
     const { deps, controller } = setUp();
     controller.answer("certain");
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     controller.answer("certain");
     expect(deps.writes).toEqual([]);
     expect(deps.shownNext).toBe(0);
@@ -401,7 +435,7 @@ describe("TraceEndController", () => {
     expect(controller.prompt?.phase).toBe("open");
   });
 
-  it("deeper steps 0.05 down and continues when a lower-score candidate passes, writing nothing", async () => {
+  it("look deeper after an accept re-checks the children at the lower threshold", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
     const { deps, controller } = await openPrompt("accept", [lower]);
     const atStart = controller.prompt;
@@ -416,7 +450,8 @@ describe("TraceEndController", () => {
     controller.deeper();
     expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
     expect(controller.prompt).toBeUndefined();
-    expect(deps.fetches).toHaveLength(1);
+    expect(deps.fetches).toEqual([]);
+    expect(deps.verdictThresholds.slice(-2)).toEqual([0.25, 0.2]);
     expect(deps.fills).toEqual([]);
     expect(deps.writes).toEqual([]);
   });
@@ -457,13 +492,7 @@ describe("TraceEndController", () => {
 
   it("deeper and back are ignored while checking", async () => {
     const { deps, controller } = setUp();
-    void controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    void controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     const checking = controller.prompt;
     controller.deeper();
     controller.back();
@@ -552,15 +581,9 @@ describe("TraceEndController", () => {
 
   it("a new decision while the prompt is open replaces it", async () => {
     const { deps, controller } = await openPrompt("accept");
-    const done = controller.afterDecision(
-      "reject",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     expect(controller.prompt?.phase).toBe("checking");
-    deps.fetches[1].result.resolve([]);
+    deps.fetches[0].result.resolve([]);
     await done;
     expect(controller.prompt).toMatchObject({
       phase: "open",
@@ -570,13 +593,7 @@ describe("TraceEndController", () => {
 
   it("a check that resolves after dismiss opens nothing", async () => {
     const { deps, controller } = setUp();
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     controller.dismiss();
     expect(deps.shownNext).toBe(1);
     deps.fetches[0].result.resolve([candidate({ lineId: 30n, score: 0.8 })]);
@@ -589,14 +606,7 @@ describe("TraceEndController", () => {
   it("a check that resolves after reset opens nothing", async () => {
     const { deps, controller } = setUp();
     deps.unknownUntilFill.add(30n);
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
-    deps.fetches[0].result.resolve([candidate({ lineId: 30n })]);
+    const done = acceptWith(controller, [candidate({ lineId: 30n })]);
     await settle();
     controller.reset();
     deps.fills[0].result.resolve();
@@ -641,13 +651,7 @@ describe("TraceEndController", () => {
   it("undo during a check whose remove fails shows the next candidate", async () => {
     const { deps, controller } = setUp();
     await answerWithRow(controller, deps, 55n);
-    void controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    void controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     expect(controller.prompt?.phase).toBe("checking");
     deps.removeFails = true;
     const shownBefore = deps.shownNext;
@@ -671,23 +675,13 @@ describe("TraceEndController", () => {
     expect(deps.shownNext).toBe(shownBefore);
   });
 
-  it("a prepared check is reused by afterDecision for the same line", async () => {
+  it("a prepared check is reused by afterReject for the same line", async () => {
     const { deps, controller } = setUp();
     controller.prepare(DECIDED, SEED_ROOT);
-    expect(deps.fetches.map((fetch) => fetch.center)).toEqual([
-      DECIDED.pointB,
-      DECIDED.pointB,
-      DECIDED.pointA,
-    ]);
+    expect(deps.fetches.map((fetch) => fetch.center)).toEqual([DECIDED.pointA]);
     for (const fetch of deps.fetches) fetch.result.resolve([LOW]);
-    await controller.afterDecision(
-      "reject",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
-    expect(deps.fetches).toHaveLength(3);
+    await controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
+    expect(deps.fetches).toHaveLength(1);
     expect(controller.prompt).toMatchObject({
       phase: "open",
       endPoint: DECIDED.pointA,
@@ -701,37 +695,11 @@ describe("TraceEndController", () => {
     controller.prepare(candidate({ lineId: 41n }), SEED_ROOT);
     for (const fetch of deps.fetches) fetch.result.resolve([LOW]);
     await decide(controller, deps, "reject", [LOW]);
-    expect(deps.fetches).toHaveLength(10);
-    expect(deps.fetches[9]).toMatchObject({
+    expect(deps.fetches).toHaveLength(4);
+    expect(deps.fetches[3]).toMatchObject({
       seedRoot: SEED_ROOT,
       center: DECIDED.pointA,
     });
-  });
-
-  it("an accept's prepared check covers the partner's candidates and excludes the accepted line", async () => {
-    const { deps, controller } = setUp();
-    controller.prepare(DECIDED, SEED_ROOT);
-    expect(deps.fetches.slice(0, 2).map((fetch) => fetch.seedRoot)).toEqual([
-      SEED_ROOT,
-      DECIDED.partnerRootId,
-    ]);
-    const passing = candidate({ lineId: 30n, score: 0.8, partnerRootId: 7n });
-    const acceptedFromPartner = candidate({
-      lineId: DECIDED.lineId,
-      score: 0.9,
-      partnerRootId: SEED_ROOT,
-    });
-    const nowInside = candidate({
-      lineId: 31n,
-      score: 0.95,
-      partnerRootId: DECIDED.partnerRootId,
-    });
-    deps.fetches[0].result.resolve([LOW, DECIDED, nowInside]);
-    deps.fetches[1].result.resolve([passing, acceptedFromPartner]);
-    deps.fetches[2].result.resolve([]);
-    await controller.afterDecision("accept", DECIDED, 100n, DEPTH, new Set());
-    expect(deps.fetches).toHaveLength(3);
-    expect(deps.continued).toEqual([{ candidate: passing, depth: DEPTH + 1 }]);
   });
 
   it("a prepared check that failed is replaced by a fresh fetch", async () => {
@@ -739,58 +707,13 @@ describe("TraceEndController", () => {
     controller.prepare(DECIDED, SEED_ROOT);
     for (const fetch of deps.fetches)
       fetch.result.reject(new Error("HTTP 500"));
-    const done = controller.afterDecision(
-      "reject",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
+    const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     await settle();
-    expect(deps.fetches).toHaveLength(4);
-    deps.fetches[3].result.resolve([LOW]);
+    expect(deps.fetches).toHaveLength(2);
+    deps.fetches[1].result.resolve([LOW]);
     await done;
     expect(deps.errors).toEqual([]);
     expect(controller.prompt?.phase).toBe("open");
-  });
-
-  async function acceptPreparedWith(
-    fromSeed: EdgeCandidate,
-    fromPartner: EdgeCandidate,
-    decided: ReadonlySet<bigint>,
-  ) {
-    const setup = setUp();
-    setup.controller.prepare(DECIDED, SEED_ROOT);
-    setup.deps.fetches[0].result.resolve([fromSeed]);
-    setup.deps.fetches[1].result.resolve([fromPartner]);
-    setup.deps.fetches[2].result.resolve([]);
-    await setup.controller.afterDecision(
-      "accept",
-      DECIDED,
-      100n,
-      DEPTH,
-      decided,
-    );
-    return setup;
-  }
-
-  it("an accept's prepared check keeps only the better line into a root both sides touch", async () => {
-    const worse = candidate({ lineId: 50n, score: 0.6, partnerRootId: 7n });
-    const better = candidate({ lineId: 51n, score: 0.8, partnerRootId: 7n });
-    const { deps, controller } = await acceptPreparedWith(
-      worse,
-      better,
-      new Set([better.lineId]),
-    );
-    expect(deps.continued).toEqual([]);
-    expect(controller.prompt?.phase).toBe("open");
-  });
-
-  it("on equal scores the smaller line into a shared root wins", async () => {
-    const larger = candidate({ lineId: 61n, score: 0.8, partnerRootId: 7n });
-    const smaller = candidate({ lineId: 60n, score: 0.8, partnerRootId: 7n });
-    const { deps } = await acceptPreparedWith(larger, smaller, new Set());
-    expect(deps.continued).toEqual([{ candidate: smaller, depth: DEPTH + 1 }]);
   });
 
   it("a forgotten prepared check is not reused", async () => {
@@ -799,7 +722,7 @@ describe("TraceEndController", () => {
     for (const fetch of deps.fetches) fetch.result.resolve([LOW]);
     controller.forgetPrepared();
     await decide(controller, deps, "reject", [LOW]);
-    expect(deps.fetches).toHaveLength(4);
+    expect(deps.fetches).toHaveLength(2);
   });
 
   it("a prepared check is not reused after the radius changed or a reset", async () => {
@@ -807,12 +730,12 @@ describe("TraceEndController", () => {
     controller.prepare(DECIDED, SEED_ROOT);
     controller.reset();
     await decide(controller, deps, "reject", [LOW]);
-    expect(deps.fetches).toHaveLength(4);
+    expect(deps.fetches).toHaveLength(2);
     controller.prepare(DECIDED, SEED_ROOT);
     deps.radiusNm = () => RADIUS_NM * 2;
     await decide(controller, deps, "reject", [LOW]);
-    expect(deps.fetches).toHaveLength(8);
-    expect(deps.fetches[7].radiusNm).toBe(RADIUS_NM * 2);
+    expect(deps.fetches).toHaveLength(4);
+    expect(deps.fetches[3].radiusNm).toBe(RADIUS_NM * 2);
   });
 
   it("deeper fills the graph for a candidate below the start threshold, then continues with it", async () => {
@@ -865,14 +788,7 @@ describe("TraceEndController", () => {
   it("a failed graph fill reports the graph error with its cause", async () => {
     const { deps, controller } = setUp();
     deps.unknownUntilFill.add(30n);
-    const done = controller.afterDecision(
-      "accept",
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
-    deps.fetches[0].result.resolve([candidate({ lineId: 30n })]);
+    const done = acceptWith(controller, [candidate({ lineId: 30n })]);
     await settle();
     deps.fills[0].result.reject(new Error("HTTP 500"));
     await done;

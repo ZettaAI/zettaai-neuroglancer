@@ -2957,6 +2957,15 @@ class CalcadaDebugSession extends RefCounted {
 
 // The server walks history per root; it refuses more than this at once.
 const LATEST_ROOTS_BATCH = 200;
+
+// A branch that cannot be read is a branch with no children, not a failed
+// merge: the merge has already happened by the time this is awaited.
+function childrenOrNone(
+  read: Promise<EdgeCandidate[]>,
+): Promise<EdgeCandidate[]> {
+  return read.catch(() => []);
+}
+
 /** Whether a candidate is bound to any of these pieces, on either end. */
 function namesAny(candidate: EdgeCandidate, pieces: ReadonlySet<bigint>) {
   return (
@@ -4268,8 +4277,7 @@ class ZettaTraceSession extends RefCounted {
     this.decided.add(decided.lineId);
     const seedRoot = this.state.seedRoot.value;
     if (decision === "reject" && seedRoot !== undefined) {
-      void this.endController.afterDecision(
-        "reject",
+      void this.endController.afterReject(
         decided,
         seedRoot,
         depth,
@@ -4310,7 +4318,8 @@ class ZettaTraceSession extends RefCounted {
 
     // Started before the merge on purpose: the partner root stops existing the
     // moment it is absorbed, so afterwards there is no id left to ask about.
-    const children = this.fetchChildren(accepted.partnerRootId);
+    const childrenRead = this.readChildren(accepted.partnerRootId);
+    const children = childrenOrNone(childrenRead);
 
     let merged: { root: bigint; operationId: number };
     try {
@@ -4371,10 +4380,10 @@ class ZettaTraceSession extends RefCounted {
       this.decided,
     );
     if (sameTrace()) {
-      void this.endController.afterDecision(
-        "accept",
+      void this.endController.afterAccept(
         accepted,
-        merged.root,
+        childrenRead,
+        seedRoot,
         acceptedDepth,
         this.decided,
       );
@@ -4390,23 +4399,17 @@ class ZettaTraceSession extends RefCounted {
    * taken, following it is the whole point, and the branch may well leave the
    * region it started in.
    */
-  private async fetchChildren(
+  private readChildren(
     partnerRoot: bigint,
     { consistent = false }: { consistent?: boolean } = {},
   ): Promise<EdgeCandidate[]> {
-    try {
-      return await this.graphServer.fetchCandidates(partnerRoot, {
-        limit: CANDIDATE_FETCH_LIMIT,
-        minPieceVoxels: this.state.minPieceVoxels.value,
-        rejectedBy: this.state.rejectedBy.value,
-        branchId: this.branchId,
-        consistent,
-      });
-    } catch {
-      // A branch that cannot be read is a branch with no children, not a failed
-      // merge: the merge has already happened by the time this is awaited.
-      return [];
-    }
+    return this.graphServer.fetchCandidates(partnerRoot, {
+      limit: CANDIDATE_FETCH_LIMIT,
+      minPieceVoxels: this.state.minPieceVoxels.value,
+      rejectedBy: this.state.rejectedBy.value,
+      branchId: this.branchId,
+      consistent,
+    });
   }
 
   /**
@@ -4439,7 +4442,9 @@ class ZettaTraceSession extends RefCounted {
     );
     const around = async (candidate: EdgeCandidate) => {
       if (radius === undefined) {
-        return this.fetchChildren(seedRoot, { consistent: true });
+        return childrenOrNone(
+          this.readChildren(seedRoot, { consistent: true }),
+        );
       }
       try {
         return await this.fetchInSphere(seedRoot, candidate.pointA, radius);

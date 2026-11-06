@@ -50,6 +50,8 @@ export interface TraceEndDeps {
 }
 
 const GRAPH_UNKNOWN_ERROR = "Could not load the piece graph for the end check";
+const CHILDREN_READ_ERROR = "Could not read the merged piece's candidates";
+const SPHERE_READ_ERROR = "Could not look for candidates around the trace end";
 
 interface EndCheck {
   after: TraceDecision;
@@ -62,10 +64,10 @@ interface EndCheck {
   decided: ReadonlySet<bigint>;
 }
 
-interface PreparedCheck {
+interface PreparedReject {
   lineId: bigint;
   radiusNm: number;
-  found: Record<TraceDecision, Promise<EdgeCandidate[] | undefined>>;
+  found: Promise<EdgeCandidate[] | undefined>;
 }
 
 type HistoryEntry =
@@ -79,31 +81,13 @@ type HistoryEntry =
       mark: unknown;
     };
 
-/** The server's order for the one candidate it keeps per root pair. */
-function ranksAbove(first: EdgeCandidate, second: EdgeCandidate): boolean {
-  return first.score !== second.score
-    ? first.score > second.score
-    : first.lineId < second.lineId;
-}
-
-function bestPerPartnerRoot(candidates: EdgeCandidate[]): EdgeCandidate[] {
-  const best = new Map<bigint, EdgeCandidate>();
-  for (const found of candidates) {
-    const held = best.get(found.partnerRootId);
-    if (held === undefined || ranksAbove(found, held)) {
-      best.set(found.partnerRootId, found);
-    }
-  }
-  return [...best.values()];
-}
-
 export class TraceEndController {
   prompt: TraceEndPromptView | undefined;
   private check: EndCheck | undefined;
   private threshold = 0;
   private token = 0;
   private history: HistoryEntry[] = [];
-  private prepared: PreparedCheck | undefined;
+  private prepared: PreparedReject | undefined;
 
   constructor(private readonly deps: TraceEndDeps) {}
 
@@ -113,25 +97,12 @@ export class TraceEndController {
 
   prepare(candidate: EdgeCandidate, seedRoot: bigint): void {
     const radiusNm = this.deps.radiusNm();
-    const around = (root: bigint, after: TraceDecision) =>
-      this.deps.fetchAround(root, endPointOf(after, candidate), radiusNm);
-    const merging = new Set([seedRoot, candidate.partnerRootId]);
-    const accept = Promise.all([
-      around(seedRoot, "accept"),
-      around(candidate.partnerRootId, "accept"),
-    ]).then((lists) =>
-      bestPerPartnerRoot(
-        lists.flat().filter((found) => !merging.has(found.partnerRootId)),
-      ),
-    );
-    const failedAsUndefined = () => undefined;
     this.prepared = {
       lineId: candidate.lineId,
       radiusNm,
-      found: {
-        accept: accept.catch(failedAsUndefined),
-        reject: around(seedRoot, "reject").catch(failedAsUndefined),
-      },
+      found: this.deps
+        .fetchAround(seedRoot, endPointOf("reject", candidate), radiusNm)
+        .catch(() => undefined),
     };
   }
 
@@ -139,12 +110,52 @@ export class TraceEndController {
     this.prepared = undefined;
   }
 
-  async afterDecision(
-    after: TraceDecision,
+  /** `seedRoot` is the seed before the merge: a child leading into it is now inside. */
+  afterAccept(
+    candidate: EdgeCandidate,
+    children: Promise<readonly EdgeCandidate[]>,
+    seedRoot: bigint,
+    depth: number,
+    decided: ReadonlySet<bigint>,
+  ): Promise<void> {
+    return this.checkEnd(
+      "accept",
+      candidate,
+      depth,
+      decided,
+      CHILDREN_READ_ERROR,
+      async () =>
+        (await children).filter((child) => child.partnerRootId !== seedRoot),
+    );
+  }
+
+  afterReject(
     candidate: EdgeCandidate,
     seedRoot: bigint,
     depth: number,
     decided: ReadonlySet<bigint>,
+  ): Promise<void> {
+    return this.checkEnd(
+      "reject",
+      candidate,
+      depth,
+      decided,
+      SPHERE_READ_ERROR,
+      (endPoint, radiusNm) =>
+        this.foundAround(candidate, seedRoot, endPoint, radiusNm),
+    );
+  }
+
+  private async checkEnd(
+    after: TraceDecision,
+    candidate: EdgeCandidate,
+    depth: number,
+    decided: ReadonlySet<bigint>,
+    lookUpError: string,
+    lookUp: (
+      endPoint: Float32Array,
+      radiusNm: number,
+    ) => Promise<readonly EdgeCandidate[]>,
   ): Promise<void> {
     const token = this.invalidate();
     const endPoint = endPointOf(after, candidate);
@@ -152,13 +163,7 @@ export class TraceEndController {
     const startThreshold = this.deps.startThreshold();
     this.showChecking(radiusNm, startThreshold, endPoint);
     try {
-      const found = await this.foundAround(
-        after,
-        candidate,
-        seedRoot,
-        endPoint,
-        radiusNm,
-      );
+      const found = await lookUp(endPoint, radiusNm);
       if (token !== this.token) return;
       const verdict = this.deps.verdict(undefined);
       let outcome: CheckOutcome | undefined = checkOutcome(
@@ -189,15 +194,12 @@ export class TraceEndController {
       this.settle(outcome, startThreshold);
     } catch (error) {
       if (token !== this.token) return;
-      this.deps.reportError(
-        `Could not look for candidates around the trace end: ${errorMessage(error)}`,
-      );
+      this.deps.reportError(`${lookUpError}: ${errorMessage(error)}`);
       this.close();
     }
   }
 
   private foundAround(
-    after: TraceDecision,
     candidate: EdgeCandidate,
     seedRoot: bigint,
     endPoint: Float32Array,
@@ -212,7 +214,7 @@ export class TraceEndController {
     ) {
       return fetch();
     }
-    return prepared.found[after].then((found) => found ?? fetch());
+    return prepared.found.then((found) => found ?? fetch());
   }
 
   /** undefined when the graph stayed unknown (reported, closed) or the check was superseded. */
