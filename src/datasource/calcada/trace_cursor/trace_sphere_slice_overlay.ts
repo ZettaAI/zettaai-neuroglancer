@@ -20,7 +20,6 @@
  */
 
 import {
-  TRACE_SPHERE_RGB,
   TRACE_SPHERE_SLICE_FILL_ALPHA,
   TRACE_SPHERE_SLICE_OUTLINE_ALPHA,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_appearance.js";
@@ -73,6 +72,7 @@ class TraceSphereSliceRenderer extends RefCounted {
     globalCorners: Float32Array,
     center: Float32Array,
     semiAxes: Float32Array,
+    rgb: Float32Array,
   ) {
     const { gl, shader } = this;
     this.globalPositionBuffer.setData(globalCorners, gl.DYNAMIC_DRAW);
@@ -84,7 +84,7 @@ class TraceSphereSliceRenderer extends RefCounted {
       semiAxes[1],
       semiAxes[2],
     );
-    gl.uniform3fv(shader.uniform("uColor"), TRACE_SPHERE_RGB);
+    gl.uniform3fv(shader.uniform("uColor"), rgb);
     gl.uniform1f(shader.uniform("uFillAlpha"), TRACE_SPHERE_SLICE_FILL_ALPHA);
     gl.uniform1f(
       shader.uniform("uOutlineAlpha"),
@@ -115,6 +115,7 @@ export class TraceSphereSliceOverlay extends SliceViewPanelRenderLayer {
   constructor(
     public gl: GL,
     public state: TraceSphereView,
+    private readonly rgb: Float32Array,
   ) {
     super();
     this.renderer = this.registerDisposer(new TraceSphereSliceRenderer(gl));
@@ -147,6 +148,7 @@ export class TraceSphereSliceOverlay extends SliceViewPanelRenderLayer {
       sliceQuadGlobalCorners(projectionParameters.invViewProjectionMat),
       center,
       semiAxes,
+      this.rgb,
     );
   }
 }

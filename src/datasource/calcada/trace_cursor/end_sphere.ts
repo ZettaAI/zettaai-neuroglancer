@@ -9,8 +9,8 @@
  */
 
 /**
- * @file One sphere for the trace: while the end prompt is open it marks the
- * end being asked about, in either scope, and then goes back to the trace's.
+ * @file The sphere of the end being looked for: shown while its prompt is open
+ * and while a look deeper goes through it, in a colour of its own.
  */
 
 import type { CoordinateSpace } from "#src/coordinate_transform.js";
@@ -19,43 +19,29 @@ import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { makeCachedDerivedWatchableValue } from "#src/trackable_value.js";
 import { RefCounted } from "#src/util/disposable.js";
 
-export interface EndPromptSphere {
+export interface EndSphere {
   center: Float32Array;
   radiusNm: number;
 }
 
-export class SphereShowingEndPrompt
-  extends RefCounted
-  implements TraceSphereView
-{
+export class EndSphereView extends RefCounted implements TraceSphereView {
   readonly visible: WatchableValueInterface<boolean>;
   readonly center: WatchableValueInterface<Float32Array | undefined>;
   readonly radiusNm: WatchableValueInterface<number>;
-  readonly coordinateSpace: WatchableValueInterface<CoordinateSpace>;
 
   constructor(
-    trace: TraceSphereView,
-    endSphere: WatchableValueInterface<EndPromptSphere | undefined>,
+    endSphere: WatchableValueInterface<EndSphere | undefined>,
+    readonly coordinateSpace: WatchableValueInterface<CoordinateSpace>,
   ) {
     super();
-    this.coordinateSpace = trace.coordinateSpace;
     this.visible = this.registerDisposer(
-      makeCachedDerivedWatchableValue(
-        (traceVisible, end) => end !== undefined || traceVisible,
-        [trace.visible, endSphere],
-      ),
+      makeCachedDerivedWatchableValue((end) => end !== undefined, [endSphere]),
     );
     this.center = this.registerDisposer(
-      makeCachedDerivedWatchableValue(
-        (traceCenter, end) => end?.center ?? traceCenter,
-        [trace.center, endSphere],
-      ),
+      makeCachedDerivedWatchableValue((end) => end?.center, [endSphere]),
     );
     this.radiusNm = this.registerDisposer(
-      makeCachedDerivedWatchableValue(
-        (traceRadiusNm, end) => end?.radiusNm ?? traceRadiusNm,
-        [trace.radiusNm, endSphere],
-      ),
+      makeCachedDerivedWatchableValue((end) => end?.radiusNm ?? 0, [endSphere]),
     );
   }
 }

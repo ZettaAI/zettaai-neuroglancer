@@ -14,6 +14,10 @@ import "#src/datasource/calcada/calcada.css";
 
 import type { TraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
 import { CalcadaTraceNotice } from "#src/datasource/calcada/react/trace_notice.js";
+import {
+  END_SPHERE_RGB,
+  sphereCssColor,
+} from "#src/datasource/calcada/trace_cursor/trace_sphere_appearance.js";
 import type { TraceEndPromptView } from "#src/datasource/calcada/trace_end_controller.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WatchableValue } from "#src/trackable_value.js";
@@ -164,6 +168,18 @@ describe("CalcadaTraceNotice", () => {
         null,
       );
     }
+  });
+
+  it("says what the end sphere is, in the end sphere's colour", async () => {
+    await mountPrompt(openPrompt);
+    const legend = host.querySelector<HTMLElement>(
+      ".calcada-trace-notice-legend",
+    );
+    expect(legend?.textContent).toContain("Orange sphere");
+    const swatch = legend?.querySelector<HTMLElement>(
+      ".calcada-trace-notice-swatch",
+    );
+    expect(swatch?.style.backgroundColor).toBe(sphereCssColor(END_SPHERE_RGB));
   });
 
   it("disables Look deeper at 0 and Back at the start", async () => {

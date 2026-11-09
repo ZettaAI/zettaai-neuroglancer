@@ -17,6 +17,17 @@
  */
 
 export const TRACE_SPHERE_RGB = Float32Array.of(0.35, 0.75, 1.0);
+/** The end being looked for: a different hue so it is never read as the seed sphere. */
+export const END_SPHERE_RGB = Float32Array.of(1.0, 0.6, 0.2);
+
+const CSS_CHANNEL_MAX = 255;
+
+export function sphereCssColor(rgb: Float32Array): string {
+  const channels = Array.from(rgb, (value) =>
+    Math.round(value * CSS_CHANNEL_MAX),
+  );
+  return `rgb(${channels.join(", ")})`;
+}
 
 /**
  * Facing the viewer the shell is nearly clear, at the silhouette it is dense.

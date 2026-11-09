@@ -18,12 +18,18 @@
 
 import { SCORE_DIGITS } from "#src/datasource/calcada/candidate_ranking.js";
 import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
+import {
+  END_SPHERE_RGB,
+  sphereCssColor,
+} from "#src/datasource/calcada/trace_cursor/trace_sphere_appearance.js";
 import type { TraceEndPromptView } from "#src/datasource/calcada/trace_end_controller.js";
 import { traceChords } from "#src/datasource/calcada/trace_key_bindings.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { NullarySignal } from "#src/util/signal.js";
 import { Button } from "@/components/ui/button";
+
+const END_SPHERE_CSS_COLOR = sphereCssColor(END_SPHERE_RGB);
 
 export interface TraceNotice {
   kind: "loading" | "candidate" | "empty" | "error";
@@ -117,6 +123,14 @@ function TraceEndPrompt({
         <>
           <div className="calcada-trace-notice-detail calcada-trace-notice-highlight">
             Score ≥ {prompt.threshold.toFixed(SCORE_DIGITS)}
+          </div>
+          <div className="calcada-trace-notice-detail calcada-trace-notice-legend">
+            <span
+              className="calcada-trace-notice-swatch"
+              style={{ backgroundColor: END_SPHERE_CSS_COLOR }}
+              aria-hidden
+            />
+            Orange sphere: this end; look deeper stays inside it
           </div>
           <div className="calcada-trace-notice-buttons">
             <PromptButton

@@ -200,8 +200,13 @@ import {
   stageBlockedReason,
   stageEnabled,
 } from "#src/datasource/calcada/split_steps.js";
-import type { EndPromptSphere } from "#src/datasource/calcada/trace_cursor/end_prompt_sphere.js";
-import { SphereShowingEndPrompt } from "#src/datasource/calcada/trace_cursor/end_prompt_sphere.js";
+import type { EndSphere } from "#src/datasource/calcada/trace_cursor/end_sphere.js";
+import { EndSphereView } from "#src/datasource/calcada/trace_cursor/end_sphere.js";
+import { SeedSphereReveal } from "#src/datasource/calcada/trace_cursor/seed_sphere_reveal.js";
+import {
+  END_SPHERE_RGB,
+  TRACE_SPHERE_RGB,
+} from "#src/datasource/calcada/trace_cursor/trace_sphere_appearance.js";
 import {
   traceSphereSemiAxes,
   pointInsideSphere,
@@ -3068,9 +3073,7 @@ class ZettaTraceSession extends RefCounted {
   // whether the neuron ends there.
   private readonly endController: TraceEndController;
   private readonly endPromptOpen = new WatchableValue(false);
-  readonly endSphere = new WatchableValue<EndPromptSphere | undefined>(
-    undefined,
-  );
+  readonly endSphere = new WatchableValue<EndSphere | undefined>(undefined);
   private framedEndPoint: Float32Array | undefined;
   // What the end check found to go on with; shown even below the filters,
   // since look deeper finds exactly that.
@@ -3329,9 +3332,7 @@ class ZettaTraceSession extends RefCounted {
   private onEndPromptChanged() {
     const prompt = this.endController.prompt;
     this.endPromptOpen.value = prompt?.phase === "open";
-    this.endSphere.value = prompt?.endPointKnown
-      ? { center: prompt.endPoint, radiusNm: prompt.radiusNm }
-      : undefined;
+    this.endSphere.value = this.endController.endSphere;
     if (prompt === undefined) {
       this.framedEndPoint = undefined;
       this.changed.dispatch();
@@ -6110,16 +6111,27 @@ void main() {
         layer.manager.root.coordinateSpace,
       ),
     );
-    const sphere = this.registerDisposer(
-      new SphereShowingEndPrompt(sphereState, this.traceSession.endSphere),
+    this.registerDisposer(new SeedSphereReveal(sphereState.revealed));
+    const endSphere = this.registerDisposer(
+      new EndSphereView(
+        this.traceSession.endSphere,
+        layer.manager.root.coordinateSpace,
+      ),
     );
     const { gl } = layer.manager.root.display;
-    this.registerDisposer(
-      layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphere)),
-    );
-    this.registerDisposer(
-      layer.addRenderLayer(new TraceSpherePerspectiveOverlay(gl, sphere)),
-    );
+    for (const [sphere, rgb] of [
+      [sphereState, TRACE_SPHERE_RGB],
+      [endSphere, END_SPHERE_RGB],
+    ] as const) {
+      this.registerDisposer(
+        layer.addRenderLayer(new TraceSphereSliceOverlay(gl, sphere, rgb)),
+      );
+      this.registerDisposer(
+        layer.addRenderLayer(
+          new TraceSpherePerspectiveOverlay(gl, sphere, rgb),
+        ),
+      );
+    }
     this.debugSession = this.registerDisposer(
       new CalcadaDebugSession(this, layer, state.calcadaDebugState),
     );

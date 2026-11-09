@@ -481,6 +481,19 @@
   font-weight: 700;
 }
 
+.calcada-trace-notice-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.calcada-trace-notice-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
 .calcada-trace-notice-prompt {
   opacity: 1;
 }

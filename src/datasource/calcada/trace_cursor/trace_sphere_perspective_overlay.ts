@@ -35,7 +35,6 @@
 
 import {
   TRACE_SPHERE_CORE_ALPHA,
-  TRACE_SPHERE_RGB,
   TRACE_SPHERE_RIM_ALPHA,
 } from "#src/datasource/calcada/trace_cursor/trace_sphere_appearance.js";
 import {
@@ -78,6 +77,7 @@ export class TraceSpherePerspectiveOverlay extends PerspectiveViewRenderLayer {
   constructor(
     public gl: GL,
     public state: TraceSphereView,
+    private readonly rgb: Float32Array,
   ) {
     super();
     this.shaderGetter = parameterizedEmitterDependentShaderGetter(this, gl, {
@@ -151,7 +151,7 @@ export class TraceSpherePerspectiveOverlay extends PerspectiveViewRenderLayer {
     if (shader === null) return;
     shader.bind();
     gl.uniformMatrix4fv(shader.uniform("uProjectionMatrix"), false, mvp);
-    gl.uniform3fv(shader.uniform("uColor"), TRACE_SPHERE_RGB);
+    gl.uniform3fv(shader.uniform("uColor"), this.rgb);
     gl.uniform3fv(shader.uniform("uEyeInObject"), tempEye);
     gl.uniform3fv(shader.uniform("uLightInObject"), tempLight);
     gl.uniform1f(shader.uniform("uCoreAlpha"), TRACE_SPHERE_CORE_ALPHA);
