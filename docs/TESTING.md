@@ -78,6 +78,7 @@ npm run e2e:headed       # …with a visible browser
 npm run e2e:ui           # …Playwright UI mode
 npm run perf             # fixtures + build + benchmarks        (--project perf)
 npm run perf:headed
+npm run perf:large-chunk # TM-373 4096² benchmark (own ~1.4 GB fixtures + project)
 ```
 
 `e2e*` / `perf*` all rebuild the prod bundle + regenerate fixtures first (no

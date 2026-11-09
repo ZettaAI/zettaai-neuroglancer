@@ -23,6 +23,8 @@
 
 import type { Edit, EditMeta, EditSession } from "@zettaai/edit-session";
 
+import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
+
 /** Handle for a multi-event interaction (a stroke). Exactly one of
  * `commit` / `cancel` finalizes it. */
 export interface InteractionHandle {
@@ -62,6 +64,24 @@ export function isLiveEditConflictError(err: unknown): boolean {
   );
 }
 
+/**
+ * `edit.record()`, timed into the paint profiler: on large chunks it snapshots
+ * and hashes every touched chunk, which is the pause at the end of a stroke
+ * (TM-373).
+ */
+function recordTimed(edit: Edit): void {
+  if (!paintProfiler.enabled) {
+    edit.record();
+    return;
+  }
+  const start = performance.now();
+  try {
+    edit.record();
+  } finally {
+    paintProfiler.record("edit.record(cpu)", performance.now() - start);
+  }
+}
+
 export class EditScope {
   private live: Edit | null = null;
 
@@ -83,7 +103,7 @@ export class EditScope {
     const edit = this.open(meta);
     try {
       await fn(edit);
-      edit.record();
+      recordTimed(edit);
     } catch (err) {
       try {
         await edit.discard();
@@ -107,7 +127,7 @@ export class EditScope {
       edit,
       commit: () => {
         if (this.live !== edit) return; // already finalized / superseded
-        edit.record();
+        recordTimed(edit);
         this.live = null;
       },
       cancel: async () => {

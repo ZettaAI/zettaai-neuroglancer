@@ -21,13 +21,20 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { NgLogger } from "#src/editing/adapters/ng_logger.js";
+import { SavedBaselineStore } from "#src/editing/adapters/saved_baseline_store.js";
+import type { ChunkVoxelBox } from "#src/editing/local_patch_chunk.js";
 import {
   chunkGridKey,
   LocalPatchSource,
 } from "#src/editing/local_patch_source.js";
 import type { LocalPatchStore } from "#src/editing/local_patch_store.js";
 import { notePaintedSubBox } from "#src/editing/overlay/painted_subbox_registry.js";
-import { PatchMirror } from "#src/editing/overlay/patch_mirror.js";
+import type { SessionBaselineReader } from "#src/editing/overlay/patch_mirror.js";
+import {
+  MAX_PENDING_BOXES,
+  PatchMirror,
+} from "#src/editing/overlay/patch_mirror.js";
+import { sessionEditBaselineReader } from "#src/editing/overlay/session_edit_baseline.js";
 
 const LAYER = "label-scratch" as LayerId;
 const RES = ResolutionCtor.from([16, 16, 45]);
@@ -74,13 +81,34 @@ interface Harness {
   setEditBaseline: (bytes: number[] | undefined) => void;
   errors: string[];
   baselineReadCount: () => number;
+  /** The datasource baseline (all zero unless set). */
+  setBaseline: (bytes: number[]) => void;
+  /** Reads of the harness's own edit baseline. */
+  editBaselineReadCount: () => number;
+  /** Make the next `n` edit-baseline reads reject. */
+  failEditBaselineReads: (n: number) => void;
+  /** Boxes the box reader was asked for (`boxReads` harness only). */
+  boxReads: ChunkVoxelBox[];
   dispose: () => void;
 }
 
-function makeHarness(): Harness {
+/**
+ * `readEditBaseline` replaces the harness's own edit-baseline reader (and so
+ * `setEditBaseline`), to drive the mirror through the host's real chain.
+ * `boxReads` gives the mirror a box reader (TM-373 PR 2) that cuts its box out
+ * of the same datasource baseline, fails with the same `failBaselineReads`,
+ * and records each box.
+ */
+function makeHarness(
+  options: {
+    readEditBaseline?: SessionBaselineReader;
+    boxReads?: boolean;
+  } = {},
+): Harness {
   const handlers: ((payload: { coord: OverlayCoord }) => void)[] = [];
   let overlay = new Uint8Array(VOLUME);
-  const baseline = new Uint8Array(VOLUME);
+  let baseline = new Uint8Array(VOLUME);
+  const boxReads: ChunkVoxelBox[] = [];
   let editBaseline: Uint8Array | undefined = new Uint8Array(VOLUME);
   let failuresRemaining = 0;
   let baselineReads = 0;
@@ -137,8 +165,36 @@ function makeHarness(): Harness {
     return buffer(baseline);
   };
 
-  const readEditBaseline = async () =>
-    editBaseline === undefined ? undefined : buffer(editBaseline);
+  let editBaselineReads = 0;
+  let editBaselineFailuresRemaining = 0;
+  const readEditBaseline =
+    options.readEditBaseline ??
+    (async () => {
+      editBaselineReads++;
+      if (editBaselineFailuresRemaining > 0) {
+        editBaselineFailuresRemaining--;
+        throw new Error("edit baseline read failed");
+      }
+      return editBaseline === undefined ? undefined : buffer(editBaseline);
+    });
+
+  const readBaselineBox = async (_coord: OverlayCoord, box: ChunkVoxelBox) => {
+    boxReads.push(box);
+    if (failuresRemaining > 0) {
+      failuresRemaining--;
+      throw new Error("baseline box fetch failed");
+    }
+    const [sizeX, sizeY] = CHUNK_DATA_SIZE;
+    const values: number[] = [];
+    for (let z = box.z0; z <= box.z1; z++) {
+      for (let y = box.y0; y <= box.y1; y++) {
+        for (let x = box.x0; x <= box.x1; x++) {
+          values.push(baseline[(z * sizeY + y) * sizeX + x]);
+        }
+      }
+    }
+    return buffer(Uint8Array.from(values));
+  };
 
   const mirror = new PatchMirror(
     session,
@@ -147,6 +203,7 @@ function makeHarness(): Harness {
     logger,
     readBaseline,
     readEditBaseline,
+    options.boxReads === true ? readBaselineBox : undefined,
   );
 
   return {
@@ -176,6 +233,14 @@ function makeHarness(): Harness {
     },
     errors,
     baselineReadCount: () => baselineReads,
+    setBaseline: (bytes) => {
+      baseline = Uint8Array.from(bytes);
+    },
+    editBaselineReadCount: () => editBaselineReads,
+    failEditBaselineReads: (n) => {
+      editBaselineFailuresRemaining = n;
+    },
+    boxReads,
     dispose: () => {
       mirror.dispose();
       source.dispose();
@@ -347,5 +412,304 @@ describe("PatchMirror resync after a refetch", () => {
 
     expect(mirroredMask(harness.source)).toEqual(before);
     expect(harness.errors).toEqual([]);
+  });
+});
+
+/**
+ * The saved-baseline store is bounded (TM-373). A saved chunk it evicts falls
+ * back to the session-open snapshot, so its saved voxels count as this
+ * session's edits again: the patch keeps drawing them and nothing disappears.
+ */
+describe("PatchMirror resync after the saved bytes are evicted (TM-373)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the saved paint on screen", async () => {
+    vi.useFakeTimers();
+    const store = new SavedBaselineStore({ maxChunks: 100, maxBytes: VOLUME });
+    const harness = makeHarness({
+      readEditBaseline: sessionEditBaselineReader({
+        committed: () => undefined,
+        saved: () => store.get("saved"),
+        sessionOpen: async () => buffer(new Uint8Array(VOLUME)),
+      }),
+    });
+    try {
+      harness.setOverlay([7, 0, 0, 0]);
+      harness.commit({ x0: 0, y0: 0, x1: 0, y1: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Save, then a later save of another chunk evicts this one.
+      store.set("saved", buffer(Uint8Array.from([7, 0, 0, 0])));
+      store.set("later", buffer(new Uint8Array(VOLUME)));
+      expect(store.get("saved")).toBeUndefined();
+
+      await harness.mirror.resyncAfterRefetch([COORD]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+      expect(mirroredValues(harness.source)).toEqual([7, 0, 0, 0]);
+      expect(harness.errors).toEqual([]);
+    } finally {
+      harness.dispose();
+    }
+  });
+});
+
+/**
+ * A bounded datasource pass reads the baseline of its box only (TM-373 PR 2);
+ * every other pass still reads the whole chunk.
+ */
+describe("PatchMirror reads the baseline by box", () => {
+  let harness: Harness;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    harness = makeHarness({ boxReads: true });
+  });
+
+  afterEach(() => {
+    harness.dispose();
+    vi.useRealTimers();
+  });
+
+  it("a painted commit reads its box, not the chunk, with the same result", async () => {
+    harness.setBaseline([3, 3, 3, 3]);
+    harness.setOverlay([7, 3, 3, 3]);
+    harness.commit({ x0: 0, y0: 0, x1: 1, y1: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads).toEqual([
+      { x0: 0, y0: 0, z0: 0, x1: 1, y1: 0, z1: 0 },
+    ]);
+    expect(harness.baselineReadCount()).toBe(0);
+    expect(mirroredValues(harness.source)).toEqual([7, 3, 0, 0]);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+  });
+
+  it("clamps the box to the chunk before reading it", async () => {
+    harness.setOverlay([0, 0, 0, 9]);
+    harness.commit({ x0: 1, y0: 1, x1: 5, y1: 5 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads).toEqual([
+      { x0: 1, y0: 1, z0: 0, x1: 1, y1: 1, z1: 0 },
+    ]);
+    expect(mirroredValues(harness.source)).toEqual([0, 0, 0, 9]);
+  });
+
+  it("a commit without a hint reads the whole chunk", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads).toEqual([]);
+    expect(harness.baselineReadCount()).toBe(1);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+  });
+
+  it("a failed box read is repaired by a full pass", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.failBaselineReads(1);
+    harness.commit({ x0: 0, y0: 0, x1: 0, y1: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mirroredValues(harness.source)).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(harness.boxReads.length).toBe(1);
+    expect(harness.baselineReadCount()).toBe(1);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+  });
+
+  it("resyncAfterRefetch reads the whole edit baseline, never a box", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit({ x0: 0, y0: 0, x1: 0, y1: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    harness.setEditBaseline([7, 0, 0, 0]);
+
+    await harness.mirror.resyncAfterRefetch([COORD]);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads.length).toBe(1);
+    expect(mirroredMask(harness.source)).toEqual([0, 0, 0, 0]);
+  });
+});
+
+/**
+ * Commits that land while a pass is in flight queue their boxes instead of
+ * forcing a full scan, and each request keeps the baseline it asked for
+ * (TM-373 PR 3).
+ */
+describe("PatchMirror queues passes while one is in flight", () => {
+  let harness: Harness;
+  const voxel = (x: number, y: number) => ({ x0: x, y0: y, x1: x, y1: y });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    harness = makeHarness({ boxReads: true });
+  });
+
+  afterEach(() => {
+    harness.dispose();
+    vi.useRealTimers();
+  });
+
+  it("two commits during a pass: the next pass is bounded over both boxes", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit(voxel(0, 0));
+    // Lands while the first pass awaits its reads.
+    harness.setOverlay([7, 0, 0, 8]);
+    harness.commit(voxel(1, 1));
+    harness.setOverlay([7, 9, 0, 8]);
+    harness.commit(voxel(1, 0));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads).toEqual([
+      { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 },
+      { x0: 1, y0: 1, z0: 0, x1: 1, y1: 1, z1: 0 },
+      { x0: 1, y0: 0, z0: 0, x1: 1, y1: 0, z1: 0 },
+    ]);
+    expect(harness.baselineReadCount()).toBe(0);
+    // Same as a full scan would give.
+    expect(mirroredValues(harness.source)).toEqual([7, 9, 0, 8]);
+    expect(mirroredMask(harness.source)).toEqual([1, 1, 0, 1]);
+  });
+
+  it("too many queued boxes merge into their union, still correct", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit(voxel(0, 0));
+    harness.setOverlay([7, 0, 0, 8]);
+    for (let i = 0; i <= MAX_PENDING_BOXES; i++) {
+      harness.commit(i % 2 === 0 ? voxel(1, 1) : voxel(0, 1));
+    }
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads).toEqual([
+      { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 },
+      { x0: 0, y0: 1, z0: 0, x1: 1, y1: 1, z1: 0 },
+    ]);
+    expect(mirroredValues(harness.source)).toEqual([7, 0, 0, 8]);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 1]);
+  });
+
+  it("a failed pass with queued boxes is repaired by one full scan that covers them", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.failBaselineReads(1);
+    harness.commit(voxel(0, 0));
+    harness.setOverlay([7, 0, 0, 8]);
+    harness.commit(voxel(1, 1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mirroredValues(harness.source)).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    // The queued box never got its own read: the full scan covered it.
+    expect(harness.boxReads.length).toBe(1);
+    expect(harness.baselineReadCount()).toBe(1);
+    expect(mirroredValues(harness.source)).toEqual([7, 0, 0, 8]);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 1]);
+
+    // Nothing is left queued.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(harness.baselineReadCount()).toBe(1);
+    expect(harness.boxReads.length).toBe(1);
+  });
+
+  it("a commit without a hint during a pass still gets a full scan", async () => {
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit(voxel(0, 0));
+    harness.setOverlay([7, 0, 0, 8]);
+    harness.commit();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.boxReads.length).toBe(1);
+    expect(harness.baselineReadCount()).toBe(1);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 1]);
+  });
+
+  it("resyncAfterRefetch during a datasource pass runs its edit-baseline pass, then resolves", async () => {
+    // Voxel 1 differs from the datasource but is the session's own baseline
+    // (a colleague's value it loaded): out of the mask after the resync.
+    harness.setEditBaseline([0, 5, 0, 0]);
+    harness.setOverlay([7, 5, 0, 0]);
+    harness.commit(voxel(0, 0));
+    let resolved = false;
+    const resync = harness.mirror
+      .resyncAfterRefetch([COORD])
+      .then(() => (resolved = true));
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    await resync;
+
+    expect(harness.editBaselineReadCount()).toBe(1);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+  });
+
+  it("a stroke's box during an edit-baseline pass is read from the datasource", async () => {
+    harness.setEditBaseline([7, 5, 0, 0]);
+    harness.setOverlay([7, 5, 0, 0]);
+    const resync = harness.mirror.resyncAfterRefetch([COORD]);
+    // The stroke repaints voxel 1 with the value the edit baseline holds; it
+    // differs from the datasource (0), so it belongs in the mask.
+    harness.commit(voxel(1, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    await resync;
+
+    expect(harness.boxReads).toEqual([
+      { x0: 1, y0: 0, z0: 0, x1: 1, y1: 0, z1: 0 },
+    ]);
+    expect(mirroredMask(harness.source)).toEqual([0, 1, 0, 0]);
+  });
+
+  it("a failed edit-baseline pass retries against the edit baseline", async () => {
+    harness.setEditBaseline([7, 0, 0, 0]);
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.commit(voxel(0, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+
+    harness.failEditBaselineReads(1);
+    await harness.mirror.resyncAfterRefetch([COORD]);
+    expect(harness.editBaselineReadCount()).toBe(1);
+    expect(mirroredMask(harness.source)).toEqual([1, 0, 0, 0]);
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(harness.editBaselineReadCount()).toBe(2);
+    expect(harness.baselineReadCount()).toBe(0);
+    expect(mirroredMask(harness.source)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("a resync queued behind a failing pass resolves once the chunk stops retrying", async () => {
+    // The chunk fails until it gives up retrying on its own.
+    harness.setOverlay([7, 0, 0, 0]);
+    harness.failBaselineReads(99);
+    harness.commit(voxel(0, 0));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(
+      harness.errors.some((m) => m.includes("no longer retrying chunk")),
+    ).toBe(true);
+
+    // A stroke's pass is running when a refetch asks for a resync; the pass
+    // fails and no retry follows. The resync must not wait forever: the host
+    // awaits it before resyncing every other refetched chunk.
+    harness.commit(voxel(0, 0));
+    let resolved = false;
+    const resync = harness.mirror
+      .resyncAfterRefetch([COORD])
+      .then(() => (resolved = true));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(resolved).toBe(true);
+    await resync;
+    expect(harness.editBaselineReadCount()).toBe(0);
+
+    // The edit-baseline request stays queued: the next commit runs it.
+    harness.failBaselineReads(0);
+    harness.commit(voxel(0, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.editBaselineReadCount()).toBe(1);
   });
 });

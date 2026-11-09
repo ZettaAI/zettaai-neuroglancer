@@ -151,4 +151,21 @@ describe("summarizePatchedVoxels", () => {
     expect(s.sample[0].g).toEqual([5000, 2, 0]);
     expect(s.bbox).toEqual({ lo: [5000, 2, 0], hi: [5001, 3, 1] });
   });
+
+  it("counts the voxels holding one value, past the maxVoxels cap", () => {
+    const c = chunk(
+      [4, 4, 1],
+      [
+        { at: [0, 0, 0], v: 1000n },
+        { at: [1, 0, 0], v: 2000n },
+        { at: [2, 0, 0], v: 1000n },
+      ],
+    );
+    const s = summarizePatchedVoxels(entries([["0,0,0", c]]), {
+      maxVoxels: 1,
+      countValue: "1000",
+    });
+    expect(s.valueCount).toBe(2);
+    expect(summarizePatchedVoxels(entries([["0,0,0", c]])).valueCount).toBe(0);
+  });
 });
