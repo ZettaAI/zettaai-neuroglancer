@@ -48,6 +48,7 @@ import {
   ANNOTATION_TABLES_TAB_LABEL,
   CalcadaAnnotationTablesTab,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
+import { mountRowPayloadEditor } from "#src/datasource/calcada/annotation_tables/row_payload_editor.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import {
   TableLineTool,
@@ -5960,6 +5961,7 @@ void main() {
               annotationListDimensions(layer, [annotationState]),
               columnWidths,
             ),
+          mountRowEditor: mountRowPayloadEditor,
           selectedAnnotation: selectedTableAnnotation,
           listCoordinatesChanged,
           clearHover: () => {
