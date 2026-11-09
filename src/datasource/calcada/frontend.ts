@@ -157,12 +157,6 @@ import {
   nanometresToGlobal,
   parsePieceSpheres,
 } from "#src/datasource/calcada/piece_centers.js";
-import { pieceFarEndNm } from "#src/datasource/calcada/piece_far_end.js";
-import type { GeometryInRadius } from "#src/datasource/calcada/piece_geometry.js";
-import {
-  parseGeometryInRadius,
-  pieceGeometryRequestBody,
-} from "#src/datasource/calcada/piece_geometry.js";
 import { PieceGraphContextCache } from "#src/datasource/calcada/piece_graph_context.js";
 import {
   PointPlacement,
@@ -3138,8 +3132,6 @@ class ZettaTraceSession extends RefCounted {
         }
         return this.fetchInSphere(seedRoot, center, semiAxes);
       },
-      acceptEndPoint: (candidate, mergedRoot, radiusNm) =>
-        this.partnerFarEnd(candidate, mergedRoot, radiusNm),
       insideEndSphere: (point, center, radiusNm) => {
         const semiAxes = traceSphereSemiAxes(
           radiusNm,
@@ -3327,35 +3319,6 @@ class ZettaTraceSession extends RefCounted {
 
   get endPrompt(): TraceEndPromptView | undefined {
     return this.endController.prompt;
-  }
-
-  /** The far end of the partner piece inside the merged segment; undefined = unknown. */
-  private async partnerFarEnd(
-    candidate: EdgeCandidate,
-    mergedRoot: bigint,
-    radiusNm: number,
-  ): Promise<Float32Array | undefined> {
-    const coordinateSpace = this.layer.manager.root.coordinateSpace.value;
-    const contactNm = globalToNanometres(candidate.pointB, coordinateSpace);
-    if (contactNm === undefined) return undefined;
-    const geometry = await this.graphServer.fetchPieceGeometry(
-      mergedRoot,
-      candidate.partnerPieceId,
-      contactNm,
-      radiusNm,
-      this.branchId,
-    );
-    const partner = geometry.results[0]?.pieces.find(
-      (piece) => piece.pieceId === candidate.partnerPieceId,
-    );
-    if (partner === undefined) return undefined;
-    const farEndNm = pieceFarEndNm(
-      partner.centroidVoxels,
-      partner.covVoxels2,
-      geometry.resolutionNm,
-      contactNm,
-    );
-    return farEndNm && nanometresToGlobal(farEndNm, coordinateSpace);
   }
 
   private resetEndCheck() {
@@ -4423,7 +4386,6 @@ class ZettaTraceSession extends RefCounted {
         accepted,
         childrenRead,
         seedRoot,
-        merged.root,
         acceptedDepth,
         this.decided,
       );
@@ -7957,27 +7919,6 @@ class CalcadaGraphServerInterface {
       );
     }
     return out;
-  }
-
-  /** One piece's geometry, when it belongs to `rootId` and has any. */
-  async fetchPieceGeometry(
-    rootId: bigint,
-    pieceId: bigint,
-    pointNm: readonly number[],
-    radiusNm: number,
-    branchId: number,
-  ): Promise<GeometryInRadius> {
-    const { fetchOkImpl, baseUrl } = this.httpSource;
-    const params = new URLSearchParams();
-    if (branchId) params.set("branch_id", String(branchId));
-    const response = await fetchOkImpl(
-      `${baseUrl}/geometry_in_radius?${params.toString()}`,
-      {
-        method: "POST",
-        body: pieceGeometryRequestBody(rootId, pieceId, pointNm, radiusNm),
-      },
-    );
-    return parseGeometryInRadius(await response.text());
   }
 
   /** Who has rejected a candidate on this graph, not counting the caller. */
