@@ -39,8 +39,9 @@ export interface TraceEndpointRow {
   status: TraceEndStatus;
   threshold: number;
   radiusNm: number;
-  after: TraceDecision;
-  lineId: bigint;
+  /** Both absent for an end asked for at the seed sphere, before any decision. */
+  after?: TraceDecision;
+  lineId?: bigint;
   /** In global coordinates. */
   position: Float32Array;
 }
@@ -87,8 +88,8 @@ export class TraceEndpointTable {
         status: row.status,
         threshold: row.threshold,
         radius_nm: row.radiusNm,
-        after: row.after,
-        line_id: String(row.lineId),
+        ...(row.after !== undefined && { after: row.after }),
+        ...(row.lineId !== undefined && { line_id: String(row.lineId) }),
       },
     );
     tablesSession.rowWritten(tableName, rowId);

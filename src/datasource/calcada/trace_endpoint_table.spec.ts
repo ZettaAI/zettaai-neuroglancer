@@ -229,6 +229,19 @@ describe("TraceEndpointTable", () => {
     expect(tablesSession.rowRemoved).toHaveBeenCalledWith(CERTAIN_TABLE, 5n);
   });
 
+  it("a seed end is written without a decision or a line", async () => {
+    const { table, posts } = makeTable(
+      newServer({ tables: [UNCERTAIN_TABLE] }),
+    );
+    const { after: _after, lineId: _lineId, ...seedEnd } = ROW;
+    await table.write(BRANCH, seedEnd);
+    expect(posts[0].body.annotations[0].payload).toEqual({
+      status: "uncertain",
+      threshold: 0.5,
+      radius_nm: 300,
+    });
+  });
+
   it("refuses when the point cannot be converted", async () => {
     const { table, fetchOk } = makeTable(newServer(), {
       toNanometres: () => undefined,

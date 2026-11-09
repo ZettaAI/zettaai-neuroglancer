@@ -3078,6 +3078,10 @@ class ZettaTraceSession extends RefCounted {
   // What the end check found to go on with; shown even below the filters,
   // since look deeper finds exactly that.
   private continuationLineId: bigint | undefined;
+  // A just-placed sphere with nothing passing in it asks for an end at its
+  // centre, once; after that, running out is the usual empty notice. Kept
+  // until the first pick, which may wait for the piece graph.
+  private seedEndPending = false;
   readonly endActions: TraceEndActions = {
     certain: () => this.endController.answer("certain"),
     uncertain: () => this.endController.answer("uncertain"),
@@ -3328,6 +3332,7 @@ class ZettaTraceSession extends RefCounted {
 
   private resetEndCheck() {
     this.continuationLineId = undefined;
+    this.seedEndPending = false;
     this.endController.reset();
   }
 
@@ -3732,7 +3737,7 @@ class ZettaTraceSession extends RefCounted {
     this.dimmed.clear();
     this.clearAnnotation();
     this.showOnly(rootId);
-    void this.loadCandidates();
+    void this.loadCandidates({ askAtSeed: true });
   }
 
   // Accepting or rejecting clears whatever the proofreader had selected for
@@ -3912,8 +3917,15 @@ class ZettaTraceSession extends RefCounted {
       this.endController.prepare(this.current, seedRoot);
     }
     this.remaining = remainingCount(this.pool, this.decided, shown);
+    const seedCenter = this.state.sphereCenter.value;
+    const askAtSeed = this.seedEndPending && seedCenter !== undefined;
+    this.seedEndPending = false;
     if (this.current === undefined) {
       this.showOnly(seedRoot);
+      if (askAtSeed) {
+        void this.endController.atSeed(seedCenter, seedRoot, this.decided);
+        return;
+      }
       const hidden = remainingCount(this.pool, this.decided);
       if (hidden > 0) {
         this.setStatus(
@@ -4163,7 +4175,13 @@ class ZettaTraceSession extends RefCounted {
   private async loadCandidates({
     retryWhenEmpty = false,
     moveCamera = true,
-  }: { retryWhenEmpty?: boolean; moveCamera?: boolean } = {}) {
+    askAtSeed = false,
+  }: {
+    retryWhenEmpty?: boolean;
+    moveCamera?: boolean;
+    /** Whether an empty sphere asks for an end at its centre. */
+    askAtSeed?: boolean;
+  } = {}) {
     const seedRoot = this.state.seedRoot.value;
     if (seedRoot === undefined) return;
     const token = ++this.fetchToken;
@@ -4195,6 +4213,7 @@ class ZettaTraceSession extends RefCounted {
     }
 
     this.pool = seedPool(fetched);
+    this.seedEndPending = askAtSeed && this.sphereQuery() !== undefined;
     this.warnIfSphereWasIgnored(fetched);
     this.showCurrent({ moveCamera });
     void this.refreshGraphContext();
