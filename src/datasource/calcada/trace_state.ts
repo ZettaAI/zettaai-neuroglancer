@@ -129,7 +129,6 @@ const TRACE_MIN_PIECE_VOXELS_KEY = "minPieceVoxels";
 const TRACE_REJECTED_BY_KEY = "rejectedBy";
 const TRACE_MIN_SCORE_KEY = "minScore";
 const TRACE_CENTRE_KEY = "centreOnCandidate";
-const TRACE_ZOOM_KEY = "zoomOnCandidate";
 const TRACE_KEEP_SPLIT_PARTS_KEY = "keepSplitParts";
 const TRACE_SHOW_SPLIT_POINTS_KEY = "showSplitPoints";
 const TRACE_SOURCE_MIN_VOXELS_KEY = "sourceMinVoxels";
@@ -213,9 +212,8 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // never learns its own user id.
   rejectedBy = new WatchableValue<string[]>([]);
   // Moving the camera to every candidate costs the proofreader their bearings;
-  // both are theirs to turn off.
+  // theirs to turn off.
   centreOnCandidate = new WatchableValue<boolean>(true);
-  zoomOnCandidate = new WatchableValue<boolean>(true);
   // Keep the parts of a segment cut during the trace on screen, rather than
   // only the seed and the candidate.
   keepSplitParts = new WatchableValue<boolean>(false);
@@ -241,7 +239,6 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.seedRoot.changed.add(reemit));
     this.registerDisposer(this.rejectedBy.changed.add(reemit));
     this.registerDisposer(this.centreOnCandidate.changed.add(reemit));
-    this.registerDisposer(this.zoomOnCandidate.changed.add(reemit));
     this.registerDisposer(this.keepSplitParts.changed.add(reemit));
     this.registerDisposer(this.showSplitPoints.changed.add(reemit));
     this.registerDisposer(
@@ -316,7 +313,6 @@ export class ZettaTraceState extends RefCounted implements Trackable {
         ? this.rejectedBy.value
         : undefined,
       [TRACE_CENTRE_KEY]: this.centreOnCandidate.value ? undefined : false,
-      [TRACE_ZOOM_KEY]: this.zoomOnCandidate.value ? undefined : false,
       [TRACE_KEEP_SPLIT_PARTS_KEY]: this.keepSplitParts.value || undefined,
       [TRACE_SHOW_SPLIT_POINTS_KEY]: this.showSplitPoints.value || undefined,
       [TRACE_FILTER_KEY]:
@@ -367,9 +363,6 @@ export class ZettaTraceState extends RefCounted implements Trackable {
         TRACE_KEEP_SPLIT_PARTS_KEY,
         verifyBoolean,
       ) ?? false;
-    verifyOptionalObjectProperty(x, TRACE_ZOOM_KEY, (value) => {
-      this.zoomOnCandidate.value = verifyBoolean(value);
-    });
     const linked = verifyOptionalObjectProperty(
       x,
       TRACE_FILTER_KEY,

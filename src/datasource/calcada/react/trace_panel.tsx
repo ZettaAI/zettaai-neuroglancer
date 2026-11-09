@@ -381,7 +381,6 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
   const radiusNm = useWatchable(traceState.sphereRadiusNm);
   const endRadiusNm = useWatchable(traceState.endRadiusNm);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
-  const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const keepSplitParts = useWatchable(traceState.keepSplitParts);
   const showSplitPoints = useWatchable(traceState.showSplitPoints);
   const busy = traceSession.isBusy;
@@ -505,16 +504,6 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           }}
         />
         Centre on each candidate
-      </label>
-      <label className="calcada-trace-panel-check">
-        <input
-          type="checkbox"
-          checked={zoomOnCandidate}
-          onChange={(event) => {
-            traceState.zoomOnCandidate.value = event.target.checked;
-          }}
-        />
-        Zoom the 3D view to each candidate
       </label>
       <label className="calcada-trace-panel-check">
         <input

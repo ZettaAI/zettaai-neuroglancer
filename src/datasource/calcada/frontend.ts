@@ -4019,9 +4019,6 @@ class ZettaTraceSession extends RefCounted {
       this.layer.manager.root.globalPosition.value =
         Float32Array.from(midpoint);
     }
-    if (this.state.zoomOnCandidate.value) {
-      framePerspective(this.layer, pointA, pointB);
-    }
   }
 
   // The banner keeps to what a verdict turns on; interfaces and depth stay in
@@ -5489,12 +5486,7 @@ class CandidateOverviewSession extends RefCounted {
       }
       globalPosition.value = center;
     }
-    if (
-      sphere === undefined ||
-      !this.connection.state.zettaTraceState.zoomOnCandidate.value
-    ) {
-      return;
-    }
+    if (sphere === undefined) return;
     const [x, y, z] = sphere.center;
     const edgeA = nanometresToGlobal(
       [x - sphere.radiusNm, y, z],
@@ -5504,8 +5496,6 @@ class CandidateOverviewSession extends RefCounted {
       [x + sphere.radiusNm, y, z],
       coordinateSpace.value,
     );
-    // The trace's zoom setting, shared: a proofreader who keeps their own 3D
-    // scale while tracing wants to keep it here too.
     if (edgeA !== undefined && edgeB !== undefined) {
       framePerspective(this.layer, edgeA, edgeB);
     }

@@ -43,6 +43,14 @@ describe("ZettaTraceState", () => {
     restored.dispose();
   });
 
+  it("ignores an old link's zoom setting and never writes one", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ zoomOnCandidate: false });
+    expect(state).not.toHaveProperty("zoomOnCandidate");
+    expect(JSON.stringify(state.toJSON())).not.toContain("zoomOnCandidate");
+    state.dispose();
+  });
+
   it("keeps the trace alive while aiming over it", () => {
     const state = new ZettaTraceState();
     state.active.value = true;

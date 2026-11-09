@@ -358,6 +358,14 @@ describe("CalcadaTracePanel", () => {
     );
   });
 
+  it("offers no option to zoom the 3D view to each candidate", async () => {
+    await mountPanel(await makeConnection());
+    await vi.waitFor(() =>
+      expect(tab.textContent).toContain("Centre on each candidate"),
+    );
+    expect(tab.textContent).not.toContain("Zoom the 3D view");
+  });
+
   it("shows split error points while tracing when the box is ticked", async () => {
     const connection = await makeConnection();
     await mountPanel(connection);
