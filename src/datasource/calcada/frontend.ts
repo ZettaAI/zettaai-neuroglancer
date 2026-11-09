@@ -3161,8 +3161,8 @@ class ZettaTraceSession extends RefCounted {
       radiusNm: () => state.endRadiusNm.value,
       branchId: () => this.branchId,
       write: (row, branchId) => connection.traceEndpoints.write(branchId, row),
-      remove: (rowId, branchId) =>
-        connection.traceEndpoints.remove(branchId, rowId),
+      remove: (rowId, status, branchId) =>
+        connection.traceEndpoints.remove(branchId, status, rowId),
       continueWith: (candidate, depth) => {
         const passes = this.candidateVerdicts()(candidate) === true;
         this.pool = continueAt(this.pool, candidate, depth, passes);

@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { TraceEndpointRow } from "#src/datasource/calcada/trace_endpoint_table.js";
 import {
   TRACE_ENDPOINT_SCHEMA,
-  TRACE_ENDPOINTS_TABLE,
+  TRACE_ENDPOINTS_TABLES,
   TraceEndpointTable,
 } from "#src/datasource/calcada/trace_endpoint_table.js";
 import { HttpError } from "#src/util/http_request.js";
@@ -55,8 +55,9 @@ function fakeFetch(server: FakeServer) {
       return json({ points: [{ name: "pt", role: 0 }], json_schema: {} });
     }
     if (init?.method === "POST" && url.endsWith("/annotation/tables")) {
-      posts.push({ url, body: JSON.parse(String(init.body)) });
-      if (server.createAdds) server.tables.push(TRACE_ENDPOINTS_TABLE);
+      const body = JSON.parse(String(init.body));
+      posts.push({ url, body });
+      if (server.createAdds) server.tables.push(body.table_name);
       if (server.createStatus === HTTP_CONFLICT) {
         throw HttpError.fromResponse(
           new Response(JSON.stringify({ message: "exists" }), {
@@ -88,6 +89,10 @@ const ROW: TraceEndpointRow = {
   position: Float32Array.of(80, 120, 800),
 };
 
+const CERTAIN_ROW: TraceEndpointRow = { ...ROW, status: "certain" };
+const UNCERTAIN_TABLE = TRACE_ENDPOINTS_TABLES.uncertain;
+const CERTAIN_TABLE = TRACE_ENDPOINTS_TABLES.certain;
+
 const newServer = (overrides: Partial<FakeServer> = {}): FakeServer => ({
   tables: [],
   createStatus: undefined,
@@ -113,7 +118,9 @@ function makeTable(
   return { table, fetchOk, posts, tablesSession };
 }
 
-const rowUrl = `${BASE}/annotation/tables/${TRACE_ENDPOINTS_TABLE}/annotations?branch_id=${BRANCH}`;
+const rowsUrl = (table: string) =>
+  `${BASE}/annotation/tables/${table}/annotations?branch_id=${BRANCH}`;
+const rowUrl = rowsUrl(UNCERTAIN_TABLE);
 
 describe("TraceEndpointTable", () => {
   it("creates the table on first write, then writes the row on the branch", async () => {
@@ -123,7 +130,7 @@ describe("TraceEndpointTable", () => {
       {
         url: `${BASE}/annotation/tables`,
         body: {
-          table_name: TRACE_ENDPOINTS_TABLE,
+          table_name: UNCERTAIN_TABLE,
           schema_type: TRACE_ENDPOINT_SCHEMA,
           schema_version: 1,
           voxel_resolution: RESOLUTION,
@@ -151,14 +158,14 @@ describe("TraceEndpointTable", () => {
       },
     ]);
     expect(tablesSession.rowWritten).toHaveBeenCalledWith(
-      TRACE_ENDPOINTS_TABLE,
+      UNCERTAIN_TABLE,
       BigInt(ROW_ID),
     );
   });
 
   it("takes an existing table without creating it", async () => {
     const { table, posts } = makeTable(
-      newServer({ tables: [TRACE_ENDPOINTS_TABLE] }),
+      newServer({ tables: [UNCERTAIN_TABLE] }),
     );
     await table.write(BRANCH, ROW);
     expect(posts.map(({ url }) => url)).toEqual([rowUrl]);
@@ -177,9 +184,7 @@ describe("TraceEndpointTable", () => {
 
   it("rejects naming the table when it is still absent after a create", async () => {
     const { table, posts } = makeTable(newServer({ createAdds: false }));
-    await expect(table.write(BRANCH, ROW)).rejects.toThrow(
-      TRACE_ENDPOINTS_TABLE,
-    );
+    await expect(table.write(BRANCH, ROW)).rejects.toThrow(UNCERTAIN_TABLE);
     expect(posts).toHaveLength(1);
   });
 
@@ -201,6 +206,29 @@ describe("TraceEndpointTable", () => {
     expect(posts.at(-1)?.url).toBe(rowUrl);
   });
 
+  it("certain and uncertain ends go to their own tables", async () => {
+    const { table, posts, tablesSession } = makeTable(newServer());
+    await table.write(BRANCH, CERTAIN_ROW);
+    await table.write(BRANCH, ROW);
+    expect(posts.map(({ url, body }) => body.table_name ?? url)).toEqual([
+      CERTAIN_TABLE,
+      rowsUrl(CERTAIN_TABLE),
+      UNCERTAIN_TABLE,
+      rowUrl,
+    ]);
+    expect(tablesSession.rowWritten.mock.calls.map(([name]) => name)).toEqual([
+      CERTAIN_TABLE,
+      UNCERTAIN_TABLE,
+    ]);
+  });
+
+  it("a certain end is removed from the certain table", async () => {
+    const { table, posts, tablesSession } = makeTable(newServer());
+    await table.remove(BRANCH, "certain", 5n);
+    expect(posts.map(({ url }) => url)).toEqual([rowsUrl(CERTAIN_TABLE)]);
+    expect(tablesSession.rowRemoved).toHaveBeenCalledWith(CERTAIN_TABLE, 5n);
+  });
+
   it("refuses when the point cannot be converted", async () => {
     const { table, fetchOk } = makeTable(newServer(), {
       toNanometres: () => undefined,
@@ -211,11 +239,8 @@ describe("TraceEndpointTable", () => {
 
   it("remove deletes on the branch and tells the tables session", async () => {
     const { table, posts, tablesSession } = makeTable(newServer());
-    await table.remove(BRANCH, 5n);
+    await table.remove(BRANCH, "uncertain", 5n);
     expect(posts).toEqual([{ url: rowUrl, body: { ids: ["5"] } }]);
-    expect(tablesSession.rowRemoved).toHaveBeenCalledWith(
-      TRACE_ENDPOINTS_TABLE,
-      5n,
-    );
+    expect(tablesSession.rowRemoved).toHaveBeenCalledWith(UNCERTAIN_TABLE, 5n);
   });
 });
