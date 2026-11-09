@@ -44,6 +44,8 @@ export interface TraceEndActions {
   uncertain(): void;
   deeper(): void;
   back(): void;
+  shrink(): void;
+  grow(): void;
 }
 
 export interface TraceNoticeSource {
@@ -131,6 +133,24 @@ function TraceEndPrompt({
               aria-hidden
             />
             Orange sphere: this end; look deeper stays inside it
+          </div>
+          <div className="calcada-trace-notice-radius">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={!prompt.canShrink}
+              onClick={actions.shrink}
+            >
+              Smaller
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={!prompt.canGrow}
+              onClick={actions.grow}
+            >
+              Larger
+            </Button>
           </div>
           <div className="calcada-trace-notice-buttons">
             <PromptButton

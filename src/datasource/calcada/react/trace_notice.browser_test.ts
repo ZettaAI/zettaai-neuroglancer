@@ -42,6 +42,8 @@ function endActions() {
     uncertain: vi.fn(),
     deeper: vi.fn(),
     back: vi.fn(),
+    shrink: vi.fn(),
+    grow: vi.fn(),
   };
 }
 
@@ -51,6 +53,8 @@ const openPrompt: TraceEndPromptView = {
   threshold: 0.3,
   canGoDeeper: true,
   canGoBack: true,
+  canShrink: true,
+  canGrow: false,
   endPoint: new Float32Array(3),
   endPointKnown: true,
 };
@@ -152,7 +156,9 @@ describe("CalcadaTraceNotice", () => {
     );
     expect(host.textContent).toContain("Score ≥ 0.30");
     expect(
-      [...host.querySelectorAll("button")].map((b) => b.textContent),
+      [...host.querySelectorAll(".calcada-trace-notice-buttons button")].map(
+        (b) => b.textContent,
+      ),
     ).toEqual(
       ["Certain end→", "Uncertain end←", "Look deeper↓", "Back↑"].map((text) =>
         expect.stringContaining(text.slice(0, -1)),
@@ -180,6 +186,14 @@ describe("CalcadaTraceNotice", () => {
       ".calcada-trace-notice-swatch",
     );
     expect(swatch?.style.backgroundColor).toBe(sphereCssColor(END_SPHERE_RGB));
+  });
+
+  it("makes the sphere smaller or larger as far as each may go", async () => {
+    const actions = await mountPrompt(openPrompt);
+    expect(button("Smaller").disabled).toBe(false);
+    expect(button("Larger").disabled).toBe(true);
+    button("Smaller").click();
+    expect(actions.shrink).toHaveBeenCalledOnce();
   });
 
   it("disables Look deeper at 0 and Back at the start", async () => {

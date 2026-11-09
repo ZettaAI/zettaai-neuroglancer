@@ -41,7 +41,9 @@ import type {
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 import {
+  clampTraceEndRadiusNm,
   clampTraceSphereRadiusNm,
+  TRACE_END_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
@@ -485,12 +487,12 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
         </span>
         <FilterNumberInput
           min={TRACE_SPHERE_RADIUS_MIN_NM}
-          max={TRACE_SPHERE_RADIUS_MAX_NM}
+          max={TRACE_END_RADIUS_MAX_NM}
           step={100}
           title="After each decision, asks whether the line ends when no passing candidate lies within this radius."
           value={Math.round(endRadiusNm)}
           onValueChange={(next) => {
-            traceState.endRadiusNm.value = clampTraceSphereRadiusNm(next);
+            traceState.endRadiusNm.value = clampTraceEndRadiusNm(next);
           }}
         />
       </label>

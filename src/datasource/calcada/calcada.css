@@ -498,6 +498,7 @@
   opacity: 1;
 }
 
+.calcada-trace-notice-radius,
 .calcada-trace-notice-buttons {
   display: flex;
   flex-wrap: wrap;

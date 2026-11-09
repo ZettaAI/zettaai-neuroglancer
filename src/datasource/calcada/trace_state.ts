@@ -49,6 +49,8 @@ export const TRACE_SPHERE_RADIUS_DEFAULT_NM = 2000;
 export const TRACE_SPHERE_RADIUS_MIN_NM = 100;
 export const TRACE_SPHERE_RADIUS_MAX_NM = 50000;
 export const TRACE_END_RADIUS_DEFAULT_NM = 1000;
+/** An end is looked for no wider than this; a prompt may only narrow it. */
+export const TRACE_END_RADIUS_MAX_NM = TRACE_END_RADIUS_DEFAULT_NM;
 const RADIUS_STEP_FACTOR = 1.25;
 
 export function clampTraceSphereRadiusNm(radiusNm: number): number {
@@ -67,6 +69,10 @@ export function stepTraceSphereRadiusNm(
       ? radiusNm * RADIUS_STEP_FACTOR
       : radiusNm / RADIUS_STEP_FACTOR;
   return clampTraceSphereRadiusNm(next);
+}
+
+export function clampTraceEndRadiusNm(radiusNm: number): number {
+  return Math.min(TRACE_END_RADIUS_MAX_NM, clampTraceSphereRadiusNm(radiusNm));
 }
 
 const TRACE_SCOPE_KEY = "scope";
@@ -393,9 +399,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       this.sphereRadiusNm.value = verifyFiniteFloat(value);
     });
     verifyOptionalObjectProperty(x, TRACE_END_RADIUS_KEY, (value) => {
-      this.endRadiusNm.value = clampTraceSphereRadiusNm(
-        verifyFiniteFloat(value),
-      );
+      this.endRadiusNm.value = clampTraceEndRadiusNm(verifyFiniteFloat(value));
     });
     verifyOptionalObjectProperty(x, TRACE_SPHERE_CENTER_KEY, (value) => {
       this.sphereCenter.value = Float32Array.from(

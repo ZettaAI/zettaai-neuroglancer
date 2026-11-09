@@ -3083,6 +3083,8 @@ class ZettaTraceSession extends RefCounted {
     uncertain: () => this.endController.answer("uncertain"),
     deeper: () => void this.endController.deeper(),
     back: () => void this.endController.back(),
+    shrink: () => void this.endController.shrink(),
+    grow: () => void this.endController.grow(),
   };
 
   constructor(
