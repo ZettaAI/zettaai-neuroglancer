@@ -1,17 +1,19 @@
 import { errorMessage } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import type { Verdict } from "#src/datasource/calcada/candidate_filter_tree.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
-import type {
-  CheckOutcome,
-  TraceDecision,
-} from "#src/datasource/calcada/trace_end_check.js";
+import type { EndSphere } from "#src/datasource/calcada/trace_cursor/end_sphere.js";
+import type { CheckOutcome } from "#src/datasource/calcada/trace_end_check.js";
 import {
   checkOutcome,
   endPointOf,
   lowerEndThreshold,
   raiseEndThreshold,
 } from "#src/datasource/calcada/trace_end_check.js";
-import type { TraceEndpointRow } from "#src/datasource/calcada/trace_endpoint_table.js";
+import type {
+  TraceEndpointRow,
+  TraceEndStatus,
+} from "#src/datasource/calcada/trace_endpoint_table.js";
+import { stepTraceSphereRadiusNm } from "#src/datasource/calcada/trace_state.js";
 
 export interface TraceEndPromptView {
   phase: "checking" | "open";
@@ -19,6 +21,8 @@ export interface TraceEndPromptView {
   threshold: number;
   canGoDeeper: boolean;
   canGoBack: boolean;
+  canShrink: boolean;
+  canGrow: boolean;
   endPoint: Float32Array;
   /** False while the first check still looks for where the end is. */
   endPointKnown: boolean;
@@ -30,12 +34,6 @@ export interface TraceEndDeps {
     center: Float32Array,
     radiusNm: number,
   ): Promise<EdgeCandidate[]>;
-  /** Where the branch ends after `candidate` merged into `mergedRoot`; undefined = at the contact. */
-  acceptEndPoint(
-    candidate: EdgeCandidate,
-    mergedRoot: bigint,
-    radiusNm: number,
-  ): Promise<Float32Array | undefined>;
   insideEndSphere(
     point: Float32Array,
     center: Float32Array,
@@ -52,7 +50,11 @@ export interface TraceEndDeps {
   radiusNm(): number;
   branchId(): number;
   write(row: TraceEndpointRow, branchId: number): Promise<bigint>;
-  remove(rowId: bigint, branchId: number): Promise<void>;
+  remove(
+    rowId: bigint,
+    status: TraceEndStatus,
+    branchId: number,
+  ): Promise<void>;
   /** Push onto the pool head if absent and show it. */
   continueWith(candidate: EdgeCandidate, depth: number): void;
   showNext(): void;
@@ -67,14 +69,33 @@ const CHILDREN_READ_ERROR = "Could not read the merged piece's candidates";
 const SPHERE_READ_ERROR = "Could not look for candidates around the trace end";
 
 interface EndCheck {
-  after: TraceDecision;
-  lineId: bigint;
+  /** The rejected candidate's; undefined at the seed sphere. */
+  lineId: bigint | undefined;
   endPoint: Float32Array;
   radiusNm: number;
+  /** What `found` was read with; the sphere can shrink below it and grow back. */
+  readRadiusNm: number;
   startThreshold: number;
   continueDepth: number;
   found: readonly EdgeCandidate[];
   decided: ReadonlySet<bigint>;
+}
+
+/** A look deeper that went on: what is left in its sphere belongs to its end. */
+interface DeeperRound {
+  check: EndCheck;
+  threshold: number;
+}
+
+function smallerEndRadiusNm(radiusNm: number): number {
+  return stepTraceSphereRadiusNm(radiusNm, -1);
+}
+
+function largerEndRadiusNm(check: EndCheck): number {
+  return Math.min(
+    check.readRadiusNm,
+    stepTraceSphereRadiusNm(check.radiusNm, 1),
+  );
 }
 
 interface PreparedReject {
@@ -88,6 +109,7 @@ type HistoryEntry =
   | {
       kind: "endpoint";
       check: EndCheck;
+      status: TraceEndStatus;
       threshold: number;
       branchId: number;
       rowId: Promise<bigint | undefined>;
@@ -98,19 +120,29 @@ export class TraceEndController {
   prompt: TraceEndPromptView | undefined;
   private check: EndCheck | undefined;
   private threshold = 0;
-  /** Where look deeper continued the trace; later checks in it start there. */
-  private reachedThreshold: number | undefined;
+  private round: DeeperRound | undefined;
   private token = 0;
   private history: HistoryEntry[] = [];
   private prepared: PreparedReject | undefined;
 
   constructor(private readonly deps: TraceEndDeps) {}
 
+  /** The open prompt's sphere, else the look-deeper round's. */
+  get endSphere(): EndSphere | undefined {
+    const prompt = this.prompt;
+    if (prompt?.endPointKnown) {
+      return { center: prompt.endPoint, radiusNm: prompt.radiusNm };
+    }
+    const check = this.round?.check;
+    return check && { center: check.endPoint, radiusNm: check.radiusNm };
+  }
+
   get isAnswering(): boolean {
     return this.prompt?.phase === "open";
   }
 
   prepare(candidate: EdgeCandidate, seedRoot: bigint): void {
+    if (this.round !== undefined) return;
     const radiusNm = this.deps.radiusNm();
     this.prepared = {
       lineId: candidate.lineId,
@@ -125,101 +157,182 @@ export class TraceEndController {
     this.prepared = undefined;
   }
 
-  /** `seedRoot` is the seed before the merge: a child leading into it is now inside. */
-  afterAccept(
+  /**
+   * Asks for an end only inside a look-deeper round. `seedRoot` is the seed
+   * before the merge: a child leading into it is now inside.
+   */
+  async afterAccept(
     candidate: EdgeCandidate,
     children: Promise<readonly EdgeCandidate[]>,
     seedRoot: bigint,
-    mergedRoot: bigint,
     depth: number,
     decided: ReadonlySet<bigint>,
   ): Promise<void> {
-    return this.checkEnd(
-      "accept",
-      candidate,
-      depth,
-      decided,
-      CHILDREN_READ_ERROR,
-      async () =>
-        (await children).filter((child) => child.partnerRootId !== seedRoot),
-      (radiusNm) => this.deps.acceptEndPoint(candidate, mergedRoot, radiusNm),
+    const token = this.invalidate();
+    const round = this.round;
+    this.showChecking(
+      this.deps.radiusNm(),
+      round?.threshold ?? this.deps.startThreshold(),
+      endPointOf("accept", candidate),
+      false,
     );
+    try {
+      const found = (await children).filter(
+        (child) => child.partnerRootId !== seedRoot,
+      );
+      if (token !== this.token) return;
+      const outcome = await this.outcomeAt(found, decided, undefined, token);
+      if (outcome === undefined) return;
+      if (outcome.kind === "continue") {
+        if (
+          round !== undefined &&
+          !this.inSphere(round.check, outcome.candidate)
+        ) {
+          this.round = undefined;
+        }
+        this.continueWith(outcome.candidate, depth + 1);
+        return;
+      }
+      if (round === undefined) {
+        this.close();
+        return;
+      }
+      const inRound = found.filter((child) =>
+        this.inSphere(round.check, child),
+      );
+      const deeper = await this.outcomeAt(
+        inRound,
+        decided,
+        round.threshold,
+        token,
+      );
+      if (deeper === undefined) return;
+      if (deeper.kind === "continue") {
+        this.continueWith(deeper.candidate, depth + 1);
+      } else {
+        await this.nextInRound(round, decided, token);
+      }
+    } catch (error) {
+      if (token !== this.token) return;
+      this.deps.reportError(`${CHILDREN_READ_ERROR}: ${errorMessage(error)}`);
+      this.close();
+    }
   }
 
-  afterReject(
+  async afterReject(
     candidate: EdgeCandidate,
     seedRoot: bigint,
     depth: number,
     decided: ReadonlySet<bigint>,
   ): Promise<void> {
-    return this.checkEnd(
-      "reject",
-      candidate,
+    if (this.round !== undefined) {
+      this.prepared = undefined;
+      await this.nextInRound(this.round, decided, this.invalidate());
+      return;
+    }
+    await this.checkAround(
+      endPointOf("reject", candidate),
+      candidate.lineId,
       depth,
       decided,
-      SPHERE_READ_ERROR,
       (endPoint, radiusNm) =>
         this.foundAround(candidate, seedRoot, endPoint, radiusNm),
     );
   }
 
-  private async checkEnd(
-    after: TraceDecision,
-    candidate: EdgeCandidate,
+  /** When nothing in the seed sphere passes: the end is asked for at its centre. */
+  atSeed(
+    center: Float32Array,
+    seedRoot: bigint,
+    decided: ReadonlySet<bigint>,
+  ): Promise<void> {
+    return this.checkAround(
+      center,
+      undefined,
+      0,
+      decided,
+      (endPoint, radiusNm) =>
+        this.deps.fetchAround(seedRoot, endPoint, radiusNm),
+    );
+  }
+
+  private async checkAround(
+    endPoint: Float32Array,
+    lineId: bigint | undefined,
     depth: number,
     decided: ReadonlySet<bigint>,
-    lookUpError: string,
     lookUp: (
       endPoint: Float32Array,
       radiusNm: number,
     ) => Promise<readonly EdgeCandidate[]>,
-    endPointIfEnded?: (radiusNm: number) => Promise<Float32Array | undefined>,
   ): Promise<void> {
     const token = this.invalidate();
-    const endPoint = endPointOf(after, candidate);
     const radiusNm = this.deps.radiusNm();
-    const reached = this.reachedThreshold;
-    const startThreshold = reached ?? this.deps.startThreshold();
+    const startThreshold = this.deps.startThreshold();
     this.showChecking(radiusNm, startThreshold, endPoint, false);
     try {
       const found = await lookUp(endPoint, radiusNm);
       if (token !== this.token) return;
-      const anywhereThreshold = after === "accept" ? undefined : reached;
-      let outcome = await this.outcomeAt(
-        found,
-        decided,
-        anywhereThreshold,
-        token,
-      );
+      const outcome = await this.outcomeAt(found, decided, undefined, token);
       if (outcome === undefined) return;
-      let checkedEndPoint = endPoint;
-      let considered = found;
-      if (outcome.kind !== "continue" && endPointIfEnded !== undefined) {
-        checkedEndPoint =
-          (await endPointIfEnded(radiusNm).catch(() => undefined)) ?? endPoint;
-        if (token !== this.token) return;
-        considered = this.nearEnd(found, checkedEndPoint, radiusNm);
-        if (reached !== undefined) {
-          outcome = await this.outcomeAt(considered, decided, reached, token);
-          if (outcome === undefined) return;
-        }
-      }
       this.check = {
-        after,
-        lineId: candidate.lineId,
-        endPoint: checkedEndPoint,
+        lineId,
+        endPoint,
         radiusNm,
+        readRadiusNm: radiusNm,
         startThreshold,
-        continueDepth: after === "accept" ? depth + 1 : depth,
-        found: considered,
+        continueDepth: depth,
+        found,
         decided,
       };
       this.settle(outcome, startThreshold);
     } catch (error) {
       if (token !== this.token) return;
-      this.deps.reportError(`${lookUpError}: ${errorMessage(error)}`);
+      this.deps.reportError(`${SPHERE_READ_ERROR}: ${errorMessage(error)}`);
       this.close();
     }
+  }
+
+  /** The round's best candidate left, else its end asked for again. */
+  private async nextInRound(
+    { check, threshold }: DeeperRound,
+    decided: ReadonlySet<bigint>,
+    token: number,
+  ): Promise<void> {
+    this.showChecking(check.radiusNm, threshold, check.endPoint, true);
+    const outcome = await this.outcomeAt(
+      this.candidatesIn(check),
+      decided,
+      threshold,
+      token,
+    );
+    if (outcome === undefined) return;
+    if (outcome.kind === "continue") {
+      this.continueWith(outcome.candidate, check.continueDepth);
+      return;
+    }
+    this.check = { ...check, decided };
+    this.open(threshold);
+  }
+
+  private candidatesIn(check: EndCheck): readonly EdgeCandidate[] {
+    if (check.radiusNm >= check.readRadiusNm) return check.found;
+    return check.found.filter((candidate) => this.inSphere(check, candidate));
+  }
+
+  private inSphere(check: EndCheck, candidate: EdgeCandidate): boolean {
+    return (
+      this.deps.insideEndSphere(
+        candidate.pointA,
+        check.endPoint,
+        check.radiusNm,
+      ) ||
+      this.deps.insideEndSphere(
+        candidate.pointB,
+        check.endPoint,
+        check.radiusNm,
+      )
+    );
   }
 
   /** undefined when the check was superseded or closed. */
@@ -233,18 +346,6 @@ export class TraceEndController {
     const outcome = checkOutcome(found, decided, verdict);
     if (outcome.kind !== "waiting") return outcome;
     return this.filledOutcome(found, decided, threshold, verdict, token);
-  }
-
-  private nearEnd(
-    found: readonly EdgeCandidate[],
-    endPoint: Float32Array,
-    radiusNm: number,
-  ): EdgeCandidate[] {
-    return found.filter(
-      (candidate) =>
-        this.deps.insideEndSphere(candidate.pointA, endPoint, radiusNm) ||
-        this.deps.insideEndSphere(candidate.pointB, endPoint, radiusNm),
-    );
   }
 
   private foundAround(
@@ -289,7 +390,7 @@ export class TraceEndController {
     return undefined;
   }
 
-  answer(status: TraceEndpointRow["status"]): void {
+  answer(status: TraceEndStatus): void {
     const check = this.check;
     if (!this.isAnswering || check === undefined) return;
     const branchId = this.deps.branchId();
@@ -299,9 +400,11 @@ export class TraceEndController {
           status,
           threshold: this.threshold,
           radiusNm: check.radiusNm,
-          after: check.after,
-          lineId: check.lineId,
           position: check.endPoint,
+          ...(check.lineId !== undefined && {
+            after: "reject",
+            lineId: check.lineId,
+          }),
         },
         branchId,
       )
@@ -314,6 +417,7 @@ export class TraceEndController {
     this.history.push({
       kind: "endpoint",
       check,
+      status,
       threshold: this.threshold,
       branchId,
       rowId,
@@ -323,30 +427,51 @@ export class TraceEndController {
   }
 
   deeper(): Promise<void> {
-    return this.retryAt(lowerEndThreshold(this.threshold));
+    return this.recheck(
+      lowerEndThreshold(this.threshold),
+      this.check?.radiusNm,
+    );
   }
 
   back(): Promise<void> {
     const check = this.check;
     if (check === undefined) return Promise.resolve();
-    return this.retryAt(
+    return this.recheck(
       raiseEndThreshold(this.threshold, check.startThreshold),
+      check.radiusNm,
     );
   }
 
-  private async retryAt(threshold: number) {
+  shrink(): Promise<void> {
     const check = this.check;
-    if (!this.isAnswering || check === undefined) return;
-    if (threshold === this.threshold) return;
+    if (check === undefined) return Promise.resolve();
+    return this.recheck(this.threshold, smallerEndRadiusNm(check.radiusNm));
+  }
+
+  grow(): Promise<void> {
+    const check = this.check;
+    if (check === undefined) return Promise.resolve();
+    return this.recheck(this.threshold, largerEndRadiusNm(check));
+  }
+
+  private async recheck(threshold: number, radiusNm: number | undefined) {
+    const current = this.check;
+    if (!this.isAnswering || current === undefined || radiusNm === undefined) {
+      return;
+    }
+    if (threshold === this.threshold && radiusNm === current.radiusNm) return;
+    const check = { ...current, radiusNm };
+    this.check = check;
+    const candidates = this.candidatesIn(check);
     const verdict = this.deps.verdict(threshold);
-    const outcome = checkOutcome(check.found, check.decided, verdict);
+    const outcome = checkOutcome(candidates, check.decided, verdict);
     if (outcome.kind !== "waiting") {
       this.settle(outcome, threshold);
       return;
     }
     this.showChecking(check.radiusNm, threshold, check.endPoint, true);
     const filled = await this.filledOutcome(
-      check.found,
+      candidates,
       check.decided,
       threshold,
       verdict,
@@ -357,8 +482,15 @@ export class TraceEndController {
 
   dismiss(): void {
     this.prepared = undefined;
-    if (this.prompt !== undefined) this.close();
-    else this.invalidate();
+    if (this.prompt !== undefined) {
+      this.close();
+      return;
+    }
+    this.invalidate();
+    if (this.round !== undefined) {
+      this.round = undefined;
+      this.deps.changed();
+    }
   }
 
   async undo(): Promise<boolean> {
@@ -372,7 +504,7 @@ export class TraceEndController {
     const rowId = await newest.rowId;
     try {
       if (rowId !== undefined) {
-        await this.deps.remove(rowId, newest.branchId);
+        await this.deps.remove(rowId, newest.status, newest.branchId);
       }
     } catch (error) {
       this.deps.reportError(
@@ -383,6 +515,7 @@ export class TraceEndController {
       return true;
     }
     if (token !== this.token) return true;
+    this.round = undefined;
     this.check = newest.check;
     this.open(newest.threshold);
     return true;
@@ -408,7 +541,7 @@ export class TraceEndController {
     this.invalidate();
     this.history = [];
     this.prepared = undefined;
-    this.reachedThreshold = undefined;
+    this.round = undefined;
     this.setPrompt(undefined);
   }
 
@@ -417,11 +550,16 @@ export class TraceEndController {
       this.open(threshold);
       return;
     }
-    const { continueDepth, startThreshold } = this.check!;
-    if (threshold < startThreshold) this.reachedThreshold = threshold;
+    const check = this.check!;
+    this.round =
+      threshold < check.startThreshold ? { check, threshold } : undefined;
+    this.continueWith(outcome.candidate, check.continueDepth);
+  }
+
+  private continueWith(candidate: EdgeCandidate, depth: number) {
     this.invalidate();
     this.setPrompt(undefined);
-    this.deps.continueWith(outcome.candidate, continueDepth);
+    this.deps.continueWith(candidate, depth);
   }
 
   private open(threshold: number) {
@@ -433,6 +571,8 @@ export class TraceEndController {
       threshold,
       canGoDeeper: lowerEndThreshold(threshold) < threshold,
       canGoBack: raiseEndThreshold(threshold, check.startThreshold) > threshold,
+      canShrink: smallerEndRadiusNm(check.radiusNm) < check.radiusNm,
+      canGrow: largerEndRadiusNm(check) > check.radiusNm,
       endPoint: check.endPoint,
       endPointKnown: true,
     });
@@ -450,12 +590,15 @@ export class TraceEndController {
       threshold,
       canGoDeeper: false,
       canGoBack: false,
+      canShrink: false,
+      canGrow: false,
       endPoint,
       endPointKnown,
     });
   }
 
   private close() {
+    this.round = undefined;
     this.invalidate();
     this.setPrompt(undefined);
     this.deps.showNext();

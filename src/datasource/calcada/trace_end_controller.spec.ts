@@ -6,13 +6,15 @@ import type { TraceDecision } from "#src/datasource/calcada/trace_end_check.js";
 import { END_THRESHOLD_STEP } from "#src/datasource/calcada/trace_end_check.js";
 import type { TraceEndDeps } from "#src/datasource/calcada/trace_end_controller.js";
 import { TraceEndController } from "#src/datasource/calcada/trace_end_controller.js";
-import type { TraceEndpointRow } from "#src/datasource/calcada/trace_endpoint_table.js";
+import type {
+  TraceEndpointRow,
+  TraceEndStatus,
+} from "#src/datasource/calcada/trace_endpoint_table.js";
+import { TRACE_SPHERE_RADIUS_MIN_NM } from "#src/datasource/calcada/trace_state.js";
 
 const START_THRESHOLD = 0.3;
 const RADIUS_NM = 1000;
 const SEED_ROOT = 99n;
-const MERGED_ROOT = 77n;
-const FAR_END = new Float32Array([40, 50, 60]);
 const DEPTH = 2;
 const MAIN_BRANCH = 0;
 const OTHER_BRANCH = 7;
@@ -87,6 +89,7 @@ class FakeDeps implements TraceEndDeps {
   }[] = [];
   removed: bigint[] = [];
   removedOn: number[] = [];
+  removedFrom: TraceEndStatus[] = [];
   branch = MAIN_BRANCH;
   removeFails = false;
   continued: { candidate: EdgeCandidate; depth: number }[] = [];
@@ -97,25 +100,10 @@ class FakeDeps implements TraceEndDeps {
   graphFillLeavesUnknown = false;
   verdictThresholds: (number | undefined)[] = [];
   mark: unknown = "edit-1";
-  farEndReads: {
-    candidate: EdgeCandidate;
-    mergedRoot: bigint;
-    radiusNm: number;
-    result: Deferred<Float32Array | undefined>;
-  }[] = [];
-  farEnd: Float32Array | undefined = undefined;
-  holdFarEnd = false;
 
   fetchAround(seedRoot: bigint, center: Float32Array, radiusNm: number) {
     const result = deferred<EdgeCandidate[]>();
     this.fetches.push({ seedRoot, center, radiusNm, result });
-    return result.promise;
-  }
-
-  acceptEndPoint(edge: EdgeCandidate, mergedRoot: bigint, radiusNm: number) {
-    const result = deferred<Float32Array | undefined>();
-    this.farEndReads.push({ candidate: edge, mergedRoot, radiusNm, result });
-    if (!this.holdFarEnd) result.resolve(this.farEnd);
     return result.promise;
   }
 
@@ -162,9 +150,10 @@ class FakeDeps implements TraceEndDeps {
     return result.promise;
   }
 
-  async remove(rowId: bigint, branchId: number) {
+  async remove(rowId: bigint, status: TraceEndStatus, branchId: number) {
     if (this.removeFails) throw new Error("HTTP 409");
     this.removed.push(rowId);
+    this.removedFrom.push(status);
     this.removedOn.push(branchId);
   }
 
@@ -206,7 +195,6 @@ function acceptWith(
     DECIDED,
     Promise.resolve(children),
     SEED_ROOT,
-    MERGED_ROOT,
     DEPTH,
     decided,
   );
@@ -229,7 +217,7 @@ async function decide(
 }
 
 async function openPrompt(
-  after: TraceDecision = "accept",
+  after: TraceDecision = "reject",
   found: EdgeCandidate[] = [LOW],
 ) {
   const setup = setUp();
@@ -242,15 +230,19 @@ async function answerWithRow(
   deps: FakeDeps,
   rowId: bigint,
 ) {
-  await decide(controller, deps, "accept", []);
+  await decide(controller, deps, "reject", []);
   controller.answer("certain");
   deps.writes.at(-1)!.result.resolve(rowId);
 }
 
+const SHRUNK_RADIUS_NM = 800;
+const SEED_CENTER = Float32Array.of(3, 3, 3);
+const SHRINKS_TO_MIN = 20;
+
 const STEPS_TO_ZERO = Math.round(START_THRESHOLD / END_THRESHOLD_STEP);
 
 describe("TraceEndController", () => {
-  it("accept whose children all fail opens the prompt at pointB", async () => {
+  it("accept whose children all fail opens no prompt and shows the next candidate", async () => {
     const { deps, controller } = setUp();
     const done = acceptWith(controller, [LOW]);
     expect(controller.prompt).toMatchObject({
@@ -258,114 +250,11 @@ describe("TraceEndController", () => {
       endPointKnown: false,
     });
     await done;
-    expect(controller.prompt).toEqual({
-      phase: "open",
-      radiusNm: RADIUS_NM,
-      threshold: START_THRESHOLD,
-      canGoDeeper: true,
-      canGoBack: false,
-      endPoint: DECIDED.pointB,
-      endPointKnown: true,
-    });
-    expect(controller.isAnswering).toBe(true);
-    expect(deps.continued).toEqual([]);
-    expect(deps.shownNext).toBe(0);
-    expect(deps.changes).toBeGreaterThanOrEqual(2);
-  });
-
-  it("an accept that ends opens the prompt at the merged piece's far end and writes it there", async () => {
-    const { deps, controller } = setUp();
-    deps.farEnd = FAR_END;
-    await acceptWith(controller, [LOW]);
-    expect(
-      deps.farEndReads.map(({ candidate: edge, mergedRoot, radiusNm }) => ({
-        edge,
-        mergedRoot,
-        radiusNm,
-      })),
-    ).toEqual([
-      { edge: DECIDED, mergedRoot: MERGED_ROOT, radiusNm: RADIUS_NM },
-    ]);
-    expect(controller.prompt).toMatchObject({
-      phase: "open",
-      endPoint: FAR_END,
-    });
-    controller.answer("certain");
-    expect(deps.writes[0].row.position).toBe(FAR_END);
-  });
-
-  it("stays checking while the far end resolves", async () => {
-    const { deps, controller } = setUp();
-    deps.holdFarEnd = true;
-    const done = acceptWith(controller, [LOW]);
-    await settle();
-    expect(controller.prompt?.phase).toBe("checking");
-    deps.farEndReads[0].result.resolve(FAR_END);
-    await done;
-    expect(controller.prompt).toMatchObject({
-      phase: "open",
-      endPoint: FAR_END,
-    });
-  });
-
-  it("falls back to pointB when the far end is unknown or its read fails", async () => {
-    const unknown = setUp();
-    await acceptWith(unknown.controller, [LOW]);
-    expect(unknown.controller.prompt?.endPoint).toBe(DECIDED.pointB);
-
-    const failed = setUp();
-    failed.deps.holdFarEnd = true;
-    const done = acceptWith(failed.controller, [LOW]);
-    await settle();
-    failed.deps.farEndReads[0].result.reject(new Error("HTTP 500"));
-    await done;
-    expect(failed.controller.prompt).toMatchObject({
-      phase: "open",
-      endPoint: DECIDED.pointB,
-    });
-    expect(failed.deps.errors).toEqual([]);
-  });
-
-  it("a reset during the far-end read opens nothing", async () => {
-    const { deps, controller } = setUp();
-    deps.holdFarEnd = true;
-    const done = acceptWith(controller, [LOW]);
-    await settle();
-    controller.reset();
-    deps.farEndReads[0].result.resolve(FAR_END);
-    await done;
     expect(controller.prompt).toBeUndefined();
-    expect(deps.shownNext).toBe(0);
-  });
-
-  it("a new decision during the far-end read keeps its own prompt", async () => {
-    const { deps, controller } = setUp();
-    deps.holdFarEnd = true;
-    const accepted = acceptWith(controller, [LOW]);
-    await settle();
-    const rejected = controller.afterReject(
-      DECIDED,
-      SEED_ROOT,
-      DEPTH,
-      new Set(),
-    );
-    deps.farEndReads[0].result.resolve(FAR_END);
-    await accepted;
-    deps.fetches[0].result.resolve([]);
-    await rejected;
-    expect(controller.prompt).toMatchObject({
-      phase: "open",
-      endPoint: DECIDED.pointA,
-    });
-  });
-
-  it("reads no far end when the accept goes on or after a reject", async () => {
-    const { deps, controller } = setUp();
-    await decide(controller, deps, "accept", [
-      candidate({ lineId: 30n, score: 0.8 }),
-    ]);
-    await decide(controller, deps, "reject", []);
-    expect(deps.farEndReads).toEqual([]);
+    expect(controller.isAnswering).toBe(false);
+    expect(deps.continued).toEqual([]);
+    expect(deps.writes).toEqual([]);
+    expect(deps.shownNext).toBe(1);
   });
 
   it("accept with a passing child far from the contact opens no prompt", async () => {
@@ -389,14 +278,11 @@ describe("TraceEndController", () => {
     expect(deps.fetches.map((fetch) => fetch.center)).toEqual([DECIDED.pointA]);
     await acceptWith(controller, []);
     expect(deps.fetches).toHaveLength(1);
-    expect(controller.prompt).toMatchObject({
-      phase: "open",
-      endPoint: DECIDED.pointB,
-      radiusNm: RADIUS_NM,
-    });
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
   });
 
-  it("a child leading back into the seed does not keep the prompt shut", async () => {
+  it("a child leading back into the seed does not continue the trace", async () => {
     const { deps, controller } = setUp();
     const intoSeed = candidate({
       lineId: 30n,
@@ -405,10 +291,7 @@ describe("TraceEndController", () => {
     });
     await acceptWith(controller, [intoSeed]);
     expect(deps.continued).toEqual([]);
-    expect(controller.prompt).toMatchObject({
-      phase: "open",
-      endPoint: DECIDED.pointB,
-    });
+    expect(deps.shownNext).toBe(1);
   });
 
   it("a failed children read after an accept reports and shows the next candidate", async () => {
@@ -417,7 +300,6 @@ describe("TraceEndController", () => {
       DECIDED,
       Promise.reject(new Error("HTTP 503")),
       SEED_ROOT,
-      MERGED_ROOT,
       DEPTH,
       new Set(),
     );
@@ -458,7 +340,7 @@ describe("TraceEndController", () => {
   it("a candidate decided this session does not keep the prompt shut", async () => {
     const { deps, controller } = setUp();
     const skipped = candidate({ lineId: 30n, score: 0.8 });
-    await decide(controller, deps, "accept", [skipped], new Set([30n]));
+    await decide(controller, deps, "reject", [skipped], new Set([30n]));
     expect(deps.continued).toEqual([]);
     expect(controller.prompt?.phase).toBe("open");
   });
@@ -505,16 +387,16 @@ describe("TraceEndController", () => {
   });
 
   it("certain writes one row with status, threshold, radius, after and line id, then shows the next candidate", async () => {
-    const { deps, controller } = await openPrompt("accept");
+    const { deps, controller } = await openPrompt();
     controller.answer("certain");
     expect(deps.writes.map((write) => write.row)).toEqual([
       {
         status: "certain",
         threshold: START_THRESHOLD,
         radiusNm: RADIUS_NM,
-        after: "accept",
+        after: "reject",
         lineId: DECIDED.lineId,
-        position: DECIDED.pointB,
+        position: DECIDED.pointA,
       },
     ]);
     expect(controller.prompt).toBeUndefined();
@@ -559,80 +441,133 @@ describe("TraceEndController", () => {
     expect(controller.prompt?.phase).toBe("open");
   });
 
-  it("look deeper after an accept re-checks the children at the lower threshold", async () => {
-    const lower = candidate({ lineId: 30n, score: 0.22 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
-    const atStart = controller.prompt;
+  it("a reject while looking deeper goes on with the next candidate of the same sphere", async () => {
+    const first = candidate({ lineId: 30n, score: 0.22 });
+    const second = candidate({ lineId: 31n, score: 0.21 });
+    const { deps, controller } = await openPrompt("reject", [first, second]);
     controller.deeper();
-    expect(controller.prompt).not.toBe(atStart);
+    controller.deeper();
+    expect(deps.continued).toEqual([{ candidate: first, depth: DEPTH }]);
+
+    controller.prepare(first, SEED_ROOT);
+    await controller.afterReject(first, SEED_ROOT, DEPTH, new Set([30n]));
+    expect(deps.fetches).toHaveLength(1);
+    expect(deps.continued.at(-1)).toEqual({ candidate: second, depth: DEPTH });
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("a look-deeper round with nothing left reopens the prompt at its centre and threshold", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("reject", [lower]);
+    controller.deeper();
+    controller.deeper();
+    await controller.afterReject(lower, SEED_ROOT, DEPTH, new Set([30n]));
+    expect(deps.fetches).toHaveLength(1);
     expect(controller.prompt).toMatchObject({
       phase: "open",
-      threshold: 0.25,
-      canGoDeeper: true,
+      endPoint: DECIDED.pointA,
+      radiusNm: RADIUS_NM,
+      threshold: 0.2,
       canGoBack: true,
     });
-    controller.deeper();
-    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
-    expect(controller.prompt).toBeUndefined();
-    expect(deps.fetches).toEqual([]);
-    expect(deps.verdictThresholds.slice(-2)).toEqual([0.25, 0.2]);
-    expect(deps.fills).toEqual([]);
-    expect(deps.writes).toEqual([]);
+    controller.answer("certain");
+    expect(deps.writes[0].row).toMatchObject({
+      lineId: DECIDED.lineId,
+      position: DECIDED.pointA,
+      threshold: 0.2,
+    });
   });
 
-  it("look deeper after an accept skips children outside the end sphere", async () => {
-    const outside = new Float32Array([RADIUS_NM * 10, 0, 0]);
-    const far = candidate({
-      lineId: 31n,
-      score: 0.22,
-      pointA: outside,
-      pointB: outside,
-    });
-    const near = candidate({
-      lineId: 32n,
-      score: 0.12,
-      pointA: outside,
-      pointB: new Float32Array(FAR_END),
-    });
-    const { deps, controller } = setUp();
-    deps.farEnd = FAR_END;
-    await acceptWith(controller, [far, near]);
-    controller.deeper();
-    controller.deeper();
-    expect(deps.continued).toEqual([]);
-    expect(controller.prompt).toMatchObject({ phase: "open", threshold: 0.2 });
-    controller.deeper();
-    controller.deeper();
-    expect(deps.continued).toEqual([{ candidate: near, depth: DEPTH + 1 }]);
-  });
-
-  it("after look deeper continues, the next checks start at the lowered threshold", async () => {
+  it("looking deeper again keeps the round's sphere", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
+    const lowest = candidate({ lineId: 31n, score: 0.12 });
+    const { deps, controller } = await openPrompt("reject", [lower, lowest]);
     controller.deeper();
     controller.deeper();
-    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
-
-    const passingAtLowered = candidate({ lineId: 40n, score: 0.21 });
-    await decide(controller, deps, "reject", [passingAtLowered]);
-    expect(deps.continued.at(-1)).toEqual({
-      candidate: passingAtLowered,
-      depth: DEPTH,
-    });
-
-    await decide(controller, deps, "reject", [LOW]);
+    await controller.afterReject(lower, SEED_ROOT, DEPTH, new Set([30n]));
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued.at(-1)).toEqual({ candidate: lowest, depth: DEPTH });
+    await controller.afterReject(lowest, SEED_ROOT, DEPTH, new Set([30n, 31n]));
+    expect(deps.fetches).toHaveLength(1);
     expect(controller.prompt).toMatchObject({
       phase: "open",
-      threshold: 0.2,
-      canGoBack: false,
+      endPoint: DECIDED.pointA,
+      threshold: 0.1,
     });
-    controller.deeper();
-    expect(controller.prompt).toMatchObject({ threshold: 0.15 });
   });
 
-  it("after an accept the lowered threshold reaches only children in the end sphere", async () => {
+  it("an answer ends the look-deeper round", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
+    const { deps, controller } = await openPrompt("reject", [lower]);
+    controller.deeper();
+    controller.deeper();
+    await controller.afterReject(lower, SEED_ROOT, DEPTH, new Set([30n]));
+    controller.answer("uncertain");
+    await decide(controller, deps, "reject", [
+      candidate({ lineId: 40n, score: 0.21 }),
+    ]);
+    expect(deps.fetches).toHaveLength(2);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      threshold: START_THRESHOLD,
+    });
+  });
+
+  it("dismiss and a new trace end the look-deeper round", async () => {
+    for (const end of ["dismiss", "reset"] as const) {
+      const lower = candidate({ lineId: 30n, score: 0.22 });
+      const { deps, controller } = await openPrompt("reject", [lower]);
+      controller.deeper();
+      controller.deeper();
+      controller[end]();
+      await decide(controller, deps, "reject", [
+        candidate({ lineId: 40n, score: 0.21 }),
+      ]);
+      expect(deps.fetches).toHaveLength(2);
+      expect(controller.prompt).toMatchObject({
+        phase: "open",
+        threshold: START_THRESHOLD,
+      });
+    }
+  });
+
+  it("a failed read in a round ends it before the next candidate is shown", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("reject", [lower]);
+    controller.deeper();
+    controller.deeper();
+    await controller.afterAccept(
+      lower,
+      Promise.reject(new Error("HTTP 503")),
+      SEED_ROOT,
+      DEPTH,
+      new Set([30n]),
+    );
+    await decide(controller, deps, "reject", [
+      candidate({ lineId: 40n, score: 0.21 }),
+    ]);
+    expect(deps.fetches).toHaveLength(2);
+    expect(controller.prompt).toMatchObject({ threshold: START_THRESHOLD });
+  });
+
+  it("an accept in a round whose piece goes nowhere goes on with the round", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("reject", [lower]);
+    controller.deeper();
+    controller.deeper();
+    await acceptWith(controller, [], new Set([30n]));
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: DECIDED.pointA,
+      threshold: 0.2,
+    });
+    expect(deps.continued).toHaveLength(1);
+  });
+
+  it("an accept in a round goes on with a child in the sphere at the round's threshold", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("reject", [lower]);
     controller.deeper();
     controller.deeper();
     const outside = new Float32Array([RADIUS_NM * 10, 0, 0]);
@@ -642,30 +577,31 @@ describe("TraceEndController", () => {
       pointA: outside,
       pointB: outside,
     });
-    const farPassing = candidate({
-      lineId: 42n,
-      score: 0.5,
-      pointA: outside,
-      pointB: outside,
-    });
-
-    await acceptWith(controller, [far]);
-    expect(deps.continued).toHaveLength(1);
-    expect(controller.prompt).toMatchObject({ phase: "open", threshold: 0.2 });
-
-    await acceptWith(controller, [far, farPassing]);
+    const near = candidate({ lineId: 42n, score: 0.21 });
+    await acceptWith(controller, [far, near], new Set([30n]));
     expect(deps.continued.at(-1)).toEqual({
-      candidate: farPassing,
+      candidate: near,
       depth: DEPTH + 1,
     });
   });
 
-  it("a new trace forgets the lowered threshold", async () => {
+  it("an accept whose child leaves the sphere ends the round", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
+    const { deps, controller } = await openPrompt("reject", [lower]);
     controller.deeper();
     controller.deeper();
-    controller.reset();
+    const outside = new Float32Array([RADIUS_NM * 10, 0, 0]);
+    const leaving = candidate({
+      lineId: 41n,
+      score: 0.8,
+      pointA: outside,
+      pointB: outside,
+    });
+    await acceptWith(controller, [leaving], new Set([30n]));
+    expect(deps.continued.at(-1)).toEqual({
+      candidate: leaving,
+      depth: DEPTH + 1,
+    });
     await decide(controller, deps, "reject", [
       candidate({ lineId: 40n, score: 0.21 }),
     ]);
@@ -675,8 +611,152 @@ describe("TraceEndController", () => {
     });
   });
 
+  it("the end sphere is the open prompt's, then the round's while it goes on", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = setUp();
+    const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
+    expect(controller.endSphere).toBeUndefined();
+    deps.fetches[0].result.resolve([lower]);
+    await done;
+    const sphere = { center: DECIDED.pointA, radiusNm: RADIUS_NM };
+    expect(controller.endSphere).toEqual(sphere);
+    controller.deeper();
+    controller.deeper();
+    expect(controller.prompt).toBeUndefined();
+    expect(controller.endSphere).toEqual(sphere);
+    const checking = acceptWith(controller, [], new Set([30n]));
+    expect(controller.endSphere).toEqual(sphere);
+    await checking;
+    controller.answer("certain");
+    expect(controller.endSphere).toBeUndefined();
+  });
+
+  it("a dismiss while a round goes on tells that its sphere is gone", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("reject", [lower]);
+    controller.deeper();
+    controller.deeper();
+    const changes = deps.changes;
+    controller.dismiss();
+    expect(controller.endSphere).toBeUndefined();
+    expect(deps.changes).toBeGreaterThan(changes);
+  });
+
+  it("a smaller sphere leaves out the candidates outside it", async () => {
+    const outside = Float32Array.of(901, 2, 3);
+    const between = candidate({
+      lineId: 30n,
+      score: 0.22,
+      pointA: outside,
+      pointB: outside,
+    });
+    const { deps, controller } = await openPrompt("reject", [between]);
+    expect(controller.prompt).toMatchObject({
+      canShrink: true,
+      canGrow: false,
+    });
+    controller.shrink();
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      radiusNm: SHRUNK_RADIUS_NM,
+      canGrow: true,
+    });
+    expect(controller.endSphere?.radiusNm).toBe(SHRUNK_RADIUS_NM);
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued).toEqual([]);
+    expect(controller.prompt).toMatchObject({ threshold: 0.2 });
+    controller.answer("certain");
+    expect(deps.writes[0].row.radiusNm).toBe(SHRUNK_RADIUS_NM);
+  });
+
+  it("a larger sphere goes back no further than the radius read", async () => {
+    const { controller } = await openPrompt("reject", []);
+    controller.grow();
+    expect(controller.prompt?.radiusNm).toBe(RADIUS_NM);
+    controller.shrink();
+    controller.shrink();
+    controller.grow();
+    controller.grow();
+    expect(controller.prompt).toMatchObject({
+      radiusNm: RADIUS_NM,
+      canGrow: false,
+    });
+  });
+
+  it("growing back goes on with a candidate passing at the lowered threshold", async () => {
+    const outside = Float32Array.of(901, 2, 3);
+    const between = candidate({
+      lineId: 30n,
+      score: 0.22,
+      pointA: outside,
+      pointB: outside,
+    });
+    const { deps, controller } = await openPrompt("reject", [between]);
+    controller.shrink();
+    controller.deeper();
+    controller.deeper();
+    controller.grow();
+    expect(deps.continued).toEqual([{ candidate: between, depth: DEPTH }]);
+  });
+
+  it("a look-deeper round keeps the smaller sphere", async () => {
+    const near = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = await openPrompt("reject", [near]);
+    controller.shrink();
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued).toEqual([{ candidate: near, depth: DEPTH }]);
+    expect(controller.endSphere?.radiusNm).toBe(SHRUNK_RADIUS_NM);
+  });
+
+  it("shrinking stops at the smallest sphere", async () => {
+    const { controller } = await openPrompt("reject", []);
+    for (let i = 0; i < SHRINKS_TO_MIN; i++) controller.shrink();
+    expect(controller.prompt).toMatchObject({
+      radiusNm: TRACE_SPHERE_RADIUS_MIN_NM,
+      canShrink: false,
+    });
+  });
+
+  it("a seed sphere with nothing passing asks for an end at its centre", async () => {
+    const { deps, controller } = setUp();
+    const done = controller.atSeed(SEED_CENTER, SEED_ROOT, new Set());
+    expect(deps.fetches[0]).toMatchObject({
+      seedRoot: SEED_ROOT,
+      center: SEED_CENTER,
+      radiusNm: RADIUS_NM,
+    });
+    deps.fetches[0].result.resolve([LOW]);
+    await done;
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: SEED_CENTER,
+      threshold: START_THRESHOLD,
+    });
+    controller.answer("uncertain");
+    expect(deps.writes[0].row).toEqual({
+      status: "uncertain",
+      threshold: START_THRESHOLD,
+      radiusNm: RADIUS_NM,
+      position: SEED_CENTER,
+    });
+  });
+
+  it("look deeper from the seed sphere goes on at depth 0 in a round", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const { deps, controller } = setUp();
+    const done = controller.atSeed(SEED_CENTER, SEED_ROOT, new Set());
+    deps.fetches[0].result.resolve([lower]);
+    await done;
+    controller.deeper();
+    controller.deeper();
+    expect(deps.continued).toEqual([{ candidate: lower, depth: 0 }]);
+    expect(controller.endSphere?.center).toBe(SEED_CENTER);
+  });
+
   it("deeper is unavailable at 0", async () => {
-    const { controller } = await openPrompt("accept", []);
+    const { controller } = await openPrompt("reject", []);
     for (let i = 0; i < STEPS_TO_ZERO; i++) controller.deeper();
     expect(controller.prompt).toMatchObject({
       threshold: 0,
@@ -688,7 +768,7 @@ describe("TraceEndController", () => {
   });
 
   it("back stops at the start threshold", async () => {
-    const { controller } = await openPrompt("accept", []);
+    const { controller } = await openPrompt("reject", []);
     const atStart = controller.prompt;
     controller.back();
     expect(controller.prompt).toBe(atStart);
@@ -728,13 +808,14 @@ describe("TraceEndController", () => {
   });
 
   it("undo after an answer removes the row and reopens the same prompt", async () => {
-    const { deps, controller } = await openPrompt("accept", []);
+    const { deps, controller } = await openPrompt("reject", []);
     controller.deeper();
     const answered = controller.prompt;
     controller.answer("uncertain");
     deps.writes[0].result.resolve(55n);
     expect(await controller.undo()).toBe(true);
     expect(deps.removed).toEqual([55n]);
+    expect(deps.removedFrom).toEqual(["uncertain"]);
     expect(controller.prompt).toEqual(answered);
     controller.answer("certain");
     expect(deps.writes.map((write) => write.row)).toMatchObject([
@@ -799,10 +880,10 @@ describe("TraceEndController", () => {
   });
 
   it("a new decision while the prompt is open replaces it", async () => {
-    const { deps, controller } = await openPrompt("accept");
+    const { deps, controller } = await openPrompt();
     const done = controller.afterReject(DECIDED, SEED_ROOT, DEPTH, new Set());
     expect(controller.prompt?.phase).toBe("checking");
-    deps.fetches[0].result.resolve([]);
+    deps.fetches.at(-1)!.result.resolve([]);
     await done;
     expect(controller.prompt).toMatchObject({
       phase: "open",
@@ -881,7 +962,7 @@ describe("TraceEndController", () => {
 
   it("an undo over an open prompt replaces it with the reopened one and shows next only once", async () => {
     const { deps, controller } = setUp();
-    await decide(controller, deps, "accept", []);
+    await decide(controller, deps, "reject", []);
     const answered = controller.prompt;
     controller.answer("certain");
     deps.writes[0].result.resolve(55n);
@@ -959,7 +1040,7 @@ describe("TraceEndController", () => {
 
   it("deeper fills the graph for a candidate below the start threshold, then continues with it", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
+    const { deps, controller } = await openPrompt("reject", [lower]);
     deps.unknownUntilFill.add(30n);
     void controller.deeper();
     const done = controller.deeper();
@@ -972,29 +1053,27 @@ describe("TraceEndController", () => {
     expect(deps.continued).toEqual([]);
     deps.fills[0].result.resolve();
     await done;
-    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH + 1 }]);
+    expect(deps.continued).toEqual([{ candidate: lower, depth: DEPTH }]);
     expect(controller.prompt).toBeUndefined();
     expect(deps.writes).toEqual([]);
   });
 
   it("a deeper re-check keeps the known end point while it waits for the graph", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
-    const { deps, controller } = setUp();
-    deps.farEnd = FAR_END;
-    await acceptWith(controller, [lower]);
+    const { deps, controller } = await openPrompt("reject", [lower]);
     deps.unknownUntilFill.add(30n);
     void controller.deeper();
     void controller.deeper();
     expect(controller.prompt).toMatchObject({
       phase: "checking",
-      endPoint: FAR_END,
+      endPoint: DECIDED.pointA,
       endPointKnown: true,
     });
   });
 
   it("deeper with the graph still unknown after the fill reports and shows the next candidate", async () => {
     const lower = candidate({ lineId: 30n, score: 0.27 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
+    const { deps, controller } = await openPrompt("reject", [lower]);
     deps.unknownUntilFill.add(30n);
     deps.graphFillLeavesUnknown = true;
     const done = controller.deeper();
@@ -1009,7 +1088,7 @@ describe("TraceEndController", () => {
 
   it("a look-deeper fill that resolves after dismiss opens nothing", async () => {
     const lower = candidate({ lineId: 30n, score: 0.27 });
-    const { deps, controller } = await openPrompt("accept", [lower]);
+    const { deps, controller } = await openPrompt("reject", [lower]);
     deps.unknownUntilFill.add(30n);
     const done = controller.deeper();
     controller.dismiss();
