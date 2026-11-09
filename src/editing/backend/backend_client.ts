@@ -24,7 +24,9 @@
 
 import {
   type BackendEndpoint,
+  type BackendTarget,
   BackendAuthExpiredError,
+  backendBaseUrl,
   getBackendEndpoint,
   isAuthExpiredSignal,
   setBackendAuthExpired,
@@ -91,8 +93,8 @@ export function joinBackendUrl(baseUrl: string, path: string): string {
  */
 export class BackendClient {
   /**
-   * Issue an authenticated request to `path` (relative to the endpoint's
-   * `baseUrl`). Applies the endpoint's `authorize` to `init`, then fetches via
+   * Issue an authenticated request to `path` (relative to the root URL of
+   * `target`, see {@link backendBaseUrl}). Applies the endpoint's `authorize` to `init`, then fetches via
    * `fetchOk` (which retries transient 429/503/504 and throws `HttpError` on a
    * non-OK final response).
    *
@@ -127,9 +129,10 @@ export class BackendClient {
   async request(
     path: string,
     init: RequestInitWithProgress = {},
+    target: BackendTarget = "api",
   ): Promise<Response> {
     const endpoint = this.requireEndpoint(path);
-    const url = joinBackendUrl(endpoint.baseUrl, path);
+    const url = joinBackendUrl(backendBaseUrl(endpoint, target), path);
     try {
       return await this.attempt(endpoint, url, init);
     } catch (error) {
@@ -195,9 +198,10 @@ export class BackendClient {
     path: string,
     form: FormData,
     init: RequestInit = {},
+    target: BackendTarget = "api",
   ): Promise<Response> {
     // Note: do NOT set Content-Type — the browser adds the multipart boundary.
-    return this.request(path, { ...init, method: "POST", body: form });
+    return this.request(path, { ...init, method: "POST", body: form }, target);
   }
 
   /** POST a raw binary body, defaulting the Content-Type to octet-stream. */

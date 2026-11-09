@@ -12,9 +12,11 @@
  * @file Request/response codec for the backend `propagate_mask` endpoint.
  *
  * Sends the current slice's image + labelized mask and the next slice's image
- * as a multipart body through the shared {@link BackendClient} (which owns the
- * endpoint URL, auth, subportal scoping, and 401 retry — this module never sees
- * them), then decodes the model's predicted label mask.
+ * as a multipart body through the shared {@link BackendClient} to the GPU web
+ * API when the host provides one (Cutie inference is many times faster there on
+ * large slices), otherwise to the main backend. The client owns the endpoint
+ * URLs, auth, subportal scoping, and 401 retry, which this module never sees.
+ * Then decodes the model's predicted label mask.
  *
  * Response framing (little-endian): a `uint32` header length, then that many
  * bytes of JSON (`{ mask_shape: [height, width] }`), then `height * width`
@@ -64,6 +66,7 @@ export async function propagateMask(
     PROPAGATE_MASK_PATH,
     buildRequestForm(input),
     { headers: { Accept: "application/octet-stream" }, signal },
+    "gpu",
   );
   const body = await inflateIfGzipped(await response.arrayBuffer());
   return parseResponse(body);

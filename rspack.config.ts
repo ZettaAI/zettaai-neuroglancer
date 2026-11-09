@@ -220,6 +220,9 @@ export default defineConfig((env, args) => {
       //    edit session's tools append their own API group (e.g.
       //    `/segmentation/propagate_mask`). Without it the backend is only
       //    reachable when an embedding host injects it via `configureBackend()`.
+      //  - NEUROGLANCER_ZETTA_GPU_BACKEND_URL — root URL of the GPU web API;
+      //    model inference (`/segmentation/propagate_mask`) goes there. Without
+      //    it those requests use NEUROGLANCER_ZETTA_BACKEND_URL.
       //  - NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP — enables browser Google
       //    OAuth (client id only, NO secret) and sends the OIDC id_token as the
       //    bearer for an IAP-protected backend. Precedence over the static token.
@@ -229,6 +232,7 @@ export default defineConfig((env, args) => {
       //    google_oauth2_redirect.html receives the Google login response, for
       //    origins (PR previews) not authorized on the OAuth client.
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_URL"),
+      ...zettaDefine("NEUROGLANCER_ZETTA_GPU_BACKEND_URL"),
       ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP"),
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_TOKEN"),
       ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL"),
