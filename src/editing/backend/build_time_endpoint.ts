@@ -19,6 +19,9 @@
  *  - `NEUROGLANCER_ZETTA_BACKEND_URL` — the backend **root** URL (paths carry
  *    their own API group, e.g. `/segmentation/propagate_mask`). Without it no
  *    build-time endpoint is produced.
+ *  - `NEUROGLANCER_ZETTA_GPU_BACKEND_URL` — root URL of the GPU web API, used
+ *    for model inference (`/segmentation/propagate_mask`). Without it those
+ *    requests go to `NEUROGLANCER_ZETTA_BACKEND_URL` too.
  *  - `NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP` — enables a **Google login**
  *    auth flow: `authorize` lazily runs Google OAuth (implicit, client id only,
  *    **no secret**) and sends the resulting OIDC `id_token` as a bearer. The
@@ -53,6 +56,7 @@ import {
 } from "#src/util/google_oauth2.js";
 
 declare let NEUROGLANCER_ZETTA_BACKEND_URL: string | undefined;
+declare let NEUROGLANCER_ZETTA_GPU_BACKEND_URL: string | undefined;
 declare let NEUROGLANCER_ZETTA_BACKEND_TOKEN: string | undefined;
 declare let NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP: string | undefined;
 declare let NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL: string | undefined;
@@ -194,6 +198,10 @@ export function buildTimeBackendEndpoint(): BackendEndpoint | undefined {
       : undefined;
   if (baseUrl === undefined) return undefined;
 
+  const gpuBaseUrl =
+    typeof NEUROGLANCER_ZETTA_GPU_BACKEND_URL !== "undefined"
+      ? NEUROGLANCER_ZETTA_GPU_BACKEND_URL
+      : undefined;
   const clientId =
     typeof NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP !== "undefined"
       ? NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP
@@ -215,5 +223,7 @@ export function buildTimeBackendEndpoint(): BackendEndpoint | undefined {
       token !== undefined ? makeStaticTokenAuthorize(token) : (init) => init;
   }
 
-  return { baseUrl, authorize };
+  return gpuBaseUrl === undefined
+    ? { baseUrl, authorize }
+    : { baseUrl, gpuBaseUrl, authorize };
 }
