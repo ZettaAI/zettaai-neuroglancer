@@ -40,6 +40,10 @@ import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { WithParameters } from "#src/chunk_manager/frontend.js";
 import { makeIdentityTransform } from "#src/coordinate_transform.js";
 import {
+  AcceptedCandidatesTable,
+  AcceptedLines,
+} from "#src/datasource/calcada/accepted_candidates_table.js";
+import {
   CalcadaAnnotationTablesSession,
   pinnedSelection,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
@@ -259,6 +263,7 @@ import {
   rootsKeptOnExit,
   rootsShownWhileTracing,
 } from "#src/datasource/calcada/trace_view_roots.js";
+import type { TraceTableOptions } from "#src/datasource/calcada/trace_written_table.js";
 import { createSerialRunner } from "#src/datasource/calcada/undo_serialization.js";
 import type {
   DataSource,
@@ -3026,8 +3031,8 @@ class ZettaTraceSession extends RefCounted {
     this.clock?.setHidden(document.hidden);
   };
   // Candidates accepted this session, newest last, so an undo can offer the top
-  // one again.
-  private acceptedLines: bigint[] = [];
+  // one again and take its line out of the accepted candidates table.
+  private readonly acceptedLines: AcceptedLines;
   // Rejections and skips both land here so neither comes back this session.
   // Skips are memory-only by design: they mean "not now", and a proofreader
   // starting a fresh session should see them again.
@@ -3098,6 +3103,16 @@ class ZettaTraceSession extends RefCounted {
     private segmentSession: ProofreadSegmentSession,
   ) {
     super();
+    this.acceptedLines = new AcceptedLines(
+      {
+        write: (branchId, row) =>
+          connection.acceptedCandidates.write(branchId, row),
+        remove: (branchId, rowId) =>
+          connection.acceptedCandidates.remove(branchId, rowId),
+      },
+      (message) =>
+        StatusMessage.showTemporaryMessage(message, MESSAGE_DURATION_MS),
+    );
     // A trace belongs to the segment it started on.
     this.registerDisposer(
       segmentSession.segment.piece.changed.add(() => this.clearSeed()),
@@ -3632,7 +3647,7 @@ class ZettaTraceSession extends RefCounted {
     this.pool = [];
     this.current = undefined;
     this.decided.clear();
-    this.acceptedLines.length = 0;
+    this.acceptedLines.clear();
     this.partnerCandidates = undefined;
     this.seedPieceId = undefined;
     ++this.fetchToken;
@@ -4364,7 +4379,16 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     this.decided.add(accepted.lineId);
-    this.acceptedLines.push(accepted.lineId);
+    this.acceptedLines.record(this.branchId, {
+      score: accepted.score,
+      lineId: accepted.lineId,
+      depth: acceptedDepth,
+      operationId: merged.operationId > 0 ? merged.operationId : undefined,
+      pieceA: accepted.selfPieceId,
+      pieceB: accepted.partnerPieceId,
+      pointA: accepted.pointA,
+      pointB: accepted.pointB,
+    });
     if (sameTrace()) this.endController.noteAccept(accepted.lineId);
     // The edit handler skips the trace's own merges (the trace is busy), so the
     // roots they retire are recorded here. Without this, leaving the trace put
@@ -4675,7 +4699,7 @@ class ZettaTraceSession extends RefCounted {
       // then would re-offer a candidate whose merge is still in place while
       // quietly draining the list.
       if (await this.connection.undo()) {
-        const lastAccepted = this.acceptedLines.pop();
+        const lastAccepted = this.acceptedLines.forgetNewest();
         this.endController.forgetAccept();
         if (lastAccepted !== undefined) {
           this.decided.delete(lastAccepted);
@@ -5574,6 +5598,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public debugSession!: CalcadaDebugSession;
   public annotationTablesSession!: CalcadaAnnotationTablesSession;
   public traceEndpoints!: TraceEndpointTable;
+  public acceptedCandidates!: AcceptedCandidatesTable;
   // Fires after any edit that rewrote roots: merge, split or undo.
   readonly graphEdited = new Signal<
     (oldRoots: Uint64Set, newRoots: Uint64Set) => void
@@ -6258,7 +6283,7 @@ void main() {
       ),
     );
     const globalSpace = layer.manager.root.coordinateSpace;
-    this.traceEndpoints = new TraceEndpointTable({
+    const traceTableOptions: TraceTableOptions = {
       fetchOk: graph.httpSource.fetchOkImpl,
       baseUrl: graph.httpSource.baseUrl,
       toNanometres: (point) => {
@@ -6270,7 +6295,9 @@ void main() {
         return perUnit && Array.from(perUnit);
       },
       tablesSession: this.annotationTablesSession,
-    });
+    };
+    this.traceEndpoints = new TraceEndpointTable(traceTableOptions);
+    this.acceptedCandidates = new AcceptedCandidatesTable(traceTableOptions);
     layer.displayState.annotationExcludedSegments.value =
       state.annotationTables.excludedSegments;
     this.registerDisposer(() => {

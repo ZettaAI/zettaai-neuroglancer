@@ -8,17 +8,9 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import type { AnnotationTableInfo } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
-import {
-  createAnnotationRow,
-  createAnnotationTable,
-  deleteAnnotationRows,
-  listAnnotationTables,
-} from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
-import type { CalcadaAnnotationTablesSession } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
-import { nanometresToTableVoxels } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import type { TraceDecision } from "#src/datasource/calcada/trace_end_check.js";
-import type { FetchOk } from "#src/util/http_request.js";
+import type { TraceTableOptions } from "#src/datasource/calcada/trace_written_table.js";
+import { TraceWrittenTable } from "#src/datasource/calcada/trace_written_table.js";
 
 export type TraceEndStatus = "certain" | "uncertain";
 
@@ -46,44 +38,27 @@ export interface TraceEndpointRow {
   position: Float32Array;
 }
 
-interface TraceEndpointTableOptions {
-  fetchOk: FetchOk;
-  baseUrl: string;
-  toNanometres: (point: Float32Array) => Float32Array | undefined;
-  nanometresPerUnit: () => readonly number[] | undefined;
-  tablesSession: Pick<
-    CalcadaAnnotationTablesSession,
-    "rowWritten" | "rowRemoved"
-  >;
-}
-
 export class TraceEndpointTable {
-  private readonly ensured = new Map<
-    TraceEndStatus,
-    Promise<AnnotationTableInfo>
-  >();
+  private readonly tables: Record<TraceEndStatus, TraceWrittenTable>;
 
-  constructor(private readonly options: TraceEndpointTableOptions) {}
+  constructor(options: TraceTableOptions) {
+    const tableFor = (status: TraceEndStatus) =>
+      new TraceWrittenTable(options, {
+        name: TRACE_ENDPOINTS_TABLES[status],
+        schema: TRACE_ENDPOINT_SCHEMA,
+        schemaVersion: TRACE_ENDPOINT_SCHEMA_VERSION,
+        description: TRACE_ENDPOINTS_DESCRIPTIONS[status],
+      });
+    this.tables = {
+      certain: tableFor("certain"),
+      uncertain: tableFor("uncertain"),
+    };
+  }
 
-  async write(branchId: number, row: TraceEndpointRow): Promise<bigint> {
-    const { fetchOk, baseUrl, toNanometres, tablesSession } = this.options;
-    const nanometres = toNanometres(row.position);
-    if (nanometres === undefined) {
-      throw new Error("The trace end has no position in nanometres");
-    }
-    const tableName = TRACE_ENDPOINTS_TABLES[row.status];
-    const info = await this.ensureTable(row.status);
-    const rowId = await createAnnotationRow(
-      fetchOk,
-      baseUrl,
-      tableName,
+  write(branchId: number, row: TraceEndpointRow): Promise<bigint> {
+    return this.tables[row.status].write(
       branchId,
-      new Map([
-        [
-          TRACE_ENDPOINT_POINT,
-          nanometresToTableVoxels(Array.from(nanometres), info.voxelResolution),
-        ],
-      ]),
+      new Map([[TRACE_ENDPOINT_POINT, row.position]]),
       {
         status: row.status,
         threshold: row.threshold,
@@ -92,66 +67,13 @@ export class TraceEndpointTable {
         ...(row.lineId !== undefined && { line_id: String(row.lineId) }),
       },
     );
-    tablesSession.rowWritten(tableName, rowId);
-    return rowId;
   }
 
-  async remove(
+  remove(
     branchId: number,
     status: TraceEndStatus,
     rowId: bigint,
   ): Promise<void> {
-    const { fetchOk, baseUrl, tablesSession } = this.options;
-    const tableName = TRACE_ENDPOINTS_TABLES[status];
-    await deleteAnnotationRows(fetchOk, baseUrl, tableName, branchId, [rowId]);
-    tablesSession.rowRemoved(tableName, rowId);
-  }
-
-  private ensureTable(status: TraceEndStatus): Promise<AnnotationTableInfo> {
-    const known = this.ensured.get(status);
-    if (known !== undefined) return known;
-    const ensuring = this.findOrCreateTable(status);
-    this.ensured.set(status, ensuring);
-    ensuring.catch(() => {
-      if (this.ensured.get(status) === ensuring) this.ensured.delete(status);
-    });
-    return ensuring;
-  }
-
-  private async findOrCreateTable(
-    status: TraceEndStatus,
-  ): Promise<AnnotationTableInfo> {
-    const tableName = TRACE_ENDPOINTS_TABLES[status];
-    const found = await this.findTable(tableName);
-    if (found !== undefined) return found;
-    const { fetchOk, baseUrl, nanometresPerUnit } = this.options;
-    const voxelResolution = nanometresPerUnit();
-    if (voxelResolution === undefined) {
-      throw new Error("The graph has no nanometre scale");
-    }
-    await createAnnotationTable(fetchOk, baseUrl, {
-      tableName,
-      schemaType: TRACE_ENDPOINT_SCHEMA,
-      schemaVersion: TRACE_ENDPOINT_SCHEMA_VERSION,
-      voxelResolution,
-      description: TRACE_ENDPOINTS_DESCRIPTIONS[status],
-      readPermission: "PUBLIC",
-      writePermission: "PUBLIC",
-    });
-    const created = await this.findTable(tableName);
-    if (created === undefined) {
-      throw new Error(
-        `Annotation table ${tableName} is missing after it was created`,
-      );
-    }
-    return created;
-  }
-
-  private async findTable(
-    tableName: string,
-  ): Promise<AnnotationTableInfo | undefined> {
-    const { fetchOk, baseUrl } = this.options;
-    const tables = await listAnnotationTables(fetchOk, baseUrl);
-    return tables.find(({ name }) => name === tableName);
+    return this.tables[status].remove(branchId, rowId);
   }
 }
