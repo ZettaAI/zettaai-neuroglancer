@@ -28,12 +28,13 @@ export const CALCADA_TRACE_TOGGLE_ACTION = "calcada-toggle-zetta-trace";
 // A mode like the other two, bound straight to a key for the same reason.
 export const CALCADA_SPLIT_DETECTION_TOGGLE_ACTION =
   "calcada-toggle-split-detection";
-/** Held, not pressed, so it is no action: see seed_sphere_reveal.ts. */
+/** Held, not pressed, so they are no actions: see held_key_reveal.ts. */
 export const SEED_SPHERE_REVEAL_KEY = "keyj";
-const SEED_SPHERE_SHORTCUT: ModeShortcut = {
-  keys: [SEED_SPHERE_REVEAL_KEY],
-  label: "Hold: seed sphere",
-};
+export const END_SPHERE_REVEAL_KEY = "keyk";
+const SPHERE_SHORTCUTS: readonly ModeShortcut[] = [
+  { keys: [SEED_SPHERE_REVEAL_KEY], label: "Hold: seed sphere" },
+  { keys: [END_SPHERE_REVEAL_KEY], label: "Hold: end sphere" },
+];
 
 function plusMinusBindings(mode: string) {
   const plus = { action: `${mode}-plus` };
@@ -109,7 +110,7 @@ export const TRACE_MODE_SHORTCUTS: readonly ModeShortcut[] = [
     label: "Lowest score",
   },
   { keys: traceChords("trace-undo"), label: "Undo" },
-  SEED_SPHERE_SHORTCUT,
+  ...SPHERE_SHORTCUTS,
   { keys: traceChords("exit-trace"), label: "Exit" },
 ];
 
@@ -118,7 +119,7 @@ export const TRACE_END_MODE_SHORTCUTS: readonly ModeShortcut[] = [
   { keys: traceChords("reject-candidate"), label: "Uncertain end" },
   { keys: traceChords("skip-candidate"), label: "Look deeper" },
   { keys: traceChords("trace-end-back"), label: "Back" },
-  SEED_SPHERE_SHORTCUT,
+  ...SPHERE_SHORTCUTS,
   { keys: traceChords("exit-trace"), label: "Close" },
 ];
 

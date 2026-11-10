@@ -9,8 +9,8 @@
  */
 
 /**
- * @file The sphere of the end being looked for: shown while its prompt is open
- * and while a look deeper goes through it, in a colour of its own.
+ * @file The sphere of the end being looked for, in a colour of its own: drawn
+ * when it is `shown`, which the trace decides.
  */
 
 import type { CoordinateSpace } from "#src/coordinate_transform.js";
@@ -31,11 +31,15 @@ export class EndSphereView extends RefCounted implements TraceSphereView {
 
   constructor(
     endSphere: WatchableValueInterface<EndSphere | undefined>,
+    shown: WatchableValueInterface<boolean>,
     readonly coordinateSpace: WatchableValueInterface<CoordinateSpace>,
   ) {
     super();
     this.visible = this.registerDisposer(
-      makeCachedDerivedWatchableValue((end) => end !== undefined, [endSphere]),
+      makeCachedDerivedWatchableValue(
+        (end, isShown) => end !== undefined && isShown,
+        [endSphere, shown],
+      ),
     );
     this.center = this.registerDisposer(
       makeCachedDerivedWatchableValue((end) => end?.center, [endSphere]),

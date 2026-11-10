@@ -10,8 +10,9 @@ const END_POINT = Float32Array.of(7, 8, 9);
 function setUp() {
   const coordinateSpace = new WatchableValue({} as CoordinateSpace);
   const endSphere = new WatchableValue<EndSphere | undefined>(undefined);
-  const view = new EndSphereView(endSphere, coordinateSpace);
-  return { coordinateSpace, endSphere, view };
+  const shown = new WatchableValue(true);
+  const view = new EndSphereView(endSphere, shown, coordinateSpace);
+  return { coordinateSpace, endSphere, shown, view };
 }
 
 describe("EndSphereView", () => {
@@ -42,6 +43,16 @@ describe("EndSphereView", () => {
     }
     endSphere.value = { center: END_POINT, radiusNm: END_RADIUS_NM };
     expect(redraws).toBeGreaterThanOrEqual(2);
+    view.dispose();
+  });
+
+  it("hides a known end until it is asked about or revealed", () => {
+    const { endSphere, shown, view } = setUp();
+    shown.value = false;
+    endSphere.value = { center: END_POINT, radiusNm: END_RADIUS_NM };
+    expect(view.visible.value).toBe(false);
+    shown.value = true;
+    expect(view.visible.value).toBe(true);
     view.dispose();
   });
 });

@@ -631,6 +631,26 @@ describe("TraceEndController", () => {
     expect(controller.endSphere).toBeUndefined();
   });
 
+  it("the end is in question while its prompt is open or rechecked, not while a round goes on", async () => {
+    const lower = candidate({ lineId: 30n, score: 0.22 });
+    const lowest = candidate({ lineId: 31n, score: 0.12 });
+    const { deps, controller } = await openPrompt("reject", [lower, lowest]);
+    expect(controller.endInQuestion).toBe(true);
+    deps.unknownUntilFill.add(30n);
+    void controller.deeper();
+    const done = controller.deeper();
+    expect(controller.prompt?.phase).toBe("checking");
+    expect(controller.endInQuestion).toBe(true);
+    deps.fills[0].result.resolve();
+    await done;
+    expect(deps.continued).toHaveLength(1);
+    expect(controller.endSphere).toBeDefined();
+    expect(controller.endInQuestion).toBe(false);
+    await controller.afterReject(lower, SEED_ROOT, DEPTH, new Set([30n]));
+    expect(controller.prompt?.phase).toBe("open");
+    expect(controller.endInQuestion).toBe(true);
+  });
+
   it("a dismiss while a round goes on tells that its sphere is gone", async () => {
     const lower = candidate({ lineId: 30n, score: 0.22 });
     const { deps, controller } = await openPrompt("reject", [lower]);

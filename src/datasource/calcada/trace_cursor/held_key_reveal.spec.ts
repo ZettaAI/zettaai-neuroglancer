@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { SeedSphereReveal } from "#src/datasource/calcada/trace_cursor/seed_sphere_reveal.js";
+import { HeldKeyReveal } from "#src/datasource/calcada/trace_cursor/held_key_reveal.js";
 import { WatchableValue } from "#src/trackable_value.js";
 
-const KEY_CODE = "KeyJ";
+const KEY = "keyk";
+const KEY_CODE = "KeyK";
 
-let reveal: SeedSphereReveal | undefined;
+let reveal: HeldKeyReveal | undefined;
 
 afterEach(() => {
   reveal?.dispose();
@@ -14,7 +15,7 @@ afterEach(() => {
 
 function setUp() {
   const revealed = new WatchableValue(false);
-  reveal = new SeedSphereReveal(revealed);
+  reveal = new HeldKeyReveal(KEY, revealed);
   return revealed;
 }
 
@@ -28,8 +29,8 @@ function press(
   );
 }
 
-describe("SeedSphereReveal", () => {
-  it("reveals the seed sphere while J is held", () => {
+describe("HeldKeyReveal", () => {
+  it("reveals while its key is held", () => {
     const revealed = setUp();
     press("keydown");
     expect(revealed.value).toBe(true);
@@ -39,15 +40,15 @@ describe("SeedSphereReveal", () => {
     expect(revealed.value).toBe(false);
   });
 
-  it("ignores other keys and J with a modifier", () => {
+  it("ignores other keys and its key with a modifier", () => {
     const revealed = setUp();
-    press("keydown", { code: "KeyK" });
+    press("keydown", { code: "KeyJ" });
     press("keydown", { ctrlKey: true });
     press("keydown", { metaKey: true });
     expect(revealed.value).toBe(false);
   });
 
-  it("ignores J typed into a text field", () => {
+  it("ignores the key typed into a text field", () => {
     const revealed = setUp();
     const input = document.createElement("input");
     document.body.appendChild(input);
@@ -55,7 +56,7 @@ describe("SeedSphereReveal", () => {
     expect(revealed.value).toBe(false);
   });
 
-  it("hides the sphere when the window loses focus mid-hold", () => {
+  it("hides when the window loses focus mid-hold", () => {
     const revealed = setUp();
     press("keydown");
     window.dispatchEvent(new Event("blur"));

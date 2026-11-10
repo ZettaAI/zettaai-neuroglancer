@@ -137,6 +137,11 @@ export class TraceEndController {
     return check && { center: check.endPoint, radiusNm: check.radiusNm };
   }
 
+  /** Out of candidates at the end: its prompt is open or being rechecked. */
+  get endInQuestion(): boolean {
+    return this.prompt !== undefined && this.check !== undefined;
+  }
+
   get isAnswering(): boolean {
     return this.prompt?.phase === "open";
   }

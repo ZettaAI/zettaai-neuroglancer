@@ -9,19 +9,14 @@
  */
 
 /**
- * @file Holding the key shows the placed seed sphere. A hold is a keydown and
- * its keyup, which an action map cannot express: it fires on keydown only.
+ * @file Something shown only while a key is held. A hold is a keydown and its
+ * keyup, which an action map cannot express: it fires on keydown only.
  */
 
-import { SEED_SPHERE_REVEAL_KEY } from "#src/datasource/calcada/trace_key_bindings.js";
 import type { WatchableValue } from "#src/trackable_value.js";
 import { RefCounted } from "#src/util/disposable.js";
 
 const TEXT_ENTRY_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
-
-function isRevealKey(event: KeyboardEvent): boolean {
-  return event.code.toLowerCase() === SEED_SPHERE_REVEAL_KEY;
-}
 
 function typedIntoField(event: KeyboardEvent): boolean {
   const target = event.target as HTMLElement | null;
@@ -31,9 +26,15 @@ function typedIntoField(event: KeyboardEvent): boolean {
   );
 }
 
-export class SeedSphereReveal extends RefCounted {
-  constructor(private readonly revealed: WatchableValue<boolean>) {
+export class HeldKeyReveal extends RefCounted {
+  /** `key` is an event identifier such as "keyj". */
+  constructor(
+    key: string,
+    private readonly revealed: WatchableValue<boolean>,
+  ) {
     super();
+    const isRevealKey = (event: KeyboardEvent) =>
+      event.code.toLowerCase() === key;
     this.registerEventListener(document, "keydown", (event: Event) => {
       const key = event as KeyboardEvent;
       if (!isRevealKey(key) || typedIntoField(key)) return;

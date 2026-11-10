@@ -206,7 +206,7 @@ import {
 } from "#src/datasource/calcada/split_steps.js";
 import type { EndSphere } from "#src/datasource/calcada/trace_cursor/end_sphere.js";
 import { EndSphereView } from "#src/datasource/calcada/trace_cursor/end_sphere.js";
-import { SeedSphereReveal } from "#src/datasource/calcada/trace_cursor/seed_sphere_reveal.js";
+import { HeldKeyReveal } from "#src/datasource/calcada/trace_cursor/held_key_reveal.js";
 import {
   END_SPHERE_RGB,
   TRACE_SPHERE_RGB,
@@ -232,7 +232,9 @@ import {
   CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
   CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
   CALCADA_TRACE_TOGGLE_ACTION,
+  END_SPHERE_REVEAL_KEY,
   PROOFREAD_SEGMENT_PICK_INPUT_EVENT_MAP,
+  SEED_SPHERE_REVEAL_KEY,
   SPLIT_DETECTION_INPUT_EVENT_MAP,
   SPLIT_DETECTION_KEYS_MODE,
   SPLIT_DETECTION_MODE_SHORTCUTS,
@@ -362,6 +364,7 @@ import type {
   WatchableValueInterface,
 } from "#src/trackable_value.js";
 import {
+  makeCachedDerivedWatchableValue,
   makeCachedLazyDerivedWatchableValue,
   registerNested,
   registerNestedSync,
@@ -3079,6 +3082,7 @@ class ZettaTraceSession extends RefCounted {
   private readonly endController: TraceEndController;
   private readonly endPromptOpen = new WatchableValue(false);
   readonly endSphere = new WatchableValue<EndSphere | undefined>(undefined);
+  readonly endInQuestion = new WatchableValue(false);
   private framedEndPoint: Float32Array | undefined;
   // What the end check found to go on with; shown even below the filters,
   // since look deeper finds exactly that.
@@ -3355,6 +3359,7 @@ class ZettaTraceSession extends RefCounted {
     const prompt = this.endController.prompt;
     this.endPromptOpen.value = prompt?.phase === "open";
     this.endSphere.value = this.endController.endSphere;
+    this.endInQuestion.value = this.endController.endInQuestion;
     if (prompt === undefined) {
       this.framedEndPoint = undefined;
       this.changed.dispatch();
@@ -6147,10 +6152,25 @@ void main() {
         layer.manager.root.coordinateSpace,
       ),
     );
-    this.registerDisposer(new SeedSphereReveal(sphereState.revealed));
+    this.registerDisposer(
+      new HeldKeyReveal(SEED_SPHERE_REVEAL_KEY, sphereState.revealed),
+    );
+    // The end sphere is drawn when the trace has run out of candidates at it,
+    // or while its key is held.
+    const endRevealed = new WatchableValue(false);
+    this.registerDisposer(
+      new HeldKeyReveal(END_SPHERE_REVEAL_KEY, endRevealed),
+    );
+    const endShown = this.registerDisposer(
+      makeCachedDerivedWatchableValue(
+        (inQuestion, revealed) => inQuestion || revealed,
+        [this.traceSession.endInQuestion, endRevealed],
+      ),
+    );
     const endSphere = this.registerDisposer(
       new EndSphereView(
         this.traceSession.endSphere,
+        endShown,
         layer.manager.root.coordinateSpace,
       ),
     );
