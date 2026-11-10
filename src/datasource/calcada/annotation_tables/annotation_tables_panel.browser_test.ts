@@ -69,6 +69,8 @@ import { vec3 } from "#src/util/geom.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 const SIDE_PANEL_WIDTH_PX = 260;
+/** Low enough that the controls above the list overflow their half. */
+const SHORT_TAB_HEIGHT_PX = 300;
 const SWATCH_COLOR = vec3.fromValues(1, 0, 0);
 const BEYOND_SAFE_INTEGER_ID = 9007199254740993n;
 const LONG_LIST_LENGTH = 120;
@@ -536,6 +538,33 @@ describe("CalcadaAnnotationTablesPanel", () => {
       chips()[0].querySelector<HTMLElement>(".calcada-annotations-swatch")!
         .style.background,
     ).toBe("rgb(255, 0, 0)");
+  });
+
+  it("grows the picker to hold chips that wrap onto more rows", async () => {
+    const wrapping = [
+      "trace_endpoints_uncertain",
+      "trace_endpoints_certain",
+      "accepted_candidates",
+    ].map((name) => ({ ...nuclei, name }));
+    const { connection } = makeConnection(
+      wrapping,
+      [],
+      wrapping.map(({ name }) => name),
+    );
+    await mountPanel(connection);
+    tab.style.height = `${SHORT_TAB_HEIGHT_PX}px`;
+    const picker = tab
+      .querySelector<HTMLElement>(".calcada-annotations-picker")!
+      .getBoundingClientRect();
+    const rowTops = new Set(
+      chips().map((chip) => chip.getBoundingClientRect().top),
+    );
+    expect(rowTops.size).toBeGreaterThan(1);
+    for (const chip of chips()) {
+      expect(chip.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        picker.bottom,
+      );
+    }
   });
 
   it("shows counts for each selected table only", async () => {

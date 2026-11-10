@@ -1741,6 +1741,7 @@
 }
 
 .calcada-annotations-picker {
+  flex: none;
   min-width: 0;
 }
 
