@@ -9,21 +9,22 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { SplitEditRow } from "#src/datasource/calcada/split_edits_table.js";
+import type { SplitCutRow } from "#src/datasource/calcada/split_cuts_table.js";
 import {
-  parseCutPointNm,
-  SPLIT_EDIT_SCHEMA,
-  SPLIT_EDITS_TABLE,
-  SplitEditRows,
-  SplitEditsTable,
-} from "#src/datasource/calcada/split_edits_table.js";
+  parseCutLineNm,
+  SPLIT_CUT_SCHEMA,
+  SPLIT_CUTS_TABLE,
+  SplitCutRows,
+  SplitCutsTable,
+} from "#src/datasource/calcada/split_cuts_table.js";
 
 const BASE = "https://host/g";
 const BRANCH = 7;
 const RESOLUTION = [4, 4, 40];
-const ROW: SplitEditRow = {
+const ROW: SplitCutRow = {
   operationId: 41,
-  position: Float32Array.of(80, 120, 800),
+  pointA: Float32Array.of(80, 120, 800),
+  pointB: Float32Array.of(40, 40, 400),
 };
 
 const json = (body: unknown) =>
@@ -35,14 +36,20 @@ function tableSetUp() {
   const fetchOk = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/annotation/schemas/")) {
-      return json({ points: [{ name: "pt", role: 0 }], json_schema: {} });
+      return json({
+        points: [
+          { name: "pt_a", role: 0 },
+          { name: "pt_b", role: 1 },
+        ],
+        json_schema: {},
+      });
     }
     const method = init?.method ?? "GET";
     if (method === "GET") {
       return json({
         tables: tables.map((name) => ({
           table_name: name,
-          schema_type: SPLIT_EDIT_SCHEMA,
+          schema_type: SPLIT_CUT_SCHEMA,
           schema_version: 1,
           description: "",
           reference_table: "",
@@ -62,7 +69,7 @@ function tableSetUp() {
     return json({ ids: ["42"] });
   });
   const tablesSession = { rowWritten: vi.fn(), rowRemoved: vi.fn() };
-  const table = new SplitEditsTable({
+  const table = new SplitCutsTable({
     fetchOk,
     baseUrl: BASE,
     toNanometres: (point) => point,
@@ -72,15 +79,15 @@ function tableSetUp() {
   return { table, posts };
 }
 
-const rowsUrl = `${BASE}/annotation/tables/${SPLIT_EDITS_TABLE}/annotations?branch_id=${BRANCH}`;
+const rowsUrl = `${BASE}/annotation/tables/${SPLIT_CUTS_TABLE}/annotations?branch_id=${BRANCH}`;
 
-describe("SplitEditsTable", () => {
-  it("creates the table on the first split, then writes the cut point on the branch", async () => {
+describe("SplitCutsTable", () => {
+  it("creates the table on the first split, then writes a line across the cut on the branch", async () => {
     const { table, posts } = tableSetUp();
     expect(await table.write(BRANCH, ROW)).toBe(42n);
     expect(posts[0].body).toMatchObject({
-      table_name: SPLIT_EDITS_TABLE,
-      schema_type: SPLIT_EDIT_SCHEMA,
+      table_name: SPLIT_CUTS_TABLE,
+      schema_type: SPLIT_CUT_SCHEMA,
     });
     expect(posts[1]).toEqual({
       url: rowsUrl,
@@ -88,7 +95,10 @@ describe("SplitEditsTable", () => {
       body: {
         annotations: [
           {
-            points: { pt: { position: [20, 30, 20] } },
+            points: {
+              pt_a: { position: [20, 30, 20] },
+              pt_b: { position: [10, 10, 10] },
+            },
             payload: { operation_id: 41 },
           },
         ],
@@ -105,23 +115,42 @@ describe("SplitEditsTable", () => {
   });
 });
 
-describe("parseCutPointNm", () => {
-  it("reads three numbers and nothing else", () => {
-    expect(parseCutPointNm([25, 5, 5])).toEqual([25, 5, 5]);
-    expect(parseCutPointNm(undefined)).toBeUndefined();
-    expect(parseCutPointNm([1, 2])).toBeUndefined();
-    expect(parseCutPointNm([1, "2", 3])).toBeUndefined();
+describe("parseCutLineNm", () => {
+  it("reads two points of three numbers and nothing else", () => {
+    expect(
+      parseCutLineNm([
+        [25, 5, 5],
+        [30, 5, 5],
+      ]),
+    ).toEqual([
+      [25, 5, 5],
+      [30, 5, 5],
+    ]);
+    expect(parseCutLineNm(undefined)).toBeUndefined();
+    expect(parseCutLineNm([[25, 5, 5]])).toBeUndefined();
+    expect(
+      parseCutLineNm([
+        [25, 5],
+        [30, 5, 5],
+      ]),
+    ).toBeUndefined();
+    expect(
+      parseCutLineNm([
+        [25, "5", 5],
+        [30, 5, 5],
+      ]),
+    ).toBeUndefined();
   });
 });
 
 function rowsSetUp() {
-  const written: { branchId: number; row: SplitEditRow }[] = [];
+  const written: { branchId: number; row: SplitCutRow }[] = [];
   const removed: { branchId: number; rowId: bigint }[] = [];
   const errors: string[] = [];
   let nextRowId = 100n;
   const table = {
     writeFails: false,
-    async write(branchId: number, row: SplitEditRow) {
+    async write(branchId: number, row: SplitCutRow) {
       if (table.writeFails) throw new Error("HTTP 403");
       written.push({ branchId, row });
       return nextRowId++;
@@ -130,17 +159,17 @@ function rowsSetUp() {
       removed.push({ branchId, rowId });
     },
   };
-  const rows = new SplitEditRows(table, (message) => errors.push(message));
+  const rows = new SplitCutRows(table, (message) => errors.push(message));
   return { rows, table, written, removed, errors };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-describe("SplitEditRows", () => {
+describe("SplitCutRows", () => {
   it("writes a row per split and removes it when that split is reverted", async () => {
     const { rows, written, removed } = rowsSetUp();
-    rows.record(41, BRANCH, ROW.position);
-    rows.record(42, BRANCH + 1, ROW.position);
+    rows.record(BRANCH, ROW);
+    rows.record(BRANCH + 1, { ...ROW, operationId: 42 });
     expect(written.map(({ row }) => row.operationId)).toEqual([41, 42]);
     rows.reverted(42);
     await settle();
@@ -152,7 +181,7 @@ describe("SplitEditRows", () => {
 
   it("keeps the row of a split that left the undo history", async () => {
     const { rows, removed } = rowsSetUp();
-    rows.record(41, BRANCH, ROW.position);
+    rows.record(BRANCH, ROW);
     rows.forget(41);
     rows.reverted(41);
     await settle();
@@ -162,9 +191,9 @@ describe("SplitEditRows", () => {
   it("reports a failed write and removes nothing on revert", async () => {
     const { rows, table, removed, errors } = rowsSetUp();
     table.writeFails = true;
-    rows.record(41, BRANCH, ROW.position);
+    rows.record(BRANCH, ROW);
     await settle();
-    expect(errors).toEqual(["Could not record the split edit: HTTP 403"]);
+    expect(errors).toEqual(["Could not record the split cut: HTTP 403"]);
     rows.reverted(41);
     await settle();
     expect(removed).toEqual([]);
