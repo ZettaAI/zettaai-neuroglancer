@@ -8,7 +8,10 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import type { CoordinateSpace } from "#src/coordinate_transform.js";
 import { errorMessage } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import type { PieceSphere } from "#src/datasource/calcada/piece_centers.js";
+import { nanometresToGlobal } from "#src/datasource/calcada/piece_centers.js";
 import type { TraceTableOptions } from "#src/datasource/calcada/trace_written_table.js";
 import { TraceWrittenTable } from "#src/datasource/calcada/trace_written_table.js";
 
@@ -30,7 +33,23 @@ export interface AcceptedCandidateRow {
   pointB: Float32Array;
 }
 
-/** A line per accept, from the seed's side of the contact to the partner's. */
+/**
+ * A line end at the centre of its piece, so the line shows what merged with
+ * what; the contact stays the end when the piece's place is unknown.
+ */
+export function lineEndAtPiece(
+  spheres: Map<bigint, PieceSphere>,
+  pieceId: bigint,
+  contact: Float32Array,
+  coordinateSpace: CoordinateSpace,
+): Float32Array {
+  const sphere = spheres.get(pieceId);
+  return (
+    (sphere && nanometresToGlobal(sphere.center, coordinateSpace)) ?? contact
+  );
+}
+
+/** A line per accept, from the seed's piece to the partner's. */
 export class AcceptedCandidatesTable {
   private readonly table: TraceWrittenTable;
 
@@ -83,14 +102,20 @@ export class AcceptedLines {
     private readonly reportError: (message: string) => void,
   ) {}
 
-  record(branchId: number, row: AcceptedCandidateRow): void {
-    const rowId = this.table.write(branchId, row).catch((error) => {
-      this.reportError(
-        `Could not record the accepted candidate: ${errorMessage(error)}`,
-      );
-      return undefined;
-    });
-    this.entries.push({ lineId: row.lineId, branchId, rowId });
+  record(
+    branchId: number,
+    lineId: bigint,
+    row: Promise<AcceptedCandidateRow>,
+  ): void {
+    const rowId = row
+      .then((ready) => this.table.write(branchId, ready))
+      .catch((error) => {
+        this.reportError(
+          `Could not record the accepted candidate: ${errorMessage(error)}`,
+        );
+        return undefined;
+      });
+    this.entries.push({ lineId, branchId, rowId });
   }
 
   /** The newest accept's line; its row is removed in the background. */
