@@ -137,6 +137,9 @@ async function makeConnection({
   };
 }
 
+const CHIP_INSET_PX = 4;
+const BUTTON_ROW_GAP_PX = 8;
+
 let tab: HTMLDivElement;
 let disposer: Disposer;
 
@@ -355,6 +358,28 @@ describe("CalcadaTracePanel", () => {
     box.click();
     await vi.waitFor(() =>
       expect(connection.state.zettaTraceState.keepSplitParts.value).toBe(true),
+    );
+  });
+
+  it("leaves room around a key chip and between rows of buttons", async () => {
+    await mountPanel(await makeConnection());
+    const chip = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLElement>(
+        ".calcada-trace-panel-button-hint button .neuroglancer-key-chip",
+      );
+      expect(found).not.toBe(null);
+      return found!;
+    });
+    const button = chip.closest("button")!;
+    const chipBox = chip.getBoundingClientRect();
+    const buttonBox = button.getBoundingClientRect();
+    expect(chipBox.top - buttonBox.top).toBeGreaterThanOrEqual(CHIP_INSET_PX);
+    expect(buttonBox.bottom - chipBox.bottom).toBeGreaterThanOrEqual(
+      CHIP_INSET_PX,
+    );
+    const row = tab.querySelector<HTMLElement>(".calcada-trace-panel-buttons")!;
+    expect(parseFloat(getComputedStyle(row).rowGap)).toBeGreaterThanOrEqual(
+      BUTTON_ROW_GAP_PX,
     );
   });
 

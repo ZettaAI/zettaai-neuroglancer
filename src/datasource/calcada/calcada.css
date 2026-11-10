@@ -502,7 +502,7 @@
 .calcada-trace-notice-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 8px 4px;
   margin-top: 4px;
 }
 
@@ -632,6 +632,13 @@
   pointer-events: none;
 }
 
+/* An xs button is barely taller than a key chip; let it grow around one. */
+.calcada-trace-panel-button-hint button,
+.calcada-trace-notice-buttons button {
+  height: auto;
+  padding-block: 4px;
+}
+
 .calcada-trace-panel-button-hint .neuroglancer-key-chip {
   margin-inline: 1px;
   font-weight: 400;
@@ -725,7 +732,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 8px 4px;
 }
 
 /* The Trace tab's filter box: which saved filter Trace applies. */

@@ -26,6 +26,7 @@ import { invokeDisposer } from "#src/util/disposable.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 const BOLD_WEIGHT = "700";
+const CHIP_INSET_PX = 4;
 
 let host: HTMLDivElement;
 let disposer: Disposer | undefined;
@@ -194,6 +195,16 @@ describe("CalcadaTraceNotice", () => {
     expect(button("Larger").disabled).toBe(true);
     button("Smaller").click();
     expect(actions.shrink).toHaveBeenCalledOnce();
+  });
+
+  it("leaves room around the key chip of a prompt button", async () => {
+    await mountPrompt(openPrompt);
+    const chip = button("Certain end").querySelector<HTMLElement>(
+      ".neuroglancer-key-chip",
+    )!;
+    const chipBox = chip.getBoundingClientRect();
+    const buttonBox = button("Certain end").getBoundingClientRect();
+    expect(chipBox.top - buttonBox.top).toBeGreaterThanOrEqual(CHIP_INSET_PX);
   });
 
   it("disables Look deeper at 0 and Back at the start", async () => {
