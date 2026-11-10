@@ -4,7 +4,7 @@ export type TracePromptKeyAction =
   | "reject-candidate"
   | "accept-candidate"
   | "skip-candidate"
-  | "trace-end-back"
+  | "ambiguous-candidate"
   | "exit-trace";
 
 export type TraceKeyHandler =
@@ -16,6 +16,7 @@ export type TraceKeyHandler =
   | "reject"
   | "accept"
   | "skip"
+  | "ambiguous"
   | "cancel";
 
 interface TraceKeyRoute {
@@ -29,7 +30,7 @@ const TRACE_KEY_ROUTES: Record<TracePromptKeyAction, TraceKeyRoute> = {
   "reject-candidate": { onOpenPrompt: "uncertain", onTrace: "reject" },
   "accept-candidate": { onOpenPrompt: "certain", onTrace: "accept" },
   "skip-candidate": { onOpenPrompt: "deeper", onTrace: "skip" },
-  "trace-end-back": { onOpenPrompt: "back" },
+  "ambiguous-candidate": { onOpenPrompt: "back", onTrace: "ambiguous" },
   "exit-trace": {
     onOpenPrompt: "dismiss",
     onCheckingPrompt: "dismiss",

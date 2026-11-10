@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TraceEndpointRow } from "#src/datasource/calcada/trace_endpoint_table.js";
 import {
+  ambiguousEnd,
   TRACE_ENDPOINT_SCHEMA,
   TRACE_ENDPOINTS_TABLES,
   TraceEndpointTable,
@@ -239,6 +240,23 @@ describe("TraceEndpointTable", () => {
       status: "uncertain",
       threshold: 0.5,
       radius_nm: 300,
+    });
+  });
+
+  it("a contact left ambiguous is an uncertain end there, with its line and no sphere", async () => {
+    const { table, posts } = makeTable(
+      newServer({ tables: [UNCERTAIN_TABLE] }),
+    );
+    const contact = Float32Array.of(40, 40, 400);
+    await table.write(BRANCH, ambiguousEnd(ROW.lineId!, contact, 0.5));
+    expect(posts[0].url).toBe(rowsUrl(UNCERTAIN_TABLE));
+    expect(posts[0].body.annotations[0]).toEqual({
+      points: { pt: { position: [10, 10, 10] } },
+      payload: {
+        status: "uncertain",
+        threshold: 0.5,
+        line_id: "18446744073709551615",
+      },
     });
   });
 

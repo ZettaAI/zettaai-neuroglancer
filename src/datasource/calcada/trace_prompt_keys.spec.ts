@@ -6,23 +6,25 @@ describe("traceKeyHandler", () => {
     expect(traceKeyHandler("reject-candidate", "open")).toBe("uncertain");
     expect(traceKeyHandler("accept-candidate", "open")).toBe("certain");
     expect(traceKeyHandler("skip-candidate", "open")).toBe("deeper");
-    expect(traceKeyHandler("trace-end-back", "open")).toBe("back");
+    expect(traceKeyHandler("ambiguous-candidate", "open")).toBe("back");
     expect(traceKeyHandler("exit-trace", "open")).toBe("dismiss");
   });
 
-  it("←/→/↓ and Esc act on the trace when no prompt is shown, and ↑ does nothing", () => {
+  it("←/→/↓/↑ and Esc act on the trace when no prompt is shown", () => {
     expect(traceKeyHandler("reject-candidate", undefined)).toBe("reject");
     expect(traceKeyHandler("accept-candidate", undefined)).toBe("accept");
     expect(traceKeyHandler("skip-candidate", undefined)).toBe("skip");
-    expect(traceKeyHandler("trace-end-back", undefined)).toBeUndefined();
+    expect(traceKeyHandler("ambiguous-candidate", undefined)).toBe("ambiguous");
     expect(traceKeyHandler("exit-trace", undefined)).toBe("cancel");
   });
 
-  it("while the prompt is checking only Esc reaches it", () => {
+  it("while the prompt is checking the arrows still act on the trace", () => {
     expect(traceKeyHandler("reject-candidate", "checking")).toBe("reject");
     expect(traceKeyHandler("accept-candidate", "checking")).toBe("accept");
     expect(traceKeyHandler("skip-candidate", "checking")).toBe("skip");
-    expect(traceKeyHandler("trace-end-back", "checking")).toBeUndefined();
+    expect(traceKeyHandler("ambiguous-candidate", "checking")).toBe(
+      "ambiguous",
+    );
     expect(traceKeyHandler("exit-trace", "checking")).toBe("dismiss");
   });
 });

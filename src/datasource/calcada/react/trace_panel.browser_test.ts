@@ -128,6 +128,7 @@ async function makeConnection({
       reject: () => {},
       canUndo: () => false,
       skip: () => {},
+      markAmbiguous: () => {},
       start: record("start"),
       accept: async () => {},
       undoLast: async () => {},
@@ -358,6 +359,22 @@ describe("CalcadaTracePanel", () => {
     box.click();
     await vi.waitFor(() =>
       expect(connection.state.zettaTraceState.keepSplitParts.value).toBe(true),
+    );
+  });
+
+  it("offers Ambiguous beside Skip, on the up arrow", async () => {
+    await mountPanel(await makeConnection());
+    const ambiguous = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLButtonElement>(
+          ".calcada-trace-panel-buttons button",
+        ),
+      ].find((button) => button.textContent?.includes("Ambiguous"));
+      expect(found).not.toBe(undefined);
+      return found!;
+    });
+    expect(ambiguous.querySelector(".neuroglancer-key-chip")?.textContent).toBe(
+      "↑",
     );
   });
 

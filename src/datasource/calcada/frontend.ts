@@ -231,7 +231,10 @@ import {
 } from "#src/datasource/calcada/trace_end_check.js";
 import type { TraceEndPromptView } from "#src/datasource/calcada/trace_end_controller.js";
 import { TraceEndController } from "#src/datasource/calcada/trace_end_controller.js";
-import { TraceEndpointTable } from "#src/datasource/calcada/trace_endpoint_table.js";
+import {
+  ambiguousEnd,
+  TraceEndpointTable,
+} from "#src/datasource/calcada/trace_endpoint_table.js";
 import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import {
@@ -3557,6 +3560,7 @@ class ZettaTraceSession extends RefCounted {
       reject: () => this.reject(),
       accept: () => void this.accept(),
       skip: () => this.skip(),
+      ambiguous: () => this.markAmbiguous(),
       cancel: () => this.state.cancelInnermost(),
     };
     const routed = (action: TracePromptKeyAction) => () => {
@@ -3567,7 +3571,7 @@ class ZettaTraceSession extends RefCounted {
       "reject-candidate": routed("reject-candidate"),
       "accept-candidate": routed("accept-candidate"),
       "skip-candidate": routed("skip-candidate"),
-      "trace-end-back": routed("trace-end-back"),
+      "ambiguous-candidate": routed("ambiguous-candidate"),
       "trace-undo": () => void this.undoLast(),
       "exit-trace": routed("exit-trace"),
       ...plusMinusHandlers(TRACE_KEYS_MODE, this.state),
@@ -4313,8 +4317,28 @@ class ZettaTraceSession extends RefCounted {
     this.recordVerdict("defer", "skip");
   }
 
+  /** Impossible to tell: an uncertain end goes where the two pieces touch. */
+  markAmbiguous() {
+    const candidate = this.current;
+    if (this.busy || candidate === undefined) return;
+    this.recordVerdict("ambiguous", "ambiguous mark");
+    const { state } = this;
+    const threshold = scoreFloor(state.filter.value, state.scoreRange.value);
+    this.connection.traceEndpoints
+      .write(
+        this.branchId,
+        ambiguousEnd(candidate.lineId, candidate.pointA, threshold),
+      )
+      .catch((e: unknown) => {
+        StatusMessage.showTemporaryMessage(
+          `Could not write the trace end: ${e}`,
+          5000,
+        );
+      });
+  }
+
   private recordVerdict(
-    decision: "reject" | "defer",
+    decision: "reject" | "defer" | "ambiguous",
     noun: string,
     onRecorded?: () => void,
   ) {

@@ -171,7 +171,7 @@ function TraceEndPrompt({
             />
             <PromptButton
               label="Back"
-              action="trace-end-back"
+              action="ambiguous-candidate"
               disabled={!prompt.canGoBack}
               onClick={actions.back}
             />

@@ -104,6 +104,7 @@ export interface TracePanelConnection {
     reject(): void;
     canUndo(): boolean;
     skip(): void;
+    markAmbiguous(): void;
     start(): void;
     accept(): Promise<void>;
     undoLast(): Promise<void>;
@@ -548,6 +549,16 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           onClick={() => traceSession.skip()}
         >
           Skip
+        </HintedButton>
+        <HintedButton
+          hint={"Impossible to tell\nMarks an uncertain end at the contact"}
+          keys={traceChords("ambiguous-candidate")}
+          keysOnButton="before"
+          variant="outline"
+          disabled={verdictDisabled}
+          onClick={() => traceSession.markAmbiguous()}
+        >
+          Ambiguous
         </HintedButton>
         <HintedButton
           hint="Accept and merge"

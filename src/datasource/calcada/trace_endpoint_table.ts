@@ -30,12 +30,22 @@ const TRACE_ENDPOINT_POINT = "pt";
 export interface TraceEndpointRow {
   status: TraceEndStatus;
   threshold: number;
-  radiusNm: number;
+  /** Absent for a contact marked ambiguous: no sphere was looked in. */
+  radiusNm?: number;
   /** Both absent for an end asked for at the seed sphere, before any decision. */
   after?: TraceDecision;
   lineId?: bigint;
   /** In global coordinates. */
   position: Float32Array;
+}
+
+/** A contact marked ambiguous ends the trace there, uncertainly. */
+export function ambiguousEnd(
+  lineId: bigint,
+  contact: Float32Array,
+  threshold: number,
+): TraceEndpointRow {
+  return { status: "uncertain", threshold, lineId, position: contact };
 }
 
 export class TraceEndpointTable {
@@ -62,7 +72,7 @@ export class TraceEndpointTable {
       {
         status: row.status,
         threshold: row.threshold,
-        radius_nm: row.radiusNm,
+        ...(row.radiusNm !== undefined && { radius_nm: row.radiusNm }),
         ...(row.after !== undefined && { after: row.after }),
         ...(row.lineId !== undefined && { line_id: String(row.lineId) }),
       },
