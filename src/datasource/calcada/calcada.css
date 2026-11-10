@@ -472,6 +472,12 @@
   white-space: nowrap;
 }
 
+/* The prompt's title carries a radius and can outgrow the overlay; a notice's
+   stays on one line. */
+.calcada-trace-notice-prompt .calcada-trace-notice-title {
+  white-space: normal;
+}
+
 .calcada-trace-notice-detail {
   font-size: 11px;
   font-variant-numeric: tabular-nums;

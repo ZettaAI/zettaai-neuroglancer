@@ -26,6 +26,7 @@ import { invokeDisposer } from "#src/util/disposable.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 const BOLD_WEIGHT = "700";
+const OVERLAY_WIDTH_PX = 200;
 const CHIP_INSET_PX = 4;
 
 let host: HTMLDivElement;
@@ -195,6 +196,14 @@ describe("CalcadaTraceNotice", () => {
     expect(button("Larger").disabled).toBe(true);
     button("Smaller").click();
     expect(actions.shrink).toHaveBeenCalledOnce();
+  });
+
+  it("wraps a long title inside the overlay instead of running past it", async () => {
+    await mountPrompt(openPrompt);
+    host.className = "calcada-trace-notice-overlay";
+    host.style.width = `${OVERLAY_WIDTH_PX}px`;
+    const notice = host.querySelector<HTMLElement>(".calcada-trace-notice")!;
+    expect(notice.scrollWidth).toBeLessThanOrEqual(notice.clientWidth);
   });
 
   it("leaves room around the key chip of a prompt button", async () => {
