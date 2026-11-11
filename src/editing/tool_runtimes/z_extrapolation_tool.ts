@@ -21,8 +21,8 @@
  *    {@link runNextSlice} / {@link cancel} / {@link resetLastRun}.
  *
  * `runNextSlice` reads the region window from `session.sessionVoxelBoundsFor`
- * (global voxels), the current Z from the viewport (or the locked value), and
- * the tracked IDs, then runs one {@link propagateSlice} inside
+ * (global voxels), the current Z from the viewport (always the slice the user
+ * is looking at), and the tracked IDs, then runs one {@link propagateSlice} inside
  * `EditScope.runOperation` — one native undo entry, which is exactly what Reset
  * undoes.
  *
@@ -86,8 +86,8 @@ export interface ZExtrapolationRunState {
   readonly imageLayerId: LayerId | undefined;
   readonly maskLayerId: LayerId | undefined;
   readonly direction: ZExtrapolationDirection;
+  /** The viewport's Z in the mask grid: the slice Run propagates from. */
   readonly currentZ: number | undefined;
-  readonly isCurrentZLocked: boolean;
   readonly isRunning: boolean;
   /** Whether the last propagation is still the top of the undo stack. */
   readonly hasLastRun: boolean;
@@ -137,7 +137,6 @@ const DEFAULT_STATE: ZExtrapolationRunState = {
   maskLayerId: undefined,
   direction: "forward",
   currentZ: undefined,
-  isCurrentZLocked: false,
   isRunning: false,
   hasLastRun: false,
 };
@@ -177,10 +176,8 @@ interface RunPlan {
   readonly protectedIds: readonly bigint[];
 }
 
-/** Captured before a run so Reset can restore the pre-run viewport + Z. */
+/** Captured before a run so Reset can return the viewport to the pre-run slice. */
 interface LastRunSnapshot {
-  readonly prevCurrentZ: number | undefined;
-  readonly prevLocked: boolean;
   readonly prevViewport: Float32Array;
 }
 
@@ -289,8 +286,6 @@ export class ZExtrapolationTool implements EditTool {
     }
 
     const snapshot: LastRunSnapshot = {
-      prevCurrentZ: this.state.currentZ,
-      prevLocked: this.state.isCurrentZLocked,
       prevViewport: this.deps.getViewportPosition().slice(),
     };
     const abortController = new AbortController();
@@ -356,18 +351,15 @@ export class ZExtrapolationTool implements EditTool {
     this.patchState({ isRunning: false });
   }
 
-  /** Undo the last propagation (native undo) and restore the prior viewport/Z. */
+  /** Undo the last propagation (native undo) and return to the prior slice. */
   async resetLastRun(): Promise<void> {
     const snapshot = this.lastRun;
     if (!this.state.hasLastRun || snapshot === undefined) return;
     await this.deps.session.undo();
     this.deps.setViewportPosition(snapshot.prevViewport);
-    this.patchState({
-      currentZ: snapshot.prevCurrentZ,
-      isCurrentZLocked: snapshot.prevLocked,
-      hasLastRun: false,
-    });
     this.lastRun = undefined;
+    this.patchState({ hasLastRun: false });
+    this.followViewportZ();
   }
 
   // -- Panel bindings -----------------------------------------------------
@@ -443,34 +435,36 @@ export class ZExtrapolationTool implements EditTool {
     this.schedulePrefetch();
   }
 
-  /** Set the current Z explicitly, which locks it (editing pins the slice). */
+  /**
+   * Go to slice `z` (mask grid): the viewport moves there, so Current Z always
+   * matches the slice the user sees.
+   */
   setCurrentZ(z: number): void {
-    this.patchState({ currentZ: z, isCurrentZLocked: true });
-    this.schedulePrefetch();
+    const maskScale = this.currentMaskScale();
+    if (maskScale === undefined) return;
+    this.moveViewportToZ(z, maskScale);
+    this.followViewportZ();
   }
 
-  /** Toggle the Z lock; unlocking re-syncs the current Z to the viewport. */
-  toggleLock(): void {
-    if (this.state.isCurrentZLocked) {
-      this.patchState({ isCurrentZLocked: false });
-      this.followViewportZ();
-    } else {
-      this.patchState({ isCurrentZLocked: true });
-    }
-  }
-
-  /** When unlocked, refresh the current Z from the viewport's Z position. */
+  /** Refresh the current Z from the viewport's Z position. */
   followViewportZ(): void {
-    const { maskLayerId, isCurrentZLocked } = this.state;
-    if (isCurrentZLocked || maskLayerId === undefined) return;
-    const metadata = this.deps.metadataByLayer.get(maskLayerId);
-    const resolution = this.deps.resolutionFor(maskLayerId);
-    if (metadata === undefined || resolution === undefined) return;
-    const z = this.viewportMaskZ(scaleFor(metadata, resolution));
+    const maskScale = this.currentMaskScale();
+    if (maskScale === undefined) return;
+    const z = this.viewportMaskZ(maskScale);
     if (z !== undefined && z !== this.state.currentZ) {
       this.patchState({ currentZ: z });
       this.schedulePrefetch();
     }
+  }
+
+  /** The selected mask layer's scale at its session resolution, if available. */
+  private currentMaskScale(): ScaleMetadata | undefined {
+    const { maskLayerId } = this.state;
+    if (maskLayerId === undefined) return undefined;
+    const metadata = this.deps.metadataByLayer.get(maskLayerId);
+    const resolution = this.deps.resolutionFor(maskLayerId);
+    if (metadata === undefined || resolution === undefined) return undefined;
+    return scaleFor(metadata, resolution);
   }
 
   /**
@@ -635,7 +629,6 @@ export class ZExtrapolationTool implements EditTool {
   private advanceAfterRun(plan: RunPlan): void {
     this.patchState({
       currentZ: plan.maskWindow.nextZ,
-      isCurrentZLocked: true,
       isRunning: false,
       hasLastRun: true,
     });
@@ -796,10 +789,7 @@ export class ZExtrapolationTool implements EditTool {
     maskScale: ScaleMetadata,
     bounds: SessionVoxelBounds,
   ): number | string {
-    const z =
-      this.state.isCurrentZLocked && this.state.currentZ !== undefined
-        ? this.state.currentZ
-        : this.viewportMaskZ(maskScale);
+    const z = this.viewportMaskZ(maskScale);
     if (z === undefined) {
       return "Current Z is not set.";
     }
