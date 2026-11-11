@@ -117,6 +117,7 @@ import {
   CalcadaOverviewState,
   SCORING_SEGMENT_STATUS,
   splitDetectionStatus,
+  resumesAfterTrace,
   toggleSplitDetection,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
@@ -5206,11 +5207,13 @@ class CandidateOverviewSession extends RefCounted {
           state.active.value = false;
           return;
         }
-        if (!this.resumeAfterTrace) return;
+        const resume = resumesAfterTrace({
+          wasActive: this.resumeAfterTrace,
+          onMain: connection.graph.branchId.value === MAIN_BRANCH_ID,
+          segmentChosen: segmentSession.piece !== undefined,
+        });
         this.resumeAfterTrace = false;
-        if (connection.graph.branchId.value !== MAIN_BRANCH_ID) {
-          state.active.value = true;
-        }
+        if (resume) state.active.value = true;
       }),
     );
     this.registerDisposer(
