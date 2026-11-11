@@ -9,14 +9,12 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { makeCoordinateSpace } from "#src/coordinate_transform.js";
 import type { AcceptedCandidateRow } from "#src/datasource/calcada/accepted_candidates_table.js";
 import {
   ACCEPTED_CANDIDATE_SCHEMA,
   ACCEPTED_CANDIDATES_TABLE,
   AcceptedCandidatesTable,
   AcceptedLines,
-  lineEndAtPiece,
 } from "#src/datasource/calcada/accepted_candidates_table.js";
 
 const BASE = "https://host/g";
@@ -173,9 +171,8 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 describe("AcceptedLines", () => {
   it("records a line per accept and forgets the newest one, removing its row on its branch", async () => {
     const { lines, written, removed } = linesSetUp();
-    lines.record(BRANCH, ROW.lineId, Promise.resolve(ROW));
-    lines.record(BRANCH + 1, 5n, Promise.resolve({ ...ROW, lineId: 5n }));
-    await settle();
+    lines.record(BRANCH, ROW);
+    lines.record(BRANCH + 1, { ...ROW, lineId: 5n });
     expect(written.map(({ branchId }) => branchId)).toEqual([
       BRANCH,
       BRANCH + 1,
@@ -190,7 +187,7 @@ describe("AcceptedLines", () => {
   it("an accept whose row failed is still forgotten, and reports the failure once", async () => {
     const { lines, table, removed, errors } = linesSetUp();
     table.writeFails = true;
-    lines.record(BRANCH, ROW.lineId, Promise.resolve(ROW));
+    lines.record(BRANCH, ROW);
     await settle();
     expect(errors).toEqual([
       "Could not record the accepted candidate: HTTP 403",
@@ -201,60 +198,12 @@ describe("AcceptedLines", () => {
     expect(errors).toHaveLength(1);
   });
 
-  it("an accept undone while its line's ends are still read loses its row once written", async () => {
-    const { lines, written, removed } = linesSetUp();
-    let resolveRow!: (row: AcceptedCandidateRow) => void;
-    lines.record(
-      BRANCH,
-      ROW.lineId,
-      new Promise((resolve) => {
-        resolveRow = resolve;
-      }),
-    );
-    expect(lines.forgetNewest()).toBe(ROW.lineId);
-    resolveRow(ROW);
-    await settle();
-    expect(written).toHaveLength(1);
-    expect(removed).toEqual([{ branchId: BRANCH, rowId: 100n }]);
-  });
-
   it("clear forgets every accept and keeps their rows", async () => {
     const { lines, removed } = linesSetUp();
-    lines.record(BRANCH, ROW.lineId, Promise.resolve(ROW));
+    lines.record(BRANCH, ROW);
     lines.clear();
     expect(lines.forgetNewest()).toBeUndefined();
     await settle();
     expect(removed).toEqual([]);
-  });
-});
-
-describe("lineEndAtPiece", () => {
-  const space = makeCoordinateSpace({
-    names: ["x", "y", "z"],
-    units: ["m", "m", "m"],
-    scales: Float64Array.of(16e-9, 16e-9, 45e-9),
-  });
-  const contact = Float32Array.of(1, 2, 3);
-  const spheres = new Map([
-    [7n, { center: [160, 320, 450] as const, radiusNm: 10 }],
-  ]);
-
-  it("puts the end at the centre of the piece", () => {
-    expect(Array.from(lineEndAtPiece(spheres, 7n, contact, space))).toEqual([
-      10, 20, 10,
-    ]);
-  });
-
-  it("keeps the contact for a piece the manifest does not place", () => {
-    expect(lineEndAtPiece(spheres, 9n, contact, space)).toBe(contact);
-  });
-
-  it("keeps the contact when the view cannot say where nanometres are", () => {
-    const flat = makeCoordinateSpace({
-      names: ["x", "y"],
-      units: ["m", "m"],
-      scales: Float64Array.of(16e-9, 16e-9),
-    });
-    expect(lineEndAtPiece(spheres, 7n, contact, flat)).toBe(contact);
   });
 });

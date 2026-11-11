@@ -42,7 +42,6 @@ import { makeIdentityTransform } from "#src/coordinate_transform.js";
 import {
   AcceptedCandidatesTable,
   AcceptedLines,
-  lineEndAtPiece,
 } from "#src/datasource/calcada/accepted_candidates_table.js";
 import {
   CalcadaAnnotationTablesSession,
@@ -4398,7 +4397,6 @@ class ZettaTraceSession extends RefCounted {
     // moment it is absorbed, so afterwards there is no id left to ask about.
     const childrenRead = this.readChildren(accepted.partnerRootId);
     const children = childrenOrNone(childrenRead);
-    const lineEnds = this.acceptedLineEnds(seedRoot, accepted);
 
     let merged: { root: bigint; operationId: number };
     try {
@@ -4422,19 +4420,16 @@ class ZettaTraceSession extends RefCounted {
       return;
     }
     this.decided.add(accepted.lineId);
-    this.acceptedLines.record(
-      this.branchId,
-      accepted.lineId,
-      lineEnds.then((ends) => ({
-        score: accepted.score,
-        lineId: accepted.lineId,
-        depth: acceptedDepth,
-        operationId: merged.operationId > 0 ? merged.operationId : undefined,
-        pieceA: accepted.selfPieceId,
-        pieceB: accepted.partnerPieceId,
-        ...ends,
-      })),
-    );
+    this.acceptedLines.record(this.branchId, {
+      score: accepted.score,
+      lineId: accepted.lineId,
+      depth: acceptedDepth,
+      operationId: merged.operationId > 0 ? merged.operationId : undefined,
+      pieceA: accepted.selfPieceId,
+      pieceB: accepted.partnerPieceId,
+      pointA: accepted.pointA,
+      pointB: accepted.pointB,
+    });
     if (sameTrace()) this.endController.noteAccept(accepted.lineId);
     // The edit handler skips the trace's own merges (the trace is busy), so the
     // roots they retire are recorded here. Without this, leaving the trace put
@@ -4481,35 +4476,6 @@ class ZettaTraceSession extends RefCounted {
     }
     this.setBusy(false);
     void this.refreshGraphContext();
-  }
-
-  /** The accepted line's ends at the centres of the two merged pieces. */
-  private async acceptedLineEnds(
-    seedRoot: bigint,
-    accepted: EdgeCandidate,
-  ): Promise<{ pointA: Float32Array; pointB: Float32Array }> {
-    const { graph } = this.connection;
-    const piecesOf = (root: bigint) =>
-      graph.fetchPieceSpheres(root).catch(() => new Map<bigint, PieceSphere>());
-    const [seedPieces, partnerPieces] = await Promise.all([
-      piecesOf(seedRoot),
-      piecesOf(accepted.partnerRootId),
-    ]);
-    const coordinateSpace = this.layer.manager.root.coordinateSpace.value;
-    return {
-      pointA: lineEndAtPiece(
-        seedPieces,
-        accepted.selfPieceId,
-        accepted.pointA,
-        coordinateSpace,
-      ),
-      pointB: lineEndAtPiece(
-        partnerPieces,
-        accepted.partnerPieceId,
-        accepted.pointB,
-        coordinateSpace,
-      ),
-    };
   }
 
   /**
