@@ -3,6 +3,7 @@ import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js
 import {
   bestAlternative,
   describePartnerChoice,
+  formatScore,
 } from "#src/datasource/calcada/candidate_ranking.js";
 import {
   continueAt,
@@ -31,6 +32,7 @@ function candidate(
     pointB: Float32Array.of(1, 1, 1),
     nInterfaces: 1,
     modelDecision: "defer",
+    label: "",
     partnerVoxels: 0,
     partnerClasses: {
       perikaryon: 0,
@@ -291,5 +293,19 @@ describe("describePartnerChoice", () => {
     expect(describePartnerChoice(0.5, candidate(1, 0.7)).seedIsBest).toBe(
       false,
     );
+  });
+
+  it("names the alternative's label beside its score", () => {
+    const labelled = { ...candidate(1, 0.7), label: "thin-neck" };
+    expect(describePartnerChoice(0.5, labelled).text).toBe(
+      "Candidate has an alternative: score 0.70 (thin-neck)",
+    );
+  });
+});
+
+describe("formatScore", () => {
+  it("puts a label after the score, and nothing without one", () => {
+    expect(formatScore(0.873, "thin-neck")).toBe("0.87 (thin-neck)");
+    expect(formatScore(0.873, "")).toBe("0.87");
   });
 });

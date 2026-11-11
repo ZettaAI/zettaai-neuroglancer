@@ -104,6 +104,7 @@ async function makeConnection({
             piece: {
               pieceId: 1n,
               bestScore: 0.87,
+              bestLabel: "",
               bestPartnerPiece: 2n,
               bestPartnerRoot: 3n,
               bestPartnerVoxels: 2125,

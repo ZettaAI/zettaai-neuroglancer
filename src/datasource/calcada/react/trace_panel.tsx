@@ -21,6 +21,7 @@ import type {
   SplitDetectionFocus,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { formatScore } from "#src/datasource/calcada/candidate_ranking.js";
 import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
 import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
 import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
@@ -311,7 +312,6 @@ function HintedButton({
 }
 
 const NO_VALUE = "—";
-const SCORE_DIGITS = 2;
 
 /** One line that never wraps: a longer text is cut, and whole in its tooltip. */
 function StatusLine({ text, picking }: { text: string; picking?: boolean }) {
@@ -673,11 +673,13 @@ function SplitDetectionSection({
       <div className="calcada-trace-panel-current">
         {piece === undefined
           ? NO_VALUE
-          : `score ${piece.bestScore.toFixed(SCORE_DIGITS)} · ${describePiece({
-              voxels: piece.bestPartnerVoxels,
-              classes: piece.partnerClasses,
-              hasInfo: piece.partnerHasInfo,
-            })}`}
+          : `score ${formatScore(piece.bestScore, piece.bestLabel)} · ${describePiece(
+              {
+                voxels: piece.bestPartnerVoxels,
+                classes: piece.partnerClasses,
+                hasInfo: piece.partnerHasInfo,
+              },
+            )}`}
       </div>
     </fieldset>
   );

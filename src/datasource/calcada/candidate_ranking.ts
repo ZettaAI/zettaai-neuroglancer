@@ -19,6 +19,8 @@ export interface EdgeCandidate {
   pointB: Float32Array;
   nInterfaces: number;
   modelDecision: string;
+  /** The scoring run's label for the candidate; empty without one. */
+  label: string;
   /** The piece this candidate would merge in. */
   partnerVoxels: number;
   partnerClasses: PieceClasses;
@@ -30,6 +32,12 @@ export interface EdgeCandidate {
 }
 
 export const SCORE_DIGITS = 2;
+
+/** A candidate's score as shown everywhere, its label beside it. */
+export function formatScore(score: number, label: string): string {
+  const shown = score.toFixed(SCORE_DIGITS);
+  return label === "" ? shown : `${shown} (${label})`;
+}
 
 /**
  * The strongest merge the candidate's segment has on offer elsewhere — anything
@@ -59,7 +67,7 @@ export function describePartnerChoice(
   if (alternative === undefined) {
     return { seedIsBest: true, text: "Seed is the candidate's only match" };
   }
-  const other = alternative.score.toFixed(SCORE_DIGITS);
+  const other = formatScore(alternative.score, alternative.label);
   return score > alternative.score
     ? {
         seedIsBest: true,

@@ -42,6 +42,7 @@ function candidate(overrides: Partial<EdgeCandidate> = {}): EdgeCandidate {
     pointB: new Float32Array([4, 5, 6]),
     nInterfaces: 1,
     modelDecision: "",
+    label: "",
     partnerVoxels: 500,
     partnerClasses: noClasses,
     partnerHasInfo: false,

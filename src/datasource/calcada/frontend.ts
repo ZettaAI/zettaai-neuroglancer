@@ -123,7 +123,7 @@ import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js
 import {
   bestAlternative,
   describePartnerChoice,
-  SCORE_DIGITS,
+  formatScore,
 } from "#src/datasource/calcada/candidate_ranking.js";
 import type { PoolEntry } from "#src/datasource/calcada/candidate_traversal.js";
 import {
@@ -4074,7 +4074,7 @@ class ZettaTraceSession extends RefCounted {
     candidate: EdgeCandidate,
     alternative?: EdgeCandidate | null,
   ) {
-    const score = `score ${candidate.score.toFixed(SCORE_DIGITS)}`;
+    const score = `score ${formatScore(candidate.score, candidate.label)}`;
     const left = `${this.remaining} left`;
     const choice =
       alternative === undefined
@@ -8023,6 +8023,7 @@ class CalcadaGraphServerInterface {
         pointB: Float32Array.from(c.point_b),
         nInterfaces: Number(c.n_interfaces),
         modelDecision: String(c.model_decision),
+        label: String(c.label ?? ""),
         partnerVoxels: Number(c.partner_voxels ?? 0),
         partnerClasses: parseClassCounts(c.partner_classes),
         partnerHasInfo: c.partner_has_info === true,

@@ -35,6 +35,7 @@ function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
   return {
     pieceId: 1n,
     bestScore: 0,
+    bestLabel: "",
     bestPartnerPiece: 0n,
     bestPartnerRoot: 0n,
     bestPartnerVoxels: 0,
@@ -148,6 +149,7 @@ describe("parsePieceOverviews", () => {
       {
         line_id: "101",
         score: 0.9,
+        label: "thin-neck",
         partner_piece: "7",
         partner_root: "70",
         partner_voxels: 5,
@@ -176,6 +178,7 @@ describe("parsePieceOverviews", () => {
     );
     expect(rows[1].bestPartnerRoot).toBe(80n);
     expect(rows[1].voxelCount).toBe(46);
+    expect(rows.map((row) => row.bestLabel)).toEqual(["thin-neck", ""]);
   });
 
   it("keeps a piece that offers nothing as one row", () => {
@@ -232,6 +235,7 @@ describe("pieceOverviewSubject", () => {
     const subject = pieceOverviewSubject(
       piece({
         bestScore: 0.9,
+        bestLabel: "",
         classes: axon,
         hasInfo: true,
         partnerClasses: axon,
@@ -277,6 +281,7 @@ describe("edgeCandidateSubject", () => {
       pointB: new Float32Array(3),
       nInterfaces: 1,
       modelDecision: "",
+      label: "",
       partnerVoxels: 10,
       partnerClasses: noClasses,
       partnerHasInfo: false,
@@ -302,6 +307,7 @@ describe("describeCandidateSides", () => {
         pointB: new Float32Array(3),
         nInterfaces: 1,
         modelDecision: "",
+        label: "",
         partnerVoxels: 10,
         partnerClasses: { ...noClasses, glia: 1 },
         partnerHasInfo: true,
