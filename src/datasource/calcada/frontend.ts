@@ -197,6 +197,7 @@ import {
   componentsWithCarvedParents,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
+import { firstShownOverGraph } from "#src/datasource/calcada/shown_graph_layer.js";
 import type { CutLineNm } from "#src/datasource/calcada/split_cuts_table.js";
 import {
   parseCutLineNm,
@@ -6450,6 +6451,7 @@ void main() {
     // started before the timestamp moved would otherwise be impossible to end.
     this.registerDisposer(
       registerActionListener(window, CALCADA_TRACE_TOGGLE_ACTION, () => {
+        if (!answersGraphKeys(layer)) return;
         const { aiming } = state.zettaTraceState;
         // A trace merges into the branch it runs on, and main is not a place
         // for that. On main the key only opens the tab, which says why.
@@ -6476,6 +6478,7 @@ void main() {
         window,
         CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
         () => {
+          if (!answersGraphKeys(layer)) return;
           const { active } = state.overviewState;
           const { zettaTraceState } = state;
           this.traceSession.revealTraceTab();
@@ -9334,30 +9337,34 @@ function activeCalcadaLayer(
   layer: SegmentationUserLayer,
   context: RefCounted,
 ): WatchableValueInterface<SegmentationUserLayer> {
-  const layerManager = layer.manager.rootLayers;
-  const firstShown = () => {
-    // Read per call rather than once: the tool can be activated before this
-    // layer's datasource has finished loading, and a url captured then would
-    // stay undefined for the life of the activation.
-    const url = calcadaGraphUrl(layer);
-    if (url !== undefined) {
-      for (const managed of layerManager.managedLayers) {
-        const other = managed.layer;
-        if (!managed.visible || !(other instanceof SegmentationUserLayer)) {
-          continue;
-        }
-        if (calcadaGraphUrl(other) === url) return other;
-      }
-    }
-    return layer;
-  };
-  const target = new WatchableValue(firstShown());
+  // Read per call rather than once: the tool can be activated before this
+  // layer's datasource has finished loading, and a url captured then would
+  // stay undefined for the life of the activation.
+  const target = new WatchableValue(firstShownCalcadaLayer(layer));
   context.registerDisposer(
-    layerManager.layersChanged.add(() => {
-      target.value = firstShown();
+    layer.manager.rootLayers.layersChanged.add(() => {
+      target.value = firstShownCalcadaLayer(layer);
     }),
   );
   return target;
+}
+
+function firstShownCalcadaLayer(
+  layer: SegmentationUserLayer,
+): SegmentationUserLayer {
+  const segmentationLayers = layer.manager.rootLayers.managedLayers.flatMap(
+    ({ visible, layer: other }) =>
+      other instanceof SegmentationUserLayer ? [{ visible, layer: other }] : [],
+  );
+  return firstShownOverGraph(layer, segmentationLayers, calcadaGraphUrl);
+}
+
+/**
+ * A graph key reaches every layer over the graph; only the one on screen
+ * answers it, or the hidden ones would start a second mode beside it.
+ */
+function answersGraphKeys(layer: SegmentationUserLayer): boolean {
+  return firstShownCalcadaLayer(layer) === layer;
 }
 
 /**
