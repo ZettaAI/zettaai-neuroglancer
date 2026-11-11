@@ -27,6 +27,7 @@ import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_i
 import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import { ScoreRangeSlider } from "#src/datasource/calcada/react/score_range_slider.js";
+import type { PairCandidate } from "#src/datasource/calcada/segment_pair_candidates.js";
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import {
   AIM_KEYS_MODE,
@@ -109,6 +110,14 @@ export interface TracePanelConnection {
     start(): void;
     accept(): Promise<void>;
     undoLast(): Promise<void>;
+  };
+  /** The candidates between the segments on screen, one row per pair. */
+  readonly pairCandidates: {
+    readonly changed: NullarySignal;
+    readonly status: string;
+    readonly rows: readonly PairCandidate[];
+    list(): Promise<void>;
+    goTo(row: PairCandidate): void;
   };
   listCandidateReviewers(): Promise<string[]>;
   readonly filterLibrary: FilterLibrary;
@@ -685,6 +694,43 @@ function SplitDetectionSection({
   );
 }
 
+function PairCandidatesSection({
+  session,
+}: {
+  session: TracePanelConnection["pairCandidates"];
+}) {
+  useSignalRerender(session.changed);
+  return (
+    <fieldset className="calcada-trace-panel-section calcada-trace-panel-pairs">
+      <legend>Candidates between segments</legend>
+      <div className="calcada-trace-panel-buttons">
+        <HintedButton
+          hint="List the candidates between the segments on screen"
+          variant="outline"
+          onClick={() => void session.list()}
+        >
+          List
+        </HintedButton>
+      </div>
+      <StatusLine text={session.status} />
+      <ul className="calcada-trace-panel-pairs-list">
+        {session.rows.map((row) => (
+          <li key={String(row.lineId)}>
+            <button
+              type="button"
+              title="Go to where the two segments touch"
+              onClick={() => session.goTo(row)}
+            >
+              {formatScore(row.score, row.label)} · {String(row.rootA)} ↔{" "}
+              {String(row.rootB)}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </fieldset>
+  );
+}
+
 export function CalcadaTracePanel({
   connection,
 }: {
@@ -749,6 +795,7 @@ export function CalcadaTracePanel({
         state={connection.state.overviewState}
         traceState={traceState}
       />
+      <PairCandidatesSection session={connection.pairCandidates} />
       <details className="calcada-trace-panel-keys-section" open>
         <summary>Hotkeys</summary>
         <dl className="calcada-trace-panel-keys">

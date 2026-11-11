@@ -196,6 +196,7 @@ import {
   componentsWithCarvedParents,
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
+import { SegmentPairCandidates } from "#src/datasource/calcada/segment_pair_candidates.js";
 import { firstShownOverGraph } from "#src/datasource/calcada/shown_graph_layer.js";
 import type { CutLineNm } from "#src/datasource/calcada/split_cuts_table.js";
 import {
@@ -5645,6 +5646,7 @@ class GraphConnection extends SegmentationGraphSourceConnection {
   public traceAnnotationState!: AnnotationLayerState;
   public traceSession!: ZettaTraceSession;
   public overviewSession!: CandidateOverviewSession;
+  public pairCandidates!: SegmentPairCandidates;
   public segmentSession!: ProofreadSegmentSession;
   public debugSession!: CalcadaDebugSession;
   public annotationTablesSession!: CalcadaAnnotationTablesSession;
@@ -6381,6 +6383,21 @@ void main() {
         state.overviewState,
         this.segmentSession,
       ),
+    );
+    this.pairCandidates = this.registerDisposer(
+      new SegmentPairCandidates({
+        selectedRoots: () => [
+          ...layer.displayState.segmentationGroupState.value.visibleSegments,
+        ],
+        fetchBetween: (roots) =>
+          this.graph.graphServer.fetchCandidatesBetween(
+            roots,
+            this.graph.branchId.value,
+          ),
+        goTo: (point) => {
+          layer.manager.root.globalPosition.value = point;
+        },
+      }),
     );
     const { sidePanelManager } = layer.manager.root;
     if (sidePanelManager instanceof SidePanelManager) {
@@ -7744,6 +7761,30 @@ const selectionInNanometers = (
   };
 };
 
+// The server's cap on candidates per segment in one read.
+const MAX_CANDIDATES_PER_SEGMENT = 500;
+
+function parseEdgeCandidate(c: any): EdgeCandidate {
+  return {
+    lineId: parseUint64(c.line_id),
+    score: Number(c.score),
+    selfPieceId: parseUint64(c.self_piece_id),
+    partnerPieceId: parseUint64(c.partner_piece_id),
+    partnerRootId: parseUint64(c.partner_root_id),
+    pointA: Float32Array.from(c.point_a),
+    pointB: Float32Array.from(c.point_b),
+    nInterfaces: Number(c.n_interfaces),
+    modelDecision: String(c.model_decision),
+    label: String(c.label ?? ""),
+    partnerVoxels: Number(c.partner_voxels ?? 0),
+    partnerClasses: parseClassCounts(c.partner_classes),
+    partnerHasInfo: c.partner_has_info === true,
+    selfVoxels: Number(c.self_voxels ?? 0),
+    selfClasses: parseClassCounts(c.self_classes),
+    selfHasInfo: c.self_has_info === true,
+  };
+}
+
 class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
 
@@ -8012,25 +8053,34 @@ class CalcadaGraphServerInterface {
       { priority: opts.priority ?? "high" },
     );
     const jsonResp = await response.json();
-    return (jsonResp.candidates ?? []).map(
-      (c: any): EdgeCandidate => ({
-        lineId: parseUint64(c.line_id),
-        score: Number(c.score),
-        selfPieceId: parseUint64(c.self_piece_id),
-        partnerPieceId: parseUint64(c.partner_piece_id),
-        partnerRootId: parseUint64(c.partner_root_id),
-        pointA: Float32Array.from(c.point_a),
-        pointB: Float32Array.from(c.point_b),
-        nInterfaces: Number(c.n_interfaces),
-        modelDecision: String(c.model_decision),
-        label: String(c.label ?? ""),
-        partnerVoxels: Number(c.partner_voxels ?? 0),
-        partnerClasses: parseClassCounts(c.partner_classes),
-        partnerHasInfo: c.partner_has_info === true,
-        selfVoxels: Number(c.self_voxels ?? 0),
-        selfClasses: parseClassCounts(c.self_classes),
-        selfHasInfo: c.self_has_info === true,
+    return (jsonResp.candidates ?? []).map(parseEdgeCandidate);
+  }
+
+  /**
+   * The candidates between the given segments only, as many as the server
+   * lists per segment; each pair comes under both of its segments.
+   */
+  async fetchCandidatesBetween(
+    rootIds: readonly bigint[],
+    branchId = 0,
+  ): Promise<Map<bigint, EdgeCandidate[]>> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const params = new URLSearchParams({ int64_as_str: "1" });
+    if (branchId) params.set("branch_id", String(branchId));
+    const response = await fetchOkImpl(`${baseUrl}/candidates?${params}`, {
+      method: "POST",
+      body: JSON.stringify({
+        segment_ids: rootIds.map(String),
+        between_segments: true,
+        limit: MAX_CANDIDATES_PER_SEGMENT,
       }),
+    });
+    const jsonResp = await response.json();
+    return new Map(
+      Object.entries(jsonResp.candidates ?? {}).map(([root, candidates]) => [
+        parseUint64(root),
+        (candidates as any[]).map(parseEdgeCandidate),
+      ]),
     );
   }
 

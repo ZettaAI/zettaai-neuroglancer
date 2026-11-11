@@ -134,6 +134,26 @@ async function makeConnection({
       accept: async () => {},
       undoLast: async () => {},
     },
+    // Not the trace's: the same whether it is busy or idle.
+    pairCandidates: {
+      changed: new NullarySignal(),
+      status: "1 pair between 2 segments",
+      rows: [
+        {
+          lineId: 9n,
+          score: 0.87,
+          label: "thin-neck",
+          rootA: 10n,
+          rootB: 20n,
+          pointA: Float32Array.of(0, 0, 0),
+          pointB: Float32Array.of(2, 2, 2),
+        },
+      ],
+      list: async () => {
+        calls.push("listPairs");
+      },
+      goTo: record("goToPair"),
+    },
     listCandidateReviewers: async () => [],
     filterLibrary: library,
   };
@@ -286,6 +306,18 @@ describe("CalcadaTracePanel", () => {
     // Both still start: each asks for the segment first.
     expect((await button("Start")).disabled).toBe(false);
     expect((await button("Detect split errors")).disabled).toBe(false);
+  });
+
+  it("lists the candidates between the segments on screen and goes to one", async () => {
+    await mountPanel(await makeConnection());
+    calls = [];
+    const pairs = ".calcada-trace-panel-pairs";
+    (await button("List", pairs)).click();
+    (await button("0.87 (thin-neck) · 10 ↔ 20", pairs)).click();
+    expect(calls).toEqual(["listPairs", "goToPair"]);
+    expect(tab.querySelector(pairs)?.textContent).toContain(
+      "1 pair between 2 segments",
+    );
   });
 
   it("says to Ctrl+click while the segment is being selected", async () => {
