@@ -192,6 +192,17 @@ function makeTool(
     removalListeners,
     writes,
     readZs: image.readZs,
+    /** The viewport's global Z (one global unit = one mask voxel here). */
+    viewportZ: () => viewport[2],
+    /** The user scrolling the viewer to global Z `z`. */
+    scrollTo: (z: number) => {
+      viewport = Float32Array.from([viewport[0], viewport[1], z]);
+    },
+    /** The user scrolling the viewer to the centre of mask slice `z`. */
+    goToSlice: (z: number) => {
+      viewport = Float32Array.from([viewport[0], viewport[1], z + 0.5]);
+      tool.followViewportZ();
+    },
     ...backend,
   };
 }
@@ -449,8 +460,8 @@ describe("ZExtrapolationTool run (TM-518)", () => {
   });
 
   it("does not prefetch past the session region", async () => {
-    const { tool, readZs, writes } = makeTool();
-    tool.setCurrentZ(BOUNDS.hiZ - 2); // run writes the last slice
+    const { tool, readZs, writes, goToSlice } = makeTool();
+    goToSlice(BOUNDS.hiZ - 2); // run writes the last slice
     await tool.runNextSlice();
     await settle();
     expect(writes).toHaveLength(1);
@@ -462,20 +473,59 @@ describe("ZExtrapolationTool run (TM-518)", () => {
 
   it("prefetches the current and next slice once the Z settles", async () => {
     vi.useFakeTimers();
-    const { tool, readZs } = makeTool();
-    tool.setCurrentZ(10);
-    tool.setCurrentZ(12); // a quick second change replaces the first
+    const { readZs, goToSlice } = makeTool();
+    goToSlice(10);
+    goToSlice(12); // a quick second change replaces the first
     await vi.advanceTimersByTimeAsync(300);
     expect(readZs.sort((a, b) => a - b)).toEqual([12, 13]);
   });
 
   it("prefetches nothing once disposed", async () => {
     vi.useFakeTimers();
-    const { tool, readZs } = makeTool();
-    tool.setCurrentZ(10);
+    const { tool, readZs, goToSlice } = makeTool();
+    goToSlice(10);
     tool.dispose();
     await vi.advanceTimersByTimeAsync(300);
     expect(readZs).toEqual([]);
+  });
+});
+
+describe("ZExtrapolationTool current Z follows the viewport", () => {
+  it("runs from the slice the user scrolled to after a run", async () => {
+    const { tool, writes, scrollTo } = makeTool();
+    await tool.runNextSlice(); // 5 → 6
+    scrollTo(5.5);
+    tool.followViewportZ();
+    expect(tool.getState().currentZ).toBe(5);
+    await tool.runNextSlice();
+    expect(writes.map((write) => write.box.origin[2])).toEqual([6, 6]);
+  });
+
+  it("moves the viewport to a typed Current Z", () => {
+    const { tool, viewportZ } = makeTool();
+    tool.setCurrentZ(10);
+    expect(viewportZ()).toBe(10.5);
+    expect(tool.getState().currentZ).toBe(10);
+  });
+
+  it("follows the viewport after a typed Current Z", async () => {
+    const { tool, writes, goToSlice } = makeTool();
+    tool.setCurrentZ(10);
+    goToSlice(5);
+    expect(tool.getState().currentZ).toBe(5);
+    await tool.runNextSlice();
+    expect(writes.map((write) => write.box.origin[2])).toEqual([6]);
+  });
+
+  it("moves to the next slice after a run and back to it on Reset", async () => {
+    const { tool, viewportZ } = makeTool();
+    await tool.runNextSlice();
+    expect(viewportZ()).toBe(6.5);
+    expect(tool.getState().currentZ).toBe(6);
+    await tool.resetLastRun();
+    expect(viewportZ()).toBe(5.5);
+    expect(tool.getState().currentZ).toBe(5);
+    expect(tool.getState().hasLastRun).toBe(false);
   });
 });
 
@@ -488,10 +538,10 @@ describe("ZExtrapolationTool empty steps (TM-518)", () => {
 
   it("says the current slice is unpainted instead of running on it", async () => {
     const shown = messages();
-    const { tool, sentMasks, writes } = makeTool({
+    const { tool, sentMasks, writes, goToSlice } = makeTool({
       currentMask: BigUint64Array.from([0n, 0n, 0n, 0n]),
     });
-    tool.setCurrentZ(5); // locked on a slice the user did not paint
+    goToSlice(5); // a slice the user did not paint
     await tool.runNextSlice();
     expect(shown).toHaveBeenCalledWith(
       "None of the tracked segments is painted on Z=5. Paint them on this " +

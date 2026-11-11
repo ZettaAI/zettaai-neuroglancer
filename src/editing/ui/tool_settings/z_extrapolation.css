@@ -14,29 +14,6 @@
   gap: var(--nge-space-3);
 }
 
-.neuroglancer-z-extrapolation-lock {
-  flex: 0 0 auto;
-  height: var(--nge-control-h);
-  padding: 0 var(--nge-control-pad-x);
-  border: 1px solid var(--nge-border);
-  border-radius: var(--nge-radius-sm);
-  background: var(--nge-control-bg);
-  color: var(--nge-text);
-  font: inherit;
-  cursor: pointer;
-  transition: var(--nge-transition);
-}
-
-.neuroglancer-z-extrapolation-lock:hover {
-  background: var(--nge-control-bg-hover);
-}
-
-.neuroglancer-z-extrapolation-lock[aria-pressed="true"] {
-  border-color: var(--nge-accent-border);
-  background: var(--nge-accent-tint);
-  color: var(--nge-accent-fg);
-}
-
 /* --- Actions ---------------------------------------------------------- */
 
 .neuroglancer-z-extrapolation-run {
@@ -62,6 +39,7 @@
   cursor: default;
 }
 
+.neuroglancer-z-extrapolation-cancel,
 .neuroglancer-z-extrapolation-reset {
   height: var(--nge-control-h);
   border: 1px solid var(--nge-border);
@@ -73,10 +51,12 @@
   transition: var(--nge-transition);
 }
 
+.neuroglancer-z-extrapolation-cancel:hover:not(:disabled),
 .neuroglancer-z-extrapolation-reset:hover:not(:disabled) {
   background: var(--nge-control-bg-hover);
 }
 
+.neuroglancer-z-extrapolation-cancel:disabled,
 .neuroglancer-z-extrapolation-reset:disabled {
   opacity: 0.5;
   cursor: default;

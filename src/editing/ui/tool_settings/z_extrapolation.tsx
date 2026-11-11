@@ -15,7 +15,9 @@
  * controller). The panel reads its reactive state, offers layer/direction/Z
  * controls, lists the segments (the mask layer's selection) with their colours
  * and a track/untrack tick each (TM-518), and drives Auto-detect / Run / Reset.
- * Run is gated on the backend being reachable.
+ * Run is gated on the backend being reachable. Current Z always follows the
+ * viewport; typing a Z moves the viewport there. Every control is rendered in
+ * every state, so the layout does not shift while a run is in flight.
  */
 
 import type { EditSession, LayerId } from "@zettaai/edit-session";
@@ -111,7 +113,7 @@ function ZExtrapolationBody({
     }
   }, [tool, state.maskLayerId, state.imageLayerId, firstMask, firstImage]);
 
-  // Follow the viewport Z while unlocked.
+  // Current Z follows the viewport.
   useEffect(() => {
     const position = host.viewer.position;
     tool.followViewportZ();
@@ -216,19 +218,6 @@ function ZExtrapolationBody({
           parse={parseCurrentZ}
           onCommit={(z) => tool.setCurrentZ(z)}
         />
-        <button
-          type="button"
-          class="neuroglancer-z-extrapolation-lock"
-          aria-pressed={state.isCurrentZLocked ? "true" : "false"}
-          data-tooltip={
-            state.isCurrentZLocked
-              ? "Locked — click to follow the viewport"
-              : "Following viewport — click to lock"
-          }
-          onClick={() => tool.toggleLock()}
-        >
-          {state.isCurrentZLocked ? "Locked" : "Follow"}
-        </button>
       </div>
 
       <TrackedSegmentList
@@ -255,11 +244,14 @@ function ZExtrapolationBody({
             ? `Run next slice (${trackedCount} ${trackedCount === 1 ? "segment" : "segments"})`
             : "Run next slice"}
       </button>
-      {state.isRunning && (
-        <button type="button" onClick={() => tool.cancel()}>
-          Cancel
-        </button>
-      )}
+      <button
+        type="button"
+        class="neuroglancer-z-extrapolation-cancel"
+        disabled={!state.isRunning}
+        onClick={() => tool.cancel()}
+      >
+        Cancel
+      </button>
       <button
         type="button"
         class="neuroglancer-z-extrapolation-reset"
