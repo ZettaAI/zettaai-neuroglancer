@@ -4306,11 +4306,13 @@ class ZettaTraceSession extends RefCounted {
   }
 
   reject() {
-    this.recordVerdict("reject", "rejection", () => {
-      // The rejection takes that candidate off the seed's points too.
-      const seedRoot = this.state.seedRoot.value;
-      if (seedRoot !== undefined) void this.splitPoints.forget(seedRoot);
-    });
+    this.recordVerdict("reject", "rejection", () => this.forgetSeedPoints());
+  }
+
+  /** A hidden candidate leaves the seed's points too. */
+  private forgetSeedPoints() {
+    const seedRoot = this.state.seedRoot.value;
+    if (seedRoot !== undefined) void this.splitPoints.forget(seedRoot);
   }
 
   skip() {
@@ -4321,7 +4323,9 @@ class ZettaTraceSession extends RefCounted {
   markAmbiguous() {
     const candidate = this.current;
     if (this.busy || candidate === undefined) return;
-    this.recordVerdict("ambiguous", "ambiguous mark");
+    this.recordVerdict("ambiguous", "ambiguous mark", () =>
+      this.forgetSeedPoints(),
+    );
     const { state } = this;
     const threshold = scoreFloor(state.filter.value, state.scoreRange.value);
     this.connection.traceEndpoints
