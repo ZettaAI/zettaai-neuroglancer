@@ -9,10 +9,15 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import "#src/ui/annotations.css";
 import "#src/ui/key_chips.css";
 
 import type { ComponentProps } from "react";
-import { Fragment, useCallback } from "react";
+import { Fragment, useCallback, useLayoutEffect, useRef } from "react";
+import {
+  AnnotationType,
+  annotationTypeHandlers,
+} from "#src/annotation/index.js";
 
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { describePiece } from "#src/datasource/calcada/candidate_heat.js";
@@ -29,6 +34,7 @@ import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_pick
 import { ScoreRangeSlider } from "#src/datasource/calcada/react/score_range_slider.js";
 import type {
   PairContact,
+  PairListDimension,
   SegmentPair,
 } from "#src/datasource/calcada/segment_pair_candidates.js";
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
@@ -55,6 +61,10 @@ import {
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
+import {
+  AnnotationListColumnWidths,
+  annotationListCoordinateColumns,
+} from "#src/ui/annotations.js";
 import { keysForCustomAction } from "#src/ui/custom_keybinds.js";
 import {
   chordsForAction,
@@ -119,6 +129,8 @@ export interface TracePanelConnection {
     readonly changed: NullarySignal;
     readonly status: string;
     readonly pairs: readonly SegmentPair[];
+    /** The view's dimensions, the list's coordinate columns. */
+    dimensions(): readonly PairListDimension[];
     list(): Promise<void>;
     goTo(contact: PairContact): void;
   };
@@ -708,6 +720,107 @@ function describeContact(contact: PairContact) {
   return hiding === undefined ? score : `${score} · ${hiding}`;
 }
 
+const LINE_ICON = annotationTypeHandlers[AnnotationType.LINE].icon;
+// What the annotation list adds around a dimension's name and scale: a space
+// and the scale's parentheses.
+const DIMENSION_DECORATION = 3;
+
+const coordinatesOf = (point: Float32Array) =>
+  Array.from(point, (value) => String(Math.floor(value)));
+
+function ContactEnd({ point }: { point: Float32Array }) {
+  return (
+    <div className="neuroglancer-annotation-position">
+      {coordinatesOf(point).map((text, axis) => (
+        <div
+          key={axis}
+          className="neuroglancer-annotation-coordinate"
+          style={{ gridColumn: `dim ${axis + 1}` }}
+        >
+          {text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Each contact as an annotation list shows a line: its two ends, then its
+ * score; read-only, so without the list's edit and delete columns.
+ */
+function PairContactList({
+  session,
+}: {
+  session: TracePanelConnection["pairCandidates"];
+}) {
+  const list = useRef<HTMLDivElement>(null);
+  const dimensions = session.dimensions();
+  const gridTemplateColumns = annotationListCoordinateColumns(
+    dimensions.length,
+  );
+  useLayoutEffect(() => {
+    const widths = new AnnotationListColumnWidths(list.current!);
+    dimensions.forEach(({ name, scale }, axis) => {
+      widths.widen(axis, name.length + scale.length + DIMENSION_DECORATION);
+    });
+    for (const { contacts } of session.pairs) {
+      for (const { pointA, pointB } of contacts) {
+        for (const point of [pointA, pointB]) {
+          coordinatesOf(point).forEach((text, axis) =>
+            widths.widen(axis, text.length),
+          );
+        }
+      }
+    }
+  });
+  return (
+    <div ref={list} className="calcada-trace-panel-pairs-list">
+      <div
+        className="neuroglancer-annotation-list-header"
+        style={{ gridTemplateColumns }}
+      >
+        {dimensions.map(({ name, scale }, axis) => (
+          <div
+            key={axis}
+            className="neuroglancer-annotations-view-dimension"
+            style={{ gridColumn: `dim ${axis + 1}` }}
+          >
+            <span className="neuroglancer-annotations-view-dimension-name">
+              {name}
+            </span>
+            <span className="neuroglancer-annotations-view-dimension-scale">
+              {scale}
+            </span>
+          </div>
+        ))}
+      </div>
+      {session.pairs.map((pair) => (
+        <Fragment key={`${pair.rootA}:${pair.rootB}`}>
+          <div className="calcada-trace-panel-pair">
+            {String(pair.rootA)} ↔ {String(pair.rootB)}
+          </div>
+          {pair.contacts.map((contact) => (
+            <div
+              key={String(contact.lineId)}
+              className="neuroglancer-annotation-list-entry"
+              style={{ gridTemplateColumns }}
+              title="Go to where the two segments touch"
+              onClick={() => session.goTo(contact)}
+            >
+              <div className="neuroglancer-annotation-icon">{LINE_ICON}</div>
+              <ContactEnd point={contact.pointA} />
+              <ContactEnd point={contact.pointB} />
+              <div className="neuroglancer-annotation-description">
+                {describeContact(contact)}
+              </div>
+            </div>
+          ))}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
 function PairCandidatesSection({
   session,
 }: {
@@ -727,28 +840,7 @@ function PairCandidatesSection({
         </HintedButton>
       </div>
       <StatusLine text={session.status} />
-      <ul className="calcada-trace-panel-pairs-list">
-        {session.pairs.map((pair) => (
-          <li key={`${pair.rootA}:${pair.rootB}`}>
-            <div className="calcada-trace-panel-pair">
-              {String(pair.rootA)} ↔ {String(pair.rootB)}
-            </div>
-            <ul>
-              {pair.contacts.map((contact) => (
-                <li key={String(contact.lineId)}>
-                  <button
-                    type="button"
-                    title="Go to where the two segments touch"
-                    onClick={() => session.goTo(contact)}
-                  >
-                    {describeContact(contact)}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </li>
-        ))}
-      </ul>
+      {session.pairs.length > 0 && <PairContactList session={session} />}
     </fieldset>
   );
 }

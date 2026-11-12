@@ -164,6 +164,11 @@ async function makeConnection({
           ],
         },
       ],
+      dimensions: () => [
+        { name: "x", scale: "8nm" },
+        { name: "y", scale: "8nm" },
+        { name: "z", scale: "40nm" },
+      ],
       list: async () => {
         calls.push("listPairs");
       },
@@ -329,12 +334,29 @@ describe("CalcadaTracePanel", () => {
     calls = [];
     const pairs = ".calcada-trace-panel-pairs";
     (await button("List", pairs)).click();
-    (await button("0.87 (thin-neck)", pairs)).click();
+    const entries = [
+      ...tab.querySelectorAll<HTMLElement>(
+        `${pairs} .neuroglancer-annotation-list-entry`,
+      ),
+    ];
+    // Like an annotation list's line: both ends' coordinates, then the score.
+    expect(
+      entries.map((entry) =>
+        [...entry.children].map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      ["ꕹ", "000", "222", "0.87 (thin-neck)"],
+      ["ꕹ", "000", "444", "0.41 · rejected"],
+    ]);
+    entries[0].click();
     expect(calls).toEqual(["listPairs", "goToPair"]);
     const text = tab.querySelector(pairs)?.textContent;
     expect(text).toContain("2 contacts in 1 pair between 2 segments");
     expect(text).toContain("10 ↔ 20");
-    await button("0.41 · rejected", pairs);
+    expect(
+      tab.querySelector(`${pairs} .neuroglancer-annotation-list-header`)
+        ?.textContent,
+    ).toBe("x8nmy8nmz40nm");
   });
 
   it("lists the candidates between segments on main too", async () => {

@@ -76,8 +76,15 @@ export function segmentPairs(
   );
 }
 
+/** A coordinate column of the list: the dimension's name and its scale. */
+export interface PairListDimension {
+  name: string;
+  scale: string;
+}
+
 export interface SegmentPairCandidatesDeps {
   selectedRoots(): bigint[];
+  dimensions(): PairListDimension[];
   /** The most candidates the server returns per segment. */
   contactLimit: number;
   fetchBetween(roots: bigint[]): Promise<Map<bigint, EdgeCandidate[]>>;
@@ -122,6 +129,10 @@ export class SegmentPairCandidates extends RefCounted {
       status += ` · a segment reached the limit of ${contactLimit}, so some may be missing`;
     }
     this.show(pairs, status);
+  }
+
+  dimensions(): PairListDimension[] {
+    return this.deps.dimensions();
   }
 
   /** To the middle of the contact, where both segments meet. */

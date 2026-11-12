@@ -97,6 +97,7 @@ describe("SegmentPairCandidates", () => {
     const asked: bigint[][] = [];
     const pairs = new SegmentPairCandidates({
       selectedRoots: () => roots,
+      dimensions: () => [],
       contactLimit: LIMIT,
       fetchBetween: async (asking) => {
         asked.push(asking);

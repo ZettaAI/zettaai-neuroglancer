@@ -458,6 +458,7 @@ import { KeyboardEventBinder } from "#src/util/keyboard_bindings.js";
 import { MouseEventBinder } from "#src/util/mouse_bindings.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
+import { formatScaleWithUnitAsString } from "#src/util/si_units.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
@@ -6389,6 +6390,16 @@ void main() {
         selectedRoots: () => [
           ...layer.displayState.segmentationGroupState.value.visibleSegments,
         ],
+        dimensions: () => {
+          const { names, scales, units } =
+            layer.manager.root.coordinateSpace.value;
+          return names.map((name, axis) => ({
+            name,
+            scale: formatScaleWithUnitAsString(scales[axis], units[axis], {
+              precision: LIST_SCALE_PRECISION,
+            }),
+          }));
+        },
         contactLimit: MAX_CANDIDATES_PER_SEGMENT,
         fetchBetween: (roots) =>
           this.graph.graphServer.fetchCandidatesBetween(
@@ -7769,6 +7780,8 @@ const selectionInNanometers = (
 
 // The server's cap on candidates per segment in one read.
 const MAX_CANDIDATES_PER_SEGMENT = 500;
+/** The digits an annotation list shows of a dimension's scale. */
+const LIST_SCALE_PRECISION = 2;
 
 function parseEdgeCandidate(c: any): EdgeCandidate {
   return {

@@ -723,46 +723,17 @@
 }
 
 .calcada-trace-panel-pairs-list {
-  max-height: 12em;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.calcada-trace-panel-pairs-list ul {
-  margin: 0 0 4px;
-  padding-left: 1em;
-  list-style: none;
+  max-height: 16em;
+  overflow: auto;
 }
 
 .calcada-trace-panel-pair {
-  font-size: 12px;
+  padding-top: 4px;
   font-variant-numeric: tabular-nums;
   opacity: 0.7;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.calcada-trace-panel-pairs-list button {
-  width: 100%;
-  padding: 2px 0;
-  border: none;
-  background: none;
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-
-.calcada-trace-panel-pairs-list button:hover {
-  text-decoration: underline;
 }
 
 .calcada-trace-panel-navigator-position {
@@ -1900,7 +1871,8 @@
   overflow-y: auto;
 }
 
-.calcada-annotations-list .neuroglancer-annotation-list-entry:hover {
+.calcada-annotations-list .neuroglancer-annotation-list-entry:hover,
+.calcada-trace-panel-pairs-list .neuroglancer-annotation-list-entry:hover {
   background-color: #333;
 }
 
