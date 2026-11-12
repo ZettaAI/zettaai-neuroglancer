@@ -21,6 +21,11 @@ export interface EdgeCandidate {
   modelDecision: string;
   /** The scoring run's label for the candidate; empty without one. */
   label: string;
+  /**
+   * The rejection or ambiguous mark hiding the candidate; empty unless the
+   * read asked for hidden candidates.
+   */
+  hidingDecision: string;
   /** The piece this candidate would merge in. */
   partnerVoxels: number;
   partnerClasses: PieceClasses;

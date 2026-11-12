@@ -46,6 +46,7 @@ interface PanelSetup {
   busy?: boolean;
   hasSegment?: boolean;
   picking?: boolean;
+  branchId?: number;
 }
 
 let calls: string[] = [];
@@ -55,6 +56,7 @@ async function makeConnection({
   busy = true,
   hasSegment = true,
   picking = false,
+  branchId = 1,
 }: PanelSetup = {}): Promise<TracePanelConnection> {
   const { library } = await libraryWith({
     axons: "both axon >= 30%",
@@ -84,7 +86,7 @@ async function makeConnection({
     calls.push(name);
   };
   return {
-    graph: { branchId: new WatchableValue(1) },
+    graph: { branchId: new WatchableValue(branchId) },
     state: { zettaTraceState, overviewState },
     segmentSession: {
       changed: new NullarySignal(),
@@ -137,16 +139,29 @@ async function makeConnection({
     // Not the trace's: the same whether it is busy or idle.
     pairCandidates: {
       changed: new NullarySignal(),
-      status: "1 pair between 2 segments",
-      rows: [
+      status: "2 contacts in 1 pair between 2 segments",
+      pairs: [
         {
-          lineId: 9n,
-          score: 0.87,
-          label: "thin-neck",
           rootA: 10n,
           rootB: 20n,
-          pointA: Float32Array.of(0, 0, 0),
-          pointB: Float32Array.of(2, 2, 2),
+          contacts: [
+            {
+              lineId: 9n,
+              score: 0.87,
+              label: "thin-neck",
+              hidingDecision: "",
+              pointA: Float32Array.of(0, 0, 0),
+              pointB: Float32Array.of(2, 2, 2),
+            },
+            {
+              lineId: 8n,
+              score: 0.41,
+              label: "",
+              hidingDecision: "reject",
+              pointA: Float32Array.of(0, 0, 0),
+              pointB: Float32Array.of(4, 4, 4),
+            },
+          ],
         },
       ],
       list: async () => {
@@ -177,7 +192,8 @@ async function mountPanel(connection: TracePanelConnection) {
   document.body.appendChild(tab);
   disposer = mountComponent(tab, CalcadaTracePanel, { connection });
   await vi.waitFor(() => {
-    expect(tab.querySelector(".calcada-trace-panel-navigator")).not.toBe(null);
+    // Shown on main as well as on a branch.
+    expect(tab.querySelector(".calcada-trace-panel-pairs")).not.toBe(null);
   });
 }
 
@@ -313,11 +329,18 @@ describe("CalcadaTracePanel", () => {
     calls = [];
     const pairs = ".calcada-trace-panel-pairs";
     (await button("List", pairs)).click();
-    (await button("0.87 (thin-neck) · 10 ↔ 20", pairs)).click();
+    (await button("0.87 (thin-neck)", pairs)).click();
     expect(calls).toEqual(["listPairs", "goToPair"]);
-    expect(tab.querySelector(pairs)?.textContent).toContain(
-      "1 pair between 2 segments",
-    );
+    const text = tab.querySelector(pairs)?.textContent;
+    expect(text).toContain("2 contacts in 1 pair between 2 segments");
+    expect(text).toContain("10 ↔ 20");
+    await button("0.41 · rejected", pairs);
+  });
+
+  it("lists the candidates between segments on main too", async () => {
+    await mountPanel(await makeConnection({ branchId: 0 }));
+    expect(tab.textContent).toContain("Trace works on a branch only");
+    await button("List", ".calcada-trace-panel-pairs");
   });
 
   it("says to Ctrl+click while the segment is being selected", async () => {

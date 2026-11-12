@@ -46,6 +46,7 @@ function candidate(overrides: Partial<EdgeCandidate> = {}): EdgeCandidate {
     nInterfaces: 1,
     modelDecision: "",
     label: "",
+    hidingDecision: "",
     partnerVoxels: 500,
     partnerClasses: noClasses,
     partnerHasInfo: false,

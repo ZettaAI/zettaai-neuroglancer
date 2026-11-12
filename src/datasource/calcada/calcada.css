@@ -730,6 +730,21 @@
   list-style: none;
 }
 
+.calcada-trace-panel-pairs-list ul {
+  margin: 0 0 4px;
+  padding-left: 1em;
+  list-style: none;
+}
+
+.calcada-trace-panel-pair {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .calcada-trace-panel-pairs-list button {
   width: 100%;
   padding: 2px 0;

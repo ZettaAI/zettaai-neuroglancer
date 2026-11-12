@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import {
-  pairCandidates,
+  segmentPairs,
   SegmentPairCandidates,
 } from "#src/datasource/calcada/segment_pair_candidates.js";
 
@@ -20,7 +20,7 @@ function candidate(
   lineId: number,
   score: number,
   partnerRootId: bigint,
-  label = "",
+  { label = "", hidingDecision = "" } = {},
 ): EdgeCandidate {
   return {
     lineId: BigInt(lineId),
@@ -33,6 +33,7 @@ function candidate(
     nInterfaces: 1,
     modelDecision: "defer",
     label,
+    hidingDecision,
     partnerVoxels: 0,
     partnerClasses: noClasses,
     partnerHasInfo: false,
@@ -42,41 +43,61 @@ function candidate(
   };
 }
 
-describe("pairCandidates", () => {
-  it("keeps one row per pair of segments, best first", () => {
-    const rows = pairCandidates(
+describe("segmentPairs", () => {
+  it("groups every contact under its pair, best pairs and contacts first", () => {
+    const pairs = segmentPairs(
       new Map([
-        [10n, [candidate(1, 0.4, 20n), candidate(2, 0.9, 30n, "thin-neck")]],
-        [20n, [candidate(1, 0.4, 10n)]],
-        [30n, [candidate(2, 0.9, 10n, "thin-neck"), candidate(3, 0.6, 20n)]],
+        [
+          10n,
+          [
+            candidate(1, 0.4, 20n),
+            candidate(4, 0.6, 20n, { hidingDecision: "reject" }),
+            candidate(2, 0.9, 30n, { label: "thin-neck" }),
+          ],
+        ],
+        [
+          20n,
+          [
+            candidate(1, 0.4, 10n),
+            candidate(4, 0.6, 10n, { hidingDecision: "reject" }),
+          ],
+        ],
+        [30n, [candidate(2, 0.9, 10n, { label: "thin-neck" })]],
       ]),
     );
     expect(
-      rows.map((row) => [row.lineId, row.rootA, row.rootB, row.label]),
-    ).toEqual([
-      [2n, 10n, 30n, "thin-neck"],
-      [3n, 20n, 30n, ""],
-      [1n, 10n, 20n, ""],
-    ]);
-  });
-
-  it("keeps a pair's best candidate when it has several", () => {
-    const rows = pairCandidates(
-      new Map([
-        [10n, [candidate(1, 0.4, 20n)]],
-        [20n, [candidate(5, 0.7, 10n)]],
+      pairs.map((pair) => [
+        pair.rootA,
+        pair.rootB,
+        pair.contacts.map((contact) => [
+          contact.lineId,
+          contact.label,
+          contact.hidingDecision,
+        ]),
       ]),
-    );
-    expect(rows.map((row) => row.lineId)).toEqual([5n]);
+    ).toEqual([
+      [10n, 30n, [[2n, "thin-neck", ""]]],
+      [
+        10n,
+        20n,
+        [
+          [4n, "", "reject"],
+          [1n, "", ""],
+        ],
+      ],
+    ]);
   });
 });
 
 describe("SegmentPairCandidates", () => {
+  const LIMIT = 2;
+
   function session(roots: bigint[], answer = new Map()) {
     const visited: Float32Array[] = [];
     const asked: bigint[][] = [];
     const pairs = new SegmentPairCandidates({
       selectedRoots: () => roots,
+      contactLimit: LIMIT,
       fetchBetween: async (asking) => {
         asked.push(asking);
         return answer;
@@ -90,21 +111,32 @@ describe("SegmentPairCandidates", () => {
     const { pairs, asked } = session([10n]);
     await pairs.list();
     expect(asked).toEqual([]);
-    expect(pairs.rows).toEqual([]);
+    expect(pairs.pairs).toEqual([]);
     expect(pairs.status).toBe("Select at least two segments");
   });
 
-  it("lists the selected segments' pairs and goes to a contact", async () => {
+  it("lists the selected segments' contacts and goes to one", async () => {
     const { pairs, visited, asked } = session(
       [10n, 20n],
       new Map([[10n, [candidate(1, 0.4, 20n)]]]),
     );
     await pairs.list();
     expect(asked).toEqual([[10n, 20n]]);
-    expect(pairs.rows).toHaveLength(1);
-    expect(pairs.status).toBe("1 pair between 2 segments");
+    expect(pairs.pairs).toHaveLength(1);
+    expect(pairs.status).toBe("1 contact in 1 pair between 2 segments");
 
-    pairs.goTo(pairs.rows[0]);
+    pairs.goTo(pairs.pairs[0].contacts[0]);
     expect(Array.from(visited[0])).toEqual([1, 2, 3]);
+  });
+
+  it("says when a segment reached the limit and may have more", async () => {
+    const { pairs } = session(
+      [10n, 20n],
+      new Map([[10n, [candidate(1, 0.4, 20n), candidate(2, 0.3, 20n)]]]),
+    );
+    await pairs.list();
+    expect(pairs.status).toBe(
+      "2 contacts in 1 pair between 2 segments · a segment reached the limit of 2, so some may be missing",
+    );
   });
 });

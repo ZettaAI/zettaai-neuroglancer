@@ -6389,6 +6389,7 @@ void main() {
         selectedRoots: () => [
           ...layer.displayState.segmentationGroupState.value.visibleSegments,
         ],
+        contactLimit: MAX_CANDIDATES_PER_SEGMENT,
         fetchBetween: (roots) =>
           this.graph.graphServer.fetchCandidatesBetween(
             roots,
@@ -7776,6 +7777,7 @@ function parseEdgeCandidate(c: any): EdgeCandidate {
     nInterfaces: Number(c.n_interfaces),
     modelDecision: String(c.model_decision),
     label: String(c.label ?? ""),
+    hidingDecision: String(c.hiding_decision ?? ""),
     partnerVoxels: Number(c.partner_voxels ?? 0),
     partnerClasses: parseClassCounts(c.partner_classes),
     partnerHasInfo: c.partner_has_info === true,
@@ -8072,6 +8074,8 @@ class CalcadaGraphServerInterface {
       body: JSON.stringify({
         segment_ids: rootIds.map(String),
         between_segments: true,
+        all_contacts: true,
+        include_hidden: true,
         limit: MAX_CANDIDATES_PER_SEGMENT,
       }),
     });

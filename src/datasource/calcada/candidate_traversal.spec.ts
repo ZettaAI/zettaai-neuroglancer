@@ -33,6 +33,7 @@ function candidate(
     nInterfaces: 1,
     modelDecision: "defer",
     label: "",
+    hidingDecision: "",
     partnerVoxels: 0,
     partnerClasses: {
       perikaryon: 0,

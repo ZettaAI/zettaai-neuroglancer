@@ -2,60 +2,84 @@ import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js
 import { RefCounted } from "#src/util/disposable.js";
 import { NullarySignal } from "#src/util/signal.js";
 
-/** The best candidate between two selected segments, `rootA < rootB`. */
-export interface PairCandidate {
+/** One candidate between two selected segments. */
+export interface PairContact {
   lineId: bigint;
   score: number;
   label: string;
-  rootA: bigint;
-  rootB: bigint;
+  /** The rejection or ambiguous mark hiding it from the trace; empty if none. */
+  hidingDecision: string;
   pointA: Float32Array;
   pointB: Float32Array;
+}
+
+/** Every candidate between two selected segments, `rootA < rootB`, best first. */
+export interface SegmentPair {
+  rootA: bigint;
+  rootB: bigint;
+  contacts: PairContact[];
 }
 
 const MIN_SEGMENTS = 2;
 const LISTING_STATUS = "Listing candidates…";
 const TOO_FEW_STATUS = "Select at least two segments";
 
-function ranksAbove(row: PairCandidate, other: PairCandidate) {
-  return row.score !== other.score
-    ? row.score > other.score
-    : row.lineId < other.lineId;
+function ranksAbove(contact: PairContact, other: PairContact) {
+  return contact.score !== other.score
+    ? contact.score > other.score
+    : contact.lineId < other.lineId;
+}
+
+function plural(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 /**
- * The server lists each pair under both of its segments; one row per pair is
- * what is shown, its best candidate, best pairs first.
+ * The server lists each contact under both of its segments; each is shown
+ * once, under its pair. Pairs are ordered by their best contact.
  */
-export function pairCandidates(
+export function segmentPairs(
   byRoot: ReadonlyMap<bigint, readonly EdgeCandidate[]>,
-): PairCandidate[] {
-  const best = new Map<string, PairCandidate>();
+): SegmentPair[] {
+  const pairs = new Map<string, SegmentPair>();
+  const seen = new Set<bigint>();
   for (const [root, candidates] of byRoot) {
     for (const candidate of candidates) {
+      if (seen.has(candidate.lineId)) continue;
+      seen.add(candidate.lineId);
       const [rootA, rootB] =
         root < candidate.partnerRootId
           ? [root, candidate.partnerRootId]
           : [candidate.partnerRootId, root];
-      const row: PairCandidate = {
+      const key = `${rootA}:${rootB}`;
+      let pair = pairs.get(key);
+      if (pair === undefined) {
+        pair = { rootA, rootB, contacts: [] };
+        pairs.set(key, pair);
+      }
+      pair.contacts.push({
         lineId: candidate.lineId,
         score: candidate.score,
         label: candidate.label,
-        rootA,
-        rootB,
+        hidingDecision: candidate.hidingDecision,
         pointA: candidate.pointA,
         pointB: candidate.pointB,
-      };
-      const key = `${rootA}:${rootB}`;
-      const kept = best.get(key);
-      if (kept === undefined || ranksAbove(row, kept)) best.set(key, row);
+      });
     }
   }
-  return [...best.values()].sort((a, b) => (ranksAbove(a, b) ? -1 : 1));
+  const sorted = [...pairs.values()];
+  for (const pair of sorted) {
+    pair.contacts.sort((a, b) => (ranksAbove(a, b) ? -1 : 1));
+  }
+  return sorted.sort((a, b) =>
+    ranksAbove(a.contacts[0], b.contacts[0]) ? -1 : 1,
+  );
 }
 
 export interface SegmentPairCandidatesDeps {
   selectedRoots(): bigint[];
+  /** The most candidates the server returns per segment. */
+  contactLimit: number;
   fetchBetween(roots: bigint[]): Promise<Map<bigint, EdgeCandidate[]>>;
   goTo(point: Float32Array): void;
 }
@@ -64,7 +88,7 @@ export interface SegmentPairCandidatesDeps {
 export class SegmentPairCandidates extends RefCounted {
   readonly changed = new NullarySignal();
   status = "";
-  rows: PairCandidate[] = [];
+  pairs: SegmentPair[] = [];
   // A listing that lands after a newer one was asked for is dropped.
   private fetchToken = 0;
 
@@ -80,9 +104,9 @@ export class SegmentPairCandidates extends RefCounted {
       return;
     }
     this.show([], LISTING_STATUS);
-    let rows: PairCandidate[];
+    let byRoot: Map<bigint, EdgeCandidate[]>;
     try {
-      rows = pairCandidates(await this.deps.fetchBetween(roots));
+      byRoot = await this.deps.fetchBetween(roots);
     } catch (e) {
       if (token === this.fetchToken) {
         this.show([], `Could not list candidates: ${e}`);
@@ -90,19 +114,25 @@ export class SegmentPairCandidates extends RefCounted {
       return;
     }
     if (token !== this.fetchToken) return;
-    const pairs = rows.length === 1 ? "pair" : "pairs";
-    this.show(rows, `${rows.length} ${pairs} between ${roots.length} segments`);
+    const pairs = segmentPairs(byRoot);
+    const contacts = pairs.reduce((sum, pair) => sum + pair.contacts.length, 0);
+    let status = `${plural(contacts, "contact")} in ${plural(pairs.length, "pair")} between ${roots.length} segments`;
+    const { contactLimit } = this.deps;
+    if ([...byRoot.values()].some((list) => list.length >= contactLimit)) {
+      status += ` · a segment reached the limit of ${contactLimit}, so some may be missing`;
+    }
+    this.show(pairs, status);
   }
 
   /** To the middle of the contact, where both segments meet. */
-  goTo(row: PairCandidate) {
+  goTo(contact: PairContact) {
     this.deps.goTo(
-      row.pointA.map((value, axis) => (value + row.pointB[axis]) / 2),
+      contact.pointA.map((value, axis) => (value + contact.pointB[axis]) / 2),
     );
   }
 
-  private show(rows: PairCandidate[], status: string) {
-    this.rows = rows;
+  private show(pairs: SegmentPair[], status: string) {
+    this.pairs = pairs;
     this.status = status;
     this.changed.dispatch();
   }

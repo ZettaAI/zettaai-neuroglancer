@@ -27,7 +27,10 @@ import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_i
 import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import { ScoreRangeSlider } from "#src/datasource/calcada/react/score_range_slider.js";
-import type { PairCandidate } from "#src/datasource/calcada/segment_pair_candidates.js";
+import type {
+  PairContact,
+  SegmentPair,
+} from "#src/datasource/calcada/segment_pair_candidates.js";
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import {
   AIM_KEYS_MODE,
@@ -111,13 +114,13 @@ export interface TracePanelConnection {
     accept(): Promise<void>;
     undoLast(): Promise<void>;
   };
-  /** The candidates between the segments on screen, one row per pair. */
+  /** Every candidate between the segments on screen, grouped by pair. */
   readonly pairCandidates: {
     readonly changed: NullarySignal;
     readonly status: string;
-    readonly rows: readonly PairCandidate[];
+    readonly pairs: readonly SegmentPair[];
     list(): Promise<void>;
-    goTo(row: PairCandidate): void;
+    goTo(contact: PairContact): void;
   };
   listCandidateReviewers(): Promise<string[]>;
   readonly filterLibrary: FilterLibrary;
@@ -694,6 +697,17 @@ function SplitDetectionSection({
   );
 }
 
+const HIDING_DECISION_NAMES: Record<string, string> = {
+  reject: "rejected",
+  ambiguous: "ambiguous",
+};
+
+function describeContact(contact: PairContact) {
+  const score = formatScore(contact.score, contact.label);
+  const hiding = HIDING_DECISION_NAMES[contact.hidingDecision];
+  return hiding === undefined ? score : `${score} · ${hiding}`;
+}
+
 function PairCandidatesSection({
   session,
 }: {
@@ -705,7 +719,7 @@ function PairCandidatesSection({
       <legend>Candidates between segments</legend>
       <div className="calcada-trace-panel-buttons">
         <HintedButton
-          hint="List the candidates between the segments on screen"
+          hint="List every candidate between the segments on screen, hidden ones included"
           variant="outline"
           onClick={() => void session.list()}
         >
@@ -714,16 +728,24 @@ function PairCandidatesSection({
       </div>
       <StatusLine text={session.status} />
       <ul className="calcada-trace-panel-pairs-list">
-        {session.rows.map((row) => (
-          <li key={String(row.lineId)}>
-            <button
-              type="button"
-              title="Go to where the two segments touch"
-              onClick={() => session.goTo(row)}
-            >
-              {formatScore(row.score, row.label)} · {String(row.rootA)} ↔{" "}
-              {String(row.rootB)}
-            </button>
+        {session.pairs.map((pair) => (
+          <li key={`${pair.rootA}:${pair.rootB}`}>
+            <div className="calcada-trace-panel-pair">
+              {String(pair.rootA)} ↔ {String(pair.rootB)}
+            </div>
+            <ul>
+              {pair.contacts.map((contact) => (
+                <li key={String(contact.lineId)}>
+                  <button
+                    type="button"
+                    title="Go to where the two segments touch"
+                    onClick={() => session.goTo(contact)}
+                  >
+                    {describeContact(contact)}
+                  </button>
+                </li>
+              ))}
+            </ul>
           </li>
         ))}
       </ul>
@@ -759,6 +781,7 @@ export function CalcadaTracePanel({
           runs on. Switch to a branch, or create one, with the Branch control —
           the segments you have selected come with you.
         </div>
+        <PairCandidatesSection session={connection.pairCandidates} />
       </div>
     );
   }
