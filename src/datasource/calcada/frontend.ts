@@ -200,7 +200,7 @@ import { SegmentPairCandidates } from "#src/datasource/calcada/segment_pair_cand
 import { firstShownOverGraph } from "#src/datasource/calcada/shown_graph_layer.js";
 import type { CutLineNm } from "#src/datasource/calcada/split_cuts_table.js";
 import {
-  parseCutLineNm,
+  parseCutLinesNm,
   SplitCutRows,
   SplitCutsTable,
 } from "#src/datasource/calcada/split_cuts_table.js";
@@ -5622,12 +5622,12 @@ class CandidateOverviewSession extends RefCounted {
   }
 }
 
-/** What a split answers; `cutLineNm` crosses its cut, when the server drew one. */
+/** What a split answers; `cutLinesNm` cross the edges it cut. */
 interface SplitOutcome {
   roots: bigint[];
   components: bigint[][];
   operationId: number;
-  cutLineNm: CutLineNm | undefined;
+  cutLinesNm: CutLineNm[];
 }
 
 /** An edit on the undo stack: what to revert, and on which branch. */
@@ -6893,8 +6893,12 @@ void main() {
     (message) => StatusMessage.showTemporaryMessage(message, 5000),
   );
 
-  /** `cutLineNm` marks a split: the line across its cut, for split_cuts. */
-  pushUndo(operationId: number, branchId: number, cutLineNm?: CutLineNm) {
+  /** `cutLinesNm` mark a split: a line across each edge it cut, for split_cuts. */
+  pushUndo(
+    operationId: number,
+    branchId: number,
+    cutLinesNm: readonly CutLineNm[] = [],
+  ) {
     if (operationId > 0) {
       this.undoStack.push({ operationId, branchId });
       if (this.undoStack.length > GraphConnection.MAX_UNDO_ENTRIES) {
@@ -6902,11 +6906,12 @@ void main() {
         this.splitCutRows.forget(dropped.operationId);
       }
       const coordinateSpace = this.layer.manager.root.coordinateSpace.value;
-      const [pointA, pointB] = (cutLineNm ?? []).map((pointNm) =>
-        nanometresToGlobal(pointNm, coordinateSpace),
-      );
-      if (pointA !== undefined && pointB !== undefined) {
-        this.splitCutRows.record(branchId, { operationId, pointA, pointB });
+      for (const [startNm, endNm] of cutLinesNm) {
+        const pointA = nanometresToGlobal(startNm, coordinateSpace);
+        const pointB = nanometresToGlobal(endNm, coordinateSpace);
+        if (pointA !== undefined && pointB !== undefined) {
+          this.splitCutRows.record(branchId, { operationId, pointA, pointB });
+        }
       }
     }
   }
@@ -7394,7 +7399,7 @@ void main() {
         roots: splitRoots,
         components,
         operationId,
-        cutLineNm,
+        cutLinesNm,
       } = await this.graph.graphServer.splitSegments(
         [...sinks].map((x) => selectionInNanometers(x, annotationToNanometers)),
         [...sources].map((x) =>
@@ -7422,7 +7427,7 @@ void main() {
         newValues.add(splitRoots);
         this.notifyGraphEdited(oldValues, newValues);
         this.updateAfterSplit(focusSegment, splitRoots, components);
-        this.pushUndo(operationId, this.graph.branchId.value, cutLineNm);
+        this.pushUndo(operationId, this.graph.branchId.value, cutLinesNm);
         return true;
       }
     }
@@ -8229,7 +8234,7 @@ class CalcadaGraphServerInterface {
       roots,
       components,
       operationId,
-      cutLineNm: parseCutLineNm(jsonResp.cut_line_nm),
+      cutLinesNm: parseCutLinesNm(jsonResp.cut_lines_nm),
     };
   }
 
@@ -8265,7 +8270,7 @@ class CalcadaGraphServerInterface {
       roots: rootIds.map((x) => parseUint64(x)),
       components: rawComponents.map((c) => c.map(parseUint64)),
       operationId: Number(jsonResp.operation_id ?? 0),
-      cutLineNm: parseCutLineNm(jsonResp.cut_line_nm),
+      cutLinesNm: parseCutLinesNm(jsonResp.cut_lines_nm),
     };
   }
 
@@ -8340,7 +8345,7 @@ class CalcadaGraphServerInterface {
       operationId: Number(jsonResp.operation_id ?? 0),
       roots: rootIds.map((x) => parseUint64(x)),
       components: comps.map((c) => c.map((x) => parseUint64(x))),
-      cutLineNm: parseCutLineNm(jsonResp.cut_line_nm),
+      cutLinesNm: parseCutLinesNm(jsonResp.cut_lines_nm),
       splitPieces: subs.map((sp) => ({
         old: parseUint64(sp.old),
         blue: parseUint64(sp.blue),
@@ -11043,7 +11048,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           z: p.voxel[2],
           origin: p.origin,
         });
-        const { roots, components, operationId, splitPieces, cutLineNm } =
+        const { roots, components, operationId, splitPieces, cutLinesNm } =
           await graphConnection.graph.graphServer.generalSplit(
             [
               ...blue.map((p) => toPayload(p, "blue")),
@@ -11058,7 +11063,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           StatusMessage.showTemporaryMessage("No split found.", 3000);
           return;
         }
-        graphConnection.pushUndo(operationId, branchId, cutLineNm);
+        graphConnection.pushUndo(operationId, branchId, cutLinesNm);
         rememberStep(operationId);
         // Before updateAfterSplit: the guard that drops points runs inside it,
         // and the preview of the old segment has to come off first.
@@ -11294,7 +11299,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
       const startedAt = Date.now();
       const { sources, sinks, branchId, rootId } = carved;
       try {
-        const { roots, components, operationId, cutLineNm } =
+        const { roots, components, operationId, cutLinesNm } =
           await graphConnection.graph.graphServer.splitByPieces(
             sources,
             sinks,
@@ -11305,7 +11310,7 @@ class PieceSplitTool extends LayerTool<SegmentationUserLayer> {
           StatusMessage.showTemporaryMessage("No split found.", 3000);
           return;
         }
-        graphConnection.pushUndo(operationId, branchId, cutLineNm);
+        graphConnection.pushUndo(operationId, branchId, cutLinesNm);
         rememberStep(operationId);
         pointsOutliveSplit = true;
         updatePieceSplitDisplay();

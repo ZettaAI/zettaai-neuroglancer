@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SplitCutRow } from "#src/datasource/calcada/split_cuts_table.js";
 import {
-  parseCutLineNm,
+  parseCutLinesNm,
   SPLIT_CUT_SCHEMA,
   SPLIT_CUTS_TABLE,
   SplitCutRows,
@@ -115,31 +115,39 @@ describe("SplitCutsTable", () => {
   });
 });
 
-describe("parseCutLineNm", () => {
-  it("reads two points of three numbers and nothing else", () => {
+describe("parseCutLinesNm", () => {
+  it("reads every line of two points of three numbers, skipping the rest", () => {
     expect(
-      parseCutLineNm([
-        [25, 5, 5],
-        [30, 5, 5],
+      parseCutLinesNm([
+        [
+          [25, 5, 5],
+          [30, 5, 5],
+        ],
+        [[25, 5, 5]],
+        [
+          [25, 5],
+          [30, 5, 5],
+        ],
+        [
+          [25, "5", 5],
+          [30, 5, 5],
+        ],
+        [
+          [1, 2, 3],
+          [4, 5, 6],
+        ],
       ]),
     ).toEqual([
-      [25, 5, 5],
-      [30, 5, 5],
+      [
+        [25, 5, 5],
+        [30, 5, 5],
+      ],
+      [
+        [1, 2, 3],
+        [4, 5, 6],
+      ],
     ]);
-    expect(parseCutLineNm(undefined)).toBeUndefined();
-    expect(parseCutLineNm([[25, 5, 5]])).toBeUndefined();
-    expect(
-      parseCutLineNm([
-        [25, 5],
-        [30, 5, 5],
-      ]),
-    ).toBeUndefined();
-    expect(
-      parseCutLineNm([
-        [25, "5", 5],
-        [30, 5, 5],
-      ]),
-    ).toBeUndefined();
+    expect(parseCutLinesNm(undefined)).toEqual([]);
   });
 });
 
@@ -166,17 +174,21 @@ function rowsSetUp() {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("SplitCutRows", () => {
-  it("writes a row per split and removes it when that split is reverted", async () => {
+  it("writes a row per cut line and removes a split's rows when it is reverted", async () => {
     const { rows, written, removed } = rowsSetUp();
     rows.record(BRANCH, ROW);
     rows.record(BRANCH + 1, { ...ROW, operationId: 42 });
-    expect(written.map(({ row }) => row.operationId)).toEqual([41, 42]);
+    rows.record(BRANCH + 1, { ...ROW, operationId: 42 });
+    expect(written.map(({ row }) => row.operationId)).toEqual([41, 42, 42]);
     rows.reverted(42);
     await settle();
-    expect(removed).toEqual([{ branchId: BRANCH + 1, rowId: 101n }]);
+    expect(removed).toEqual([
+      { branchId: BRANCH + 1, rowId: 101n },
+      { branchId: BRANCH + 1, rowId: 102n },
+    ]);
     rows.reverted(42);
     await settle();
-    expect(removed).toHaveLength(1);
+    expect(removed).toHaveLength(2);
   });
 
   it("keeps the row of a split that left the undo history", async () => {

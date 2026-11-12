@@ -15,7 +15,7 @@ import { TraceWrittenTable } from "#src/datasource/calcada/trace_written_table.j
 export const SPLIT_CUTS_TABLE = "split_cuts";
 export const SPLIT_CUT_SCHEMA = "split_cut";
 const SPLIT_CUT_SCHEMA_VERSION = 1;
-const SPLIT_CUTS_DESCRIPTION = "A line across each split's cut";
+const SPLIT_CUTS_DESCRIPTION = "A line across each edge a split cut";
 const AXES = 3;
 const LINE_ENDS = 2;
 
@@ -34,8 +34,7 @@ const isPointNm = (value: unknown): value is number[] =>
   value.length === AXES &&
   value.every((axis) => typeof axis === "number");
 
-/** A split response's `cut_line_nm`; undefined when absent or malformed. */
-export function parseCutLineNm(value: unknown): CutLineNm | undefined {
+function parseCutLineNm(value: unknown): CutLineNm | undefined {
   if (
     !Array.isArray(value) ||
     value.length !== LINE_ENDS ||
@@ -46,7 +45,15 @@ export function parseCutLineNm(value: unknown): CutLineNm | undefined {
   return [value[0], value[1]];
 }
 
-/** A line per split, across its widest cut. */
+/** A split response's `cut_lines_nm`, its malformed lines left out. */
+export function parseCutLinesNm(value: unknown): CutLineNm[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(parseCutLineNm)
+    .filter((line): line is CutLineNm => line !== undefined);
+}
+
+/** A line per edge a split cut. */
 export class SplitCutsTable {
   private readonly table: TraceWrittenTable;
 
@@ -82,7 +89,7 @@ interface SplitCutRowRef {
 
 /** The rows of the splits still on the undo stack, by operation. */
 export class SplitCutRows {
-  private readonly rows = new Map<number, SplitCutRowRef>();
+  private readonly rows = new Map<number, SplitCutRowRef[]>();
 
   constructor(
     private readonly table: Pick<SplitCutsTable, "write" | "remove">,
@@ -96,26 +103,30 @@ export class SplitCutRows {
       );
       return undefined;
     });
-    this.rows.set(row.operationId, { branchId, rowId });
+    const recorded = this.rows.get(row.operationId) ?? [];
+    recorded.push({ branchId, rowId });
+    this.rows.set(row.operationId, recorded);
   }
 
-  /** The split was undone: its row goes in the background. */
+  /** The split was undone: its rows go in the background. */
   reverted(operationId: number): void {
-    const row = this.rows.get(operationId);
-    if (row === undefined) return;
+    const recorded = this.rows.get(operationId);
+    if (recorded === undefined) return;
     this.rows.delete(operationId);
-    void row.rowId
-      .then(async (rowId) => {
-        if (rowId !== undefined) await this.table.remove(row.branchId, rowId);
-      })
-      .catch((error) => {
-        this.reportError(
-          `Could not remove the split cut: ${errorMessage(error)}`,
-        );
-      });
+    for (const row of recorded) {
+      void row.rowId
+        .then(async (rowId) => {
+          if (rowId !== undefined) await this.table.remove(row.branchId, rowId);
+        })
+        .catch((error) => {
+          this.reportError(
+            `Could not remove the split cut: ${errorMessage(error)}`,
+          );
+        });
+    }
   }
 
-  /** The split can no longer be undone: its row stays. */
+  /** The split can no longer be undone: its rows stay. */
   forget(operationId: number): void {
     this.rows.delete(operationId);
   }
