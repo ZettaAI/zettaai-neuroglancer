@@ -72,7 +72,24 @@ function useCurrentMode() {
 export function ModeShortcutStrip() {
   const mode = useCurrentMode();
   const hidden = useWatchable(modeStripHidden);
-  if (mode === undefined || hidden) return null;
+  if (mode === undefined) return null;
+  if (hidden) {
+    return (
+      <div class="neuroglancer-mode-strip">
+        <button
+          type="button"
+          class="neuroglancer-mode-strip-expand"
+          data-tooltip="Show this mode's keys"
+          onClick={() => {
+            modeStripHidden.value = false;
+          }}
+        >
+          <span class="neuroglancer-mode-strip-title">{mode.title}</span>
+          Keys ▾
+        </button>
+      </div>
+    );
+  }
   return (
     <div class="neuroglancer-mode-strip" role="status">
       <span class="neuroglancer-mode-strip-title">{mode.title}</span>
@@ -95,8 +112,8 @@ export function ModeShortcutStrip() {
       <button
         type="button"
         class="neuroglancer-mode-strip-close"
-        aria-label="Hide this strip"
-        data-tooltip="Hide this strip. Turn it back on from the shortcut sheet."
+        aria-label="Collapse this strip"
+        data-tooltip="Collapse this strip to a button that brings it back"
         onClick={() => {
           modeStripHidden.value = true;
         }}
@@ -328,7 +345,7 @@ function OpenShortcutSheet({
               modeStripHidden.value = !event.currentTarget.checked;
             }}
           />
-          Show the current mode's keys over the viewer
+          Show the current mode's keys over the viewer, not only its button
         </label>
         <button
           type="button"
