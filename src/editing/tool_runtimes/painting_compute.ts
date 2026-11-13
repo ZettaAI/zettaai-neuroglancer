@@ -558,6 +558,17 @@ export class PaintingCompute implements PaintCompute {
     const csz = scale.chunkDataSize[2];
     const is3d = input.mode === "3d";
 
+    // Chunks are read on the LIBRARY's grid, which is anchored at the scale's
+    // `voxelOffset`: chunk `c` holds absolute voxels from `voxelOffset + c *
+    // chunkDataSize`. Counting chunks from 0 instead reads the chunk
+    // `voxelOffset` voxels away, so on data with an offset the flood followed
+    // somebody else's shape (ant segmentation, offset 1024 at 16 nm). Writes go
+    // through `PaintBatchBuilder` in absolute voxels and need no such shift.
+    const chunkIndexOf = (voxel: number, axis: 0 | 1 | 2): number =>
+      Math.floor((voxel - scale.voxelOffset[axis]) / scale.chunkDataSize[axis]);
+    const chunkOriginOf = (chunkIndex: number, axis: 0 | 1 | 2): number =>
+      scale.voxelOffset[axis] + chunkIndex * scale.chunkDataSize[axis];
+
     const newBuilder = () =>
       new PaintBatchBuilder(
         input.metadata,
@@ -644,17 +655,16 @@ export class PaintingCompute implements PaintCompute {
     };
 
     // Seed value: read once. A no-op (seed already equals target) short-circuits.
-    const seedCx = Math.floor(seedX / csx);
-    const seedCy = Math.floor(seedY / csy);
-    const seedCz = Math.floor(seedZ / csz);
+    const seedCx = chunkIndexOf(seedX, 0);
+    const seedCy = chunkIndexOf(seedY, 1);
+    const seedCz = chunkIndexOf(seedZ, 2);
     const seedView = await loadView(seedCx, seedCy, seedCz);
     if (seedView === null) return newBuilder().build();
+    const seedLocalX = seedX - chunkOriginOf(seedCx, 0);
+    const seedLocalY = seedY - chunkOriginOf(seedCy, 1);
+    const seedLocalZ = seedZ - chunkOriginOf(seedCz, 2);
     const seedValue =
-      seedView[
-        seedX -
-          seedCx * csx +
-          csx * (seedY - seedCy * csy + csy * (seedZ - seedCz * csz))
-      ];
+      seedView[seedLocalX + csx * (seedLocalY + csy * seedLocalZ)];
     if (seedValue === undefined) return newBuilder().build();
     if (voxelEqualsTarget(seedValue, input.value)) return newBuilder().build();
 
@@ -695,16 +705,16 @@ export class PaintingCompute implements PaintCompute {
       const ey = frontierY[fhead];
       const ez = frontierZ[fhead];
       fhead++;
-      const cx = Math.floor(ex / csx);
-      const cy = Math.floor(ey / csy);
-      const cz = Math.floor(ez / csz);
+      const cx = chunkIndexOf(ex, 0);
+      const cy = chunkIndexOf(ey, 1);
+      const cz = chunkIndexOf(ez, 2);
       const key = `${cx},${cy},${cz}`;
       const view = await loadView(cx, cy, cz);
       if (view === null) continue;
       const visited = visitedFor(key);
-      const baseX = cx * csx;
-      const baseY = cy * csy;
-      const baseZ = cz * csz;
+      const baseX = chunkOriginOf(cx, 0);
+      const baseY = chunkOriginOf(cy, 1);
+      const baseZ = chunkOriginOf(cz, 2);
 
       // Intra-chunk DFS over local coords. Cross-chunk neighbors spill to the
       // outer frontier; in-chunk neighbors stay on this stack.
@@ -737,9 +747,9 @@ export class PaintingCompute implements PaintCompute {
         const consider = (nx: number, ny: number, nz: number) => {
           if (!inBounds(nx, ny, nz)) return;
           if (
-            Math.floor(nx / csx) === cx &&
-            Math.floor(ny / csy) === cy &&
-            Math.floor(nz / csz) === cz
+            chunkIndexOf(nx, 0) === cx &&
+            chunkIndexOf(ny, 1) === cy &&
+            chunkIndexOf(nz, 2) === cz
           ) {
             stackX.push(nx - baseX);
             stackY.push(ny - baseY);
