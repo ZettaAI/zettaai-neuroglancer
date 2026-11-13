@@ -516,6 +516,22 @@ describe("CalcadaTracePanel", () => {
     );
   });
 
+  it("the sphere radius input sets the default every trace starts at", async () => {
+    const connection = await makeConnection();
+    const state = connection.state.zettaTraceState;
+    await mountPanel(connection);
+    const input = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLLabelElement>(".calcada-trace-panel-row"),
+      ].find((label) => label.textContent?.includes("Default sphere radius"));
+      expect(found).toBeDefined();
+      return found!.querySelector<HTMLInputElement>("input")!;
+    });
+    await userEvent.fill(input, "800");
+    await vi.waitFor(() => expect(state.sphereRadiusDefaultNm.value).toBe(800));
+    expect(state.sphereRadiusNm.value).toBe(800);
+  });
+
   it("the end radius input sets endRadiusNm in both scopes", async () => {
     const connection = await makeConnection();
     const state = connection.state.zettaTraceState;

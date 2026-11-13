@@ -77,6 +77,7 @@ export function clampTraceEndRadiusNm(radiusNm: number): number {
 
 const TRACE_SCOPE_KEY = "scope";
 const TRACE_SPHERE_RADIUS_KEY = "sphereRadiusNm";
+const TRACE_SPHERE_RADIUS_DEFAULT_KEY = "sphereRadiusDefaultNm";
 const TRACE_END_RADIUS_KEY = "endRadiusNm";
 const TRACE_SPHERE_CENTER_KEY = "sphereCenter";
 
@@ -194,6 +195,11 @@ export class ZettaTraceState extends RefCounted implements Trackable {
   // aiming would show a sphere with no trace behind it.
   aiming = new WatchableValue<boolean>(false);
   scope = new WatchableValue<TraceScope>("sphere");
+  // What every trace's sphere starts at; − / + while aiming resize only the
+  // sphere of the trace at hand.
+  sphereRadiusDefaultNm = new WatchableValue<number>(
+    TRACE_SPHERE_RADIUS_DEFAULT_NM,
+  );
   sphereRadiusNm = new WatchableValue<number>(TRACE_SPHERE_RADIUS_DEFAULT_NM);
   endRadiusNm = new WatchableValue<number>(TRACE_END_RADIUS_DEFAULT_NM);
   sphereCenter = new WatchableValue<Float32Array | undefined>(undefined);
@@ -239,6 +245,7 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.registerDisposer(this.active.changed.add(reemit));
     this.registerDisposer(this.aiming.changed.add(reemit));
     this.registerDisposer(this.scope.changed.add(reemit));
+    this.registerDisposer(this.sphereRadiusDefaultNm.changed.add(reemit));
     this.registerDisposer(this.sphereRadiusNm.changed.add(reemit));
     this.registerDisposer(this.endRadiusNm.changed.add(reemit));
     this.registerDisposer(this.sphereCenter.changed.add(reemit));
@@ -297,11 +304,21 @@ export class ZettaTraceState extends RefCounted implements Trackable {
     this.active.value = false;
   }
 
+  setSphereRadiusDefaultNm(radiusNm: number) {
+    this.sphereRadiusDefaultNm.value = clampTraceSphereRadiusNm(radiusNm);
+    this.sphereRadiusNm.value = this.sphereRadiusDefaultNm.value;
+  }
+
+  dropSphere() {
+    this.sphereCenter.value = undefined;
+    this.sphereRadiusNm.value = this.sphereRadiusDefaultNm.value;
+  }
+
   reset() {
     this.active.value = false;
     this.aiming.value = false;
     this.seedRoot.value = undefined;
-    this.sphereCenter.value = undefined;
+    this.dropSphere();
   }
 
   // The seed is re-resolved from its piece rather than remapped from the old
@@ -333,7 +350,13 @@ export class ZettaTraceState extends RefCounted implements Trackable {
           : [...this.scoreRange.value],
       [TRACE_FILTER_EDITOR_KEY]: emptyToUndefined(this.filterEditor.toJSON()),
       [TRACE_SCOPE_KEY]: this.scope.value,
-      [TRACE_SPHERE_RADIUS_KEY]: this.sphereRadiusNm.value,
+      [TRACE_SPHERE_RADIUS_DEFAULT_KEY]:
+        this.sphereRadiusDefaultNm.value === TRACE_SPHERE_RADIUS_DEFAULT_NM
+          ? undefined
+          : this.sphereRadiusDefaultNm.value,
+      [TRACE_SPHERE_RADIUS_KEY]: this.sphereCenter.value
+        ? this.sphereRadiusNm.value
+        : undefined,
       [TRACE_END_RADIUS_KEY]:
         this.endRadiusNm.value === TRACE_END_RADIUS_DEFAULT_NM
           ? undefined
@@ -395,9 +418,13 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       this.scope.value =
         verifyString(value) === "segment" ? "segment" : "sphere";
     });
-    verifyOptionalObjectProperty(x, TRACE_SPHERE_RADIUS_KEY, (value) => {
-      this.sphereRadiusNm.value = verifyFiniteFloat(value);
-    });
+    this.setSphereRadiusDefaultNm(
+      verifyOptionalObjectProperty(
+        x,
+        TRACE_SPHERE_RADIUS_DEFAULT_KEY,
+        verifyFiniteFloat,
+      ) ?? TRACE_SPHERE_RADIUS_DEFAULT_NM,
+    );
     verifyOptionalObjectProperty(x, TRACE_END_RADIUS_KEY, (value) => {
       this.endRadiusNm.value = clampTraceEndRadiusNm(verifyFiniteFloat(value));
     });
@@ -405,6 +432,9 @@ export class ZettaTraceState extends RefCounted implements Trackable {
       this.sphereCenter.value = Float32Array.from(
         parseFixedLengthArray([0, 0, 0], value, verifyFiniteFloat),
       );
+      verifyOptionalObjectProperty(x, TRACE_SPHERE_RADIUS_KEY, (radius) => {
+        this.sphereRadiusNm.value = verifyFiniteFloat(radius);
+      });
     });
   }
 }

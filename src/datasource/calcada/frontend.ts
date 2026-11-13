@@ -3678,9 +3678,9 @@ class ZettaTraceSession extends RefCounted {
     // The seed does not outlive the mode: leaving means done with that segment.
     // Keeping it made re-entry snap the view back to the old candidate and wipe
     // whatever the proofreader had just selected to trace next. The placed
-    // sphere goes with it; the radius stays, being a setting rather than state.
+    // sphere goes with it, and the next trace's sphere starts at the default.
     this.state.seedRoot.value = undefined;
-    this.state.sphereCenter.value = undefined;
+    this.state.dropSphere();
 
     this.dimmed.clear();
     this.clearRoleColors();

@@ -54,7 +54,6 @@ import type {
 } from "#src/datasource/calcada/trace_state.js";
 import {
   clampTraceEndRadiusNm,
-  clampTraceSphereRadiusNm,
   TRACE_END_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
@@ -414,7 +413,7 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
   const aiming = useWatchable(traceState.aiming);
   const tracing = useWatchable(traceState.active);
   const scope = useWatchable(traceState.scope);
-  const radiusNm = useWatchable(traceState.sphereRadiusNm);
+  const radiusDefaultNm = useWatchable(traceState.sphereRadiusDefaultNm);
   const endRadiusNm = useWatchable(traceState.endRadiusNm);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
   const keepSplitParts = useWatchable(traceState.keepSplitParts);
@@ -483,10 +482,10 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
       </label>
       <label className="calcada-trace-panel-row">
         <span className="calcada-trace-panel-radius-label">
-          Sphere radius, nm
+          Default sphere radius, nm
           <span
             className="neuroglancer-key-chips"
-            data-tooltip="Resize the sphere while placing it"
+            data-tooltip="Resize this trace's sphere while placing it; the default stays"
           >
             <KeyChips
               keys={chordsForAction(
@@ -507,12 +506,10 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           min={TRACE_SPHERE_RADIUS_MIN_NM}
           max={TRACE_SPHERE_RADIUS_MAX_NM}
           step={100}
-          title="Radius of the sphere. Changing it after the seed is placed re-picks the candidates."
+          title="Every trace's sphere starts at this radius. Changing it also resizes the current sphere and re-picks the candidates."
           disabled={scope === "segment"}
-          value={Math.round(radiusNm)}
-          onValueChange={(next) => {
-            traceState.sphereRadiusNm.value = clampTraceSphereRadiusNm(next);
-          }}
+          value={Math.round(radiusDefaultNm)}
+          onValueChange={(next) => traceState.setSphereRadiusDefaultNm(next)}
         />
       </label>
       <label className="calcada-trace-panel-row">

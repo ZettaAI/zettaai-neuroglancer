@@ -87,16 +87,38 @@ describe("ZettaTraceState", () => {
     restored.dispose();
   });
 
-  it("keeps the radius but drops the placed sphere on reset", () => {
+  it("drops the placed sphere and its radius on reset, keeping the default", () => {
     const state = new ZettaTraceState();
+    state.setSphereRadiusDefaultNm(800);
     state.sphereRadiusNm.value = 999;
     state.sphereCenter.value = Float32Array.of(1, 2, 3);
     state.aiming.value = true;
     state.reset();
     expect(state.sphereCenter.value).toBeUndefined();
     expect(state.aiming.value).toBe(false);
-    expect(state.sphereRadiusNm.value).toBe(999);
+    expect(state.sphereRadiusNm.value).toBe(800);
     state.dispose();
+  });
+
+  it("a link without a placed sphere starts at the default radius", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ sphereRadiusNm: 2000 });
+    expect(state.sphereRadiusNm.value).toBe(TRACE_SPHERE_RADIUS_DEFAULT_NM);
+    state.sphereRadiusNm.value = 1234;
+    expect(JSON.stringify(state.toJSON())).not.toContain("sphereRadius");
+    state.dispose();
+  });
+
+  it("the default radius round-trips and starts the sphere", () => {
+    const state = new ZettaTraceState();
+    state.setSphereRadiusDefaultNm(800);
+    expect(state.sphereRadiusNm.value).toBe(800);
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.sphereRadiusDefaultNm.value).toBe(800);
+    expect(restored.sphereRadiusNm.value).toBe(800);
+    state.dispose();
+    restored.dispose();
   });
 
   it("cancels only the aim when escaping over a live trace", () => {
@@ -321,6 +343,9 @@ describe("ZettaTraceState.stepPlusMinus", () => {
     state.stepPlusMinus(1);
     expect(state.scoreRange.value).toEqual([0, 1]);
     expect(state.sphereRadiusNm.value).toBeGreaterThan(
+      TRACE_SPHERE_RADIUS_DEFAULT_NM,
+    );
+    expect(state.sphereRadiusDefaultNm.value).toBe(
       TRACE_SPHERE_RADIUS_DEFAULT_NM,
     );
   });
