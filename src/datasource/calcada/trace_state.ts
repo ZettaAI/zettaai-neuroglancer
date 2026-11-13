@@ -45,10 +45,10 @@ import type { Trackable } from "#src/util/trackable.js";
  */
 export type TraceScope = "sphere" | "segment";
 
-export const TRACE_SPHERE_RADIUS_DEFAULT_NM = 2000;
+export const TRACE_SPHERE_RADIUS_DEFAULT_NM = 500;
 export const TRACE_SPHERE_RADIUS_MIN_NM = 100;
 export const TRACE_SPHERE_RADIUS_MAX_NM = 50000;
-export const TRACE_END_RADIUS_DEFAULT_NM = 1000;
+export const TRACE_END_RADIUS_DEFAULT_NM = 500;
 /** An end is looked for no wider than this; a prompt may only narrow it. */
 export const TRACE_END_RADIUS_MAX_NM = TRACE_END_RADIUS_DEFAULT_NM;
 const RADIUS_STEP_FACTOR = 1.25;

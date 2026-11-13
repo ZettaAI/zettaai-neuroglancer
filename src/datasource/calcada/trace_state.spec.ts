@@ -13,7 +13,8 @@ import {
 } from "#src/datasource/calcada/trace_state.js";
 
 describe("ZettaTraceState", () => {
-  it("starts off with no aiming and the default radius", () => {
+  it("starts off with no aiming and a 500 nm sphere", () => {
+    expect(TRACE_SPHERE_RADIUS_DEFAULT_NM).toBe(500);
     const state = new ZettaTraceState();
     expect(state.active.value).toBe(false);
     expect(state.aiming.value).toBe(false);
@@ -22,9 +23,9 @@ describe("ZettaTraceState", () => {
     state.dispose();
   });
 
-  it("endRadiusNm defaults to 1000 and is left out of the JSON", () => {
+  it("endRadiusNm defaults to 500 and is left out of the JSON", () => {
     const state = new ZettaTraceState();
-    expect(TRACE_END_RADIUS_DEFAULT_NM).toBe(1000);
+    expect(TRACE_END_RADIUS_DEFAULT_NM).toBe(500);
     expect(state.endRadiusNm.value).toBe(TRACE_END_RADIUS_DEFAULT_NM);
     expect(JSON.stringify(state.toJSON())).not.toContain("endRadiusNm");
     state.dispose();

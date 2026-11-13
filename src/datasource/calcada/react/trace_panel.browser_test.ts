@@ -530,9 +530,9 @@ describe("CalcadaTracePanel", () => {
     for (const scope of ["sphere", "segment"] as const) {
       state.scope.value = scope;
       await vi.waitFor(() => expect(input.disabled).toBe(false));
-      await userEvent.fill(input, scope === "sphere" ? "600" : "800");
+      await userEvent.fill(input, scope === "sphere" ? "300" : "400");
       await vi.waitFor(() =>
-        expect(state.endRadiusNm.value).toBe(scope === "sphere" ? 600 : 800),
+        expect(state.endRadiusNm.value).toBe(scope === "sphere" ? 300 : 400),
       );
     }
   });
