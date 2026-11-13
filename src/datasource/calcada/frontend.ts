@@ -241,6 +241,7 @@ import { followSavedTraceFilter } from "#src/datasource/calcada/trace_filter_cho
 import { framingZoom } from "#src/datasource/calcada/trace_focus.js";
 import {
   AIM_KEYS_MODE,
+  CALCADA_LIST_PAIR_CANDIDATES_ACTION,
   CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
   CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
   CALCADA_TRACE_TOGGLE_ACTION,
@@ -335,6 +336,8 @@ import type {
 import {
   getBaseObjectColor,
   augmentSegmentId,
+  bindSegmentListWidth,
+  registerCallbackWhenSegmentationDisplayStateChanged,
   resetTemporaryVisibleSegmentsState,
   SegmentationLayerSharedObject,
   SegmentWidgetFactory,
@@ -6385,6 +6388,10 @@ void main() {
         this.segmentSession,
       ),
     );
+    const pairSegmentWidgets = SegmentWidgetFactory.make(
+      layer.displayState,
+      /*includeUnmapped=*/ false,
+    );
     this.pairCandidates = this.registerDisposer(
       new SegmentPairCandidates({
         selectedRoots: () => [
@@ -6408,6 +6415,20 @@ void main() {
           ),
         goTo: (point) => {
           layer.manager.root.globalPosition.value = point;
+        },
+        showSegment: (root, parent) => {
+          const shown = new RefCounted();
+          const row = parent.appendChild(pairSegmentWidgets.get(root));
+          shown.registerDisposer(
+            bindSegmentListWidth(layer.displayState, parent),
+          );
+          registerCallbackWhenSegmentationDisplayStateChanged(
+            layer.displayState,
+            shown,
+            () => pairSegmentWidgets.update(row),
+          );
+          shown.registerDisposer(() => row.remove());
+          return () => shown.dispose();
         },
       }),
     );
@@ -6483,6 +6504,17 @@ void main() {
             active: active.value,
             onMain: this.graph.branchId.value === MAIN_BRANCH_ID,
           });
+        },
+      ),
+    );
+    this.registerDisposer(
+      registerActionListener(
+        window,
+        CALCADA_LIST_PAIR_CANDIDATES_ACTION,
+        () => {
+          if (!answersGraphKeys(layer)) return;
+          this.traceSession.revealTraceTab();
+          void this.pairCandidates.list();
         },
       ),
     );

@@ -729,11 +729,6 @@
 
 .calcada-trace-panel-pair {
   padding-top: 4px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.7;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .calcada-trace-panel-navigator-position {

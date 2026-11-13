@@ -40,6 +40,7 @@ import type {
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
 import {
   AIM_KEYS_MODE,
+  CALCADA_LIST_PAIR_CANDIDATES_ACTION,
   CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
   CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
   CALCADA_TRACE_TOGGLE_ACTION,
@@ -133,6 +134,7 @@ export interface TracePanelConnection {
     dimensions(): readonly PairListDimension[];
     list(): Promise<void>;
     goTo(contact: PairContact): void;
+    showSegment(root: bigint, parent: HTMLElement): () => void;
   };
   listCandidateReviewers(): Promise<string[]>;
   readonly filterLibrary: FilterLibrary;
@@ -252,6 +254,9 @@ const START_TRACE_KEYS = keysForCustomAction(CALCADA_TRACE_TOGGLE_ACTION);
 const SPLIT_DETECTION_KEYS = keysForCustomAction(
   CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
 );
+const LIST_PAIR_CANDIDATES_KEYS = keysForCustomAction(
+  CALCADA_LIST_PAIR_CANDIDATES_ACTION,
+);
 const CONTROL_CLICK = ["control+mousedown0", "meta+mousedown0"];
 
 const aimChords = (action: string) =>
@@ -294,6 +299,10 @@ const KEY_HINTS: ReadonlyArray<readonly [string, string]> = [
       splitDetectionChords("split-detection-next"),
     ),
     "previous / next flagged candidate",
+  ],
+  [
+    formatShortcutKeys(LIST_PAIR_CANDIDATES_KEYS),
+    "list the candidates between the segments on screen",
   ],
   [formatShortcutKeys(SHORTCUT_SHEET_KEYS), "all shortcuts"],
 ];
@@ -744,6 +753,21 @@ function ContactEnd({ point }: { point: Float32Array }) {
   );
 }
 
+function PairSegment({
+  root,
+  session,
+}: {
+  root: bigint;
+  session: TracePanelConnection["pairCandidates"];
+}) {
+  const slot = useRef<HTMLDivElement>(null);
+  useLayoutEffect(
+    () => session.showSegment(root, slot.current!),
+    [root, session],
+  );
+  return <div ref={slot} />;
+}
+
 /**
  * Each contact as an annotation list shows a line: its two ends, then its
  * score; read-only, so without the list's edit and delete columns.
@@ -797,7 +821,8 @@ function PairContactList({
       {session.pairs.map((pair) => (
         <Fragment key={`${pair.rootA}:${pair.rootB}`}>
           <div className="calcada-trace-panel-pair">
-            {String(pair.rootA)} ↔ {String(pair.rootB)}
+            <PairSegment root={pair.rootA} session={session} />
+            <PairSegment root={pair.rootB} session={session} />
           </div>
           {pair.contacts.map((contact) => (
             <div
@@ -833,6 +858,7 @@ function PairCandidatesSection({
       <div className="calcada-trace-panel-buttons">
         <HintedButton
           hint="List every candidate between the segments on screen, hidden ones included"
+          keys={LIST_PAIR_CANDIDATES_KEYS}
           variant="outline"
           onClick={() => void session.list()}
         >

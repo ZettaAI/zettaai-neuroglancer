@@ -89,6 +89,8 @@ export interface SegmentPairCandidatesDeps {
   contactLimit: number;
   fetchBetween(roots: bigint[]): Promise<Map<bigint, EdgeCandidate[]>>;
   goTo(point: Float32Array): void;
+  /** Shows the segment as the Seg tab does; the returned function takes it away. */
+  showSegment(root: bigint, parent: HTMLElement): () => void;
 }
 
 /** The candidates between the segments selected when it was last asked. */
@@ -133,6 +135,10 @@ export class SegmentPairCandidates extends RefCounted {
 
   dimensions(): PairListDimension[] {
     return this.deps.dimensions();
+  }
+
+  showSegment(root: bigint, parent: HTMLElement) {
+    return this.deps.showSegment(root, parent);
   }
 
   /** To the middle of the contact, where both segments meet. */

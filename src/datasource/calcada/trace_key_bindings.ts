@@ -28,6 +28,10 @@ export const CALCADA_TRACE_TOGGLE_ACTION = "calcada-toggle-zetta-trace";
 // A mode like the other two, bound straight to a key for the same reason.
 export const CALCADA_SPLIT_DETECTION_TOGGLE_ACTION =
   "calcada-toggle-split-detection";
+// Lists the candidates between the segments on screen from anywhere, as the
+// Trace tab's List button does.
+export const CALCADA_LIST_PAIR_CANDIDATES_ACTION =
+  "calcada-list-pair-candidates";
 /** Held, not pressed, so they are no actions: see held_key_reveal.ts. */
 export const SEED_SPHERE_REVEAL_KEY = "keyj";
 export const END_SPHERE_REVEAL_KEY = "keyk";

@@ -173,6 +173,12 @@ async function makeConnection({
         calls.push("listPairs");
       },
       goTo: record("goToPair"),
+      showSegment: (root, parent) => {
+        const segment = parent.appendChild(document.createElement("div"));
+        segment.className = "fake-segment";
+        segment.textContent = String(root);
+        return () => segment.remove();
+      },
     },
     listCandidateReviewers: async () => [],
     filterLibrary: library,
@@ -352,7 +358,14 @@ describe("CalcadaTracePanel", () => {
     expect(calls).toEqual(["listPairs", "goToPair"]);
     const text = tab.querySelector(pairs)?.textContent;
     expect(text).toContain("2 contacts in 1 pair between 2 segments");
-    expect(text).toContain("10 ↔ 20");
+    // Its two segments one under the other, as the Seg tab shows them.
+    expect(
+      [
+        ...tab.querySelectorAll(
+          `${pairs} .calcada-trace-panel-pair .fake-segment`,
+        ),
+      ].map((segment) => segment.textContent),
+    ).toEqual(["10", "20"]);
     expect(
       tab.querySelector(`${pairs} .neuroglancer-annotation-list-header`)
         ?.textContent,

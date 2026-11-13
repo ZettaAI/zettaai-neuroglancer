@@ -104,6 +104,7 @@ describe("SegmentPairCandidates", () => {
         return answer;
       },
       goTo: (point) => visited.push(point),
+      showSegment: () => () => {},
     });
     return { pairs, visited, asked };
   }
