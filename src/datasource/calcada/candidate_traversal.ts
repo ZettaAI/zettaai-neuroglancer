@@ -66,6 +66,27 @@ export function prependChildren(
 }
 
 /**
+ * Go on from where a trace end check found a candidate. One the walk would
+ * reach anyway leaves it untouched; one it lacks, or one its filters hide,
+ * goes to the head (a queued one keeping its own depth).
+ */
+export function continueAt(
+  pool: PoolEntry[],
+  candidate: EdgeCandidate,
+  depth: number,
+  passesFilters: boolean,
+): PoolEntry[] {
+  const queued = pool.find(
+    (entry) => entry.candidate.lineId === candidate.lineId,
+  );
+  if (queued !== undefined && passesFilters) return pool;
+  return [
+    queued ?? { candidate, depth },
+    ...pool.filter((entry) => entry !== queued),
+  ];
+}
+
+/**
  * The shared filters hide entries rather than dropping them. They keep their
  * place in the stack, so loosening a filter brings back what it skipped in the
  * order the walk would have met it.

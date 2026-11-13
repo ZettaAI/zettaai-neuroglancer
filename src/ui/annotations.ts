@@ -253,12 +253,21 @@ export function annotationListDimensions(
   return { globalDimensionIndices, localDimensionIndices };
 }
 
-export function annotationListGridTemplate(dimensionCount: number): string {
+/** The symbol and coordinate columns of an annotation list entry. */
+export function annotationListCoordinateColumns(
+  dimensionCount: number,
+): string {
   let gridTemplate = "[symbol] 2ch";
   for (let i = 0; i < dimensionCount; ++i) {
     gridTemplate += ` [dim] var(${annotationListColumnWidthProperty(i)})`;
   }
-  return gridTemplate + " [edit] 2ch [delete] 2ch";
+  return gridTemplate;
+}
+
+export function annotationListGridTemplate(dimensionCount: number): string {
+  return (
+    annotationListCoordinateColumns(dimensionCount) + " [edit] 2ch [delete] 2ch"
+  );
 }
 
 /** The widest entry of each column so far, set on an ancestor of the entries. */

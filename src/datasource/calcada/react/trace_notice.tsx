@@ -16,9 +16,20 @@
  * one that has run dry.
  */
 
+import { SCORE_DIGITS } from "#src/datasource/calcada/candidate_ranking.js";
+import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
+import {
+  END_SPHERE_RGB,
+  sphereCssColor,
+} from "#src/datasource/calcada/trace_cursor/trace_sphere_appearance.js";
+import type { TraceEndPromptView } from "#src/datasource/calcada/trace_end_controller.js";
+import { traceChords } from "#src/datasource/calcada/trace_key_bindings.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import type { NullarySignal } from "#src/util/signal.js";
+import { Button } from "@/components/ui/button";
+
+const END_SPHERE_CSS_COLOR = sphereCssColor(END_SPHERE_RGB);
 
 export interface TraceNotice {
   kind: "loading" | "candidate" | "empty" | "error";
@@ -28,19 +39,33 @@ export interface TraceNotice {
   headline?: { text: string; bold: boolean };
 }
 
+export interface TraceEndActions {
+  certain(): void;
+  uncertain(): void;
+  deeper(): void;
+  back(): void;
+  shrink(): void;
+  grow(): void;
+}
+
 export interface TraceNoticeSource {
   readonly active: WatchableValueInterface<boolean>;
   readonly seedRoot: WatchableValueInterface<bigint | undefined>;
   readonly session: {
     readonly changed: NullarySignal;
     readonly notice: TraceNotice | undefined;
+    readonly endPrompt?: TraceEndPromptView;
+    readonly endActions?: TraceEndActions;
   };
 }
 
 export function CalcadaTraceNotice({ source }: { source: TraceNoticeSource }) {
   useSignalRerender(source.session.changed);
 
-  const { notice } = source.session;
+  const { notice, endPrompt, endActions } = source.session;
+  if (endPrompt !== undefined && endActions !== undefined) {
+    return <TraceEndPrompt prompt={endPrompt} actions={endActions} />;
+  }
   if (notice === undefined) return null;
   return (
     <div
@@ -71,5 +96,107 @@ export function CalcadaTraceNotice({ source }: { source: TraceNoticeSource }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function TraceEndPrompt({
+  prompt,
+  actions,
+}: {
+  prompt: TraceEndPromptView;
+  actions: TraceEndActions;
+}) {
+  const checking = prompt.phase === "checking";
+  return (
+    <div
+      className="calcada-trace-notice calcada-trace-notice-prompt"
+      role="status"
+    >
+      <div className="calcada-trace-notice-title">
+        <span className="calcada-trace-notice-mode">Trace</span>
+        {checking && (
+          <span className="calcada-trace-notice-spinner" aria-hidden />
+        )}
+        {checking
+          ? "Checking…"
+          : `No candidate passes the filters within ${Math.round(prompt.radiusNm)} nm`}
+      </div>
+      {!checking && (
+        <>
+          <div className="calcada-trace-notice-detail calcada-trace-notice-highlight">
+            Score ≥ {prompt.threshold.toFixed(SCORE_DIGITS)}
+          </div>
+          <div className="calcada-trace-notice-detail calcada-trace-notice-legend">
+            <span
+              className="calcada-trace-notice-swatch"
+              style={{ backgroundColor: END_SPHERE_CSS_COLOR }}
+              aria-hidden
+            />
+            Orange sphere: this end; look deeper stays inside it
+          </div>
+          <div className="calcada-trace-notice-radius">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={!prompt.canShrink}
+              onClick={actions.shrink}
+            >
+              Smaller
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={!prompt.canGrow}
+              onClick={actions.grow}
+            >
+              Larger
+            </Button>
+          </div>
+          <div className="calcada-trace-notice-buttons">
+            <PromptButton
+              label="Certain end"
+              action="accept-candidate"
+              onClick={actions.certain}
+            />
+            <PromptButton
+              label="Uncertain end"
+              action="reject-candidate"
+              onClick={actions.uncertain}
+            />
+            <PromptButton
+              label="Look deeper"
+              action="skip-candidate"
+              disabled={!prompt.canGoDeeper}
+              onClick={actions.deeper}
+            />
+            <PromptButton
+              label="Back"
+              action="ambiguous-candidate"
+              disabled={!prompt.canGoBack}
+              onClick={actions.back}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PromptButton({
+  label,
+  action,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  action: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button size="xs" variant="outline" disabled={disabled} onClick={onClick}>
+      {label}
+      <KeyChips keys={traceChords(action)} />
+    </Button>
   );
 }

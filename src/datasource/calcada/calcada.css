@@ -472,6 +472,12 @@
   white-space: nowrap;
 }
 
+/* The prompt's title carries a radius and can outgrow the overlay; a notice's
+   stays on one line. */
+.calcada-trace-notice-prompt .calcada-trace-notice-title {
+  white-space: normal;
+}
+
 .calcada-trace-notice-detail {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -479,6 +485,31 @@
 
 .calcada-trace-notice-highlight {
   font-weight: 700;
+}
+
+.calcada-trace-notice-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.calcada-trace-notice-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.calcada-trace-notice-prompt {
+  opacity: 1;
+}
+
+.calcada-trace-notice-radius,
+.calcada-trace-notice-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 4px;
+  margin-top: 4px;
 }
 
 .calcada-trace-notice-spinner {
@@ -607,6 +638,13 @@
   pointer-events: none;
 }
 
+/* An xs button is barely taller than a key chip; let it grow around one. */
+.calcada-trace-panel-button-hint button,
+.calcada-trace-notice-buttons button {
+  height: auto;
+  padding-block: 4px;
+}
+
 .calcada-trace-panel-button-hint .neuroglancer-key-chip {
   margin-inline: 1px;
   font-weight: 400;
@@ -684,6 +722,15 @@
   font-size: 12px;
 }
 
+.calcada-trace-panel-pairs-list {
+  max-height: 16em;
+  overflow: auto;
+}
+
+.calcada-trace-panel-pair {
+  padding-top: 4px;
+}
+
 .calcada-trace-panel-navigator-position {
   min-width: 4em;
   padding: 0;
@@ -700,7 +747,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 8px 4px;
 }
 
 /* The Trace tab's filter box: which saved filter Trace applies. */
@@ -1703,6 +1750,7 @@
 }
 
 .calcada-annotations-picker {
+  flex: none;
   min-width: 0;
 }
 
@@ -1818,7 +1866,8 @@
   overflow-y: auto;
 }
 
-.calcada-annotations-list .neuroglancer-annotation-list-entry:hover {
+.calcada-annotations-list .neuroglancer-annotation-list-entry:hover,
+.calcada-trace-panel-pairs-list .neuroglancer-annotation-list-entry:hover {
   background-color: #333;
 }
 

@@ -26,10 +26,20 @@ import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import { RefCounted } from "#src/util/disposable.js";
 
-export class TraceSphereState extends RefCounted {
+/** What the sphere overlays draw. */
+export interface TraceSphereView {
+  readonly visible: WatchableValueInterface<boolean>;
+  readonly center: WatchableValueInterface<Float32Array | undefined>;
+  readonly radiusNm: WatchableValueInterface<number>;
+  readonly coordinateSpace: WatchableValueInterface<CoordinateSpace>;
+}
+
+export class TraceSphereState extends RefCounted implements TraceSphereView {
   readonly visible = new WatchableValue<boolean>(false);
   readonly center = new WatchableValue<Float32Array | undefined>(undefined);
   readonly radiusNm: WatchableValue<number>;
+  /** The placed sphere is hidden unless this is set; the aiming one always shows. */
+  readonly revealed = new WatchableValue<boolean>(false);
 
   constructor(
     private readonly trace: ZettaTraceState,
@@ -46,6 +56,7 @@ export class TraceSphereState extends RefCounted {
     this.registerDisposer(trace.scope.changed.add(refresh));
     this.registerDisposer(trace.active.changed.add(refresh));
     this.registerDisposer(trace.sphereCenter.changed.add(refresh));
+    this.registerDisposer(this.revealed.changed.add(refresh));
     this.refresh();
   }
 
@@ -71,7 +82,7 @@ export class TraceSphereState extends RefCounted {
       return;
     }
     const placed = trace.active.value ? trace.sphereCenter.value : undefined;
-    this.set(placed !== undefined, placed);
+    this.set(placed !== undefined && this.revealed.value, placed);
   }
 
   private set(visible: boolean, center: Float32Array | undefined) {

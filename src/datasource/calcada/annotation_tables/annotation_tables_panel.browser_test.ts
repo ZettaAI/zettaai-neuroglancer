@@ -42,6 +42,7 @@ import {
   annotationLimitNote,
   MAX_DRAWN_ANNOTATIONS,
   PLACE_ONE_TABLE_NOTE,
+  TABLES_ON_MAIN_NOTE,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import { ANNOTATION_TABLES_TAB_LABEL } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
@@ -50,6 +51,7 @@ import type {
   DrawnRows,
 } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type {
@@ -67,6 +69,8 @@ import { vec3 } from "#src/util/geom.js";
 import { NullarySignal } from "#src/util/signal.js";
 
 const SIDE_PANEL_WIDTH_PX = 260;
+/** Low enough that the controls above the list overflow their half. */
+const SHORT_TAB_HEIGHT_PX = 300;
 const SWATCH_COLOR = vec3.fromValues(1, 0, 0);
 const BEYOND_SAFE_INTEGER_ID = 9007199254740993n;
 const LONG_LIST_LENGTH = 120;
@@ -337,16 +341,20 @@ class FakeSession {
   }
 }
 
+const BRANCH_ID = 3;
+
 function makeConnection(
   tables: AnnotationTableInfo[] | undefined,
   statuses: AnnotationTableStatus[] = [],
   ticked: string[] = [],
+  branchId = BRANCH_ID,
 ) {
   const annotationTables = new CalcadaAnnotationTablesState();
   annotationTables.setTicked(ticked);
   const session = new FakeSession(tables);
   session.status.value = statuses;
   const connection: AnnotationTablesPanelConnection = {
+    graph: { branchId: new WatchableValue(branchId) },
     state: { annotationTables },
     annotationTablesSession: session,
   };
@@ -474,6 +482,24 @@ async function pickOption(name: string) {
 }
 
 describe("CalcadaAnnotationTablesPanel", () => {
+  it("warns on main that rows change on a branch, and lists the tables as usual", async () => {
+    const { connection } = makeConnection(
+      [synapses],
+      [],
+      ["synapses"],
+      MAIN_BRANCH_ID,
+    );
+    await mountPanel(connection);
+    expect(tab.textContent).toContain(TABLES_ON_MAIN_NOTE);
+    expect(chips()).toHaveLength(1);
+  });
+
+  it("shows no main warning on a branch", async () => {
+    const { connection } = makeConnection([synapses], [], ["synapses"]);
+    await mountPanel(connection);
+    expect(tab.textContent).not.toContain(TABLES_ON_MAIN_NOTE);
+  });
+
   it("selects tables in the picker, in selection order", async () => {
     const { connection, annotationTables } = makeConnection([synapses, nuclei]);
     await mountPanel(connection);
@@ -512,6 +538,33 @@ describe("CalcadaAnnotationTablesPanel", () => {
       chips()[0].querySelector<HTMLElement>(".calcada-annotations-swatch")!
         .style.background,
     ).toBe("rgb(255, 0, 0)");
+  });
+
+  it("grows the picker to hold chips that wrap onto more rows", async () => {
+    const wrapping = [
+      "trace_endpoints_uncertain",
+      "trace_endpoints_certain",
+      "accepted_candidates",
+    ].map((name) => ({ ...nuclei, name }));
+    const { connection } = makeConnection(
+      wrapping,
+      [],
+      wrapping.map(({ name }) => name),
+    );
+    await mountPanel(connection);
+    tab.style.height = `${SHORT_TAB_HEIGHT_PX}px`;
+    const picker = tab
+      .querySelector<HTMLElement>(".calcada-annotations-picker")!
+      .getBoundingClientRect();
+    const rowTops = new Set(
+      chips().map((chip) => chip.getBoundingClientRect().top),
+    );
+    expect(rowTops.size).toBeGreaterThan(1);
+    for (const chip of chips()) {
+      expect(chip.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        picker.bottom,
+      );
+    }
   });
 
   it("shows counts for each selected table only", async () => {
@@ -913,6 +966,28 @@ describe("CalcadaAnnotationTablesPanel", () => {
     await userEvent.clear(size);
     expect(session.setNewRowValue).toHaveBeenLastCalledWith("size", undefined);
     await vi.waitFor(() => expect(isDisabled(line)).toBe(true));
+  });
+
+  it("shows the payload a new row starts with in its fields", async () => {
+    const { connection, session } = makeConnection(
+      [{ ...synapses, canWrite: true, requiredProperties: ["size"] }],
+      [],
+      ["synapses"],
+    );
+    session.newRowPayload.value = { size: 0 };
+    session.placement.value = {
+      table: "synapses",
+      type: AnnotationType.LINE,
+    };
+    await mountPanel(connection);
+    const size = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLInputElement>(
+        'input[aria-label="size (required)"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(size.value).toBe("0");
   });
 
   it("takes no fraction for an integer property", async () => {

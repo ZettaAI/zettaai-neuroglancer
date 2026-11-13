@@ -3,6 +3,7 @@ import {
   CalcadaOverviewState,
   SCORING_SEGMENT_STATUS,
   splitDetectionStatus,
+  resumesAfterTrace,
   toggleSplitDetection,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 
@@ -58,6 +59,41 @@ describe("toggleSplitDetection", () => {
   it("does not start detection on main", () => {
     expect(
       toggleSplitDetection({ tracing: false, active: false, onMain: true }),
+    ).toBe(false);
+  });
+});
+
+describe("resumesAfterTrace", () => {
+  it("brings detection back on a branch with the segment still chosen", () => {
+    expect(
+      resumesAfterTrace({
+        wasActive: true,
+        onMain: false,
+        segmentChosen: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("stays off when the segment was cleared, instead of asking for a new one", () => {
+    expect(
+      resumesAfterTrace({
+        wasActive: true,
+        onMain: false,
+        segmentChosen: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("stays off on main and when it was off before the trace", () => {
+    expect(
+      resumesAfterTrace({ wasActive: true, onMain: true, segmentChosen: true }),
+    ).toBe(false);
+    expect(
+      resumesAfterTrace({
+        wasActive: false,
+        onMain: false,
+        segmentChosen: true,
+      }),
     ).toBe(false);
   });
 });

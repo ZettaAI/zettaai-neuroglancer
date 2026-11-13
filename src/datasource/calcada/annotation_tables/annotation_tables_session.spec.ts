@@ -37,6 +37,7 @@ import {
   MAX_DRAWN_ANNOTATIONS,
   PLACE_NO_WRITE_NOTE,
   PLACE_ONE_TABLE_NOTE,
+  PLACE_ON_MAIN_NOTE,
   PLACE_PAST_NOTE,
   pinnedSelection,
   PLACE_POINT_COUNT_NOTE,
@@ -60,6 +61,7 @@ import {
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
+import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { WatchableValue } from "#src/trackable_value.js";
 import type {
   AnnotationListColumnWidths,
@@ -72,6 +74,9 @@ import { HttpError } from "#src/util/http_request.js";
 import { Signal } from "#src/util/signal.js";
 
 const MAIN = { branchId: 0, timestamp: 0 };
+const BRANCH_ID = 3;
+const OTHER_BRANCH_ID = 4;
+const SINGLE_POINT = ["at"];
 
 const roots = (count: number) =>
   Array.from({ length: count }, (_, i) => BigInt(i + 1));
@@ -89,6 +94,7 @@ const entry = (
 ): AnnotationScopeEntry => ({
   counts: new Map(Object.entries(counts)),
   points: new Map(points.map((table) => [table, NO_POINTS])),
+  rereading: new Set(),
 });
 
 const rootScopes = (
@@ -727,6 +733,7 @@ function startSession(
     ticked: string[];
     visible: bigint[];
     timestamp?: number;
+    branchId?: number;
     filters?: Record<string, AnnotationTableFilter>;
     wholeTables?: string[];
     excluded?: bigint[];
@@ -767,7 +774,7 @@ function startSession(
       fetchOkImpl: graph.fetchOkImpl,
       baseUrl: "https://host/g",
     } as unknown as AnnotationTablesConnection["httpSource"],
-    branchId: new WatchableValue(0),
+    branchId: new WatchableValue(options.branchId ?? BRANCH_ID),
     timestamp: new WatchableValue<number | undefined>(options.timestamp),
     visibleSegments,
     graphEdited,
@@ -1060,6 +1067,76 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(statusOf("syn")?.error).toBeUndefined();
   });
 
+  it("rowWritten rereads the row's scopes", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n]);
+    const response = await graph.fetchOkImpl(
+      "https://host/g/annotation/tables/syn/annotations",
+      { method: "POST", body: JSON.stringify({ annotations: [{}] }) },
+    );
+    const { ids } = await response.json();
+    session.rowWritten("syn", BigInt(ids[0]));
+    await settle();
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n, BigInt(ids[0])]);
+  });
+
+  it("rowWritten for a table not listed yet lists the tables again", async () => {
+    const graph = fakeGraph(["syn"]);
+    const { session } = startSession(graph, { ticked: [], visible: [] });
+    await settle();
+    const listings = () =>
+      graph.fetchOkImpl.mock.calls.filter(([url]) =>
+        String(url).endsWith("/annotation/tables"),
+      ).length;
+    const before = listings();
+    session.rowWritten("fresh", 1n);
+    await settle();
+    expect(listings()).toBe(before + 1);
+  });
+
+  it("rowWritten and rowRemoved after dispose send nothing", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined ? [] : [row(5n, root), row(root, root)],
+    });
+    const { session } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    session.dispose();
+    const callsBefore = graph.fetchOkImpl.mock.calls.length;
+    session.rowWritten("fresh", 1n);
+    session.rowWritten("syn", 5n);
+    session.rowRemoved("syn", 5n);
+    await settle();
+    expect(graph.fetchOkImpl.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("rowRemoved drops the row without a request", async () => {
+    const graph = fakeGraph(["syn"], {
+      rows: (root) =>
+        root === undefined ? [] : [row(5n, root), row(root, root)],
+    });
+    const { session, drawnIds } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(drawnIds("syn")).toEqual([5n, 10n]);
+    graph.requests.length = 0;
+    session.rowRemoved("syn", 5n);
+    await settle();
+    expect(drawnIds("syn")).toEqual([10n]);
+    expect(graph.requests).toEqual([]);
+  });
+
   it("a delete sends no count or points request and the other rows stay drawn throughout", async () => {
     const SHARED_ID = 5n;
     const graph = fakeGraph(["syn"], {
@@ -1132,6 +1209,30 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(statusOf("syn")?.error).toContain("delete refused");
   });
 
+  it("delete is read-only on main: no request, the row stays; on a branch it deletes", async () => {
+    const graph = fakeGraph(["syn"], { canWrite: true });
+    const { connection, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+      branchId: MAIN_BRANCH_ID,
+    });
+    await settle();
+    const source = sources.get("syn")!;
+    const reference = source.getReference("syn:10");
+    await source.delete(reference);
+    await settle();
+    expect(graph.deletes).toEqual([]);
+    expect(source.get("syn:10")).toBeDefined();
+    (connection.branchId as WatchableValue<number>).value = BRANCH_ID;
+    await settle();
+    const onBranch = source.getReference("syn:10");
+    await source.delete(onBranch);
+    await settle();
+    expect(graph.deletes).toEqual([{ table: "syn", ids: ["10"] }]);
+    reference.dispose();
+    onBranch.dispose();
+  });
+
   it("delete is readonly at an explicit timestamp", async () => {
     const graph = fakeGraph(["syn", "mine"], { canWrite: true });
     const { connection, sources } = startSession(graph, {
@@ -1185,6 +1286,58 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(await editing.read()).toEqual({ tag: "soma", size: 7 });
   });
 
+  it("keeps a saved row drawn with its old value until its scope is read again", async () => {
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      valueField: "size",
+      rows: (root) =>
+        root === undefined
+          ? []
+          : [{ id: root, roots: [root], payload: { size: 3 }, value: 3 }],
+    });
+    const { session, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n, 20n],
+    });
+    await settle();
+    const source = sources.get("syn")!;
+    graph.hold = (read) => read === "points";
+    await session.rowEditing("syn", "syn:10")!.save({ size: 7 });
+    await settle();
+    expect(graph.held).toHaveLength(1);
+    expect(source.get("syn:10")?.properties).toEqual([3]);
+    expect(source.get("syn:20")).toBeDefined();
+    graph.hold = () => false;
+    for (const release of graph.held.splice(0)) release();
+    await settle();
+    expect(source.get("syn:10")?.properties).toEqual([7]);
+    expect(source.get("syn:20")).toBeDefined();
+  });
+
+  it("a row's editor mounted again knows the payload last read or saved, on that branch only", async () => {
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      rows: (root) =>
+        root === undefined
+          ? []
+          : [{ id: root, roots: [root], payload: { size: 3 } }],
+    });
+    const { session, connection } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+    });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.known).toBeUndefined();
+    await session.rowEditing("syn", "syn:10")!.read();
+    expect(session.rowEditing("syn", "syn:10")!.known).toEqual({ size: 3 });
+    await session.rowEditing("syn", "syn:10")!.save({ size: 7 });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.known).toEqual({ size: 7 });
+    (connection.branchId as WatchableValue<number>).value = OTHER_BRANCH_ID;
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.known).toBeUndefined();
+  });
+
   it("mounts the row's payload editor into the Selection panel", async () => {
     const graph = fakeGraph(["syn"], { canWrite: true });
     const { session, sources, mountRowEditor } = startSession(graph, {
@@ -1219,6 +1372,30 @@ describe("CalcadaAnnotationTablesSession", () => {
     expect(refused).toBe(
       "Could not save the annotation: payload does not match the schema",
     );
+  });
+
+  it("rows are read-only on main and writable on a branch, live", async () => {
+    const graph = fakeGraph(["syn"], {
+      canWrite: true,
+      pointNames: SINGLE_POINT,
+    });
+    const { session, connection, sources } = startSession(graph, {
+      ticked: ["syn"],
+      visible: [10n],
+      branchId: MAIN_BRANCH_ID,
+    });
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.readonly).toBe(true);
+    expect(sources.get("syn")!.readonly).toBe(true);
+    expect(session.placement.value).toEqual({ blockedBy: PLACE_ON_MAIN_NOTE });
+    (connection.branchId as WatchableValue<number>).value = BRANCH_ID;
+    await settle();
+    expect(session.rowEditing("syn", "syn:10")!.readonly).toBe(false);
+    expect(sources.get("syn")!.readonly).toBe(false);
+    expect(session.placement.value).toEqual({
+      table: "syn",
+      type: AnnotationType.POINT,
+    });
   });
 
   it("a row of a table it cannot write is read-only", async () => {
@@ -1490,7 +1667,7 @@ describe("CalcadaAnnotationTablesSession", () => {
     });
     graph.hold = (read) => read === "points";
     await settle();
-    (connection.branchId as WatchableValue<number>).value = 3;
+    (connection.branchId as WatchableValue<number>).value = OTHER_BRANCH_ID;
     await settle();
     expect(graph.held).toHaveLength(2);
     graph.held[0]();
@@ -1736,7 +1913,6 @@ describe("CalcadaAnnotationTablesSession", () => {
   });
 
   describe("placing", () => {
-    const SINGLE_POINT = ["at"];
     const LINE_POINTS = ["pre", "post"];
     const placedPoint = (point: number[]): Annotation => ({
       id: "",
@@ -1857,6 +2033,32 @@ describe("CalcadaAnnotationTablesSession", () => {
       reference.dispose();
     });
 
+    it("keeps the root's other rows and the placed point drawn until the root is read again", async () => {
+      const graph = fakeGraph(["syn"], {
+        canWrite: true,
+        pointNames: SINGLE_POINT,
+        createdOn: 10n,
+      });
+      const { sources, drawnIds } = startSession(graph, {
+        ticked: ["syn"],
+        visible: [10n, 20n],
+      });
+      await settle();
+      const source = sources.get("syn")!;
+      graph.hold = (read) => read === "points";
+      const reference = source.add(placedPoint([1, 1, 1]));
+      await settle();
+      expect(graph.held).toHaveLength(1);
+      expect(drawnIds("syn")).toEqual([10n, 20n]);
+      expect(source.get(reference.id)).toBeDefined();
+      graph.hold = () => false;
+      for (const release of graph.held.splice(0)) release();
+      await settle();
+      expect(drawnIds("syn")).toEqual([10n, 20n, CREATED_ROW_ID]);
+      expect(source.get(reference.id)).toBeUndefined();
+      reference.dispose();
+    });
+
     it("a placed row carries the payload typed for new rows", async () => {
       const graph = fakeGraph(["syn"], {
         canWrite: true,
@@ -1899,6 +2101,7 @@ describe("CalcadaAnnotationTablesSession", () => {
         { ticked: ["syn"], visible: [10n] },
       );
       await settle();
+      session.setNewRowValue("size", undefined);
       expect(session.missingRequired()).toEqual(["size"]);
       session.togglePlacing();
       expect(armPlacement).not.toHaveBeenCalled();
@@ -1910,6 +2113,20 @@ describe("CalcadaAnnotationTablesSession", () => {
       session.setNewRowValue("size", undefined);
       expect(disarmPlacement).toHaveBeenCalled();
       expect(session.isPlacing()).toBe(false);
+    });
+
+    it("starts a new row with every required number at 0", async () => {
+      const { session } = startSession(
+        fakeGraph(["syn"], {
+          canWrite: true,
+          pointNames: SINGLE_POINT,
+          jsonSchema: SIZED_SCHEMA,
+        }),
+        { ticked: ["syn"], visible: [10n] },
+      );
+      await settle();
+      expect(session.newRowPayload.value).toEqual({ size: 0 });
+      expect(session.missingRequired()).toEqual([]);
     });
 
     it("forgets the typed payload when another table is the one to add to", async () => {
@@ -1925,7 +2142,7 @@ describe("CalcadaAnnotationTablesSession", () => {
       session.setNewRowValue("size", 1);
       state.setTicked(["mark"]);
       await settle();
-      expect(session.newRowPayload.value).toEqual({});
+      expect(session.newRowPayload.value).toEqual({ size: 0 });
     });
 
     it("a point written onto a root out of view leaves the placed one even with no new points", async () => {

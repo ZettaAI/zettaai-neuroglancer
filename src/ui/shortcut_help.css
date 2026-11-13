@@ -63,6 +63,23 @@
   color: var(--nge-text);
 }
 
+.neuroglancer-mode-strip-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nge-space-5);
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.neuroglancer-mode-strip-expand:hover {
+  color: var(--nge-text);
+}
+
 .neuroglancer-shortcut-sheet {
   position: fixed;
   top: 50%;

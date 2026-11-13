@@ -20,6 +20,7 @@ const classes = {
 const piece = (pieceId: bigint, bestScore: number): PieceOverview => ({
   pieceId,
   bestScore,
+  bestLabel: "",
   bestPartnerPiece: 0n,
   bestPartnerRoot: 0n,
   bestPartnerVoxels: 0,
