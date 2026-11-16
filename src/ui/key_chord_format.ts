@@ -168,6 +168,38 @@ export function preferredChord(
   return identifiers.includes(metaTwin) ? metaTwin : first;
 }
 
+/**
+ * Every key of an action worth showing, in order, each once: elsewhere than on
+ * a Mac the Cmd (meta) chords go — that key does not exist there — and on a
+ * Mac a Ctrl chord goes when its Cmd twin is listed too, the way
+ * {@link preferredChord} picks one of the pair. Touch gestures are not keys,
+ * and a chord bound in two maps (or in two phases) is the same key.
+ */
+export function shownChords(
+  identifiers: readonly string[],
+  mac: boolean = isMacPlatform(),
+): string[] {
+  const usable = identifiers.filter((identifier) => {
+    if (isTouchGesture(identifier)) return false;
+    if (!mac) return !isMetaChord(identifier);
+    return (
+      !identifier.includes("control+") ||
+      !identifiers.includes(identifier.replace("control+", "meta+"))
+    );
+  });
+  const seen = new Set<string>();
+  return usable.filter((identifier) => {
+    const label = formatChord(identifier, mac);
+    if (seen.has(label)) return false;
+    seen.add(label);
+    return true;
+  });
+}
+
+function isTouchGesture(identifier: string): boolean {
+  return identifier.replace(PHASE_PREFIX, "").startsWith("touch");
+}
+
 function isMetaChord(identifier: string): boolean {
   return identifier.replace(PHASE_PREFIX, "").split("+").includes("meta");
 }

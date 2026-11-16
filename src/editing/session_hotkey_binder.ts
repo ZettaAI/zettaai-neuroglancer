@@ -57,7 +57,7 @@ import {
 import { isFieldKeyForSession } from "#src/editing/tool_panel_field_keys.js";
 import type { PaintingState } from "#src/editing/tool_runtimes/painting_tools.js";
 import type { PaintParamCursor } from "#src/editing/tool_runtimes/param_cursor.js";
-import type { EditKeybindOverrides } from "#src/editing/tooling/tooling_persist.js";
+import type { EditKeybindOverrides } from "#src/editing/tooling/personal_keybinds.js";
 import {
   PARAM_IDS,
   valueDescriptor,
@@ -66,7 +66,7 @@ import {
   getEditSessionKeybinds,
   type EditSessionKeybinds,
 } from "#src/ui/custom_keybinds.js";
-import { isMacPlatform } from "#src/ui/key_chord_format.js";
+import { isMacPlatform, shownChords } from "#src/ui/key_chord_format.js";
 import {
   modeShortcuts,
   SHORTCUT_SHEET_KEYS,
@@ -301,36 +301,76 @@ const TOOL_ID_FILL = "painting.fill";
 const TOOL_ID_Z_EXTRAP = "z-extrapolation";
 const TOOL_ID_CORRESPONDENCE = "correspondence";
 
-// Keys a rebind may never take: H opens the shortcut sheet, and plain [ / ]
-// walk the annotations during a session (TM-439).
-const RESERVED_KEYS: Readonly<Record<string, string>> = {
-  ...Object.fromEntries(
-    SHORTCUT_SHEET_KEYS.map((key) => [key, "show all shortcuts"]),
-  ),
-  bracketleft: "previous annotation",
-  bracketright: "next annotation",
-};
+// Keys a rebind may never take: H opens the shortcut sheet. (Plain [ / ] are
+// viewer keys like any other: a rebind may take them, with the same note.)
+const RESERVED_KEYS: Readonly<Record<string, string>> = Object.fromEntries(
+  SHORTCUT_SHEET_KEYS.map((key) => [key, "show all shortcuts"]),
+);
+
+/** What a rebind does to the edit keys, or why it cannot happen. */
+export type EditKeybindChange =
+  | { readonly refused: string }
+  | {
+      /** The new keys of every edit action the rebind touches. */
+      readonly overrides: Partial<Record<EditKeybindName, readonly string[]>>;
+      /**
+       * The edit action that had the key, with the keys it has now: the rest
+       * of its own keys, or — when none of the rest can be pressed on this
+       * platform — the rebound action's old ones, so the two swap.
+       */
+      readonly displaced?: {
+        readonly name: EditKeybindName;
+        readonly keys: readonly string[];
+        readonly swapped: boolean;
+      };
+    };
 
 /**
- * What already uses `identifier`: another edit action, a reserved key, or an
- * action the viewer's input maps bind (calcada tools, Trace, view keys). The
- * session's own map is a parent of those maps, so its entries are skipped. A
- * rebind that would take the key is refused rather than letting it shadow the
- * other binding for the whole session.
+ * Plan a rebind of `name` to `identifier`. Only Esc, the reserved keys and —
+ * off a Mac — Win / Super chords are refused. A key another edit action has is handed over rather than refused:
+ * that action keeps its other keys, or takes `name`'s old ones, so nothing is
+ * ever left without a key and no key does two edit actions. Viewer keys are
+ * not looked at here — see {@link findShadowedViewerAction}.
  */
-export function findEditKeybindConflict(
+export function planEditKeybindChange(
   name: EditKeybindName,
   identifier: string,
   effective: Record<EditKeybindName, readonly string[]>,
-  inputMaps: readonly EventActionMap[] = [],
-): string | undefined {
-  if (identifier === "escape") return "exit";
-  const editOwner = EDIT_KEYBIND_NAMES.find(
+  mac: boolean = isMacPlatform(),
+): EditKeybindChange {
+  if (identifier === "escape") return { refused: "exit" };
+  // Off a Mac the Win / Super key is the system's, and the sheet does not show
+  // chords with it: a tool bound only to one would look unbound.
+  if (shownChords([identifier], mac).length === 0) {
+    return { refused: "system shortcuts" };
+  }
+  const reserved = RESERVED_KEYS[identifier];
+  if (reserved !== undefined) return { refused: reserved };
+  const owner = EDIT_KEYBIND_NAMES.find(
     (other) => other !== name && effective[other].includes(identifier),
   );
-  if (editOwner !== undefined) return editOwner;
-  const reserved = RESERVED_KEYS[identifier];
-  if (reserved !== undefined) return reserved;
+  if (owner === undefined) return { overrides: { [name]: [identifier] } };
+  const ownerRemaining = effective[owner].filter((key) => key !== identifier);
+  // Cmd+Z left over on Windows is no key at all: swap instead.
+  const swapped = shownChords(ownerRemaining, mac).length === 0;
+  const ownerKeys = swapped ? effective[name] : ownerRemaining;
+  return {
+    overrides: { [name]: [identifier], [owner]: ownerKeys },
+    displaced: { name: owner, keys: ownerKeys, swapped },
+  };
+}
+
+/**
+ * The viewer action (calcada tools, Trace, view keys) a rebind to `identifier`
+ * covers while a session is open. A rebind may take such a key — annotators
+ * set up their own layouts, e.g. A / S / D for the tools — and the caller says
+ * what the key stops doing; outside a session it does it again. The session's
+ * own map is a parent of these maps, so its entries are skipped.
+ */
+export function findShadowedViewerAction(
+  identifier: string,
+  inputMaps: readonly EventActionMap[],
+): string | undefined {
   return inputMapOwner(inputMaps, identifier);
 }
 

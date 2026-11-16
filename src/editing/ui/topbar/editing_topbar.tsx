@@ -45,7 +45,8 @@ import type { SaveConflictError } from "#src/editing/reconcile/save_conflict_ref
 import { canCombine } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
   effectiveEditKeybinds,
-  findEditKeybindConflict,
+  findShadowedViewerAction,
+  planEditKeybindChange,
   type EditKeybindName,
 } from "#src/editing/session_hotkey_binder.js";
 import { automergeEnabled } from "#src/editing/tooling/edit_preferences.js";
@@ -62,6 +63,7 @@ import {
   shortcutAttributes,
 } from "#src/ui/key_chord_format.js";
 import { SHORTCUT_SHEET_KEYS } from "#src/ui/mode_shortcuts.js";
+import { rebindOutcomeMessage } from "#src/ui/shortcut_catalog.js";
 
 // Synthetic tool id used for the "Cursor" row. Selecting it clears the active
 // tool (no real library tool corresponds to it). Mirrors the legacy
@@ -427,29 +429,34 @@ function ActiveTopbarControls({
       }
       const identifier = keyboardEventToIdentifier(event);
       if (identifier === undefined) return; // lone modifier — keep waiting
-      const { inputEventBindings } = host.viewer;
-      const conflict = findEditKeybindConflict(
-        capturing,
-        identifier,
-        effective,
-        [
-          inputEventBindings.global,
-          inputEventBindings.sliceView,
-          inputEventBindings.perspectiveView,
-        ],
-      );
-      if (conflict !== undefined) {
+      const change = planEditKeybindChange(capturing, identifier, effective);
+      if ("refused" in change) {
         StatusMessage.showTemporaryMessage(
-          `${formatKeyIdentifier(identifier)} already does "${conflict}". Press another key, or Esc to cancel`,
+          `${formatKeyIdentifier(identifier)} already does "${change.refused}". Press another key, or Esc to cancel`,
           4000,
         );
         return;
       }
-      host.setEditKeybind(capturing, [identifier]);
+      const { inputEventBindings } = host.viewer;
+      const shadowed = findShadowedViewerAction(identifier, [
+        inputEventBindings.global,
+        inputEventBindings.sliceView,
+        inputEventBindings.perspectiveView,
+      ]);
+      host.setEditKeybinds(change.overrides);
       setCapturing(null);
+      const outcome = rebindOutcomeMessage(
+        capturing,
+        identifier,
+        change.displaced,
+        shadowed,
+        formatKeyIdentifier,
+      );
       StatusMessage.showTemporaryMessage(
-        `Bound "${capturing}" to ${formatKeyIdentifier(identifier)}`,
-        2500,
+        outcome === ""
+          ? `Bound "${capturing}" to ${formatKeyIdentifier(identifier)}`
+          : outcome,
+        outcome === "" ? 2500 : 6000,
       );
     };
     // Capture phase so we intercept before the session-scoped action map.
