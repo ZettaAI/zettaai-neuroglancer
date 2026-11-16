@@ -26,6 +26,7 @@ import type { Browser, Page } from "@playwright/test";
 
 import {
   buildNgState,
+  type FixtureInfo,
   type FixturesIndex,
   type Scenario,
 } from "./build_ng_state.js";
@@ -33,23 +34,33 @@ import { startFakeGcsFixtures } from "./fake_gcs_fixtures.mjs";
 import { installGcsRoute } from "./gcs_route.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURES_JSON = path.resolve(
-  HERE,
-  "../../../testdata/editing/fixtures.json",
-);
+const FIXTURES_DIR = path.resolve(HERE, "../../../testdata/editing");
 
 export interface FixtureGcs {
   readonly url: string;
   [Symbol.asyncDispose](): Promise<void>;
 }
 
-/** Load the generated fixtures index, or throw with a run-the-generator hint. */
-export function loadFixturesIndex(): FixturesIndex {
+/** The generated fixture sets: the default matrix, and the TM-373 4096² set. */
+const FIXTURE_SETS = {
+  default: { index: "fixtures.json", generateFlags: "" },
+  largeChunk: {
+    index: "fixtures_large_chunk.json",
+    generateFlags: " --large-chunk",
+  },
+} as const;
+
+export type FixtureSet = keyof typeof FIXTURE_SETS;
+
+/** Load a generated fixtures index, or throw with a run-the-generator hint. */
+export function loadFixturesIndex(set: FixtureSet = "default"): FixturesIndex {
+  const { index, generateFlags } = FIXTURE_SETS[set];
+  const indexPath = path.join(FIXTURES_DIR, index);
   try {
-    return JSON.parse(readFileSync(FIXTURES_JSON, "utf8")) as FixturesIndex;
+    return JSON.parse(readFileSync(indexPath, "utf8")) as FixturesIndex;
   } catch {
     throw new Error(
-      `no fixtures index at ${FIXTURES_JSON} — run: uv run testdata/editing/generate.py`,
+      `no fixtures index at ${indexPath} — run: uv run testdata/editing/generate.py${generateFlags}`,
     );
   }
 }
@@ -78,6 +89,8 @@ export async function openScenarioPage(
     fixtures: FixturesIndex;
     fakeGcsUrl: string;
     appPort: number;
+    /** Forwarded to `buildNgState`: a layer source other than `gs://`. */
+    sourceFor?: (fixture: FixtureInfo) => string;
   },
 ): Promise<Page> {
   const context = await browser.newContext({
@@ -89,8 +102,13 @@ export async function openScenarioPage(
       console.log(`[page] ${m.text()}`);
     }
   });
+  page.on("crash", () => {
+    console.log("[page] renderer crashed");
+  });
   await installGcsRoute(page, opts.fakeGcsUrl);
-  const state = buildNgState(opts.scenario, opts.fixtures);
+  const state = buildNgState(opts.scenario, opts.fixtures, {
+    sourceFor: opts.sourceFor,
+  });
   await page.goto(`/#!${encodeURIComponent(JSON.stringify(state))}`, {
     waitUntil: "domcontentloaded",
   });

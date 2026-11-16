@@ -245,6 +245,7 @@ export class UserLayer extends RefCounted {
     state.annotationCount = undefined;
     state.annotationSourceIndex = undefined;
     state.annotationSubsource = undefined;
+    state.annotationSubsubsourceId = undefined;
     state.annotationPartIndex = undefined;
     state.annotationInstanceIndex = undefined;
     state.annotationInstanceCount = undefined;
@@ -301,6 +302,11 @@ export class UserLayer extends RefCounted {
         "annotationSubsource",
         verifyString,
       );
+      state.annotationSubsubsourceId = verifyOptionalObjectProperty(
+        json,
+        "annotationSubsubsource",
+        verifyString,
+      );
     }
 
     state.value = json.value;
@@ -332,6 +338,7 @@ export class UserLayer extends RefCounted {
       json.annotationPart = state.annotationPartIndex;
       json.annotationSource = state.annotationSourceIndex;
       json.annotationSubsource = state.annotationSubsource;
+      json.annotationSubsubsource = state.annotationSubsubsourceId;
     }
     if (state.value != null) {
       json.value = state.value;
@@ -378,6 +385,7 @@ export class UserLayer extends RefCounted {
     dest.annotationInstanceIndex = source.annotationInstanceIndex;
     dest.annotationSourceIndex = source.annotationSourceIndex;
     dest.annotationSubsource = source.annotationSubsource;
+    dest.annotationSubsubsourceId = source.annotationSubsubsourceId;
     dest.annotationPartIndex = source.annotationPartIndex;
     dest.value = source.value;
   }

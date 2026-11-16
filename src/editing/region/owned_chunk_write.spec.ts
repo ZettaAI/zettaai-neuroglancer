@@ -14,6 +14,7 @@ import type {
   ScaleMetadata,
   SessionVoxelBounds,
 } from "@zettaai/edit-session";
+import { contentRefFromBuffer } from "@zettaai/edit-session";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -239,5 +240,67 @@ describe("planOwnedWrite", () => {
     expect(owned.ownedBox).toEqual({ start: [0, 0, 0], end: [2, 3, 2] });
     expect(owned.hash).toBe(ownedRegionHash(filledChunk(), owned));
     expect(owned.hash).not.toBe("whole-chunk-hash");
+  });
+});
+
+describe("planOwnedWrite on a volume smaller than one chunk (TM-373, PR 9a)", () => {
+  // A 3×2×1 volume at (10, 20, 0) in nominal 8×8×1 chunks. Before PR 9a the
+  // session chunk was the padded 8×8×1; now it is the volume's 3×2×1.
+  const VOLUME_OFFSET: readonly [number, number, number] = [10, 20, 0];
+  const VOLUME_SIZE: readonly [number, number, number] = [3, 2, 1];
+  const NOMINAL: readonly [number, number, number] = [8, 8, 1];
+  const volumeBounds = bounds(10, 20, 0, 13, 22, 1);
+  const voxelValues = [11, 12, 13, 21, 22, 23];
+
+  function savedChunk(bytes: Uint8Array): SavedChunk {
+    return {
+      layerId: "layer-1",
+      resolution: "8x8x40",
+      chunkId: "0,0,0",
+      chunkCoord: { x: 0, y: 0, z: 0 },
+      contentRef: contentRefFromBuffer(bytes),
+      bytes: { asView: () => bytes },
+    } as unknown as SavedChunk;
+  }
+
+  function planFor(
+    chunkDataSize: readonly [number, number, number],
+    bytes: Uint8Array,
+  ) {
+    const plan = planOwnedWrite(
+      savedChunk(bytes),
+      metadata,
+      {
+        chunkDataSize,
+        voxelOffset: VOLUME_OFFSET,
+        sizeVoxels: VOLUME_SIZE,
+      } as unknown as ScaleMetadata,
+      volumeBounds,
+    );
+    if (!("write" in plan)) throw new Error("expected a write");
+    return plan.write.owned;
+  }
+
+  const paddedBytes = new Uint8Array(8 * 8);
+  paddedBytes.set(voxelValues.slice(0, 3), 0);
+  paddedBytes.set(voxelValues.slice(3), 8);
+  const compactBytes = Uint8Array.from(voxelValues);
+
+  it("sends the same box and bytes as the padded chunk did", () => {
+    const padded = planFor(NOMINAL, paddedBytes);
+    const compact = planFor(VOLUME_SIZE, compactBytes);
+    expect(compact.ownedBox).toEqual(padded.ownedBox);
+    expect(compact.ownedBox).toEqual({ start: [10, 20, 0], end: [13, 22, 1] });
+    expect(Array.from(ownedRegionBytes(compactBytes, compact))).toEqual(
+      Array.from(ownedRegionBytes(paddedBytes, padded)),
+    );
+  });
+
+  it("covers the whole chunk now, with the same hash as the clipped path", () => {
+    const padded = planFor(NOMINAL, paddedBytes);
+    const compact = planFor(VOLUME_SIZE, compactBytes);
+    expect(padded.coversWholeChunk).toBe(false);
+    expect(compact.coversWholeChunk).toBe(true);
+    expect(compact.hash).toBe(padded.hash);
   });
 });

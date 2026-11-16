@@ -179,6 +179,44 @@ describe("BackendClient", () => {
     );
   });
 
+  it("sends gpu-target requests to the GPU root and the rest to the main root", async () => {
+    registerBackendEndpoint({
+      baseUrl: "https://cpu/api",
+      gpuBaseUrl: "https://gpu/api",
+      authorize: (init) => init,
+    });
+
+    const client = new BackendClient();
+    await client.postMultipart(
+      "/segmentation/propagate_mask",
+      new FormData(),
+      {},
+      "gpu",
+    );
+    await client.postBinary("/painting/cutout", new Uint8Array([1]));
+    await client.request("/x");
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://gpu/api/segmentation/propagate_mask",
+      "https://cpu/api/painting/cutout",
+      "https://cpu/api/x",
+    ]);
+  });
+
+  it("falls back to the main root for gpu-target requests without a GPU root", async () => {
+    registerBackendEndpoint({
+      baseUrl: "https://cpu/api",
+      authorize: (init) => init,
+    });
+
+    const client = new BackendClient();
+    await client.request("/segmentation/propagate_mask", {}, "gpu");
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://cpu/api/segmentation/propagate_mask",
+    );
+  });
+
   it("posts binary bodies defaulting to application/octet-stream", async () => {
     registerBackendEndpoint({
       baseUrl: "https://h/api",

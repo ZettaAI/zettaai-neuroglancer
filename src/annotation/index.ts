@@ -1435,6 +1435,18 @@ export class AnnotationSource
     return true;
   }
 
+  /** Whether the Selection panel may edit NG's own fields of the annotation. */
+  isAnnotationReadonly(_id: AnnotationId): boolean {
+    return this.readonly;
+  }
+
+  /** Adds the source's own details of the annotation to the Selection panel. */
+  mountAnnotationDetails(
+    _id: AnnotationId,
+    _parent: HTMLElement,
+    _context: RefCounted,
+  ) {}
+
   add(annotation: Annotation, commit = true): AnnotationReference {
     this.ensureUpdated();
     if (!annotation.id) {

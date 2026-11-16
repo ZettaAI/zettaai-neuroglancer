@@ -598,6 +598,37 @@ export async function fetchAnnotationRows(
 }
 
 const CREATE_REFUSED_PREFIX = "Could not add the annotation: ";
+const UPDATE_REFUSED_PREFIX = "Could not save the annotation: ";
+
+function rowsUrl(baseUrl: string, table: string) {
+  return `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`;
+}
+
+/** Writes rows; a refusal is named by the server's reason after `refusedPrefix`. */
+async function writeRows(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  table: string,
+  method: "POST" | "PUT",
+  annotations: unknown[],
+  refusedPrefix: string,
+): Promise<Response> {
+  try {
+    return await fetchTableOk(
+      fetchOk,
+      rowsUrl(baseUrl, table),
+      { method, body: JSON.stringify({ annotations }) },
+      [table],
+      "write",
+    );
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error;
+    const reason = await errorMessageOf(error);
+    throw new Error(
+      reason === "" ? error.message : `${refusedPrefix}${reason}`,
+    );
+  }
+}
 
 /** Writes one row with an empty payload; positions are in the table's voxels. Returns its id. */
 export async function createAnnotationRow(
@@ -610,28 +641,35 @@ export async function createAnnotationRow(
   const points = Object.fromEntries(
     [...positions].map(([name, position]) => [name, { position }]),
   );
-  let response: Response;
-  try {
-    response = await fetchTableOk(
-      fetchOk,
-      `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
-      {
-        method: "POST",
-        body: JSON.stringify({ annotations: [{ points, payload }] }),
-      },
-      [table],
-      "write",
-    );
-  } catch (error) {
-    if (!(error instanceof HttpError)) throw error;
-    const reason = await errorMessageOf(error);
-    throw new Error(
-      reason === "" ? error.message : `${CREATE_REFUSED_PREFIX}${reason}`,
-    );
-  }
+  const response = await writeRows(
+    fetchOk,
+    baseUrl,
+    table,
+    "POST",
+    [{ points, payload }],
+    CREATE_REFUSED_PREFIX,
+  );
   const body = await response.json();
   const [id] = expectArray(verifyObjectProperty(body, "ids", (v) => v));
   return BigInt(verifyString(id));
+}
+
+/** Replaces the row's payload; the server derives its value from it. */
+export async function updateAnnotationRow(
+  fetchOk: FetchOk,
+  baseUrl: string,
+  table: string,
+  id: bigint,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await writeRows(
+    fetchOk,
+    baseUrl,
+    table,
+    "PUT",
+    [{ id: String(id), payload }],
+    UPDATE_REFUSED_PREFIX,
+  );
 }
 
 export async function deleteAnnotationRows(
@@ -642,7 +680,7 @@ export async function deleteAnnotationRows(
 ): Promise<void> {
   await fetchTableOk(
     fetchOk,
-    `${baseUrl}/annotation/tables/${encodeURIComponent(table)}/annotations`,
+    rowsUrl(baseUrl, table),
     { method: "DELETE", body: JSON.stringify({ ids: ids.map(String) }) },
     [table],
     "write",

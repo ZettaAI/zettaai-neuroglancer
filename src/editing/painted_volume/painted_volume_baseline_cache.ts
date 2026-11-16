@@ -23,6 +23,7 @@ import type { ChunkId, Logger } from "@zettaai/edit-session";
 
 import type { ChunkKey } from "#src/editing/local_patch_source.js";
 import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volume_occupancy.js";
+import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
 
 /** Reads one decoded datasource chunk of the preview's layer and resolution. */
 export type PaintedVolumeBaselineReader = (
@@ -93,6 +94,8 @@ export class PaintedVolumeBaselineCache {
   private startRead(key: ChunkKey, chunkId: ChunkId): void {
     const controller = new AbortController();
     this.readByKey.set(key, controller);
+    // TM-373: tells the perf suite whether 2D painting reads full baselines here.
+    if (paintProfiler.enabled) paintProfiler.count("previewBaseline.reads", 1);
     this.read(chunkId, controller.signal).then(
       (view) => {
         if (!this.finishRead(key, controller)) return;
@@ -130,6 +133,9 @@ export class PaintedVolumeBaselineCache {
         this.cachedBytes <= this.limits.maxBytes;
       if (withinLimits || oldestKey === key) break;
       this.dropView(oldestKey);
+      if (paintProfiler.enabled) {
+        paintProfiler.count("previewBaseline.evictions", 1);
+      }
     }
   }
 

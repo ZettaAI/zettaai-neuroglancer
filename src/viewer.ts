@@ -1432,8 +1432,7 @@ export class Viewer extends RefCounted implements ViewerState {
       mountComponent(sheetMount, ShortcutSheet, {
         open: this.shortcutSheetOpen,
         editKeybindOverrides: editSessionHost.editKeybindOverrides,
-        setEditKeybind: (name, keys) =>
-          editSessionHost.setEditKeybind(name, keys),
+        setEditKeybinds: (changes) => editSessionHost.setEditKeybinds(changes),
         inputMaps: [
           inputEventBindings.global,
           inputEventBindings.sliceView,

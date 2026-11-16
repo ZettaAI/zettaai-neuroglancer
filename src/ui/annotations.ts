@@ -441,10 +441,33 @@ export const moveToAnnotation = (
     layerRank,
   );
   setLayerPosition(layer, chunkTransform, layerPosition);
+  showSegmentsOnMove(annotation, state);
+};
+
+function showSegmentsOnMove(
+  annotation: Annotation,
+  state: AnnotationLayerState,
+) {
   if (state.displayState.swapVisibleSegmentsOnMove.value) {
     showAnnotationSegments(annotation, state, true);
   }
-};
+}
+
+export function showSegmentsOnMoveToAnnotation(
+  state: AnnotationLayerState,
+  id: AnnotationId,
+) {
+  const reference = state.source.getReference(id);
+  const showOnceLoaded = () => {
+    const annotation = reference.value;
+    if (annotation === undefined) return;
+    if (annotation !== null) showSegmentsOnMove(annotation, state);
+    reference.changed.remove(showOnceLoaded);
+    reference.dispose();
+  };
+  reference.changed.add(showOnceLoaded);
+  showOnceLoaded();
+}
 
 function visitTransformedAnnotationGeometry(
   annotation: Annotation,
@@ -2490,7 +2513,12 @@ export function UserLayerWithAnnotationsMixin<
                   relationships,
                   properties: { value: properties },
                 } = annotationLayer.source;
-                const sourceReadonly = annotationLayer.source.readonly;
+                const { source } = annotationLayer;
+                const ownSource =
+                  source instanceof AnnotationSource ? source : undefined;
+                const sourceReadonly =
+                  ownSource?.isAnnotationReadonly(reference.id) ??
+                  source.readonly;
                 const defaultProperties =
                   annotationTypeHandlers[annotation.type].defaultProperties(
                     annotation,
@@ -2795,11 +2823,8 @@ export function UserLayerWithAnnotationsMixin<
                   );
                 }
 
-                if (
-                  !annotationLayer.source.readonly ||
-                  annotation.description
-                ) {
-                  if (annotationLayer.source.readonly) {
+                if (!sourceReadonly || annotation.description) {
+                  if (sourceReadonly) {
                     const description = document.createElement("div");
                     description.className =
                       "neuroglancer-annotation-details-description";
@@ -2823,6 +2848,11 @@ export function UserLayerWithAnnotationsMixin<
                     parent.appendChild(description);
                   }
                 }
+                ownSource?.mountAnnotationDetails(
+                  reference.id,
+                  parent,
+                  context,
+                );
               }
               if (statusText !== undefined) {
                 const statusMessage = document.createElement("div");

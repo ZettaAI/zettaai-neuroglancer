@@ -27,12 +27,14 @@ import {
   displayToLayerCoordinates,
   layerToDisplayCoordinates,
 } from "#src/render_coordinate_transform.js";
+import { moveToMousePosition } from "#src/rendered_data_panel_move_to_mouse.js";
 import {
   clearOutOfBoundsPickData,
   getPickDiameter,
 } from "#src/rendered_data_panel_picking.js";
 import { StatusMessage } from "#src/status.js";
 import type { TrackableValue } from "#src/trackable_value.js";
+import { showSegmentsOnMoveToAnnotation } from "#src/ui/annotations.js";
 import { AutomaticallyFocusedElement } from "#src/util/automatic_focus.js";
 import type { Borrowed } from "#src/util/disposable.js";
 import type {
@@ -599,12 +601,14 @@ export abstract class RenderedDataPanel extends RenderedPanel {
       );
     }
 
-    registerActionListener(element, "move-to-mouse-position", () => {
-      const { mouseState } = this.viewer;
-      if (mouseState.updateUnconditionally()) {
-        this.navigationState.position.value = mouseState.position;
-      }
-    });
+    registerActionListener(element, "move-to-mouse-position", () =>
+      moveToMousePosition(
+        this.viewer.mouseState,
+        this.navigationState.position,
+        this.viewer.selectionDetailsState,
+        showSegmentsOnMoveToAnnotation,
+      ),
+    );
 
     registerActionListener(element, "snap", () =>
       this.navigationState.pose.snap(),

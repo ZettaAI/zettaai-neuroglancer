@@ -18,10 +18,15 @@ import type {
   ReadonlyChunkVoxelBuffer,
   Resolution,
 } from "@zettaai/edit-session";
-import { Resolution as ResolutionCtor, layerId } from "@zettaai/edit-session";
+import {
+  DEFAULT_HISTORY_POLICY,
+  Resolution as ResolutionCtor,
+  layerId,
+} from "@zettaai/edit-session";
 import { describe, it, expect, afterEach } from "vitest";
 
 import { sizeToRadius } from "#src/editing/brush_size_presets.js";
+import { maxFillHistoryBytes } from "#src/editing/edit_history_budget.js";
 
 import { paintScheduler } from "#src/editing/tool_runtimes/paint_scheduler_config.js";
 
@@ -190,6 +195,7 @@ function setup(overrides: { radius?: number } = {}) {
       asView: () => new Uint32Array(0),
     }),
     initialState: initialState(overrides.radius),
+    maxFillHistoryBytes: maxFillHistoryBytes(DEFAULT_HISTORY_POLICY),
     selectSegment: (layer, value) => selected.push([layer, value]),
   });
   return { tools, log, calls, selected };
@@ -578,6 +584,7 @@ describe("ConsumerPaintingTools — stroke lifecycle (TM-315)", () => {
         asView: () => new Uint32Array(0),
       }),
       initialState: initialState(),
+      maxFillHistoryBytes: maxFillHistoryBytes(DEFAULT_HISTORY_POLICY),
     });
     // Start the fill but don't await — it stays in flight until canceled.
     const pending = tools.fill.handleInput(down(20, 20, 20));

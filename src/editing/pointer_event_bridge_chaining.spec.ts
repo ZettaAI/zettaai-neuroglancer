@@ -10,9 +10,14 @@
 
 // @vitest-environment jsdom
 
-import { layerId, Resolution } from "@zettaai/edit-session";
+import {
+  DEFAULT_HISTORY_POLICY,
+  layerId,
+  Resolution,
+} from "@zettaai/edit-session";
 import { afterEach, describe, it, expect, vi } from "vitest";
 
+import { maxFillHistoryBytes } from "#src/editing/edit_history_budget.js";
 import { PointerEventBridge } from "#src/editing/pointer_event_bridge.js";
 import type { PaintCompute } from "#src/editing/tool_runtimes/paint_types.js";
 import { ConsumerPaintingTools } from "#src/editing/tool_runtimes/painting_tools.js";
@@ -96,6 +101,7 @@ function setup(compute: Partial<PaintCompute>, toolId: string) {
     readChunkAt: async () => {
       throw new Error("no image in this test");
     },
+    maxFillHistoryBytes: maxFillHistoryBytes(DEFAULT_HISTORY_POLICY),
     initialState: {
       targetLayerId: TARGET,
       targetResolution: RESOLUTION,

@@ -74,11 +74,6 @@ function parseFillMode(x: unknown): FillMode {
   return x === "3d" ? "3d" : "2d";
 }
 
-/** Per-user edit-hotkey overrides: friendly action name → key identifier(s). */
-export type EditKeybindOverrides = {
-  readonly [name: string]: readonly string[];
-};
-
 export interface ToolingPersistState {
   /**
    * Active tool id, or null for cursor mode. Persisted for block-shape
@@ -88,12 +83,9 @@ export interface ToolingPersistState {
   readonly activeToolId: string | null;
   /** Painting family config; absent if it could not be parsed. */
   readonly painting?: SerializedPainting;
-  /**
-   * Per-user edit-hotkey overrides (TM-315). Merged over the build-time
-   * `custom-keybinds.json` defaults by the session hotkey binder. Absent when
-   * the user has not rebound anything.
-   */
-  readonly keybinds?: EditKeybindOverrides;
+  // Edit-hotkey overrides used to live here too (TM-315). They are now kept
+  // per browser (`personal_keybinds.ts`) so a shared link does not carry them;
+  // a `keybinds` field in an older block is ignored.
 }
 
 function serializeValue(value: number | bigint): SerializedValue {
@@ -116,23 +108,15 @@ function serializePainting(state: PaintingSharedState): SerializedPainting {
   };
 }
 
-/**
- * Build the persisted tooling block from the live tool state. `keybinds` are
- * the per-user edit-hotkey overrides (omitted from the output when empty).
- */
+/** Build the persisted tooling block from the live tool state. */
 export function serializeTooling(
   activeToolId: string | undefined,
   painting: PaintingSharedState,
-  keybinds?: EditKeybindOverrides,
 ): ToolingPersistState {
-  const base: ToolingPersistState = {
+  return {
     activeToolId: activeToolId ?? null,
     painting: serializePainting(painting),
   };
-  if (keybinds !== undefined && Object.keys(keybinds).length > 0) {
-    return { ...base, keybinds };
-  }
-  return base;
 }
 
 // -- Parsing (tolerant) -----------------------------------------------------
@@ -218,26 +202,6 @@ function parsePainting(x: unknown): SerializedPainting | undefined {
   };
 }
 
-/**
- * Parse the per-user keybind overrides. Tolerant: skips any malformed entry
- * (non-string keys list) rather than dropping the whole block. Returns
- * undefined when there is nothing usable.
- */
-function parseKeybinds(x: unknown): EditKeybindOverrides | undefined {
-  if (typeof x !== "object" || x === null || Array.isArray(x)) return undefined;
-  const o = x as Record<string, unknown>;
-  const out: { [name: string]: readonly string[] } = {};
-  for (const [name, raw] of Object.entries(o)) {
-    const keys = Array.isArray(raw)
-      ? raw.filter((k): k is string => typeof k === "string")
-      : typeof raw === "string"
-        ? [raw]
-        : [];
-    if (keys.length > 0) out[name] = keys;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 /** Parse a persisted tooling block. Returns undefined when absent/malformed. */
 export function parseTooling(x: unknown): ToolingPersistState | undefined {
   if (x === null || x === undefined) return undefined;
@@ -253,12 +217,9 @@ export function parseTooling(x: unknown): ToolingPersistState | undefined {
   const painting =
     o.painting === undefined ? undefined : parsePainting(o.painting);
   if (o.painting !== undefined && painting === undefined) return undefined;
-  const keybinds = parseKeybinds(o.keybinds);
-  const result: ToolingPersistState = { activeToolId };
   return {
-    ...result,
+    activeToolId,
     ...(painting !== undefined ? { painting } : {}),
-    ...(keybinds !== undefined ? { keybinds } : {}),
   };
 }
 

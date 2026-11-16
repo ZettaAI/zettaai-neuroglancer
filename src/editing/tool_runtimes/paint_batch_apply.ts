@@ -28,8 +28,10 @@
  * `record()` / `discard()`.
  */
 
-import type { Edit, WriteTarget } from "@zettaai/edit-session";
+import type { Edit, ScaleMetadata, WriteTarget } from "@zettaai/edit-session";
 import { ChunkId } from "@zettaai/edit-session";
+
+import type { ChunkVoxelBox } from "#src/editing/local_patch_chunk.js";
 
 import {
   notePaintedSubBox,
@@ -38,10 +40,16 @@ import {
 import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
 import type { PaintWriteBatch } from "#src/editing/tool_runtimes/paint_types.js";
 
+/** The target scale's chunk grid: what the library splits a write box by. */
+export type PaintChunkGrid = Pick<
+  ScaleMetadata,
+  "chunkDataSize" | "voxelOffset"
+>;
+
 export async function applyPaintBatch(
   edit: Edit,
   batch: PaintWriteBatch,
-  chunkSize: readonly [number, number, number],
+  grid: PaintChunkGrid,
   // Polled before each chunk write. `writeRegion` awaits, so a stroke can be
   // canceled mid-batch, and `Edit` does not refuse writes after it is finalized:
   // a later chunk would land in the overlay with no undo entry behind it.
@@ -51,7 +59,7 @@ export async function applyPaintBatch(
     layerId: batch.targetLayerId,
     resolution: batch.targetResolution,
   };
-  const [csx, csy, csz] = chunkSize;
+  const [csx, csy, csz] = grid.chunkDataSize;
   const prof = paintProfiler.enabled;
   const t0 = prof ? performance.now() : 0;
   let appliedChunks = 0;
@@ -75,17 +83,15 @@ export async function applyPaintBatch(
     // from `commitWrites`); if the write is skipped (clipped to bounds / fully
     // masked → no event), we drop the orphaned hint right after. Empty sub-boxes
     // never produce a write — skip them.
-    const chunkId = ChunkId.fromCoord(w.chunkCoord);
-    const recorded = sxv > 0 && syv > 0 && szv > 0;
-    if (recorded) {
-      notePaintedSubBox(target.layerId, target.resolution, chunkId, {
-        x0: ox,
-        y0: oy,
-        z0: oz,
-        x1: ox + sxv - 1,
-        y1: oy + syv - 1,
-        z1: oz + szv - 1,
-      });
+    const hints =
+      sxv > 0 && syv > 0 && szv > 0 ? libraryChunkHints(box, grid) : [];
+    for (const hint of hints) {
+      notePaintedSubBox(
+        target.layerId,
+        target.resolution,
+        hint.chunkId,
+        hint.box,
+      );
     }
     await edit.writeRegion(
       target,
@@ -95,8 +101,8 @@ export async function applyPaintBatch(
     );
     // Drop any hint the synchronous commit handler did not consume (the write
     // was skipped), so a stale hint can never bound a later non-paint commit.
-    if (recorded) {
-      takePaintedSubBox(target.layerId, target.resolution, chunkId);
+    for (const hint of hints) {
+      takePaintedSubBox(target.layerId, target.resolution, hint.chunkId);
     }
     appliedChunks++;
   }
@@ -108,4 +114,65 @@ export async function applyPaintBatch(
     );
     paintProfiler.count("overlay.paint.apply.chunks", appliedChunks);
   }
+}
+
+/** A sub-box hint for one chunk of the library's grid. */
+interface LibraryChunkHint {
+  readonly chunkId: ChunkId;
+  readonly box: ChunkVoxelBox;
+}
+
+/**
+ * The hints for a global write box, one per chunk of the LIBRARY's grid it
+ * overlaps, in that chunk's local coordinates (TM-373).
+ *
+ * The library splits the box by chunks anchored at the scale's `voxelOffset`
+ * (`chunksOverlappingBox`) and fires `chunk-changed` with those chunk ids.
+ * The batch's own `chunkCoord` is on a grid anchored at 0, which matches only
+ * when the offset is a multiple of the chunk size. On the portal data (offset
+ * 28943, 8913, 3404) it did not: every such hint was filed under a chunk that
+ * never commits, and the mirror scanned the whole chunk instead.
+ */
+export function libraryChunkHints(
+  box: {
+    readonly origin: readonly [number, number, number];
+    readonly size: readonly [number, number, number];
+  },
+  grid: PaintChunkGrid,
+): LibraryChunkHint[] {
+  const axisRanges = [0, 1, 2].map((axis) => {
+    const size = grid.chunkDataSize[axis];
+    const first = box.origin[axis] - grid.voxelOffset[axis];
+    const last = first + box.size[axis] - 1;
+    return {
+      size,
+      first,
+      last,
+      firstChunk: Math.floor(first / size),
+      lastChunk: Math.floor(last / size),
+    };
+  });
+  const [rangeX, rangeY, rangeZ] = axisRanges;
+  const localSpan = (
+    range: (typeof axisRanges)[number],
+    chunk: number,
+  ): [number, number] => [
+    Math.max(range.first, chunk * range.size) - chunk * range.size,
+    Math.min(range.last, (chunk + 1) * range.size - 1) - chunk * range.size,
+  ];
+  const hints: LibraryChunkHint[] = [];
+  for (let z = rangeZ.firstChunk; z <= rangeZ.lastChunk; z++) {
+    for (let y = rangeY.firstChunk; y <= rangeY.lastChunk; y++) {
+      for (let x = rangeX.firstChunk; x <= rangeX.lastChunk; x++) {
+        const [x0, x1] = localSpan(rangeX, x);
+        const [y0, y1] = localSpan(rangeY, y);
+        const [z0, z1] = localSpan(rangeZ, z);
+        hints.push({
+          chunkId: ChunkId.fromCoord({ x, y, z }),
+          box: { x0, y0, z0, x1, y1, z1 },
+        });
+      }
+    }
+  }
+  return hints;
 }

@@ -23,6 +23,9 @@ effect on the next deploy.
 
 Current values: `neuroglancer` and `neuroglancer-dev` carry `NEUROGLANCER_ZETTA_BACKEND_URL`
 and `NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP`; previews inherit dev's.
+`NEUROGLANCER_ZETTA_GPU_BACKEND_URL` is optional: set it to the GPU web API root
+(`web-api-dev-gpu` for dev, `web-api-gpu` for prod) to send model inference
+(z-extrapolation) there. Without it inference goes to `NEUROGLANCER_ZETTA_BACKEND_URL`.
 
 Only `neuroglancer` and `neuroglancer-dev`'s own `google_oauth2_redirect.html` are
 authorized redirect URIs of the IAP client. Previews and the portal, which serves NG from

@@ -17,6 +17,7 @@ import {
   formatChord,
   formatShortcutKeys,
   preferredChord,
+  shownChords,
   shortcutAttributes,
 } from "#src/ui/key_chord_format.js";
 import { EventActionMap } from "#src/util/event_action_map.js";
@@ -125,5 +126,36 @@ describe("chordsForAction", () => {
     });
     expect(chordsForAction(map, "undo")).toEqual(["control+keyz", "meta+keyz"]);
     expect(chordsForAction(map, "missing")).toEqual([]);
+  });
+});
+
+describe("shownChords", () => {
+  it("lists every key of an action, in order", () => {
+    expect(shownChords(["shift+equal", "equal", "numpadadd"], false)).toEqual([
+      "shift+equal",
+      "equal",
+      "numpadadd",
+    ]);
+  });
+
+  it("drops Cmd chords off a Mac", () => {
+    expect(shownChords(["control+keyz", "meta+keyz"], false)).toEqual([
+      "control+keyz",
+    ]);
+  });
+
+  it("drops a Ctrl chord whose Cmd twin is listed on a Mac", () => {
+    expect(shownChords(["control+keyz", "meta+keyz"], true)).toEqual([
+      "meta+keyz",
+    ]);
+    expect(shownChords(["control+keyb"], true)).toEqual(["control+keyb"]);
+  });
+
+  it("shows a key bound twice once, and no touch gestures", () => {
+    expect(shownChords(["keyt", "at:keyt", "keyc"], false)).toEqual([
+      "keyt",
+      "keyc",
+    ]);
+    expect(shownChords(["keyz", "touchtap2x3"], false)).toEqual(["keyz"]);
   });
 });

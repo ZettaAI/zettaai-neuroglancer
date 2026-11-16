@@ -310,6 +310,13 @@ const BUCKET_META: Record<string, BucketMeta> = {
     role: "io",
   },
   "5.mirror.fuse(cpu)": { phase: "apply", label: "mirror.fuse", role: "cpu" },
+  // TM-373: the library's end-of-stroke `Edit.record()` (history snapshot of
+  // every touched chunk), timed from the host side.
+  "edit.record(cpu)": {
+    phase: "apply",
+    label: "edit.record (stroke end)",
+    role: "cpu",
+  },
   "5.mirror.read(io)": {
     phase: "apply",
     label: "mirror.read (await)",
@@ -449,7 +456,16 @@ class PaintProfiler {
     }
   }
 
+  /**
+   * When false, quiet periods no longer print-and-clear the window: a
+   * benchmark that owns the window (`resetWindow()` → … → `snapshot()`) needs
+   * it whole, and on large chunks one stroke has pauses longer than the 400 ms
+   * the auto-flush reads as "stroke ended" (TM-373).
+   */
+  autoFlush = true;
+
   private scheduleFlush(): void {
+    if (!this.autoFlush) return;
     if (this.flushHandle !== undefined) clearTimeout(this.flushHandle);
     // ~400ms of inactivity ≈ "stroke ended" → print one summary per stroke.
     this.flushHandle = setTimeout(() => this.flush(), 400);
@@ -608,7 +624,13 @@ class PaintProfiler {
     this.pushCounterLine(lines, "commit ", [
       "overlay.paint.apply.chunks",
       "mirror.syncs",
+      "mirror.syncs.full",
+      "mirror.syncs.bounded",
       "segments.coalescedVia",
+    ]);
+    this.pushCounterLine(lines, "preview", [
+      "previewBaseline.reads",
+      "previewBaseline.evictions",
     ]);
     this.pushGpuLine(lines);
 

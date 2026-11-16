@@ -558,8 +558,12 @@ export interface EditPaintReadback extends PatchReadbackSummary {
 }
 
 /** Resolve the active target layer's `LocalPatchStore` (best-effort). */
-function targetPatchStore(host: Any): { layerId: unknown; store: Any } {
-  const layerId = host?.painting?.state?.getState?.()?.targetLayerId;
+function targetPatchStore(
+  host: Any,
+  explicitLayerId?: string,
+): { layerId: unknown; store: Any } {
+  const layerId =
+    explicitLayerId ?? host?.painting?.state?.getState?.()?.targetLayerId;
   const store = host?.perLayer?.get?.(layerId)?.patchStore;
   return { layerId, store };
 }
@@ -574,11 +578,15 @@ export function readbackEditPaintTarget(
     maxVoxels?: number;
     sampleSize?: number;
     originOffset?: readonly [number, number, number];
+    /** Read this layer's patches; default the painting target (needs a session). */
+    layerId?: string;
+    /** Also count the patched voxels holding this value (`valueCount`). */
+    countValue?: string;
   } = {},
 ): EditPaintReadback {
   const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
   const host = viewer?.editSessionHost;
-  const { layerId, store } = targetPatchStore(host);
+  const { layerId, store } = targetPatchStore(host, opts.layerId);
   if (store?.source?.chunks === undefined) {
     return {
       targetLayerId: layerId,
@@ -590,6 +598,7 @@ export function readbackEditPaintTarget(
       distinctValues: [],
       sample: [],
       truncated: false,
+      valueCount: 0,
     };
   }
   const summary = summarizePatchedVoxels(store.source.chunks.entries(), opts);
@@ -627,6 +636,11 @@ export interface StampReadbackInput {
   /** Fractional panel position of the stamp (default centre). */
   readonly fracX?: number;
   readonly fracY?: number;
+  /**
+   * Position of the stamp in target voxels from the panel centre, as in
+   * `strokeVoxelPath`. Overrides `fracX` / `fracY`.
+   */
+  readonly centerVoxels?: readonly [number, number];
   /** Clear the target's existing patches first, so read-back is just this stamp. */
   readonly clearFirst?: boolean;
   /**
@@ -714,8 +728,13 @@ export async function stampAndReadbackEditPaint(
 
     const el = findDispatchTarget();
     const rect = el.getBoundingClientRect();
-    const x = rect.left + rect.width * (input.fracX ?? 0.5);
-    const y = rect.top + rect.height * (input.fracY ?? 0.5);
+    const [x, y] =
+      input.centerVoxels !== undefined
+        ? voxelToClient()(input.centerVoxels)
+        : [
+            rect.left + rect.width * (input.fracX ?? 0.5),
+            rect.top + rect.height * (input.fracY ?? 0.5),
+          ];
     // Bounded (was 60s) — a mis-registered stamp used to spin the full minute
     // per stamp; `waitForPaintStable` also gives up fast on zero paint.
     const settleMs = input.settleTimeoutMs ?? 15000;
@@ -776,11 +795,403 @@ export async function stampAndReadbackEditPaint(
       distinctValues: [],
       sample: [],
       truncated: false,
+      valueCount: 0,
       strokeFired: false,
     };
   } finally {
     paintProfiler.enabled = false;
     paintProfiler.resetWindow();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Large-chunk benchmark (TM-373) — strokes placed in VOXELS, not panel
+// fractions, so the same path lands on the same chunks whatever the chunk size,
+// plus undo depth and frame pacing.
+// ---------------------------------------------------------------------------
+
+/** Profiler buckets whose growth means a stroke (or undo) is still landing. */
+const LARGE_CHUNK_SETTLE_KEYS = [
+  "4.handleInput(total)",
+  "apply.total(cpu)",
+  "5.mirror.read(io)",
+  "5.mirror.fuse(cpu)",
+  "edit.record(cpu)",
+  "6.gpu.upload(value)",
+  "6.gpu.upload(mask)",
+];
+
+/** A window with no profiler activity for this long did no paint work. */
+const NOTHING_LANDED_GIVEUP_MS = 5000;
+
+const LARGE_CHUNK_TIMING_KEYS = [
+  "4.handleInput(total)",
+  "apply.total(cpu)",
+  "overlay.paint.apply.writeRegion",
+  "overlay.paint.materialize.fetchBaseline",
+  "overlay.paint.materialize.clones",
+  "5.mirror.read(io)",
+  "5.mirror.fuse(cpu)",
+  "edit.record(cpu)",
+  "6.gpu.upload(value)",
+  "6.gpu.upload(mask)",
+  "mt.frameDraw",
+  "mt.longtask(>50ms)",
+];
+
+const LARGE_CHUNK_COUNTER_KEYS = [
+  "overlay.paint.apply.chunks",
+  "mirror.syncs",
+  "mirror.syncs.full",
+  "mirror.syncs.bounded",
+  "previewBaseline.reads",
+  "previewBaseline.evictions",
+  "gpu.uploadBytes",
+  // Upload kinds (TM-373, PR 6): a full upload, a new texture (empty +
+  // paintedBounds) and a sub-box upload.
+  "gpu.upload.value.full",
+  "gpu.upload.mask.full",
+  "gpu.upload.value.create",
+  "gpu.upload.mask.create",
+  "gpu.upload.value.sub",
+  "gpu.upload.mask.sub",
+];
+
+/** Time between animation frames while a stroke lands. */
+export interface FramePacing {
+  readonly frames: number;
+  readonly meanMs: number;
+  readonly p95Ms: number;
+  readonly maxMs: number;
+}
+
+/** One profiled window (a stroke, or an undo) of the large-chunk benchmark. */
+export interface LargeChunkWindow {
+  readonly ok: boolean;
+  readonly error?: string;
+  /** Wall time from the first pointer event (or the undo call) to settle. */
+  readonly wallMs: number;
+  readonly frames: FramePacing;
+  /** Profiler totals (ms) and call counts for the `LARGE_CHUNK_*` keys. */
+  readonly timings: Record<
+    string,
+    { totalMs: number; calls: number; maxMs: number }
+  >;
+  readonly counters: Record<string, number>;
+  /** The full sectioned profiler block for the window. */
+  readonly summary: string;
+  /** `performance.memory.usedJSHeapSize` after the window, in MB (Chromium). */
+  readonly jsHeapMb?: number;
+}
+
+export interface VoxelStrokeInput {
+  /**
+   * In-plane stroke points in target voxels, relative to the panel centre (the
+   * ngState `position`). Consecutive points become separate pointer moves.
+   */
+  readonly path: ReadonlyArray<readonly [number, number]>;
+  /** Brush radius in voxels. */
+  readonly radius: number;
+  /**
+   * Apply the loaded mask preset. A masked stroke records an after-image
+   * (`image` redo); an unmasked one replays instead (TM-319). Default false.
+   */
+  readonly masked?: boolean;
+  /** ms between pointer moves (default 80 — about one worker round-trip). */
+  readonly stepMs?: number;
+  readonly settleTimeoutMs?: number;
+}
+
+function roundTenth(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function heapMegabytes(): number | undefined {
+  const memory = (
+    performance as unknown as { memory?: { usedJSHeapSize: number } }
+  ).memory;
+  return memory === undefined
+    ? undefined
+    : roundTenth(memory.usedJSHeapSize / (1024 * 1024));
+}
+
+/** Sample frame-to-frame intervals until `stop()` is called. */
+function startFramePacing(): { stop(): FramePacing } {
+  const intervals: number[] = [];
+  let running = true;
+  let previous = performance.now();
+  const onFrame = (now: number) => {
+    if (!running) return;
+    intervals.push(now - previous);
+    previous = now;
+    requestAnimationFrame(onFrame);
+  };
+  requestAnimationFrame(onFrame);
+  return {
+    stop(): FramePacing {
+      running = false;
+      if (intervals.length === 0) {
+        return { frames: 0, meanMs: 0, p95Ms: 0, maxMs: 0 };
+      }
+      const sorted = [...intervals].sort((a, b) => a - b);
+      const total = sorted.reduce((sum, interval) => sum + interval, 0);
+      const p95Index = Math.min(
+        sorted.length - 1,
+        Math.floor(sorted.length * 0.95),
+      );
+      return {
+        frames: sorted.length,
+        meanMs: roundTenth(total / sorted.length),
+        p95Ms: roundTenth(sorted[p95Index]),
+        maxMs: roundTenth(sorted[sorted.length - 1]),
+      };
+    },
+  };
+}
+
+/**
+ * Wait until none of `LARGE_CHUNK_SETTLE_KEYS` has grown for `quietMs`: input,
+ * apply, the mirror's async passes and the end-of-stroke record all count, so a
+ * mirror pass still decoding a 4096² baseline keeps the window open.
+ */
+async function waitForLargeChunkSettle(
+  timeoutMs: number,
+  quietMs = 1500,
+): Promise<void> {
+  const start = performance.now();
+  let previousTotal = -1;
+  let quietSince = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    await delay(50);
+    const { buckets } = paintProfiler.snapshot();
+    let total = 0;
+    for (const key of LARGE_CHUNK_SETTLE_KEYS)
+      total += buckets[key]?.calls ?? 0;
+    if (total !== previousTotal) {
+      previousTotal = total;
+      quietSince = performance.now();
+      continue;
+    }
+    const quietFor = performance.now() - quietSince;
+    if (total > 0 && quietFor >= quietMs) return;
+    // Nothing recorded at all: the window did no paint work, don't spin.
+    if (total === 0 && quietFor >= NOTHING_LANDED_GIVEUP_MS) return;
+  }
+}
+
+/** Run `action` inside one profiler window and collect the large-chunk row. */
+async function profileLargeChunkWindow(
+  settleTimeoutMs: number,
+  action: () => Promise<void>,
+): Promise<LargeChunkWindow> {
+  paintProfiler.enabled = true;
+  paintProfiler.autoFlush = false;
+  paintProfiler.resetWindow();
+  const pacing = startFramePacing();
+  const start = performance.now();
+  let error: string | undefined;
+  try {
+    await action();
+    await waitForLargeChunkSettle(settleTimeoutMs);
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  }
+  const wallMs = roundTenth(performance.now() - start);
+  const frames = pacing.stop();
+  const snapshot = paintProfiler.snapshot();
+  const timings: LargeChunkWindow["timings"] = {};
+  for (const key of LARGE_CHUNK_TIMING_KEYS) {
+    const bucket = snapshot.buckets[key];
+    if (bucket === undefined) continue;
+    timings[key] = {
+      totalMs: roundTenth(bucket.totalMs),
+      calls: bucket.calls,
+      maxMs: roundTenth(bucket.maxMs),
+    };
+  }
+  const counters: Record<string, number> = {};
+  for (const key of LARGE_CHUNK_COUNTER_KEYS) {
+    const count = snapshot.counters[key];
+    if (count !== undefined) counters[key] = count;
+  }
+  const summary = paintProfiler.renderSummary();
+  paintProfiler.enabled = false;
+  paintProfiler.autoFlush = true;
+  paintProfiler.resetWindow();
+  return {
+    ok: error === undefined,
+    ...(error !== undefined && { error }),
+    wallMs,
+    frames,
+    timings,
+    counters,
+    summary,
+    jsHeapMb: heapMegabytes(),
+  };
+}
+
+/** Panel-centre client point and CSS pixels per target voxel. */
+function voxelToClient(): (
+  point: readonly [number, number],
+) => [number, number] {
+  const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
+  const voxelsPerPixel = viewer.crossSectionScale.value as number;
+  const rect = findDispatchTarget().getBoundingClientRect();
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  return ([voxelX, voxelY]) => [
+    centerX + voxelX / voxelsPerPixel,
+    centerY + voxelY / voxelsPerPixel,
+  ];
+}
+
+/**
+ * Draw one unmasked brush stroke along `input.path` and profile it, from the
+ * first pointer event until the mirror and the end-of-stroke record settle.
+ */
+export async function strokeVoxelPath(
+  input: VoxelStrokeInput,
+): Promise<LargeChunkWindow> {
+  const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
+  const host = viewer?.editSessionHost;
+  await waitForActiveSession(host, 120000);
+  // Select first: the session's first brush activation seeds the size from the
+  // zoom (`maybeSeedBrushSizeFromZoom`) and would overwrite a radius set before.
+  host.selectTool("painting.brush");
+  const state = host.painting.state;
+  if (presetMask === undefined) presetMask = state.getState().mask;
+  state.patchState({
+    radius: input.radius,
+    mask: input.masked === true ? presetMask : undefined,
+    // A fill stamp leaves this on, and with it a keep-every-voxel mask is
+    // skipped altogether (`maskKeepsEveryVoxel`).
+    fillClosedPaths: false,
+  });
+  await nextFrame();
+  const target = findDispatchTarget();
+  const toClient = voxelToClient();
+  const stepMs = input.stepMs ?? 80;
+  const pointer = (
+    type: string,
+    point: readonly [number, number],
+    buttons: number,
+  ) => {
+    const [clientX, clientY] = toClient(point);
+    target.dispatchEvent(
+      new PointerEvent(type, {
+        pointerId: 1,
+        isPrimary: true,
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+        button: type === "pointermove" ? -1 : 0,
+        buttons,
+      }),
+    );
+  };
+  return profileLargeChunkWindow(input.settleTimeoutMs ?? 120000, async () => {
+    const [first, ...rest] = input.path;
+    pointer("pointerdown", first, 1);
+    for (const point of rest) {
+      await delay(stepMs);
+      pointer("pointermove", point, 1);
+    }
+    pointer("pointerup", input.path[input.path.length - 1], 0);
+  });
+}
+
+export interface UndoAllResult {
+  /** Undos that ran before `canUndo` went false (or `max` was reached). */
+  readonly undone: number;
+  readonly canUndoAfter: boolean;
+  readonly undos: readonly LargeChunkWindow[];
+}
+
+/** Undo until the history is empty (at most `max` times), profiling each. */
+export async function undoAll(
+  input: { max?: number; settleTimeoutMs?: number } = {},
+): Promise<UndoAllResult> {
+  const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
+  const session = viewer?.editSessionHost?.activeSession?.value;
+  if (session === undefined) {
+    return { undone: 0, canUndoAfter: false, undos: [] };
+  }
+  const max = input.max ?? 50;
+  const undos: LargeChunkWindow[] = [];
+  while (undos.length < max && session.getHistory().canUndo) {
+    undos.push(
+      await profileLargeChunkWindow(
+        input.settleTimeoutMs ?? 120000,
+        async () => {
+          await session.undo();
+        },
+      ),
+    );
+  }
+  return {
+    undone: undos.length,
+    canUndoAfter: session.getHistory().canUndo,
+    undos,
+  };
+}
+
+/** The session's undo/redo availability, and the 3D preview status. */
+export function sessionHistoryStatus(): {
+  canUndo: boolean;
+  canRedo: boolean;
+  preview: unknown;
+} {
+  const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
+  const host = viewer?.editSessionHost;
+  const history = host?.activeSession?.value?.getHistory?.();
+  return {
+    canUndo: history?.canUndo ?? false,
+    canRedo: history?.canRedo ?? false,
+    preview: host?.paintedVolumePreviewSummary?.value,
+  };
+}
+
+/**
+ * Commit the active session and open it again with the same config: the
+ * cross-session "committed edits stay visible and editable" path. Reads the
+ * host's private session config — a benchmark-only reach-in.
+ */
+export async function commitAndReenterSession(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
+  const host = viewer?.editSessionHost;
+  try {
+    const config = host.activeSessionConfig;
+    if (config === undefined) throw new Error("no active session config");
+    // Back to the navigation tool first: committing with a paint tool's panel
+    // open throws from that panel's render (it reads `painting.state` after
+    // the session is gone). Not what this helper measures; the UI never
+    // commits that way (its Exit discards).
+    host.selectTool(undefined);
+    await nextFrame();
+    await host.commitActive();
+    await host.openSession(config);
+    await waitForActiveSession(host, 120000);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Discard the active session (rolls patches back to the last commit). */
+export async function discardActiveSession(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  const viewer = (globalThis as unknown as { viewer?: Any }).viewer;
+  try {
+    await viewer?.editSessionHost?.discardActive();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -822,4 +1233,10 @@ Object.assign(globalThis as unknown as Record<string, unknown>, {
   __editPaintBenchReadback: readbackEditPaintTarget,
   __editPaintBenchStampReadback: stampAndReadbackEditPaint,
   __editPaintBenchClearTarget: clearEditPaintTargetPatches,
+  // TM-373 — large-chunk benchmark.
+  __editPaintBenchVoxelStroke: strokeVoxelPath,
+  __editPaintBenchUndoAll: undoAll,
+  __editPaintBenchHistory: sessionHistoryStatus,
+  __editPaintBenchCommitAndReenter: commitAndReenterSession,
+  __editPaintBenchDiscard: discardActiveSession,
 });

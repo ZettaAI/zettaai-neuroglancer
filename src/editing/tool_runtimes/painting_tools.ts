@@ -35,12 +35,7 @@ import type {
   Resolution,
   WriteTarget,
 } from "@zettaai/edit-session";
-import {
-  bytesPerVoxel,
-  ChunkId,
-  DEFAULT_HISTORY_POLICY,
-  scaleFor,
-} from "@zettaai/edit-session";
+import { bytesPerVoxel, ChunkId, scaleFor } from "@zettaai/edit-session";
 
 import {
   brushSizeVoxels,
@@ -136,12 +131,6 @@ export interface PaintingSharedState {
    */
   readonly fillClosedPaths: boolean;
 }
-
-/**
- * One fill may take at most this much of the undo history's budget. Beyond it
- * `drop-oldest` would evict the user's earlier strokes to make room.
- */
-const MAX_FILL_HISTORY_BYTES = DEFAULT_HISTORY_POLICY.maxContentBytes / 2;
 
 /** 16M voxels is 128 MB in the masked path's `Float64Array` image slab. */
 const MAX_FILL_IMAGE_VOXELS = 16_000_000;
@@ -241,6 +230,13 @@ interface PaintingToolDeps {
     readonly Resolution[]
   >;
   readonly readChunkAt: ReadChunkAt;
+  /**
+   * Most history one fill may record: half the session's undo budget, so a
+   * fill never evicts the user's earlier strokes (`maxFillHistoryBytes` in
+   * `edit_history_budget.ts`). Comes from the session's policy, which is sized
+   * to its chunks (TM-373).
+   */
+  readonly maxFillHistoryBytes: number;
   /**
    * Worker-pool stroke pipeline (TM-322). Used for the unmasked same-z r>=1 fast
    * path when cross-origin isolation makes it available; otherwise strokes fall
@@ -599,7 +595,9 @@ export class StrokeTool implements EditTool {
     // residual wait, which should be ~0 once warming wins the race.
     await paintProfiler.timeAsync("P1.warm(io)", () => warm);
     await paintProfiler.timeAsync("apply.total(cpu)", () =>
-      edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize, isCurrent)),
+      edit.withBatch(() =>
+        applyPaintBatch(edit, batch, targetScale, isCurrent),
+      ),
     );
   }
 
@@ -638,7 +636,7 @@ export class StrokeTool implements EditTool {
       bytesPerVoxel(metadata.voxelDataType) * metadata.channels,
       context.redoKind,
     );
-    if (historyBytes > MAX_FILL_HISTORY_BYTES) {
+    if (historyBytes > this.deps.maxFillHistoryBytes) {
       this.deps.notify?.(FILL_TOO_LARGE_MESSAGE);
       return false;
     }
@@ -740,9 +738,9 @@ export class StrokeTool implements EditTool {
       footprint,
       value,
     );
-    const chunkSize = scaleFor(metadata, shared.targetResolution).chunkDataSize;
+    const targetScale = scaleFor(metadata, shared.targetResolution);
     return edit.withBatch(() =>
-      applyPaintBatch(edit, batch, chunkSize, isCurrent),
+      applyPaintBatch(edit, batch, targetScale, isCurrent),
     );
   }
 
@@ -783,9 +781,9 @@ export class StrokeTool implements EditTool {
     // After the image reads, so a fill rejected above adds nothing to history.
     if (!(await this.materializeFillTiles(context, tiles))) return false;
     if (!isCurrent()) return false;
-    const chunkSize = scaleFor(metadata, shared.targetResolution).chunkDataSize;
+    const targetScale = scaleFor(metadata, shared.targetResolution);
     await edit.withBatch(() =>
-      applyPaintBatch(edit, batch, chunkSize, isCurrent),
+      applyPaintBatch(edit, batch, targetScale, isCurrent),
     );
     return isCurrent();
   }
@@ -849,9 +847,9 @@ export class StrokeTool implements EditTool {
       readChunk,
       readChunkAt: this.deps.readChunkAt,
     });
-    const chunkSize = scaleFor(metadata, shared.targetResolution).chunkDataSize;
+    const targetScale = scaleFor(metadata, shared.targetResolution);
     await paintProfiler.timeAsync("apply.total(cpu)", () =>
-      edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize)),
+      edit.withBatch(() => applyPaintBatch(edit, batch, targetScale)),
     );
     for (const path of segments) {
       await this.paintStrokePath(
@@ -1052,13 +1050,10 @@ export class StrokeTool implements EditTool {
         readChunk,
         readChunkAt,
       });
-      const chunkSize = scaleFor(
-        metadata,
-        shared.targetResolution,
-      ).chunkDataSize;
+      const targetScale = scaleFor(metadata, shared.targetResolution);
       await paintProfiler.timeAsync("apply.total(cpu)", () =>
         edit.withBatch(() =>
-          applyPaintBatch(edit, batch, chunkSize, isCurrent),
+          applyPaintBatch(edit, batch, targetScale, isCurrent),
         ),
       );
       return { consumed: true };
@@ -1343,13 +1338,10 @@ export class FillTool implements EditTool {
             chunkId: ChunkId.fromCoord({ x: 0, y: 0, z: 0 }),
           });
           if (bounds === undefined) return;
-          const chunkSize = scaleFor(
-            metadata,
-            shared.targetResolution,
-          ).chunkDataSize;
+          const targetScale = scaleFor(metadata, shared.targetResolution);
           const applyBatch = (batch: PaintWriteBatch) =>
             paintProfiler.timeAsync("apply.total(cpu)", () =>
-              edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize)),
+              edit.withBatch(() => applyPaintBatch(edit, batch, targetScale)),
             );
           const finalBatch = await this.deps.compute.fill({
             targetLayerId: shared.targetLayerId,
@@ -1417,6 +1409,8 @@ export class ConsumerPaintingTools {
     allowedResolutionsByLayer: ReadonlyMap<LayerId, readonly Resolution[]>;
     readChunkAt: ReadChunkAt;
     initialState: PaintingSharedState;
+    /** See {@link PaintingToolDeps.maxFillHistoryBytes}. */
+    maxFillHistoryBytes: number;
     /** Host sink for fill progress → cursor loader UI (TM-269). */
     fillProgress?: FillProgressSink;
     /** Host transient-notification sink (TM-269). */
@@ -1432,6 +1426,7 @@ export class ConsumerPaintingTools {
       metadataByLayer: opts.metadataByLayer,
       allowedResolutionsByLayer: opts.allowedResolutionsByLayer,
       readChunkAt: opts.readChunkAt,
+      maxFillHistoryBytes: opts.maxFillHistoryBytes,
       pipeline: new PaintStrokePipeline(),
       fillProgress: opts.fillProgress,
       notify: opts.notify,

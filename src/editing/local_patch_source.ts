@@ -110,6 +110,8 @@ export class LocalPatchSource extends RefCounted {
       }
     }
     chunk.dirty = true;
+    // Conservative: whatever `patched` holds now lies inside the whole chunk.
+    chunk.growPaintedBounds(chunk.wholeChunkBox());
     chunk.markFullUpload();
     this.dirtyKeys.add(chunkGridKey(chunkGridPosition));
   }

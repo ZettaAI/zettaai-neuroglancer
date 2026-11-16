@@ -25,6 +25,7 @@ import {
   fetchTablePoints,
   listAnnotationTables,
   retryOnceIfUnauthorized,
+  updateAnnotationRow,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
 import { HttpError } from "#src/util/http_request.js";
 
@@ -634,6 +635,49 @@ describe("createAnnotationRow", () => {
       BASE,
       "a",
       new Map([["pt", [1, 2, 3]]]),
+      {},
+    ).catch((e) => e);
+    expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
+    expect(forbidden.message).toBe("No write permission on annotation table a");
+  });
+});
+
+describe("updateAnnotationRow", () => {
+  it("puts the row's whole payload under its id", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ ids: [BIG_ID] }),
+    );
+    await updateAnnotationRow(fetchOk, BASE, "a", BigInt(BIG_ID), {
+      size: 2.5,
+      kind: "spine",
+    });
+    const [url, init] = fetchOk.mock.calls[0];
+    expect(String(url)).toBe(`${BASE}/annotation/tables/a/annotations`);
+    expect(init?.method).toBe("PUT");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      annotations: [{ id: BIG_ID, payload: { size: 2.5, kind: "spine" } }],
+    });
+  });
+
+  it("names the server's reason when it refuses the payload", async () => {
+    const refused = await updateAnnotationRow(
+      vi.fn(() => failing(422, "payload does not match the schema")),
+      BASE,
+      "a",
+      1n,
+      { size: "big" },
+    ).catch((e) => e);
+    expect(refused.message).toBe(
+      "Could not save the annotation: payload does not match the schema",
+    );
+  });
+
+  it("maps 403 to the table's forbidden error, naming write", async () => {
+    const forbidden = await updateAnnotationRow(
+      vi.fn(() => failing(403, "forbidden")),
+      BASE,
+      "a",
+      1n,
       {},
     ).catch((e) => e);
     expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);

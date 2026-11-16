@@ -23,7 +23,6 @@ import { AnnotationFilterEditor } from "#src/datasource/calcada/annotation_table
 import type {
   AnnotationPayload,
   AnnotationPayloadValue,
-  AnnotationPropertyType,
   AnnotationTableFilter,
   AnnotationTableInfo,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_client.js";
@@ -39,6 +38,7 @@ import type {
   DrawnRows,
 } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
 import { NO_DRAWN_ROWS } from "#src/datasource/calcada/annotation_tables/drawn_rows.js";
+import { PayloadField } from "#src/datasource/calcada/annotation_tables/payload_field.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -65,7 +65,6 @@ import {
   ComboboxValue,
   useComboboxAnchor,
 } from "@/components/ui/combobox";
-import { Input } from "@/components/ui/input";
 import {
   Popover,
   PopoverContent,
@@ -90,13 +89,6 @@ const PLACEMENT_LABELS = new Map<PlacementType, string>([
 const OTHER_TYPE_HINT = "The table's rows are another kind of annotation";
 const FILL_IN_PREFIX = "Fill in ";
 const FILL_IN_SUFFIX = " to add";
-const REQUIRED_MARK = " *";
-const REQUIRED_LABEL_SUFFIX = " (required)";
-const TRUE_TEXT = "true";
-const BOOLEAN_CHOICES = ["", TRUE_TEXT, "false"];
-const UNSET_CHOICE_LABEL = "—";
-const INTEGER_STEP = 1;
-const ANY_STEP = "any";
 
 export interface AnnotationTablesPanelSession {
   readonly tables: WatchableValueInterface<AnnotationTableInfo[] | undefined>;
@@ -222,79 +214,6 @@ function TablePicker({
         </ComboboxList>
       </ComboboxContent>
     </Combobox>
-  );
-}
-
-function parsePayloadText(
-  type: AnnotationPropertyType,
-  text: string,
-): AnnotationPayloadValue | undefined {
-  if (text === "") return undefined;
-  switch (type) {
-    case "string":
-      return text;
-    case "boolean":
-      return text === TRUE_TEXT;
-    case "integer":
-    case "number": {
-      const parsed = Number(text);
-      const valid =
-        Number.isFinite(parsed) &&
-        (type === "number" || Number.isInteger(parsed));
-      return valid ? parsed : undefined;
-    }
-  }
-}
-
-function PayloadField({
-  name,
-  type,
-  required,
-  onValue,
-}: {
-  name: string;
-  type: AnnotationPropertyType;
-  required: boolean;
-  onValue: (value: AnnotationPayloadValue | undefined) => void;
-}) {
-  const [text, setText] = useState("");
-  const label = required ? `${name}${REQUIRED_LABEL_SUFFIX}` : name;
-  const change = (next: string) => {
-    setText(next);
-    onValue(parsePayloadText(type, next));
-  };
-  const invalid = text !== "" && parsePayloadText(type, text) === undefined;
-  return (
-    <label className="calcada-annotations-payload-field">
-      <span>
-        {name}
-        {required && REQUIRED_MARK}
-      </span>
-      {type === "boolean" ? (
-        <select
-          aria-label={label}
-          className="calcada-annotations-payload-value"
-          value={text}
-          onChange={(event) => change(event.target.value)}
-        >
-          {BOOLEAN_CHOICES.map((choice) => (
-            <option key={choice} value={choice}>
-              {choice === "" ? UNSET_CHOICE_LABEL : choice}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <Input
-          aria-label={label}
-          aria-invalid={invalid}
-          className="calcada-annotations-payload-value"
-          type={type === "string" ? "text" : "number"}
-          step={type === "integer" ? INTEGER_STEP : ANY_STEP}
-          value={text}
-          onChange={(event) => change(event.target.value)}
-        />
-      )}
-    </label>
   );
 }
 

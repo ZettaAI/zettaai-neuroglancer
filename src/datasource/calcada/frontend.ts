@@ -39,12 +39,16 @@ import { LayerChunkProgressInfo } from "#src/chunk_manager/base.js";
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { WithParameters } from "#src/chunk_manager/frontend.js";
 import { makeIdentityTransform } from "#src/coordinate_transform.js";
-import { CalcadaAnnotationTablesSession } from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
+import {
+  CalcadaAnnotationTablesSession,
+  pinnedSelection,
+} from "#src/datasource/calcada/annotation_tables/annotation_tables_session.js";
 import { CalcadaAnnotationTablesState } from "#src/datasource/calcada/annotation_tables/annotation_tables_state.js";
 import {
   ANNOTATION_TABLES_TAB_LABEL,
   CalcadaAnnotationTablesTab,
 } from "#src/datasource/calcada/annotation_tables/annotation_tables_tab.js";
+import { mountRowPayloadEditor } from "#src/datasource/calcada/annotation_tables/row_payload_editor.js";
 import { CalcadaTableAnnotationSource } from "#src/datasource/calcada/annotation_tables/table_annotation_source.js";
 import {
   TableLineTool,
@@ -5879,11 +5883,11 @@ void main() {
     const { selectionState } = layer.manager.root;
     const selectedTableAnnotation = this.registerDisposer(
       makeCachedLazyDerivedWatchableValue(
-        (selection) =>
+        (_selection) =>
           selectedListAnnotation(
             layer,
             layer.annotationStates.states,
-            selection,
+            pinnedSelection(selectionState),
           ),
         selectionState,
       ),
@@ -5957,6 +5961,7 @@ void main() {
               annotationListDimensions(layer, [annotationState]),
               columnWidths,
             ),
+          mountRowEditor: mountRowPayloadEditor,
           selectedAnnotation: selectedTableAnnotation,
           listCoordinatesChanged,
           clearHover: () => {

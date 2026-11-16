@@ -537,7 +537,7 @@ test.describe("hotkey hints", () => {
     ).toHaveText(mac ? "Brush⌃B" : "BrushCtrlB");
   });
 
-  test("the sheet searches, rebinds and refuses a taken key", async () => {
+  test("the sheet searches, rebinds and refuses a reserved key", async () => {
     test.skip(setupError !== undefined, setupError);
     await page.keyboard.press("Control+KeyB");
     await page.keyboard.press("KeyH");
@@ -552,9 +552,10 @@ test.describe("hotkey hints", () => {
     await expect(sheet.locator(".neuroglancer-shortcut-row")).toHaveCount(2);
 
     await sheet.getByLabel("Change the key for Fill", { exact: true }).click();
-    await page.keyboard.press("Control+KeyB");
+    // H opens the sheet, so it is the key a rebind may not take.
+    await page.keyboard.press("KeyH");
     await expect(sheet.getByRole("alert")).toContainText(
-      'already does "brush"',
+      'already does "show all shortcuts"',
     );
     await page.keyboard.press("KeyQ");
     await expect(sheet.getByRole("alert")).toHaveCount(0);
@@ -564,5 +565,289 @@ test.describe("hotkey hints", () => {
     await focusDataPanel(page);
     await page.keyboard.press("KeyQ");
     expect(await activeTool(page)).toBe("painting.fill");
+  });
+  // An annotator's own layout may take a viewer key (A is Axis lines): the key
+  // is the tool's while the session is open, and the viewer's again after.
+  test("a rebind may take a viewer key for the session's duration", async () => {
+    test.skip(setupError !== undefined, setupError);
+    const axisLines = () =>
+      page.evaluate(
+        () => (globalThis as any).viewer.showAxisLines.value as boolean,
+      );
+    const axisLinesBefore = await axisLines();
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    const sheetHeight = async () => (await sheet.boundingBox())!.height;
+    const heightBefore = await sheetHeight();
+    await sheet
+      .getByLabel("Change the key for Cursor", { exact: true })
+      .click();
+    await page.keyboard.press("KeyA");
+    await expect(sheet.getByRole("alert")).toContainText(
+      'A no longer does "Axis lines"',
+    );
+    // The message has a line of its own already: nothing in the sheet moves.
+    expect(await sheetHeight()).toBe(heightBefore);
+    for (const [label, key] of [
+      ["Brush", "KeyS"],
+      ["Eraser", "KeyD"],
+    ] as const) {
+      await sheet
+        .getByLabel(`Change the key for ${label}`, { exact: true })
+        .click();
+      await page.keyboard.press(key);
+    }
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+
+    await focusDataPanel(page);
+    await page.keyboard.press("KeyS");
+    expect(await activeTool(page)).toBe("painting.brush");
+    await page.keyboard.press("KeyD");
+    expect(await activeTool(page)).toBe("painting.erase");
+    await page.keyboard.press("KeyA");
+    expect(await activeTool(page)).toBeUndefined();
+    expect(await axisLines()).toBe(axisLinesBefore);
+
+    await page.evaluate(() =>
+      (globalThis as any).viewer.editSessionHost.discardActive(),
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (globalThis as any).viewer.editSessionHost.activeSession.value ===
+            undefined,
+        ),
+      )
+      .toBe(true);
+    await focusDataPanel(page);
+    await page.keyboard.press("KeyA");
+    // One press; waited for, since the panels are still settling after the
+    // session's teardown.
+    await expect.poll(axisLines).toBe(!axisLinesBefore);
+  });
+  // Keys belong to the annotator's browser: not in the viewer state (a shared
+  // link must not carry them), kept across a reload, and followed by the
+  // site's other tabs.
+  test("rebound keys live in this browser, not in the shared state", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    await sheet.getByLabel("Change the key for Brush", { exact: true }).click();
+    await page.keyboard.press("KeyS");
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+
+    const stored = () =>
+      page.evaluate(() => localStorage.getItem("zetta-edit-keybinds"));
+    await expect.poll(stored).toBe(JSON.stringify({ brush: ["keys"] }));
+    // Change the brush size so the tooling block is written again (it is on a
+    // debounce), wait until the state holds the new size, then look for keys.
+    await focusDataPanel(page);
+    await page.keyboard.press("KeyS");
+    expect(await activeTool(page)).toBe("painting.brush");
+    await page.keyboard.press("Shift+Equal");
+    const radiusNow = await page.evaluate(
+      () =>
+        (
+          globalThis as any
+        ).viewer.editSessionHost.paintingTools.state.getState()
+          .radius as number,
+    );
+    const persistedRadius = () =>
+      page.evaluate(
+        () =>
+          (globalThis as any).viewer.state.toJSON().editSession?.tooling
+            ?.painting?.radius,
+      );
+    await expect.poll(persistedRadius).toBe(radiusNow);
+    const stateText = await page.evaluate(() =>
+      JSON.stringify((globalThis as any).viewer.state.toJSON()),
+    );
+    expect(stateText).not.toContain("keybinds");
+
+    const other = await page.context().newPage();
+    await other.goto(page.url());
+    const otherOverrides = () =>
+      other.evaluate(
+        () =>
+          (globalThis as any).viewer?.editSessionHost.editKeybindOverrides
+            .value,
+      );
+    await expect.poll(otherOverrides).toEqual({ brush: ["keys"] });
+
+    await page.evaluate(() =>
+      (globalThis as any).viewer.editSessionHost.setEditKeybind("brush", [
+        "keyw",
+      ]),
+    );
+    await expect.poll(otherOverrides).toEqual({ brush: ["keyw"] });
+  });
+  // Taking another edit action's key swaps the two instead of refusing, so a
+  // layout can be rearranged without first freeing keys up.
+  test("taking another tool's key swaps the two", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    await sheet.getByLabel("Change the key for Fill", { exact: true }).click();
+    await page.keyboard.press("Control+KeyB");
+    await expect(sheet.getByRole("alert")).toContainText(
+      "Brush took Fill's old key",
+    );
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+
+    await focusDataPanel(page);
+    await page.keyboard.press("Control+KeyB");
+    expect(await activeTool(page)).toBe("painting.fill");
+    await page.keyboard.press("Control+KeyG");
+    expect(await activeTool(page)).toBe("painting.brush");
+  });
+
+  // Plain [ / ] are viewer keys like A: a rebind may take them, with the note.
+  test("a rebind may take [ with the same note", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    await sheet
+      .getByLabel("Change the key for Cursor", { exact: true })
+      .click();
+    await page.keyboard.press("BracketLeft");
+    await expect(sheet.getByRole("alert")).toContainText(
+      '[ no longer does "Previous selected segment"',
+    );
+    await page.keyboard.press("Escape");
+    await focusDataPanel(page);
+    await page.keyboard.press("Control+KeyB");
+    expect(await activeTool(page)).toBe("painting.brush");
+    await page.keyboard.press("BracketLeft");
+    expect(await activeTool(page)).toBeUndefined();
+  });
+  // The sheet lists every key of an action, so a key a rebind took visibly
+  // goes and the note names what is left (− taken from Smaller brush).
+  test("the sheet shows every key, and what a taken key leaves", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    const smallerBrush = sheet
+      .locator(".neuroglancer-shortcut-columns .neuroglancer-shortcut-row")
+      .filter({ hasText: /^Smaller brush/ });
+    await expect(smallerBrush.locator(".neuroglancer-key-chip")).toHaveText([
+      "−",
+      "Num−",
+    ]);
+
+    await sheet
+      .getByLabel("Change the key for Cursor", { exact: true })
+      .click();
+    await page.keyboard.press("Minus");
+    await expect(sheet.getByRole("alert")).toContainText(
+      "Smaller brush no longer uses −; it still works with Num−.",
+    );
+    await expect(smallerBrush.locator(".neuroglancer-key-chip")).toHaveText([
+      "Num−",
+    ]);
+  });
+  // Every tool, rebound to a plain letter from the sheet, is reached by it with
+  // a data panel focused — whatever that letter did in the viewer before.
+  test("every tool works from the key it was rebound to", async () => {
+    test.skip(setupError !== undefined, setupError);
+    const layout = [
+      ["Brush", "KeyQ", "painting.brush"],
+      ["Eraser", "KeyW", "painting.erase"],
+      ["Fill", "KeyY", "painting.fill"],
+      ["Z-extrapolation", "KeyJ", "z-extrapolation"],
+      ["Cursor", "KeyK", undefined],
+    ] as const;
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    for (const [label, key] of layout) {
+      await sheet
+        .getByLabel(`Change the key for ${label}`, { exact: true })
+        .click();
+      await page.keyboard.press(key);
+      await expect(
+        sheet.locator(".neuroglancer-shortcut-rebind.capturing"),
+      ).toHaveCount(0);
+    }
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+    await focusDataPanel(page);
+    for (const [label, key, toolId] of layout) {
+      await page.keyboard.press(key);
+      expect(await activeTool(page), `${label} on ${key}`).toBe(toolId);
+    }
+    // The old Ctrl keys went with the rebind.
+    await page.keyboard.press("Control+KeyB");
+    expect(await activeTool(page)).toBeUndefined();
+  });
+  // The same with the 3D panel focused: the session's keys come before the
+  // perspective panel's own (and the viewer's) for A / S / D and [.
+  test("rebound keys work with the 3D panel focused", async () => {
+    test.skip(setupError !== undefined, setupError);
+    await page.evaluate(() =>
+      (globalThis as any).viewer.layout.restoreState("3d"),
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          layout: (globalThis as any).viewer.layout.toJSON(),
+          panels: document.querySelectorAll(".neuroglancer-rendered-data-panel")
+            .length,
+        })),
+      )
+      .toEqual({ layout: "3d", panels: 1 });
+    const axisLines = () =>
+      page.evaluate(
+        () => (globalThis as any).viewer.showAxisLines.value as boolean,
+      );
+    const showSlices = () =>
+      page.evaluate(
+        () =>
+          (globalThis as any).viewer.showPerspectiveSliceViews.value as boolean,
+      );
+    const axisLinesBefore = await axisLines();
+    const showSlicesBefore = await showSlices();
+
+    await focusDataPanel(page);
+    await page.keyboard.press("KeyH");
+    const sheet = page.locator(".neuroglancer-shortcut-sheet");
+    for (const [label, key] of [
+      ["Cursor", "KeyA"],
+      ["Brush", "KeyS"],
+      ["Eraser", "KeyD"],
+      ["Fill", "BracketLeft"],
+    ] as const) {
+      await sheet
+        .getByLabel(`Change the key for ${label}`, { exact: true })
+        .click();
+      await page.keyboard.press(key);
+      await expect(
+        sheet.locator(".neuroglancer-shortcut-rebind.capturing"),
+      ).toHaveCount(0);
+    }
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+
+    await focusDataPanel(page);
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.classList.contains(
+          "neuroglancer-rendered-data-panel",
+        ),
+      ),
+    ).toBe(true);
+    await page.keyboard.press("KeyS");
+    expect(await activeTool(page)).toBe("painting.brush");
+    await page.keyboard.press("KeyD");
+    expect(await activeTool(page)).toBe("painting.erase");
+    await page.keyboard.press("BracketLeft");
+    expect(await activeTool(page)).toBe("painting.fill");
+    await page.keyboard.press("KeyA");
+    expect(await activeTool(page)).toBeUndefined();
+    // None of them reached the viewer's own actions on the way.
+    expect(await axisLines()).toBe(axisLinesBefore);
+    expect(await showSlices()).toBe(showSlicesBefore);
   });
 });

@@ -92,6 +92,26 @@ describe("buildTimeBackendEndpoint", () => {
     expect(new Headers(out.headers).get("Authorization")).toBe("dev-token-123");
   });
 
+  it("has no GPU URL unless the GPU define is present", () => {
+    vi.stubGlobal("NEUROGLANCER_ZETTA_BACKEND_URL", "https://backend.dev/api");
+
+    expect(buildTimeBackendEndpoint()?.gpuBaseUrl).toBeUndefined();
+  });
+
+  it("carries the GPU web API root from its define", () => {
+    vi.stubGlobal("NEUROGLANCER_ZETTA_BACKEND_URL", "https://backend.dev/api");
+    vi.stubGlobal("NEUROGLANCER_ZETTA_GPU_BACKEND_URL", "https://gpu.dev/api");
+
+    const endpoint = buildTimeBackendEndpoint();
+    expect(endpoint?.baseUrl).toBe("https://backend.dev/api");
+    expect(endpoint?.gpuBaseUrl).toBe("https://gpu.dev/api");
+  });
+
+  it("ignores a GPU URL define when no backend URL is set", () => {
+    vi.stubGlobal("NEUROGLANCER_ZETTA_GPU_BACKEND_URL", "https://gpu.dev/api");
+    expect(buildTimeBackendEndpoint()).toBeUndefined();
+  });
+
   it("ignores a token define when no URL is set", () => {
     vi.stubGlobal("NEUROGLANCER_ZETTA_BACKEND_TOKEN", "dev-token-123");
     expect(buildTimeBackendEndpoint()).toBeUndefined();

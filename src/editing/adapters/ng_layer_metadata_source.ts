@@ -21,6 +21,7 @@ import {
   Resolution as ResolutionFactory,
 } from "@zettaai/edit-session";
 
+import { editChunkDataSize } from "#src/editing/adapters/edit_chunk_extent.js";
 import type { LayerManager, UserLayer } from "#src/layer/index.js";
 import type {
   LayerDataSource,
@@ -543,7 +544,9 @@ function buildScaleMetadata(
     voxelSizeNm,
     voxelOffset: addXYZ(spec.baseVoxelOffset, spec.lowerVoxelBound),
     sizeVoxels: subtractXYZ(spec.upperVoxelBound, spec.lowerVoxelBound),
-    chunkDataSize: takeXYZUint(spec.chunkDataSize),
+    // The edit-session chunk size: on an axis the volume fills with one chunk,
+    // the volume's extent rather than the nominal chunk (TM-373, PR 9a).
+    chunkDataSize: takeXYZUint(editChunkDataSize(spec)),
   };
 }
 
