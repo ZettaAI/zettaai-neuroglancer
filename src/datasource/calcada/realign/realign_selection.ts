@@ -3,7 +3,9 @@
  *
  * A correspondence joins where a feature sits on the moving section (`z0`,
  * the box's section) to where it belongs on the reference section
- * (`z0 + referenceOffset`, the section below unless chosen otherwise).
+ * (`z0 + referenceOffset`, the section below unless chosen otherwise). A line
+ * drawn within one of those two sections reads the same way: its first point
+ * is the feature, its second where the feature belongs.
  * web_api wants crop pixels as `[y, x]`, with `start` on the moving section.
  */
 
@@ -27,7 +29,7 @@ export interface LineEndpoints {
   readonly pointB: ArrayLike<number>;
 }
 
-export type RejectReason = "not-across-sections" | "outside-box";
+export type RejectReason = "off-sections" | "outside-box";
 
 export interface RealignSelection {
   readonly box: RealignBox;
@@ -147,12 +149,14 @@ export function selectCorrespondences(
     const sectionB = sectionOf(line.pointB[Z]);
     let moving: ArrayLike<number>;
     let reference: ArrayLike<number>;
-    if (sectionA === box.z && sectionB === referenceSection) {
-      [moving, reference] = [line.pointA, line.pointB];
-    } else if (sectionB === box.z && sectionA === referenceSection) {
+    const onPair = (section: number) =>
+      section === box.z || section === referenceSection;
+    if (sectionB === box.z && sectionA === referenceSection) {
       [moving, reference] = [line.pointB, line.pointA];
+    } else if (onPair(sectionA) && onPair(sectionB)) {
+      [moving, reference] = [line.pointA, line.pointB];
     } else {
-      rejected.push({ id: line.id, reason: "not-across-sections" });
+      rejected.push({ id: line.id, reason: "off-sections" });
       continue;
     }
     if (!insideBox(box, moving) || !insideBox(box, reference)) {

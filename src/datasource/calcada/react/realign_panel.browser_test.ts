@@ -137,18 +137,18 @@ describe("RealignPanel", () => {
       boxSection: 3103,
       referenceSection: 3102,
       lineCount: 0,
-      rejected: [{ id: "a", reason: "not-across-sections" }],
+      rejected: [{ id: "a", reason: "off-sections" }],
       arrows: [
         {
           id: "a",
           lengthPx: 21.1,
           sections: [3103, 3104],
-          rejected: "not-across-sections",
+          rejected: "off-sections",
         },
       ],
     });
     await mountPanel(session);
-    expect(tab.textContent).toContain("on z 3103 → 3104, needs 3103 → 3102");
+    expect(tab.textContent).toContain("on z 3103 → 3104, needs z 3103 or 3102");
   });
 
   it("picks the reference section and names the pair", async () => {
@@ -250,9 +250,7 @@ describe("RealignPanel", () => {
     expect(tab.textContent).toContain("6.2 px");
     expect(tab.textContent).toContain("0.4 px");
     expect(tab.textContent).toContain("an end is outside the box");
-    tab
-      .querySelector<HTMLElement>('[data-arrow-id="a"] .calcada-realign-arrow')!
-      .click();
+    tab.querySelector<HTMLElement>('[data-arrow-id="a"]')!.click();
     expect(session.focusArrow).toHaveBeenCalledWith("a");
   });
 
@@ -260,14 +258,14 @@ describe("RealignPanel", () => {
     const { session } = makeSession({
       hasBox: true,
       lineCount: 1,
-      rejected: [{ id: "c", reason: "not-across-sections" }],
+      rejected: [{ id: "c", reason: "off-sections" }],
       arrows: [
         { id: "a", lengthPx: 6.2, sections: [32, 31] },
         {
           id: "c",
           lengthPx: 3,
           sections: [32, 32],
-          rejected: "not-across-sections",
+          rejected: "off-sections",
         },
       ],
     });
@@ -277,6 +275,11 @@ describe("RealignPanel", () => {
         '[data-arrow-id="c"] .calcada-realign-arrow-remove',
       )!
       .click();
+    expect(
+      tab.querySelector(
+        '[data-arrow-id="c"] .calcada-realign-arrow-remove svg',
+      ),
+    ).not.toBe(null);
     expect(session.removeArrow).toHaveBeenCalledWith("c");
     expect(session.removeAllArrows).not.toHaveBeenCalled();
     expect(session.focusArrow).not.toHaveBeenCalled();

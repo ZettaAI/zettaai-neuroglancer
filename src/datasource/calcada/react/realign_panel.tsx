@@ -9,7 +9,13 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
+import svgBin from "ikonate/icons/bin.svg?raw";
 import { useState } from "react";
+
+import {
+  AnnotationType,
+  annotationTypeHandlers,
+} from "#src/annotation/index.js";
 
 import type {
   RealignCommitRow,
@@ -113,7 +119,7 @@ function rejectionText(
   const needed =
     boxSection === undefined || referenceSection === undefined
       ? ""
-      : `, needs ${boxSection} → ${referenceSection}`;
+      : `, needs z ${boxSection} or ${referenceSection}`;
   return `on z ${tail} → ${head}${needed}`;
 }
 
@@ -211,31 +217,32 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
         {summary.arrows.map((arrow, index) => (
           <div
             key={arrow.id}
-            className="calcada-trace-panel-row"
+            className="calcada-realign-arrow"
             data-arrow-id={arrow.id}
+            title="Go to this correspondence"
+            onClick={() => session.focusArrow(arrow.id)}
           >
-            <button
-              type="button"
-              className="calcada-realign-arrow"
-              title="Go to this correspondence"
-              onClick={() => session.focusArrow(arrow.id)}
-            >
+            <span className="calcada-realign-arrow-icon">
+              {annotationTypeHandlers[AnnotationType.LINE].icon}
+            </span>
+            <span className="calcada-realign-arrow-text">
               #{index + 1} · {pixels(arrow.lengthPx)}
               {arrow.rejected !== undefined
                 ? ` · ${rejectionText(arrow.rejected, arrow.sections, summary)}`
                 : arrow.residualPx !== undefined
                   ? ` → ${pixels(arrow.residualPx)}`
                   : ""}
-            </button>
-            <Button
-              size="xs"
-              variant="outline"
-              className="calcada-realign-arrow-remove"
+            </span>
+            <button
+              type="button"
+              className="neuroglancer-icon calcada-realign-arrow-remove"
               title="Delete this correspondence"
-              onClick={() => session.removeArrow(arrow.id)}
-            >
-              Remove
-            </Button>
+              dangerouslySetInnerHTML={{ __html: svgBin }}
+              onClick={(event) => {
+                event.stopPropagation();
+                session.removeArrow(arrow.id);
+              }}
+            />
           </div>
         ))}
         <div className="calcada-trace-panel-buttons">

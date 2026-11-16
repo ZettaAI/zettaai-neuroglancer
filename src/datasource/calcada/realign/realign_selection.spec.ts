@@ -48,15 +48,35 @@ describe("selectCorrespondences", () => {
     });
   });
 
-  it("rejects lines not spanning z0-1 and z0", () => {
+  it("reads a line within z0 or z0-1 as feature first, its place second", () => {
     const selection = selectCorrespondences(box, [
-      { id: "same", pointA: [110, 210, 32.5], pointB: [112, 205, 32.5] },
+      {
+        id: "moving",
+        pointA: [110.5, 210.5, 32.5],
+        pointB: [112.5, 205.5, 32.5],
+      },
+      {
+        id: "reference",
+        pointA: [110.5, 210.5, 31.5],
+        pointB: [112.5, 205.5, 31.5],
+      },
+    ]);
+    expect(selection.lines).toEqual([
+      { id: "moving", start: [10, 10], end: [5, 12] },
+      { id: "reference", start: [10, 10], end: [5, 12] },
+    ]);
+    expect(selection.rejected).toEqual([]);
+  });
+
+  it("rejects lines with an end off z0-1 and z0", () => {
+    const selection = selectCorrespondences(box, [
       { id: "up", pointA: [110, 210, 32.5], pointB: [112, 205, 33.5] },
+      { id: "above", pointA: [110, 210, 33.5], pointB: [112, 205, 33.5] },
     ]);
     expect(selection.lines).toEqual([]);
     expect(selection.rejected).toEqual([
-      { id: "same", reason: "not-across-sections" },
-      { id: "up", reason: "not-across-sections" },
+      { id: "up", reason: "off-sections" },
+      { id: "above", reason: "off-sections" },
     ]);
   });
 
@@ -146,7 +166,7 @@ describe("a reference section other than the one below", () => {
     expect(selection.referenceSection).toBe(34);
     expect(selection.lines.map(({ id }) => id)).toEqual(["up"]);
     expect(selection.rejected).toEqual([
-      { id: "below", reason: "not-across-sections" },
+      { id: "below", reason: "off-sections" },
     ]);
   });
 });
