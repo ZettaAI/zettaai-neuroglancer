@@ -191,6 +191,8 @@
 }
 
 .neuroglancer-shortcut-message {
+  /* Holds one line even when empty: see the sheet's message slot. */
+  min-height: 1lh;
   margin: 0;
   color: var(--nge-warning-fg);
 }

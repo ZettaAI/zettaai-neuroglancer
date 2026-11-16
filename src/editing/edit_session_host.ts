@@ -189,13 +189,19 @@ import {
 import { TrackableEditPreferences } from "#src/editing/tooling/edit_preferences.js";
 import { EditScope } from "#src/editing/tooling/edit_scope.js";
 import type { EditToolContext } from "#src/editing/tooling/edit_tool.js";
+import {
+  readPersonalKeybinds,
+  sameKeybindOverrides,
+  watchPersonalKeybinds,
+  writePersonalKeybinds,
+  type EditKeybindOverrides,
+} from "#src/editing/tooling/personal_keybinds.js";
 import { SessionToolBinder } from "#src/editing/tooling/session_tool_binder.js";
 import { ToolRegistry } from "#src/editing/tooling/tool_registry.js";
 import {
   paintingPatchFromPersist,
   parseTooling,
   serializeTooling,
-  type EditKeybindOverrides,
   type ToolingPersistState,
 } from "#src/editing/tooling/tooling_persist.js";
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
@@ -610,10 +616,13 @@ export class EditSessionHost extends RefCounted {
    * Per-user edit-hotkey overrides (TM-315 runtime rebind): friendly action
    * name → key identifier(s). Merged by the session hotkey binder OVER the
    * build-time `custom-keybinds.json` defaults, so a rebind takes effect live.
-   * Persisted into the `editSession` tooling block and restored on reopen.
+   * Kept in this browser, not the viewer state, so a shared link never carries
+   * them (`personal_keybinds.ts`); every tab of the site follows the same set.
    * Empty `{}` means "use the configured defaults". The binder watches this.
    */
-  readonly editKeybindOverrides = new WatchableValue<EditKeybindOverrides>({});
+  readonly editKeybindOverrides = new WatchableValue<EditKeybindOverrides>(
+    readPersonalKeybinds(),
+  );
   /**
    * Consumer-owned painting tools for the active session (TM-315), constructed
    * after `EditSession.open(...)`. Undefined when no session is active. The
@@ -1194,6 +1203,19 @@ export class EditSessionHost extends RefCounted {
       }),
     );
     this.registerDisposer(() => clearBackendEndpoint());
+    this.registerDisposer(
+      this.editKeybindOverrides.changed.add(() =>
+        writePersonalKeybinds(this.editKeybindOverrides.value),
+      ),
+    );
+    // Another tab rebound a key: follow it, so every tab has one layout.
+    this.registerDisposer(
+      watchPersonalKeybinds((overrides) => {
+        if (!sameKeybindOverrides(overrides, this.editKeybindOverrides.value)) {
+          this.editKeybindOverrides.value = overrides;
+        }
+      }),
+    );
     this.paintedVolumeBinding = this.registerDisposer(
       new PaintedVolumeHostBinding(this.paintedVolumePort()),
     );
@@ -1350,7 +1372,7 @@ export class EditSessionHost extends RefCounted {
       // land in either order; whichever comes last builds the 3D preview.
       this.paintedVolumeBinding.sync();
       // Restore persisted tool parameters (TM-315) now that the tools + UI
-      // are wired: patches the painting family config + keybind overrides,
+      // are wired: patches the painting family config,
       // validated against the session layers (stale bindings dropped). The
       // active tool is deliberately NOT restored (TM-381).
       this.applyRestoredTooling(restoreTooling);
@@ -1524,17 +1546,32 @@ export class EditSessionHost extends RefCounted {
    * name (e.g. `"brush"`, `"undo"`); `keys` are the NG event identifier(s)
    * (e.g. `"control+keyb"`) that should trigger it, replacing the configured
    * default. The session hotkey binder rebuilds its input layer live, and the
-   * override is persisted into the `editSession` block so it survives reload.
+   * override is saved in this browser, so it survives reload and reaches the
+   * site's other tabs, but never travels in a shared link.
    * Passing an empty `keys` array reverts `name` to its configured default.
    */
   setEditKeybind(name: string, keys: readonly string[]): void {
+    this.setEditKeybinds({ [name]: keys });
+  }
+
+  /**
+   * Rebind several edit hotkeys as one change (a swap moves two at once), so
+   * the binder, the other tabs and the saved layout never see a half-done
+   * swap with one key on two actions. Same rules per entry as
+   * {@link setEditKeybind}.
+   */
+  setEditKeybinds(changes: {
+    readonly [name: string]: readonly string[] | undefined;
+  }): void {
     const next: { [n: string]: readonly string[] } = {
       ...this.editKeybindOverrides.value,
     };
-    if (keys.length === 0) {
-      delete next[name];
-    } else {
-      next[name] = keys;
+    for (const [name, keys] of Object.entries(changes)) {
+      if (keys === undefined || keys.length === 0) {
+        delete next[name];
+      } else {
+        next[name] = keys;
+      }
     }
     this.editKeybindOverrides.value = next;
   }
@@ -3474,7 +3511,6 @@ export class EditSessionHost extends RefCounted {
     this.toolingSubscriptions.push(
       this.paintingTools.state.changed.add(() => persist()),
       this.activeToolId.changed.add(() => persist()),
-      this.editKeybindOverrides.changed.add(() => persist()),
       () => persist.cancel(),
     );
 
@@ -3487,11 +3523,7 @@ export class EditSessionHost extends RefCounted {
   private persistTooling(): void {
     const painting = this.paintingTools?.state.getState();
     if (painting === undefined) return;
-    const tooling = serializeTooling(
-      this.activeToolId.value,
-      painting,
-      this.editKeybindOverrides.value,
-    );
+    const tooling = serializeTooling(this.activeToolId.value, painting);
     const intent = this.state.value.value;
     if (intent !== null) {
       this.state.value.value = { ...intent, tooling };
@@ -3505,7 +3537,8 @@ export class EditSessionHost extends RefCounted {
   /**
    * Apply persisted tool parameters after a session opens (TM-315): patch the
    * painting family config (validated against the session layers; stale
-   * bindings dropped) and restore keybind overrides. The persisted
+   * bindings dropped). Keybind overrides are not here: they are kept per
+   * browser (`personal_keybinds.ts`). The persisted
    * `activeToolId` is deliberately ignored (TM-381) — every session entry,
    * fresh open or reload, lands in navigation mode via the caller's
    * `selectTool(undefined)`.
@@ -3513,7 +3546,7 @@ export class EditSessionHost extends RefCounted {
    * `restoreTooling` is the per-session block from `editSession.tooling`,
    * present only when reloading an already-open session — it wins when set. For
    * a fresh open → close → open it is `undefined`, and we fall back to the
-   * cross-session `editPreferences.tooling` (TM-336) to seed brush / keybind
+   * cross-session `editPreferences.tooling` (TM-336) to seed brush
    * defaults. Either way the painting patch is re-validated against the
    * session layers, so a stale binding is dropped back to the hardcoded
    * defaults.
@@ -3524,10 +3557,6 @@ export class EditSessionHost extends RefCounted {
     const session = this.activeSession.value;
     if (session === undefined) return;
     const tooling = restoreTooling ?? this.editPreferences.value.value?.tooling;
-    // Restore per-user keybind overrides (or clear any left over from a prior
-    // session). Done before the early-return so a fresh session always starts
-    // from the configured defaults. The binder watches this and rebuilds.
-    this.editKeybindOverrides.value = tooling?.keybinds ?? {};
     if (tooling === undefined) return;
     if (this.paintingTools !== undefined && tooling.painting !== undefined) {
       // A stale persisted `mask.imageResolution` (e.g. a finer scale from the

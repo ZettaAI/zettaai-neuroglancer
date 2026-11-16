@@ -12,13 +12,16 @@ import { describe, it, expect } from "vitest";
 
 import {
   EDIT_KEYBIND_NAMES,
+  type EditKeybindName,
   editModeShortcuts,
   effectiveEditKeybinds,
-  findEditKeybindConflict,
+  findShadowedViewerAction,
   isMacPlatform,
   mergeEditKeybinds,
   paramArrowDefaults,
+  planEditKeybindChange,
 } from "#src/editing/session_hotkey_binder.js";
+import { shownChords } from "#src/ui/key_chord_format.js";
 import { EventActionMap } from "#src/util/event_action_map.js";
 
 const A = {
@@ -191,39 +194,101 @@ describe("effectiveEditKeybinds", () => {
   });
 });
 
-describe("findEditKeybindConflict", () => {
+describe("planEditKeybindChange", () => {
   const effective = effectiveEditKeybinds(undefined);
 
-  it("names the action that already has the key", () => {
-    expect(findEditKeybindConflict("fill", "control+keyb", effective)).toBe(
-      "brush",
-    );
-    expect(findEditKeybindConflict("brush", "control+keyz", effective)).toBe(
-      "undo",
-    );
+  it("swaps with the action whose only key it takes", () => {
+    // Fill onto Brush's key: Brush takes Fill's old key.
+    expect(planEditKeybindChange("fill", "control+keyb", effective)).toEqual({
+      overrides: { fill: ["control+keyb"], brush: ["control+keyg"] },
+      displaced: { name: "brush", keys: ["control+keyg"], swapped: true },
+    });
+  });
+
+  it("leaves an action with several keys the rest of them", () => {
+    // Undo has Ctrl+Z and Cmd+Z: on a Mac taking Ctrl+Z leaves Cmd+Z, no swap.
+    expect(
+      planEditKeybindChange("brush", "control+keyz", effective, true),
+    ).toEqual({
+      overrides: { brush: ["control+keyz"], undo: ["meta+keyz"] },
+      displaced: { name: "undo", keys: ["meta+keyz"], swapped: false },
+    });
+  });
+
+  it("swaps when the keys left cannot be pressed on this platform", () => {
+    // Elsewhere Cmd+Z is no key at all: Undo takes Brush's old key instead.
+    expect(
+      planEditKeybindChange("brush", "control+keyz", effective, false),
+    ).toEqual({
+      overrides: { brush: ["control+keyz"], undo: ["control+keyb"] },
+      displaced: { name: "undo", keys: ["control+keyb"], swapped: true },
+    });
+  });
+
+  it("leaves Smaller brush its numpad key when - is taken", () => {
+    expect(planEditKeybindChange("cursor", "minus", effective, false)).toEqual({
+      overrides: { cursor: ["minus"], sizeDecrease: ["numpadsubtract"] },
+      displaced: {
+        name: "sizeDecrease",
+        keys: ["numpadsubtract"],
+        swapped: false,
+      },
+    });
+  });
+
+  it("swaps two rebound keys back and forth", () => {
+    const rebound = effectiveEditKeybinds({
+      cursor: ["keya"],
+      brush: ["keys"],
+    });
+    expect(planEditKeybindChange("cursor", "keys", rebound)).toEqual({
+      overrides: { cursor: ["keys"], brush: ["keya"] },
+      displaced: { name: "brush", keys: ["keya"], swapped: true },
+    });
   });
 
   it("lets an action keep its own key and take a free one", () => {
-    expect(
-      findEditKeybindConflict("brush", "control+keyb", effective),
-    ).toBeUndefined();
-    expect(findEditKeybindConflict("brush", "keyq", effective)).toBeUndefined();
+    expect(planEditKeybindChange("brush", "control+keyb", effective)).toEqual({
+      overrides: { brush: ["control+keyb"] },
+    });
+    expect(planEditKeybindChange("brush", "keyq", effective)).toEqual({
+      overrides: { brush: ["keyq"] },
+    });
   });
 
   it("refuses Esc, which is fixed", () => {
-    expect(findEditKeybindConflict("brush", "escape", effective)).toBe("exit");
+    expect(planEditKeybindChange("brush", "escape", effective)).toEqual({
+      refused: "exit",
+    });
   });
 
-  it("refuses H and the annotation keys of TM-439", () => {
-    expect(findEditKeybindConflict("brush", "keyh", effective)).toBe(
-      "show all shortcuts",
-    );
-    expect(findEditKeybindConflict("brush", "bracketleft", effective)).toBe(
-      "previous annotation",
-    );
+  it("refuses a Win / Super chord off a Mac, but not Cmd on a Mac", () => {
+    expect(
+      planEditKeybindChange("brush", "meta+keya", effective, false),
+    ).toEqual({ refused: "system shortcuts" });
+    expect(
+      planEditKeybindChange("brush", "meta+keya", effective, true),
+    ).toEqual({ overrides: { brush: ["meta+keya"] } });
   });
 
-  it("refuses a key the viewer binds, but not one the session itself binds", () => {
+  it("refuses H, which opens the shortcut sheet", () => {
+    expect(planEditKeybindChange("brush", "keyh", effective)).toEqual({
+      refused: "show all shortcuts",
+    });
+  });
+
+  it("lets a rebind take a key the viewer binds, [ and ] included", () => {
+    expect(planEditKeybindChange("cursor", "keya", effective)).toEqual({
+      overrides: { cursor: ["keya"] },
+    });
+    expect(planEditKeybindChange("cursor", "bracketleft", effective)).toEqual({
+      overrides: { cursor: ["bracketleft"] },
+    });
+  });
+});
+
+describe("findShadowedViewerAction", () => {
+  it("names the viewer action a key covers, but not the session's own", () => {
     const viewerMap = EventActionMap.fromObject({
       keyt: "calcada-toggle-zetta-trace",
     });
@@ -231,12 +296,11 @@ describe("findEditKeybindConflict", () => {
       EventActionMap.fromObject({ keyq: "edit-session-tool-brush" }),
       100,
     );
-    expect(
-      findEditKeybindConflict("fill", "keyt", effective, [viewerMap]),
-    ).toBe("calcada-toggle-zetta-trace");
-    expect(
-      findEditKeybindConflict("fill", "keyq", effective, [viewerMap]),
-    ).toBeUndefined();
+    expect(findShadowedViewerAction("keyt", [viewerMap])).toBe(
+      "calcada-toggle-zetta-trace",
+    );
+    expect(findShadowedViewerAction("keyq", [viewerMap])).toBeUndefined();
+    expect(findShadowedViewerAction("keyw", [viewerMap])).toBeUndefined();
   });
 });
 
@@ -301,4 +365,113 @@ describe("editModeShortcuts", () => {
     );
     expect(undo?.keys).toEqual(["keyq"]);
   });
+});
+
+// Every edit action onto every key, and long chains of rebinds, on both
+// platforms: the rules the sheet relies on hold after each step.
+describe("planEditKeybindChange over every action and key", () => {
+  const LETTERS = Array.from("abcdefghijklmnopqrstuvwxyz", (c) => `key${c}`);
+  const DIGITS = Array.from("0123456789", (d) => `digit${d}`);
+  const OTHER_KEYS = [
+    "minus",
+    "equal",
+    "shift+equal",
+    "numpadsubtract",
+    "numpadadd",
+    "bracketleft",
+    "bracketright",
+    "shift+bracketleft",
+    "shift+bracketright",
+    "space",
+    "comma",
+    "period",
+    "escape",
+  ];
+  const defaultKeys = Object.values(effectiveEditKeybinds(undefined)).flat();
+  const CANDIDATES = [
+    ...new Set([
+      ...LETTERS,
+      ...DIGITS,
+      ...OTHER_KEYS,
+      ...LETTERS.map((key) => `control+${key}`),
+      ...LETTERS.map((key) => `meta+${key}`),
+      ...defaultKeys,
+      ...Object.values(paramArrowDefaults(true)).flat(),
+      ...Object.values(paramArrowDefaults(false)).flat(),
+    ]),
+  ];
+
+  const apply = (
+    effective: Record<EditKeybindName, readonly string[]>,
+    overrides: Partial<Record<EditKeybindName, readonly string[]>>,
+  ) => ({ ...effective, ...overrides });
+
+  function expectRulesHold(
+    effective: Record<EditKeybindName, readonly string[]>,
+    mac: boolean,
+    context: string,
+  ) {
+    const owners = new Map<string, EditKeybindName>();
+    for (const name of EDIT_KEYBIND_NAMES) {
+      expect(
+        shownChords(effective[name], mac).length,
+        `${context}: ${name} has no key it can be pressed with`,
+      ).toBeGreaterThan(0);
+      for (const key of effective[name]) {
+        const other = owners.get(key);
+        expect(
+          other,
+          `${context}: ${key} is on both ${other} and ${name}`,
+        ).toBeUndefined();
+        owners.set(key, name);
+      }
+    }
+  }
+
+  for (const mac of [true, false]) {
+    const platform = mac ? "Mac" : "Windows";
+
+    it(`keeps the rules for every action and key from the defaults (${platform})`, () => {
+      const start = effectiveEditKeybinds(undefined);
+      expectRulesHold(start, mac, `${platform} defaults`);
+      for (const name of EDIT_KEYBIND_NAMES) {
+        for (const key of CANDIDATES) {
+          const change = planEditKeybindChange(name, key, start, mac);
+          const context = `${platform}: ${name} → ${key}`;
+          // Esc and H always; Win / Super chords off a Mac.
+          const mustRefuse =
+            key === "escape" ||
+            key === "keyh" ||
+            (!mac && key.startsWith("meta+"));
+          expect("refused" in change, context).toBe(mustRefuse);
+          if ("refused" in change) continue;
+          const after = apply(start, change.overrides);
+          expect(after[name], context).toEqual([key]);
+          expectRulesHold(after, mac, context);
+        }
+      }
+    });
+
+    it(`keeps the rules through a long chain of rebinds (${platform})`, () => {
+      // A fixed pseudo-random walk, so a failure always replays the same way.
+      let seed = mac ? 7 : 11;
+      const next = (limit: number) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed % limit;
+      };
+      let effective = effectiveEditKeybinds(undefined);
+      for (let step = 0; step < 3000; step++) {
+        const name = EDIT_KEYBIND_NAMES[next(EDIT_KEYBIND_NAMES.length)];
+        const key = CANDIDATES[next(CANDIDATES.length)];
+        const change = planEditKeybindChange(name, key, effective, mac);
+        if ("refused" in change) continue;
+        effective = apply(effective, change.overrides);
+        expectRulesHold(
+          effective,
+          mac,
+          `${platform} step ${step}: ${name} → ${key}`,
+        );
+      }
+    });
+  }
 });

@@ -21,19 +21,21 @@ import { keyboardEventToIdentifier } from "#src/editing/keybind_event.js";
 import type { EditKeybindName } from "#src/editing/session_hotkey_binder.js";
 import {
   effectiveEditKeybinds,
-  findEditKeybindConflict,
+  findShadowedViewerAction,
+  planEditKeybindChange,
 } from "#src/editing/session_hotkey_binder.js";
-import type { EditKeybindOverrides } from "#src/editing/tooling/tooling_persist.js";
+import type { EditKeybindOverrides } from "#src/editing/tooling/personal_keybinds.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { WatchableValue } from "#src/trackable_value.js";
-import { KeyCaps, ShortcutKeys } from "#src/ui/key_caps.js";
+import { AllKeyCaps, KeyCaps, ShortcutKeys } from "#src/ui/key_caps.js";
 import { formatChord, preferredChord } from "#src/ui/key_chord_format.js";
 import { modeShortcuts, SHORTCUT_SHEET_KEYS } from "#src/ui/mode_shortcuts.js";
 import type { ShortcutRow } from "#src/ui/shortcut_catalog.js";
 import {
   buildShortcutSections,
   filterShortcutSections,
+  rebindOutcomeMessage,
 } from "#src/ui/shortcut_catalog.js";
 import type { EventActionMap } from "#src/util/event_action_map.js";
 
@@ -110,7 +112,9 @@ export function ModeShortcutStrip() {
 interface ShortcutSheetProps {
   open: WatchableValue<boolean>;
   editKeybindOverrides: WatchableValueInterface<EditKeybindOverrides>;
-  setEditKeybind: (name: string, keys: readonly string[]) => void;
+  setEditKeybinds: (changes: {
+    readonly [name: string]: readonly string[] | undefined;
+  }) => void;
   inputMaps: readonly EventActionMap[];
   activeSession: WatchableValueInterface<unknown>;
   openFullReference: () => void;
@@ -125,7 +129,7 @@ export function ShortcutSheet(props: ShortcutSheetProps) {
 function OpenShortcutSheet({
   open,
   editKeybindOverrides,
-  setEditKeybind,
+  setEditKeybinds,
   inputMaps,
   activeSession,
   openFullReference,
@@ -205,32 +209,42 @@ function OpenShortcutSheet({
       }
       const identifier = keyboardEventToIdentifier(event);
       if (identifier === undefined) return;
-      const conflict = findEditKeybindConflict(
+      const change = planEditKeybindChange(
         capturingAction,
         identifier,
         editKeys,
-        inputMaps,
       );
-      if (conflict !== undefined) {
+      if ("refused" in change) {
         setMessage(
-          `${formatChord(identifier)} already does "${conflict}". Press another key, or Esc to cancel.`,
+          `${formatChord(identifier)} already does "${change.refused}". Press another key, or Esc to cancel.`,
         );
         return;
       }
-      setEditKeybind(capturingAction, [identifier]);
+      // Looked up before the change: once the session's own layer holds the
+      // key, the viewer action under it is no longer found.
+      const shadowed = findShadowedViewerAction(identifier, inputMaps);
+      setEditKeybinds(change.overrides);
       setCapturing(null);
-      setMessage("");
+      setMessage(
+        rebindOutcomeMessage(
+          capturingAction,
+          identifier,
+          change.displaced,
+          shadowed,
+          formatChord,
+        ),
+      );
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [editKeys, inputMaps, open, setEditKeybind]);
+  }, [editKeys, inputMaps, open, setEditKeybinds]);
 
   const renderRow = (row: ShortcutRow) => (
     <div class="neuroglancer-shortcut-row" key={row.label}>
       <span>{row.label}</span>
       {row.rebind === undefined ? (
-        <KeyCaps keys={row.keys} />
+        <AllKeyCaps keys={row.keys} />
       ) : (
         <button
           type="button"
@@ -248,7 +262,7 @@ function OpenShortcutSheet({
           {capturing === row.rebind ? (
             "Press a key…"
           ) : (
-            <KeyCaps keys={row.keys} />
+            <AllKeyCaps keys={row.keys} />
           )}
         </button>
       )}
@@ -283,8 +297,13 @@ function OpenShortcutSheet({
           <KeyCaps keys={["escape"]} /> Close
         </button>
       </div>
-      {message !== "" && (
-        <p class="neuroglancer-shortcut-message" role="alert">
+      {/* The line is kept while keys can be changed, so a message appearing
+          or going does not resize the sheet and move everything in it. */}
+      {(sessionActive || message !== "") && (
+        <p
+          class="neuroglancer-shortcut-message"
+          role={message === "" ? undefined : "alert"}
+        >
           {message}
         </p>
       )}
