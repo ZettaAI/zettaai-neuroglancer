@@ -171,7 +171,6 @@ import {
 import { EditSessionHotkeyBinder } from "#src/editing/session_hotkey_binder.js";
 import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
-import { MorphologyClient } from "#src/editing/tool_runtimes/morphology_client.js";
 import { paintProfilerMetrics } from "#src/editing/tool_runtimes/paint_profiler_metrics.js";
 import type { PaintingMaskConfig } from "#src/editing/tool_runtimes/paint_types.js";
 import { DEFAULT_COVERAGE_THRESHOLD } from "#src/editing/tool_runtimes/paint_types.js";
@@ -902,15 +901,6 @@ export class EditSessionHost extends RefCounted {
   readonly commitTarget: NgCommitTarget;
   private readonly saveTarget: NgSaveTarget;
   private readonly clock: NgClock;
-
-  /**
-   * Pyodide morphology worker (TM-304), shared by every `PaintingCompute` this
-   * host builds. Lazily boots pyodide on `warmup()`/first masked stroke and is
-   * terminated when the host is disposed.
-   */
-  private readonly morphologyClient = this.registerDisposer(
-    new MorphologyClient(),
-  );
 
   /**
    * Reactive flag: whether any save backend is registered (so persistence is
@@ -3184,9 +3174,6 @@ export class EditSessionHost extends RefCounted {
         "EditSessionConfig.layers must be non-empty",
       );
     }
-    // Boot pyodide eagerly as the session opens so the multi-second cold start
-    // is hidden before the user's first masked brush stroke (TM-304).
-    this.morphologyClient.warmup();
     const layers: LayerSelection[] = config.layers.map((l) => ({
       layerId: l.layerId,
       selectedResolutions: [...l.resolutions],
@@ -3405,7 +3392,7 @@ export class EditSessionHost extends RefCounted {
       fillClosedPaths: true,
     };
 
-    const compute = new PaintingCompute(this.morphologyClient);
+    const compute = new PaintingCompute();
     // Cross-layer baseline reader → the chunk-source adapter. Mirrors the
     // library runtime's old `readChunkAt`.
     const readChunkAt: ReadChunkAt = (layerId, resolution, chunkId) =>

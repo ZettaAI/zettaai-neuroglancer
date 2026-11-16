@@ -20,7 +20,7 @@
  * Each {case × brush size} is its OWN Playwright test (a tree of
  * `masked-brush › brush 1025`, …) so they show up — and can be run/inspected —
  * separately in the Playwright UI (`npm run perf --ui`). The expensive
- * setup (page load · session · pyodide boot · chunk warmup) runs ONCE per worker
+ * setup (page load · session · chunk warmup) runs ONCE per worker
  * in `beforeAll`; every test then drives a single stroke on the shared page and
  * attaches its full sectioned `__paintProfiler` block.
  *
@@ -29,7 +29,7 @@
  *       npm run perf --ui     (Playwright UI — per-config tests)
  *
  * ⚠ Benchmark, not a gating test. Needs the generated fixtures
- * (`uv run testdata/editing/generate.py`) + the prod build + WebGL2 + pyodide.
+ * (`uv run testdata/editing/generate.py`) + the prod build + WebGL2.
  * Perf-regression baseline comparison is a follow-up (TM-331 Phase 3).
  */
 
@@ -112,7 +112,7 @@ interface BenchRow {
 
 // ---------------------------------------------------------------------------
 // Shared, once-per-worker setup: load the built app, wait for the auto-opened
-// session, run diagnostics, warm the chunks + pyodide. All tests reuse `page`.
+// session, run diagnostics, warm the chunks. All tests reuse `page`.
 // ---------------------------------------------------------------------------
 
 let page: Page;
@@ -151,12 +151,12 @@ test.beforeAll(async ({ browser }) => {
     }
     if (!diag.crossOriginIsolated) {
       console.warn(
-        "[bench] crossOriginIsolated=false — masked case falls back to the " +
-          "main-thread compute (no pyodide worker). Check COOP/COEP.",
+        "[bench] crossOriginIsolated=false — strokes fall back to the " +
+          "main-thread write (no SAB worker pool). Check COOP/COEP.",
       );
     }
 
-    console.log("[bench] warming data (chunks + pyodide)…");
+    console.log("[bench] warming data (chunks)…");
     const warm = await page.evaluate(
       async () =>
         await (window as any).__editPaintBenchWarmup({ warmupStamps: 8 }),

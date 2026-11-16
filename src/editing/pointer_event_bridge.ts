@@ -123,6 +123,28 @@ interface ActiveStrokeState {
 const PRIMARY_BUTTON_MASK = 1;
 
 /**
+ * Blur the form field the user is typing into, when it lies outside `panelElement`,
+ * so its pending value commits before a press on the panel starts a tool action.
+ *
+ * Tool-panel fields commit on blur (see `ParamInput`), and a click on a panel
+ * would normally blur them. But the panel's `mousedown` bindings call
+ * `preventDefault`, which also cancels that focus change, so a typed value
+ * (e.g. "Binary closing: 4") stayed in the field and never reached the tool.
+ * Blurring here, on `pointerdown`, also commits it in time for this stroke.
+ *
+ * Any focused field outside the panel is blurred, not only tool-panel ones
+ * (e.g. a portal search box too): that is what an uncancelled press on a
+ * non-focusable element does natively.
+ */
+export function commitFieldBeingEdited(panelElement: Element): void {
+  const focused = panelElement.ownerDocument.activeElement;
+  if (!(focused instanceof HTMLElement)) return;
+  if (panelElement.contains(focused)) return;
+  if (!focused.matches("input, textarea, select")) return;
+  focused.blur();
+}
+
+/**
  * Translates DOM pointer / wheel / key events on neuroglancer's slice and
  * perspective panels into the edit-session library's normalized
  * `ToolInputEvent`, and dispatches them to `session.tools.getActiveTool()`.
@@ -253,6 +275,8 @@ export class PointerEventBridge extends RefCounted {
   private attachPanel(panel: RenderedDataPanel): () => void {
     const el = panel.element;
     const onPointerDown = (ev: PointerEvent) => {
+      // Before the tool reads its settings: commit a value still being typed.
+      commitFieldBeingEdited(el);
       // Camera lock: when a paint-like tool (brush/erase/fill) is active and
       // the user clicks WITHOUT Ctrl/Cmd, prevent neuroglancer's pan from
       // starting (otherwise click+drag = pan instead of brush stroke). We

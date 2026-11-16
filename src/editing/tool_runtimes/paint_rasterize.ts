@@ -183,8 +183,8 @@ export interface StampMaskParams {
   /**
    * Footprint mask, `1` = paint. Dense, x-fastest, over the box
    * `[loTx, loTx+maskW) × [loTy, loTy+maskH)` on z-slice `cz` (GLOBAL voxel
-   * coords). This is the exact mask the pyodide whole-pipeline returns, so the
-   * stamp is byte-identical to the main-thread `writeVoxel` sample-back loop.
+   * coords). The stamp is byte-identical to the main-thread `writeVoxel`
+   * sample-back loop.
    */
   readonly mask: Uint8Array;
   readonly maskW: number;

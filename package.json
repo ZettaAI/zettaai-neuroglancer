@@ -124,7 +124,6 @@
     "nifti-reader-js": "^0.8.0",
     "numcodecs": "^0.3.2",
     "preact": "^10.25.0",
-    "pyodide": "0.26.2",
     "react": "19.2.8",
     "react-day-picker": "^10.0.1",
     "react-dom": "19.2.8",

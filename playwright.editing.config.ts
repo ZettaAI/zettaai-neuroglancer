@@ -17,7 +17,7 @@
  *   --project perf-large-chunk                      (TM-373 4096² benchmark)
  *
  * All serve the BUILT prod bundle via `serve_dist.mjs` (COOP/COEP → cross-origin
- * isolation → SAB + pyodide) and load `buildNgState` scenarios against the LOCAL
+ * isolation → SAB) and load `buildNgState` scenarios against the LOCAL
  * fake-gcs fixtures — reproducible, no live `gs://`. Run via the npm scripts:
  *
  *   npm run e2e[:headed|:ui]   npm run perf[:headed]

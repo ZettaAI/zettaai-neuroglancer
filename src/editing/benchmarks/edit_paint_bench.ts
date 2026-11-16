@@ -16,14 +16,14 @@
  * session + restores the brush/mask preset on load — this harness does NOT open
  * a session; it waits for the active one, then for each {case × brush size}
  * drives a real stroke via SYNTHETIC pointer events on the slice canvas
- * (exercising the full stack: scheduler → pointer→voxel → pyodide compute →
+ * (exercising the full stack: scheduler → pointer→voxel → mask compute →
  * commit → GPU upload) and snapshots `__paintProfiler`.
  *
  * Cases: masked brush (the state's threshold + morphology preset), unmasked
  * brush, eraser.
  *
  * ⚠ Benchmark harness, NOT a unit test. The end-to-end run needs a
- * cross-origin-isolated browser with WebGL2 + pyodide (the dev-server build), so
+ * cross-origin-isolated browser with WebGL2 (the dev-server build), so
  * it cannot run under vitest/node. A few integration details (canvas discovery,
  * pointer dispatch, settle waits) are best-effort — see `// TUNE:` markers. The
  * reusable, verified pieces are `paintProfiler.snapshot()/resetWindow()`.
@@ -66,7 +66,7 @@ export interface EditPaintBenchOptions {
   readonly settleTimeoutMs?: number;
   /** Max ms to wait for the host to auto-open the session from ngState. */
   readonly sessionTimeoutMs?: number;
-  /** ms to let pyodide warm up after the session opens (masked path). */
+  /** ms to let the session settle after it opens (masked path). */
   readonly warmupMs?: number;
   /** Pointermove samples in the swept drag (default 40). */
   readonly strokePoints?: number;
@@ -81,14 +81,8 @@ const DEFAULT_SIZES = [5, 51, 251, 501, 751, 1025] as const;
 const TIMING_KEYS = [
   "0.stroke(total)",
   "4.handleInput(total)",
-  "P.pipeline(worker)",
-  "P.w.maskBuild(py)",
-  "P.w.closing(py)",
-  "P.w.components(py)",
-  "P.slabCopy(cpu)",
-  "P.write(cpu)",
-  "2b.morphology(worker)",
   "2a.maskBuild(cpu)",
+  "2b.morphology(cpu)",
   "apply.total(cpu)",
   "5.mirror.fuse(cpu)",
   "6.gpu.upload(value)",
@@ -100,8 +94,6 @@ const COUNTER_KEYS = [
   "voxels.painted",
   "overlay.paint.apply.chunks",
   "gpu.uploadBytes",
-  "morphology.heapPressure",
-  "morphology.workerReinit",
 ];
 
 type Any = any;
@@ -169,7 +161,7 @@ function findDispatchTarget(): HTMLElement {
  * pointermoves SWEEPING across most of the panel (a sine zigzag, so it covers a
  * 2D band of FRESH chunks, not one stationary spot) → pointerup. Moves are paced
  * (`stepMs`, ≈ the worker round-trip) so each delivered move becomes its own
- * stroke segment — reproducing sustained load (pyodide heap growth/GC over many
+ * stroke segment — reproducing sustained load (heap growth/GC over many
  * segments) AND the per-segment apply/commit cost (`writeRegion` over fresh
  * territory). A tiny stationary wiggle (the old version) under-measured both.
  */
@@ -320,7 +312,7 @@ export async function warmupEditPaintBench(
   presetRadius = base.radius ?? 512;
   ps.patchState({ radius: 512, mask: presetMask });
   host.selectTool("painting.brush");
-  await delay(opts.warmupMs ?? 1500); // let pyodide boot too
+  await delay(opts.warmupMs ?? 1500); // let the session settle
 
   const el = findDispatchTarget();
   const rect = el.getBoundingClientRect();
@@ -405,7 +397,7 @@ export interface EditPaintBenchDiag {
 }
 
 /**
- * Step 1: wait for the auto-opened session, warm up pyodide, capture the brush +
+ * Step 1: wait for the auto-opened session, let it settle, capture the brush +
  * mask preset, and return diagnostics. Called ONCE before the sweep so a single
  * short `page.evaluate` surfaces whether the session/mask/canvas are usable
  * (rather than hiding it inside a long opaque sweep).
@@ -433,7 +425,7 @@ export async function prepareEditPaintBench(
       throw new Error("window.viewer.editSessionHost missing");
     await waitForActiveSession(host, opts.sessionTimeoutMs ?? 120000);
     diag.sessionActive = true;
-    await delay(opts.warmupMs ?? 4000); // pyodide warmup
+    await delay(opts.warmupMs ?? 4000); // session warmup
     const base = host.painting.state.getState();
     presetMask = base.mask;
     presetRadius = base.radius ?? 512;
@@ -518,8 +510,8 @@ export async function stepEditPaintBench(input: {
     row.strokeFired =
       snap.buckets["4.handleInput(total)"] !== undefined ||
       snap.buckets["0.stroke(total)"] !== undefined;
-    row.maskedComputeRan = Object.keys(snap.buckets).some(
-      (k) => k.startsWith("P.") || k.startsWith("2b."),
+    row.maskedComputeRan = Object.keys(snap.buckets).some((k) =>
+      k.startsWith("2a."),
     );
     row.ok = row.summary.length > 0;
   } catch (e) {
@@ -666,8 +658,8 @@ export interface StampReadbackInput {
  * profiler-based settle can race it), and return the final count. Gives up fast
  * when nothing is painting — a mis-registered stamp would otherwise spin the
  * whole timeout (that was the multi-minute hang). `zeroGiveupMs` bounds the
- * "still empty" wait (kept above pyodide's cold-boot so a masked stamp isn't
- * abandoned mid-boot).
+ * "still empty" wait (kept long enough that a slow first masked stamp
+ * isn't abandoned).
  */
 async function waitForPaintStable(
   timeoutMs: number,
