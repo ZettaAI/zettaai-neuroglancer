@@ -50,6 +50,7 @@ function makeSession(
     clearPreview: vi.fn(),
     cancel: vi.fn(),
     focusArrow: vi.fn(),
+    removeArrow: vi.fn(),
     removeAllArrows: vi.fn(),
     plannedSections: vi.fn(() => 7),
     commit: vi.fn(async () => {}),
@@ -249,8 +250,36 @@ describe("RealignPanel", () => {
     expect(tab.textContent).toContain("6.2 px");
     expect(tab.textContent).toContain("0.4 px");
     expect(tab.textContent).toContain("an end is outside the box");
-    tab.querySelector<HTMLElement>('[data-arrow-id="a"]')!.click();
+    tab
+      .querySelector<HTMLElement>('[data-arrow-id="a"] .calcada-realign-arrow')!
+      .click();
     expect(session.focusArrow).toHaveBeenCalledWith("a");
+  });
+
+  it("removes one correspondence and leaves the rest", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      lineCount: 1,
+      rejected: [{ id: "c", reason: "not-across-sections" }],
+      arrows: [
+        { id: "a", lengthPx: 6.2, sections: [32, 31] },
+        {
+          id: "c",
+          lengthPx: 3,
+          sections: [32, 32],
+          rejected: "not-across-sections",
+        },
+      ],
+    });
+    await mountPanel(session);
+    tab
+      .querySelector<HTMLElement>(
+        '[data-arrow-id="c"] .calcada-realign-arrow-remove',
+      )!
+      .click();
+    expect(session.removeArrow).toHaveBeenCalledWith("c");
+    expect(session.removeAllArrows).not.toHaveBeenCalled();
+    expect(session.focusArrow).not.toHaveBeenCalled();
   });
 
   it("asks for an inline confirmation naming the section count and the seam before committing", async () => {

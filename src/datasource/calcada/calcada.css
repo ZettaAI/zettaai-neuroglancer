@@ -518,6 +518,22 @@
   flex: 0 0 auto;
 }
 
+.calcada-trace-panel-row button.calcada-realign-arrow {
+  width: auto;
+  flex: 1 1 auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.calcada-trace-panel-row button.calcada-realign-arrow-remove {
+  width: auto;
+}
+
 /* The reviewer picker takes a row's control slot as a whole. The rule above
    would otherwise reach inside it and make each chip's remove button and the
    search input 10em wide, which is what pushed the input onto its own line. */

@@ -69,6 +69,7 @@ export interface RealignPanelSession {
   clearPreview(): void;
   cancel(): void;
   focusArrow(id: string): void;
+  removeArrow(id: string): void;
   removeAllArrows(): void;
   plannedSections(maxShiftPx: number): number | undefined;
   commit(maxShiftPx: number): Promise<void>;
@@ -208,21 +209,34 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
             </div>
           )}
         {summary.arrows.map((arrow, index) => (
-          <button
+          <div
             key={arrow.id}
-            type="button"
             className="calcada-trace-panel-row"
             data-arrow-id={arrow.id}
-            title="Go to this correspondence"
-            onClick={() => session.focusArrow(arrow.id)}
           >
-            #{index + 1} · {pixels(arrow.lengthPx)}
-            {arrow.rejected !== undefined
-              ? ` · ${rejectionText(arrow.rejected, arrow.sections, summary)}`
-              : arrow.residualPx !== undefined
-                ? ` → ${pixels(arrow.residualPx)}`
-                : ""}
-          </button>
+            <button
+              type="button"
+              className="calcada-realign-arrow"
+              title="Go to this correspondence"
+              onClick={() => session.focusArrow(arrow.id)}
+            >
+              #{index + 1} · {pixels(arrow.lengthPx)}
+              {arrow.rejected !== undefined
+                ? ` · ${rejectionText(arrow.rejected, arrow.sections, summary)}`
+                : arrow.residualPx !== undefined
+                  ? ` → ${pixels(arrow.residualPx)}`
+                  : ""}
+            </button>
+            <Button
+              size="xs"
+              variant="outline"
+              className="calcada-realign-arrow-remove"
+              title="Delete this correspondence"
+              onClick={() => session.removeArrow(arrow.id)}
+            >
+              Remove
+            </Button>
+          </div>
         ))}
         <div className="calcada-trace-panel-buttons">
           <Button

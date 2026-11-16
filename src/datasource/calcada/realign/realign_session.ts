@@ -571,16 +571,22 @@ export class RealignSession extends RefCounted {
     drawing.layer.selectAnnotation(drawing.annotations, id, true);
   }
 
+  removeArrow(id: string): void {
+    const source = this.watchedSource;
+    if (source === undefined) return;
+    const reference = source.getReference(id);
+    try {
+      source.delete(reference);
+    } finally {
+      reference.dispose();
+    }
+  }
+
   removeAllArrows(): void {
     const source = this.watchedSource;
     if (source === undefined) return;
     for (const line of [...source].filter(isLine)) {
-      const reference = source.getReference(line.id);
-      try {
-        source.delete(reference);
-      } finally {
-        reference.dispose();
-      }
+      this.removeArrow(line.id);
     }
   }
 
