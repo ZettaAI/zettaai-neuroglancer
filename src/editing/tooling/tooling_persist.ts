@@ -31,7 +31,10 @@ import type {
   FillMode,
   PaintingMaskConfig,
 } from "#src/editing/tool_runtimes/paint_types.js";
-import { DEFAULT_COVERAGE_THRESHOLD } from "#src/editing/tool_runtimes/paint_types.js";
+import {
+  clampBinaryClosing,
+  DEFAULT_COVERAGE_THRESHOLD,
+} from "#src/editing/tool_runtimes/paint_types.js";
 import type { PaintingSharedState } from "#src/editing/tool_runtimes/painting_tools.js";
 
 /** Type-tagged numeric/bigint value, JSON-safe. */
@@ -164,7 +167,7 @@ function parseMask(x: unknown): PaintingMaskConfig | null | undefined {
         ? o.coverageThreshold
         : DEFAULT_COVERAGE_THRESHOLD,
     minComponentSize: o.minComponentSize,
-    binaryClosing: o.binaryClosing,
+    binaryClosing: clampBinaryClosing(o.binaryClosing),
     filterComponentsFirst: o.filterComponentsFirst,
   };
 }

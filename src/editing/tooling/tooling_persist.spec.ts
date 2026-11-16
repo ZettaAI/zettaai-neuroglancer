@@ -217,6 +217,28 @@ describe("tooling_persist", () => {
     expect(patch!.mask).toEqual(mask);
   });
 
+  it("caps a restored binary closing at the portal's 32 voxels", () => {
+    // A URL or older state can carry any closing; above the cap a stroke
+    // erodes away to nothing, so restoring clamps it like the panel does.
+    const mask = {
+      imageLayerId: IMAGE,
+      imageResolution: RES,
+      thresholdLow: 10,
+      thresholdHigh: 200,
+      coverageThreshold: 0.5,
+      minComponentSize: 0,
+      binaryClosing: 50,
+      filterComponentsFirst: false,
+    };
+    const serialized = serializeTooling("painting.brush", state({ mask }));
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(
+      parsed!.painting!,
+      allowed(TARGET, IMAGE),
+    );
+    expect(patch!.mask).toEqual({ ...mask, binaryClosing: 32 });
+  });
+
   it("repairs a stale mask resolution to a resolution the session opened", () => {
     // A persisted `imageResolution` that the session never opened (e.g. a finer
     // scale from the image layer's datasource pyramid) would otherwise drive

@@ -14,10 +14,10 @@
  *
  * Three consumers must agree on this exactly, or the cursor lies about where
  * paint will land: the main-thread rasterizers in `painting_compute.ts`, the
- * pyodide worker's `python_painter.py::_footprint_mask`, and the slice cursor's
- * fragment shader. So the shape lives here, once, and each consumer takes it
- * from the same three numbers — {@link brushStampAnchor},
- * {@link brushRadiusSquared}, {@link brushBoundsPadding}.
+ * worker-pool rasterize kernel, and the slice cursor's fragment shader. So
+ * the shape lives here, once, and each consumer takes it from the same three
+ * numbers — {@link brushStampAnchor}, {@link brushRadiusSquared},
+ * {@link brushBoundsPadding}.
  *
  * THE SHAPE. Brush *size* is the diameter in voxels — any whole number ≥ 1. A
  * stamp covers every voxel whose centre lies within `size / 2` of the stamp

@@ -98,7 +98,7 @@ export async function openScenarioPage(
   });
   const page = await context.newPage();
   page.on("console", (m) => {
-    if (/error|warn|pyodide|editPaintBench/i.test(m.text())) {
+    if (/error|warn|editPaintBench/i.test(m.text())) {
       console.log(`[page] ${m.text()}`);
     }
   });
@@ -131,8 +131,8 @@ export async function openScenarioPage(
 
 /**
  * Warm the paint path with a few discarded read-back stamps: the first stamps on
- * a cold page often don't register (slice transform not laid out, pyodide not
- * booted, params not propagated). Bounded — each gives up fast if nothing paints.
+ * a cold page often don't register (slice transform not laid out, params not
+ * propagated). Bounded — each gives up fast if nothing paints.
  */
 export async function warmupPaintPath(
   page: Page,

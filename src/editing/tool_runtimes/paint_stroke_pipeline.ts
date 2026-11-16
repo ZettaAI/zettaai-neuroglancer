@@ -296,12 +296,11 @@ export class PaintStrokePipeline {
   }
 
   /**
-   * Stamp a precomputed masked-brush footprint mask across its chunk tiles via
+   * Stamp a precomputed footprint mask (1 = paint) across its chunk tiles via
    * the worker pool, committing each tile as its worker finishes (TM-317 Phase
-   * B). The footprint mask (1 = paint) is computed in pyodide
-   * (`PaintingCompute.computeMaskedStrokeFootprint`); here we only enumerate the
-   * chunks it covers and dispatch the off-thread stamp, so the main thread is
-   * spared both the sample-back (`scatter`) and the slot write (`writeRegion`).
+   * B). Here we only enumerate the chunks it covers and dispatch the
+   * off-thread stamp, so the main thread is spared both the sample-back
+   * (`scatter`) and the slot write (`writeRegion`).
    *
    * Precondition: `available` is true. The mask is copied ONCE into a shared,
    * read-only buffer reused by every tile (no per-tile structured-clone copy).

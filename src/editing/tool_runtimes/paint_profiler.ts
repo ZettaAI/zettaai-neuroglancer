@@ -42,7 +42,7 @@ interface Bucket {
 /**
  * Pipeline phase a bucket belongs to. Order here is the print order.
  *  - `compute`  : main-thread brush compute (slab copy, threshold, scatter…).
- *  - `worker`   : pyodide round-trip (off-thread; does NOT block the UI).
+ *  - `worker`   : off-thread worker work (does NOT block the UI).
  *  - `apply`    : write → commit into the session (main-thread).
  *  - `render`   : GPU upload + frame draw (main-thread render loop).
  *  - `spans`    : containers (stroke/handleInput totals) — shown, never summed.
@@ -87,7 +87,7 @@ const PHASE_ORDER: Phase[] = [
 
 const PHASE_TITLE: Record<Phase, string> = {
   compute: "① COMPUTE · main-thread (blocks UI)",
-  worker: "② COMPUTE · pyodide worker (off-thread)",
+  worker: "② COMPUTE · worker (off-thread)",
   apply: "③ APPLY → COMMIT · main-thread (blocks UI)",
   render: "④ RENDER · main-thread",
   spans: "⑤ SPANS (containers — not summed)",
@@ -120,17 +120,7 @@ const BUCKET_META: Record<string, BucketMeta> = {
     label: "chunkRead (await)",
     role: "io",
   },
-  "P.chunkRead(io)": {
-    phase: "compute",
-    label: "chunkRead (await)",
-    role: "io",
-  },
   "1b.slabCopy(cpu)": {
-    phase: "compute",
-    label: "slabCopy (EM → slab)",
-    role: "cpu",
-  },
-  "P.slabCopy(cpu)": {
     phase: "compute",
     label: "slabCopy (EM → slab)",
     role: "cpu",
@@ -150,140 +140,19 @@ const BUCKET_META: Record<string, BucketMeta> = {
     label: "scatter (sample-back)",
     role: "cpu",
   },
-  "P.write(cpu)": {
-    phase: "compute",
-    label: "scatter (sample-back)",
-    role: "cpu",
-  },
   "3.build(cpu)": { phase: "compute", label: "batchBuild", role: "cpu" },
 
-  // ── compute · worker (off-thread) ────────────────────────────────────
-  "2b.morphology(worker)": {
-    phase: "worker",
-    label: "Σ morphology round-trip",
-    role: "container",
-  },
-  "P.pipeline(worker)": {
-    phase: "worker",
-    label: "Σ pipeline round-trip",
-    role: "container",
-  },
-  "2b.w.maskBuild(py)": {
-    phase: "worker",
-    label: "· maskBuild (py)",
-    role: "worker",
-  },
-  "P.w.maskBuild(py)": {
-    phase: "worker",
-    label: "· maskBuild (py)",
-    role: "worker",
-  },
-  "2b.w.closing(py)": {
-    phase: "worker",
-    label: "· closing (py)",
-    role: "worker",
-  },
-  "P.w.closing(py)": {
-    phase: "worker",
-    label: "· closing (py)",
-    role: "worker",
-  },
-  "2b.w.components(py)": {
-    phase: "worker",
-    label: "· components (py)",
-    role: "worker",
-  },
-  "P.w.components(py)": {
-    phase: "worker",
-    label: "· components (py)",
-    role: "worker",
-  },
-  "2b.w.marshalIn(py)": {
-    phase: "worker",
-    label: "· marshalIn (py)",
-    role: "worker",
-  },
-  "P.w.marshalIn(py)": {
-    phase: "worker",
-    label: "· marshalIn (py)",
-    role: "worker",
-  },
-  "2b.w.marshalOut(py)": {
-    phase: "worker",
-    label: "· marshalOut (py)",
-    role: "worker",
-  },
-  "P.w.marshalOut(py)": {
-    phase: "worker",
-    label: "· marshalOut (py)",
-    role: "worker",
-  },
-  "2b.w.convertOut(js)": {
-    phase: "worker",
-    label: "· convertOut (js)",
-    role: "worker",
-  },
-  "P.w.convertOut(js)": {
-    phase: "worker",
-    label: "· convertOut (js)",
-    role: "worker",
-  },
-  "2b.w.call(js)": {
-    phase: "worker",
-    label: "· callJs (js↔py span ⊇ py rows)",
-    role: "worker",
-  },
-  "P.w.call(js)": {
-    phase: "worker",
-    label: "· callJs (js↔py span ⊇ py rows)",
-    role: "worker",
-  },
-  "2b.w.q.boot": {
-    phase: "worker",
-    label: "· bootWait (cold pyodide)",
-    role: "worker",
-  },
-  "P.w.q.boot": {
-    phase: "worker",
-    label: "· bootWait (cold pyodide)",
-    role: "worker",
-  },
-  "2b.w.q.request": {
-    phase: "worker",
-    label: "· queueWait (transit+evloop)",
-    role: "worker",
-  },
-  "P.w.q.request": {
-    phase: "worker",
-    label: "· queueWait (transit+evloop)",
-    role: "worker",
-  },
-  "2b.w.q.response": {
-    phase: "worker",
-    label: "· respWait (main evloop)",
-    role: "worker",
-  },
-  "P.w.q.response": {
-    phase: "worker",
-    label: "· respWait (main evloop)",
-    role: "worker",
-  },
-  "2b.w.rpc+queue": {
-    phase: "worker",
-    label: "· rpcOverhead (marshal+sched)",
-    role: "worker",
-  },
-  "P.w.rpc+queue": {
-    phase: "worker",
-    label: "· rpcOverhead (marshal+sched)",
-    role: "worker",
+  "2b.morphology(cpu)": {
+    phase: "compute",
+    label: "morphology (closing+filter)",
+    role: "cpu",
   },
 
   // ── apply → commit · main-thread ─────────────────────────────────────
-  // P1 (TM-317): footprint chunks warmed concurrently with the worker compute
-  // so `materialize.fetchBaseline` below hits a resident chunk (sub-ms clone)
+  // P1 (TM-317): footprint chunks warmed concurrently with the compute so
+  // `materialize.fetchBaseline` below hits a resident chunk (sub-ms clone)
   // instead of a cold IO await. This await is normally already settled by the
-  // time the worker mask returns, so its recorded cost should be ~0.
+  // time the mask is computed, so its recorded cost should be ~0.
   "P1.warm(io)": {
     phase: "apply",
     label: "· prefetch.warm (await, overlapped)",
@@ -471,22 +340,12 @@ class PaintProfiler {
     this.flushHandle = setTimeout(() => this.flush(), 400);
   }
 
-  /**
-   * Which masked compute path ran, inferred from the buckets present:
-   * `P.*` = TM-317 whole-pipeline-in-pyodide; `2b.*` = the old split
-   * (main-thread mask + worker morphology). Both can appear in one stroke if the
-   * worker went warm mid-stroke → `MIXED`.
-   */
+  /** Which compute path ran, inferred from the buckets present. */
   private detectPath(): string {
-    let pyodide = false;
-    let split = false;
     for (const name of this.buckets.keys()) {
-      if (name.startsWith("P.")) pyodide = true;
-      else if (name.startsWith("2b.")) split = true;
+      if (name.startsWith("2a."))
+        return "MASKED (main-thread mask + morphology)";
     }
-    if (pyodide && split) return "MIXED (worker went warm mid-stroke)";
-    if (pyodide) return "PYODIDE-PIPELINE (whole compute in worker)";
-    if (split) return "SPLIT (main-thread mask + worker morphology)";
     return "no-mask / unmasked";
   }
 

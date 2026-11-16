@@ -1,6 +1,6 @@
 # Edit-session test suite
 
-Tests for the edit-session painting stack (scheduler → pointer→voxel → pyodide
+Tests for the edit-session painting stack (scheduler → pointer→voxel → mask
 compute → commit → GPU → save). Conventions (tiers, naming, vocabulary) are in
 [`docs/TESTING.md`](../../docs/TESTING.md); this is the suite-specific guide.
 
@@ -42,7 +42,7 @@ testdata/editing/manifest.json ──generate.py──▶ precomputed buckets + 
    fake-gcs-server ──harness/gcs_route.ts──▶ rewrite storage.googleapis.com → local
         │
         ▼  harness/build_ng_state.ts (scenario → ngState + editSession)
-   built app (serve_dist.mjs, COOP/COEP → SAB + pyodide) auto-opens the session
+   built app (serve_dist.mjs, COOP/COEP → SAB) auto-opens the session
         │
         ▼  harness/e2e_setup.ts: openScenarioPage + warmupPaintPath
    deterministic stamp → __editPaintBench read-back → assert
@@ -91,7 +91,7 @@ Sweeps brush sizes × {masked, unmasked, eraser} on the large `perf_*` fixture
   render loop, so `frameDraw` / `gpu.upload` / `mirror.fuse` (the RENDER phase)
   are absent.
 - Before measuring, the harness warms the data (8 max-radius stamps) so chunks
-  are resident and pyodide is booted.
+  are resident.
 - Output: a table in stdout + `test-results/edit_paint_bench.json`.
 - Perf-regression **baseline comparison** (committed baselines + tolerance) is a
   follow-up (TM-331 Phase 3).
