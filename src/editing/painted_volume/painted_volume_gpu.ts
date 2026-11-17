@@ -20,6 +20,8 @@
 import type { Logger } from "@zettaai/edit-session";
 
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
+import type { PaintedVolumeFrameTimings } from "#src/editing/painted_volume/painted_volume_frame_cost.js";
+
 import type { PaintedVolumeCursorFootprint } from "#src/editing/painted_volume/painted_volume_render_layer.js";
 import { PaintedVolumeRenderLayer } from "#src/editing/painted_volume/painted_volume_render_layer.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
@@ -65,30 +67,35 @@ export type PaintedVolumeGpuFactory = (
 export function paintedVolumeGpuFactory(
   gl: GL,
   logger: Logger,
+  frameTimings?: PaintedVolumeFrameTimings,
 ): PaintedVolumeGpuFactory {
   return (frame) => {
     const texture = new PaintedVolumeTexture(gl, logger);
     const palette = new PaintedVolumePaletteTexture(gl);
-    const renderLayer = new PaintedVolumeRenderLayer(gl, {
-      texture,
-      palette,
-      get extent() {
-        return frame.extent;
+    const renderLayer = new PaintedVolumeRenderLayer(
+      gl,
+      {
+        texture,
+        palette,
+        get extent() {
+          return frame.extent;
+        },
+        get texelToDisplay() {
+          return frame.texelToDisplay;
+        },
+        get occupiedBox() {
+          return frame.occupiedBox;
+        },
+        get cursorFootprint() {
+          return frame.cursorFootprint;
+        },
+        get visible() {
+          return frame.visible;
+        },
+        segmentOfClass: (segmentClass) => frame.segmentOfClass(segmentClass),
       },
-      get texelToDisplay() {
-        return frame.texelToDisplay;
-      },
-      get occupiedBox() {
-        return frame.occupiedBox;
-      },
-      get cursorFootprint() {
-        return frame.cursorFootprint;
-      },
-      get visible() {
-        return frame.visible;
-      },
-      segmentOfClass: (segmentClass) => frame.segmentOfClass(segmentClass),
-    });
+      frameTimings,
+    );
     return {
       renderLayer,
       allocate: (size) => texture.allocate(size),

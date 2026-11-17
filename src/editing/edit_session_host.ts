@@ -4414,6 +4414,7 @@ export class EditSessionHost extends RefCounted {
     return {
       gl: this.viewer.display.gl,
       logger: this.logger,
+      frameTimings: this.viewer.display,
       gpuMemoryLimitBytes:
         this.viewer.chunkManager.chunkQueueManager.capacities.gpuMemory
           .sizeLimit.value,

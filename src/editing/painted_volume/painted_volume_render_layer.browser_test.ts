@@ -23,6 +23,7 @@
 import { describe, expect, it } from "vitest";
 
 import { paintedVolumeBlockGridSize } from "#src/editing/painted_volume/painted_volume_occupied_blocks.js";
+import { PaintedVolumeReducedMarch } from "#src/editing/painted_volume/painted_volume_reduced_march.js";
 import type {
   PaintedVolumeCursorFootprint,
   PaintedVolumeRenderSource,
@@ -46,6 +47,7 @@ import { perspectivePanelEmit } from "#src/perspective_view/panel.js";
 import type { PerspectiveViewRenderContext } from "#src/perspective_view/render_layer.js";
 import { mat4, vec3 } from "#src/util/geom.js";
 import type { GL } from "#src/webgl/context.js";
+import { initializeWebGL } from "#src/webgl/context.js";
 import {
   DepthStencilRenderbuffer,
   FramebufferConfiguration,
@@ -1322,3 +1324,303 @@ function readBlockFlags(
   }
   return flags;
 }
+
+// The tests below share one WebGL context and one compiled march per test:
+// every context and compile in this file stalls the other WebGL test files
+// running beside it in the browser.
+
+describe("painted-volume reduced-resolution march", () => {
+  /** A 4 × 4 one-slice patch, 32 × 32 pixels down z, away from every edge. */
+  const PATCH: Scene = {
+    texels: Array.from({ length: 16 }, (_, i) => ({
+      texel: [2 + (i % 4), 2 + Math.floor(i / 4), 3] as Triple,
+      segmentClass: CLASS_A,
+    })),
+  };
+  const PICK_ID_BASE = 1000;
+  /** Float rounding between two marches of the same point. */
+  const DEPTH_ROUNDING = 1e-6;
+  const VIEW: PaintedVolumeView = {
+    viewProjectionMat: VIEW_DOWN_Z,
+    ...FLAT_LIGHT,
+    pickIdBase: PICK_ID_BASE,
+  };
+
+  /**
+   * The full march's z range over the block of pixels one small pixel
+   * covers: the stretched z is sampled somewhere inside it.
+   */
+  function zRangeOfBlock(
+    rendered: Rendered,
+    x: number,
+    y: number,
+    reduction: number,
+  ): [number, number] {
+    const blockX = Math.floor(x / reduction) * reduction;
+    const blockY = Math.floor(y / reduction) * reduction;
+    let low = Infinity;
+    let high = -Infinity;
+    for (let dy = 0; dy < reduction; ++dy) {
+      for (let dx = 0; dx < reduction; ++dx) {
+        const z = zAt(rendered, blockX + dx, blockY + dy);
+        low = Math.min(low, z);
+        high = Math.max(high, z);
+      }
+    }
+    return [low, high];
+  }
+
+  /** Whether every pixel within `margin` of (x, y) has the same colour. */
+  function uniformAround(
+    rendered: Rendered,
+    x: number,
+    y: number,
+    margin: number,
+  ): boolean {
+    const center = pixel(rendered, x, y);
+    for (let dy = -margin; dy <= margin; ++dy) {
+      for (let dx = -margin; dx <= margin; ++dx) {
+        const neighbourX = x + dx;
+        const neighbourY = y + dy;
+        if (
+          neighbourX < 0 ||
+          neighbourY < 0 ||
+          neighbourX >= FRAMEBUFFER_SIZE ||
+          neighbourY >= FRAMEBUFFER_SIZE
+        ) {
+          continue;
+        }
+        const neighbour = pixel(rendered, neighbourX, neighbourY);
+        if (neighbour.some((channel, k) => channel !== center[k])) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /** Every pixel away from an edge of `full` matches `reduced`; returns how many. */
+  function expectMatchAwayFromEdges(
+    full: Rendered,
+    reduced: Rendered,
+    reduction: number,
+  ): number {
+    let compared = 0;
+    for (let y = 0; y < FRAMEBUFFER_SIZE; ++y) {
+      for (let x = 0; x < FRAMEBUFFER_SIZE; ++x) {
+        // Within a reduction of an edge, the stretched pixel may come from
+        // either side of it.
+        if (!uniformAround(full, x, y, reduction)) continue;
+        ++compared;
+        const where = `${x},${y} at 1/${reduction}`;
+        expect(pixel(reduced, x, y), `colour at ${where}`).toEqual(
+          pixel(full, x, y),
+        );
+        const [low, high] = zRangeOfBlock(full, x, y, reduction);
+        expect(zAt(reduced, x, y), `z at ${where}`).toBeGreaterThanOrEqual(
+          low - DEPTH_ROUNDING,
+        );
+        expect(zAt(reduced, x, y), `z at ${where}`).toBeLessThanOrEqual(
+          high + DEPTH_ROUNDING,
+        );
+        expect(pickIdAt(reduced, x, y), `pick at ${where}`).toBe(
+          pickIdAt(full, x, y),
+        );
+      }
+    }
+    return compared;
+  }
+
+  it("matches the full march away from edges at 1/2 and 1/4, and keeps nearer depth in front", () => {
+    webglTest((gl) => {
+      withSource(gl, PATCH, (source) => {
+        const renderer = new PaintedVolumeRenderer(gl);
+        const reduced = new PaintedVolumeReducedMarch(gl);
+        try {
+          const full = renderPanel(gl, () => renderer.draw(source, VIEW));
+          for (const reduction of [2, 4]) {
+            const stretched = renderPanel(gl, () =>
+              reduced.draw(reduction, () => renderer.draw(source, VIEW)),
+            );
+            // Both the patch and the background were compared.
+            expect(
+              expectMatchAwayFromEdges(full, stretched, reduction),
+            ).toBeGreaterThan(FRAMEBUFFER_SIZE * 8);
+            expect(countPixels(stretched, COLOR_A)).toBeGreaterThan(0);
+            expect(countPixels(stretched, BACKGROUND)).toBeGreaterThan(0);
+          }
+          // Depth already in the panel wins over the stretched surface.
+          const behind = renderPanel(
+            gl,
+            () => reduced.draw(2, () => renderer.draw(source, VIEW)),
+            { clearDepth: 0 },
+          );
+          expect(countPixels(behind, BACKGROUND)).toBe(
+            FRAMEBUFFER_SIZE * FRAMEBUFFER_SIZE,
+          );
+        } finally {
+          reduced.dispose();
+          renderer.dispose();
+        }
+      });
+    });
+  });
+
+  it("leaves the panel's framebuffer, viewport, stencil test, culling and texture unit as it found them", () => {
+    webglTest((gl) => {
+      withSource(gl, PATCH, (source) => {
+        const renderer = new PaintedVolumeRenderer(gl);
+        const reduced = new PaintedVolumeReducedMarch(gl);
+        try {
+          renderPanel(gl, () => {
+            gl.enable(gl.STENCIL_TEST);
+            gl.enable(gl.CULL_FACE);
+            gl.activeTexture(gl.TEXTURE5);
+            const framebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+            const viewport = Array.from(
+              gl.getParameter(gl.VIEWPORT) as Int32Array,
+            );
+            reduced.draw(2, () => renderer.draw(source, VIEW));
+            expect(gl.getParameter(gl.FRAMEBUFFER_BINDING)).toBe(framebuffer);
+            expect(
+              Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array),
+            ).toEqual(viewport);
+            expect(gl.isEnabled(gl.STENCIL_TEST)).toBe(true);
+            expect(gl.isEnabled(gl.CULL_FACE)).toBe(true);
+            expect(gl.getParameter(gl.ACTIVE_TEXTURE)).toBe(gl.TEXTURE5);
+            gl.disable(gl.STENCIL_TEST);
+            gl.disable(gl.CULL_FACE);
+          });
+        } finally {
+          reduced.dispose();
+          renderer.dispose();
+        }
+      });
+    });
+  });
+});
+
+describe("painted-volume adaptive resolution", () => {
+  /** `webglTest` for bodies that wait on timers. */
+  async function asyncWebglTest(body: (gl: GL) => Promise<void>) {
+    const canvas = document.createElement("canvas");
+    document.body.appendChild(canvas);
+    const gl = initializeWebGL(canvas);
+    try {
+      await body(gl);
+    } finally {
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      document.body.removeChild(canvas);
+    }
+  }
+
+  function waitFor(condition: () => boolean, timeoutMs = 5000) {
+    return new Promise<void>((resolve, reject) => {
+      const start = performance.now();
+      const check = () => {
+        if (condition()) return resolve();
+        if (performance.now() - start > timeoutMs) {
+          return reject(new Error("timed out"));
+        }
+        setTimeout(check, 10);
+      };
+      check();
+    });
+  }
+
+  /** A frame timer reporting `frameDelta` for every frame finished. */
+  function fakeFrameTimings(frameDelta: number, measures = true) {
+    const finished: { frameNumber: number; frameDelta: number }[] = [];
+    return {
+      frameNumber: 1,
+      frameDelta,
+      measuresFrameTimes: measures,
+      finishFrame() {
+        finished.push({
+          frameNumber: this.frameNumber,
+          frameDelta: this.frameDelta,
+        });
+        ++this.frameNumber;
+      },
+      getLastFrameTimings: (count: number) => finished.slice(-count),
+    };
+  }
+
+  const LONE_TEXEL: Scene = {
+    texels: [{ texel: [4, 4, 3], segmentClass: CLASS_A }],
+  };
+  const VIEW: PaintedVolumeView = {
+    viewProjectionMat: VIEW_DOWN_Z,
+    ...FLAT_LIGHT,
+    pickIdBase: 0,
+  };
+  const FULL = { reduction: 1, capSteps: false };
+
+  /** Draw one frame of `renderer` and report it finished at `timings`. */
+  function drawFrame(
+    gl: GL,
+    renderer: PaintedVolumeRenderer,
+    timings: ReturnType<typeof fakeFrameTimings>,
+  ): Rendered {
+    let rendered: Rendered | undefined;
+    withSource(gl, LONE_TEXEL, (source) => {
+      rendered = renderPanel(gl, () => renderer.draw(source, VIEW));
+    });
+    timings.finishFrame();
+    return rendered!;
+  }
+
+  it("starts at half, goes to full on a cheap frame, and to a capped quarter on frames that take seconds", async () => {
+    await asyncWebglTest(async (gl) => {
+      let changes = 0;
+      const timings = fakeFrameTimings(2);
+      const renderer = new PaintedVolumeRenderer(gl, {
+        frameTimings: timings,
+        onResolutionChanged: () => ++changes,
+      });
+      try {
+        expect(renderer.adaptive).toBe(true);
+        expect(renderer.resolution.reduction).toBe(2);
+        const half = drawFrame(gl, renderer, timings);
+        expect(pixel(half, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL)).toEqual(
+          COLOR_A,
+        );
+        await waitFor(() => changes === 1);
+        expect(renderer.resolution).toEqual(FULL);
+        expect(renderer.lastFrameMilliseconds).toBe(2);
+
+        // The same renderer once frames take 5 s.
+        timings.frameDelta = 5000;
+        drawFrame(gl, renderer, timings);
+        await waitFor(() => changes === 2);
+        expect(renderer.resolution).toEqual({ reduction: 4, capSteps: true });
+        // A capped quarter frame still draws the near surface.
+        const capped = drawFrame(gl, renderer, timings);
+        expect(
+          pixel(capped, TEXEL_4_CENTER_PIXEL, TEXEL_4_CENTER_PIXEL),
+        ).toEqual(COLOR_A);
+      } finally {
+        renderer.dispose();
+      }
+    });
+  });
+
+  it("stays at full resolution without a GPU timer, and without the adaptive option", () => {
+    webglTest((gl) => {
+      const withoutTimer = new PaintedVolumeRenderer(gl, {
+        frameTimings: fakeFrameTimings(5000, false),
+        onResolutionChanged: () => {},
+      });
+      const plain = new PaintedVolumeRenderer(gl);
+      try {
+        for (const renderer of [withoutTimer, plain]) {
+          expect(renderer.adaptive).toBe(false);
+          expect(renderer.resolution).toEqual(FULL);
+        }
+      } finally {
+        plain.dispose();
+        withoutTimer.dispose();
+      }
+    });
+  });
+});
