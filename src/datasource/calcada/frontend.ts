@@ -7337,7 +7337,7 @@ const selectionInNanometers = (
   };
 };
 
-class CalcadaGraphServerInterface {
+export class CalcadaGraphServerInterface {
   constructor(private httpSource: HttpSource) {}
 
   async getTimestampLimit() {
@@ -8027,12 +8027,16 @@ class CalcadaGraphServerInterface {
     first: SegmentSelection,
     second: SegmentSelection,
     precisionMode: boolean,
+    branchId: number,
   ) {
     const { fetchOkImpl, baseUrl } = this.httpSource;
     const promise = fetchOkImpl(
-      `${baseUrl}/graph/find_path?int64_as_str=1&precision_mode=${Number(
-        precisionMode,
-      )}`,
+      appendCoordParams(
+        `${baseUrl}/graph/find_path?int64_as_str=1&precision_mode=${Number(
+          precisionMode,
+        )}`,
+        { branchId },
+      ),
       {
         method: "POST",
         body: JSON.stringify([
@@ -8368,6 +8372,7 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
       selectionInNanometers(first, annotationToNanometers),
       selectionInNanometers(second, annotationToNanometers),
       precisionMode && !l2CacheAvailable,
+      this.branchId.value,
     );
     if (precisionMode && l2CacheAvailable && l2_path) {
       try {
