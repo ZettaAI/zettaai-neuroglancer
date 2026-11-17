@@ -21,7 +21,6 @@ import type { Logger } from "@zettaai/edit-session";
 
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
 import type { PaintedVolumeFrameTimings } from "#src/editing/painted_volume/painted_volume_frame_cost.js";
-
 import type { PaintedVolumeCursorFootprint } from "#src/editing/painted_volume/painted_volume_render_layer.js";
 import { PaintedVolumeRenderLayer } from "#src/editing/painted_volume/painted_volume_render_layer.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
