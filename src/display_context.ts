@@ -22,6 +22,7 @@ import { TrackableValue } from "#src/trackable_value.js";
 import { animationFrameDebounce } from "#src/util/animation_frame_debounce.js";
 import type { Borrowed } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
+import type { FrameDeltaInfo } from "#src/util/framerate.js";
 import { FramerateMonitor } from "#src/util/framerate.js";
 import type { mat4 } from "#src/util/geom.js";
 import { parseFixedLengthArray, verifyFloat01 } from "#src/util/json.js";
@@ -732,5 +733,20 @@ export class DisplayContext extends RefCounted implements FrameNumberCounter {
 
   getLastFrameTimesInMs(numberOfFrames: number = 10) {
     return this.framerateMonitor.getLastFrameTimesInMs(numberOfFrames);
+  }
+
+  /**
+   * GPU time of recent frames with their frame numbers. Collects finished
+   * timer queries first, so results arrive between frames too (otherwise
+   * only the next frame's draw collects them).
+   */
+  getLastFrameTimings(numberOfFrames: number = 10): FrameDeltaInfo[] {
+    this.framerateMonitor.grabAnyFinishedQueryResults(this.gl);
+    return this.framerateMonitor.getLastFrameTimings(numberOfFrames);
+  }
+
+  /** Whether frame GPU times are measured at all (the timer-query extension). */
+  get measuresFrameTimes(): boolean {
+    return this.framerateMonitor.getTimingExtension(this.gl) !== null;
   }
 }

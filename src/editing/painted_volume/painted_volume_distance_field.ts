@@ -102,6 +102,19 @@ export class PaintedVolumeDistanceField {
     }
   }
 
+  /** True when any texel of the inclusive `texelBox` is occupied. */
+  anyOccupiedIn(texelBox: TexelBox): boolean {
+    for (let z = texelBox.z0; z <= texelBox.z1; ++z) {
+      for (let y = texelBox.y0; y <= texelBox.y1; ++y) {
+        const rowStart = this.rowOffset(z, y);
+        for (let x = texelBox.x0; x <= texelBox.x1; ++x) {
+          if (this.occupied[rowStart + x] !== 0) return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /**
    * The encoded distances a write to `texelBox` can change: the box grown by
    * the range in x and y, clamped to the texture. The bytes are reused by the

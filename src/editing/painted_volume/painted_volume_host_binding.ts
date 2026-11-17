@@ -78,6 +78,11 @@ export class PaintedVolumeHostBinding extends RefCounted {
     this.registerDisposer(() => this.releaseAll());
   }
 
+  /** True while at least one preview is bound. */
+  hasPreviews(): boolean {
+    return this.bound.size > 0;
+  }
+
   previewFor(layerId: LayerId): PaintedVolumeBoundPreview | undefined {
     return this.bound.get(layerId)?.preview;
   }

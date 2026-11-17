@@ -122,6 +122,10 @@ import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 import { PatchMirror } from "#src/editing/overlay/patch_mirror.js";
 import { sessionChunkDataSize } from "#src/editing/overlay/session_chunk_data_size.js";
 import { sessionEditBaselineReader } from "#src/editing/overlay/session_edit_baseline.js";
+import {
+  PaintedVolumeGpuLossGuard,
+  reachableSessionStorage,
+} from "#src/editing/painted_volume/painted_volume_gpu_loss_guard.js";
 import type { PaintedVolumeHostPort } from "#src/editing/painted_volume/painted_volume_host_binding.js";
 import { PaintedVolumeHostBinding } from "#src/editing/painted_volume/painted_volume_host_binding.js";
 import type { LockedLayerRegion } from "#src/editing/painted_volume/painted_volume_memory_budget.js";
@@ -1049,6 +1053,8 @@ export class EditSessionHost extends RefCounted {
    * layer, for as long as the session is open.
    */
   private readonly paintedVolumeBinding: PaintedVolumeHostBinding;
+  /** Built with the first preview, when the viewer's canvas is in use. */
+  private paintedVolumeGpuLossGuard: PaintedVolumeGpuLossGuard | undefined;
   private readonly _activeRegionByLayer = new Map<
     LayerId,
     WatchableValue<ActiveRegion | undefined>
@@ -4352,11 +4358,23 @@ export class EditSessionHost extends RefCounted {
       findUserLayer: (layerId) => this.findSegmentationUserLayer(layerId),
       createPreview: (layerId) => {
         const inputs = this.paintedVolumeInputsFor(layerId);
-        return inputs === undefined
-          ? undefined
-          : createSessionPaintedVolumePreview(inputs);
+        if (inputs === undefined) return undefined;
+        if (!this.gpuLossGuard().previewAllowed()) return undefined;
+        return createSessionPaintedVolumePreview(inputs);
       },
     };
+  }
+
+  private gpuLossGuard(): PaintedVolumeGpuLossGuard {
+    this.paintedVolumeGpuLossGuard ??= this.registerDisposer(
+      new PaintedVolumeGpuLossGuard({
+        canvas: this.viewer.display.gl.canvas,
+        storage: reachableSessionStorage(),
+        logger: this.logger,
+        previewExists: () => this.paintedVolumeBinding.hasPreviews(),
+      }),
+    );
+    return this.paintedVolumeGpuLossGuard;
   }
 
   /** Writable layers with a live mirror, i.e. painted in the open session. */
@@ -4396,6 +4414,7 @@ export class EditSessionHost extends RefCounted {
     return {
       gl: this.viewer.display.gl,
       logger: this.logger,
+      frameTimings: this.viewer.display,
       gpuMemoryLimitBytes:
         this.viewer.chunkManager.chunkQueueManager.capacities.gpuMemory
           .sizeLimit.value,

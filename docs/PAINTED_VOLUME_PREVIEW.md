@@ -123,6 +123,42 @@ datasource baseline ──read──────────┘                 
   draws only the bounding box of occupied chunks, and keeps a window clear
   under the 3D brush cursor so the cursor stays visible above painted voxels.
 
+## Keeping the GPU alive
+
+The march costs per pixel of the 3D panel, times the texels each ray crosses.
+On a weak GPU a frame of that can take seconds; Windows then resets the GPU,
+the viewer loses its WebGL context (white panels), and after a few resets
+Chrome blocks WebGL for the site ("WebGL not supported" on reload). Three
+mechanisms keep that from happening:
+
+- **Empty-block skipping** (`painted_volume_occupied_blocks.ts`). A third
+  R8UI texture flags the 8³ blocks that can hold the surface; a ray crosses
+  any other block in one step, so its cost follows what is painted along it,
+  not the size of the region. The picture is unchanged.
+- **Adaptive resolution** (`painted_volume_resolution_governor.ts`,
+  `painted_volume_frame_cost.ts`, `painted_volume_reduced_march.ts`). The
+  preview reads the GPU time of each frame it drew in from neuroglancer's own
+  frame timer (`DisplayContext.getLastFrameTimings`; only one `TIME_ELAPSED`
+  query can run at a time, and neuroglancer's spans the whole frame). Counting
+  that whole frame as march overestimates the march, so errors go towards a
+  coarser preview. From it the governor predicts the full-resolution cost and
+  picks among 1×, ½ and ¼ resolution: coarser at once when a frame passes
+  50 ms, finer when that is predicted under 25 ms, and a one-step trial every
+  2 s when it is predicted under 100 ms, so a capable GPU returns to full
+  resolution after a heavy moment. A reduced march renders into a small
+  framebuffer with the panel's attachments and is stretched over the panel
+  with its depth, pick id and stencil, so depth testing and picking behave as
+  at full resolution; edges come out blocky by the reduction. The first frame
+  of a preview marches at ½ until a measurement arrives. If even ¼ is
+  predicted over 200 ms, rays are also capped at 256 steps (far surfaces may
+  be missing) until a bound on the uncapped cost is safe again. Without
+  `EXT_disjoint_timer_query_webgl2` nothing is measured and the preview stays
+  at full resolution, as before.
+- **GPU-loss guard** (`painted_volume_gpu_loss_guard.ts`). A context lost while
+  a preview exists turns the preview off in that tab (`sessionStorage`), so
+  the reload neuroglancer does on context restore does not reset the GPU again.
+  A new tab starts with the preview on. The reason is only logged.
+
 ## Why an opaque pass
 
 Only volume-rendering layers get the depth buffer in the transparent pass. An
@@ -157,5 +193,6 @@ path reaches it, including rollbacks.
 
 Targets: occupancy plus upload ≤ 2 ms for a typical stroke, and no fill frame
 over 50 ms. Chromium runs on SwiftShader there, so GPU frame time has to be
-measured by hand on real hardware. `tests/editing/e2e/edit_painted_volume.e2e.ts`
+measured by hand on real hardware. SwiftShader is still useful as the
+slowest GPU there is: the adaptive resolution must keep its frames short. `tests/editing/e2e/edit_painted_volume.e2e.ts`
 covers the visible behaviour in an `xy-3d` layout.
