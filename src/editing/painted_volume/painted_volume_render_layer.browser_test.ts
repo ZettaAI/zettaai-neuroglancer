@@ -22,6 +22,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { paintedVolumeBlockGridSize } from "#src/editing/painted_volume/painted_volume_occupied_blocks.js";
 import type {
   PaintedVolumeCursorFootprint,
   PaintedVolumeRenderSource,
@@ -1085,3 +1086,239 @@ describe("PaintedVolumeRenderLayer", () => {
     });
   });
 });
+
+describe("painted-volume empty-block skipping", () => {
+  // Several 8³ blocks per axis, most of them empty, and texels on block
+  // edges, where a skip's exit point and the field's one-texel reach meet.
+  const SPARSE_TEXTURE: Triple = [40, 40, 24];
+  const SPARSE_SCALE: Triple = [1.5, 1.5, 1.5];
+  const SPARSE_CENTER: Triple = [30, 30, 18];
+  /** Float rounding of a hit's depth, far below one depth-buffer step. */
+  const DEPTH_ROUNDING = 1e-6;
+  /**
+   * Off the pixel grid by a quarter pixel, so no axis-aligned ray runs exactly
+   * along a texel face, where the field is exactly one half and either answer
+   * is right.
+   */
+  const OFF_GRID = 0.25;
+
+  /** Every block flagged as holding the surface: the march visits every texel. */
+  function disableSkipping(gl: GL, source: PaintedVolumeRenderSource): void {
+    const gridSize = paintedVolumeBlockGridSize(SPARSE_TEXTURE);
+    const [gridX, gridY, gridZ] = gridSize;
+    gl.bindTexture(gl.TEXTURE_3D, source.texture.blocksTexture!);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage3D(
+      gl.TEXTURE_3D,
+      0,
+      0,
+      0,
+      0,
+      gridX,
+      gridY,
+      gridZ,
+      gl.RED_INTEGER,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array(gridX * gridY * gridZ).fill(1),
+    );
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.bindTexture(gl.TEXTURE_3D, null);
+  }
+
+  function sparseTexels(): PlacedTexel[] {
+    const texels: PlacedTexel[] = [];
+    // A one-slice diagonal stroke crossing many blocks.
+    for (let i = 0; i < 36; ++i) {
+      texels.push({ texel: [2 + i, 3 + i, 5], segmentClass: CLASS_A });
+    }
+    // A thin column along z on a block corner.
+    for (let z = 0; z < SPARSE_TEXTURE[2]; ++z) {
+      texels.push({ texel: [7, 8, z], segmentClass: CLASS_B });
+    }
+    // Lone texels on both sides of block faces, far from the rest.
+    for (const texel of [
+      [31, 31, 15],
+      [32, 32, 16],
+      [39, 0, 23],
+      [16, 30, 8],
+    ] as const) {
+      texels.push({ texel, segmentClass: CLASS_A });
+    }
+    return texels;
+  }
+
+  const VIEWS: ReadonlyArray<readonly [string, mat4]> = [
+    [
+      "down z",
+      orthographicView(
+        [SPARSE_CENTER[0], SPARSE_CENTER[1], 1000],
+        SPARSE_CENTER,
+        Y_UP,
+      ),
+    ],
+    [
+      "oblique",
+      orthographicView(
+        [
+          SPARSE_CENTER[0] + 700,
+          SPARSE_CENTER[1] - 400,
+          SPARSE_CENTER[2] + 600,
+        ],
+        SPARSE_CENTER,
+        Z_UP,
+      ),
+    ],
+    [
+      "along the x axis",
+      orthographicView(
+        [18 + 1000, 18 + OFF_GRID, SPARSE_CENTER[2] + OFF_GRID],
+        [18, 18 + OFF_GRID, SPARSE_CENTER[2] + OFF_GRID],
+        Z_UP,
+      ),
+    ],
+    [
+      "perspective from inside the box",
+      perspectiveView([20, 50, 20], [40, 10, 6], Z_UP, 0.1, 1000),
+    ],
+  ];
+
+  for (const [name, view] of VIEWS) {
+    it(`draws exactly what a texel-by-texel march draws, ${name}`, () => {
+      webglTest((gl) => {
+        const scene: Scene = {
+          textureSize: SPARSE_TEXTURE,
+          texels: sparseTexels(),
+          scale: SPARSE_SCALE,
+        };
+        withSource(gl, scene, (source) => {
+          const flags = readBlockFlags(
+            gl,
+            source,
+            paintedVolumeBlockGridSize(SPARSE_TEXTURE),
+          );
+          // Most blocks are skippable, so the ray does skip.
+          expect(flags.filter((flag) => flag === 0).length).toBeGreaterThan(
+            flags.length / 2,
+          );
+          const skipping = render(gl, source, view, { pickIdBase: 1 });
+          disableSkipping(gl, source);
+          const marching = render(gl, source, view, { pickIdBase: 1 });
+          expect(countPixels(marching, BACKGROUND)).toBeLessThan(
+            FRAMEBUFFER_SIZE * FRAMEBUFFER_SIZE,
+          );
+          expect(Array.from(skipping.color)).toEqual(
+            Array.from(marching.color),
+          );
+          // The skip lands on the block face by its own ray parameter where
+          // the march summed per-texel steps, so the bisected hit depth may
+          // differ in the last bits of a float.
+          for (let i = 0; i < skipping.z.length; ++i) {
+            expect(
+              Math.abs(skipping.z[i] - marching.z[i]),
+              `z of pixel ${i}`,
+            ).toBeLessThan(DEPTH_ROUNDING);
+          }
+          expect(Array.from(skipping.pickId)).toEqual(
+            Array.from(marching.pickId),
+          );
+        });
+      });
+    });
+  }
+
+  it("flags only blocks within one texel of an occupied texel", () => {
+    webglTest((gl) => {
+      // Texel (8, 8, 8) is the first of block (1, 1, 1); its rim reaches the
+      // last texels of block (0, 0, 0), and no further.
+      const scene: Scene = {
+        textureSize: SPARSE_TEXTURE,
+        texels: [{ texel: [8, 8, 8], segmentClass: CLASS_A }],
+      };
+      withSource(gl, scene, (source) => {
+        const [gridX, gridY, gridZ] =
+          paintedVolumeBlockGridSize(SPARSE_TEXTURE);
+        const flags = readBlockFlags(gl, source, [gridX, gridY, gridZ]);
+        const flagged: string[] = [];
+        for (let z = 0; z < gridZ; ++z) {
+          for (let y = 0; y < gridY; ++y) {
+            for (let x = 0; x < gridX; ++x) {
+              if (flags[(z * gridY + y) * gridX + x] !== 0) {
+                flagged.push(`${x},${y},${z}`);
+              }
+            }
+          }
+        }
+        expect(flagged.sort()).toEqual(
+          [
+            "0,0,0",
+            "1,0,0",
+            "0,1,0",
+            "1,1,0",
+            "0,0,1",
+            "1,0,1",
+            "0,1,1",
+            "1,1,1",
+          ].sort(),
+        );
+      });
+    });
+  });
+
+  it("clears a block's flag when its texels are erased", () => {
+    webglTest((gl) => {
+      const scene: Scene = {
+        textureSize: SPARSE_TEXTURE,
+        texels: [
+          { texel: [20, 20, 12], segmentClass: CLASS_A },
+          { texel: [20, 20, 12], segmentClass: 0 },
+        ],
+      };
+      withSource(gl, scene, (source) => {
+        const gridSize = paintedVolumeBlockGridSize(SPARSE_TEXTURE);
+        const flags = readBlockFlags(gl, source, gridSize);
+        expect(flags.every((flag) => flag === 0)).toBe(true);
+      });
+    });
+  });
+});
+
+/** The block-flag texture, x fastest, read through a framebuffer per layer. */
+function readBlockFlags(
+  gl: GL,
+  source: PaintedVolumeRenderSource,
+  gridSize: Triple,
+): Uint8Array {
+  const [gridX, gridY, gridZ] = gridSize;
+  const flags = new Uint8Array(gridX * gridY * gridZ);
+  const framebuffer = gl.createFramebuffer();
+  const layer = new Uint32Array(gridX * gridY * 4);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+  try {
+    for (let z = 0; z < gridZ; ++z) {
+      gl.framebufferTextureLayer(
+        gl.READ_FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        source.texture.blocksTexture!,
+        0,
+        z,
+      );
+      gl.readPixels(
+        0,
+        0,
+        gridX,
+        gridY,
+        gl.RGBA_INTEGER,
+        gl.UNSIGNED_INT,
+        layer,
+      );
+      for (let i = 0; i < gridX * gridY; ++i) {
+        flags[z * gridX * gridY + i] = layer[i * 4];
+      }
+    }
+    expect(gl.getError()).toBe(gl.NO_ERROR);
+  } finally {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.deleteFramebuffer(framebuffer);
+  }
+  return flags;
+}

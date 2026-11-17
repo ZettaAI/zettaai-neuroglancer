@@ -16,7 +16,8 @@
  *
  * Both volumes are immutable storage (`texStorage3D`). The class texture is
  * written box by box; each write recomputes, on the CPU, the distances it can
- * change and uploads them too.
+ * change and uploads them too, and the flags of the 8³ blocks the ray may skip
+ * (`painted_volume_occupied_blocks.ts`) into a third, R8UI texture.
  * It lives outside NG's chunk manager, so it can neither be evicted nor be
  * counted against `gpuMemoryLimit`; a failed allocation (out of memory, or a
  * size past `MAX_3D_TEXTURE_SIZE`) leaves it disabled and logged rather than
@@ -26,6 +27,7 @@
 import type { Logger } from "@zettaai/edit-session";
 
 import { PaintedVolumeDistanceField } from "#src/editing/painted_volume/painted_volume_distance_field.js";
+import { PaintedVolumeOccupiedBlocks } from "#src/editing/painted_volume/painted_volume_occupied_blocks.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
 import type { GL } from "#src/webgl/context.js";
 
@@ -39,6 +41,8 @@ export class PaintedVolumeTexture {
   private texture_: WebGLTexture | undefined;
   private distanceTexture_: WebGLTexture | undefined;
   private distanceField: PaintedVolumeDistanceField | undefined;
+  private blocksTexture_: WebGLTexture | undefined;
+  private occupiedBlocks: PaintedVolumeOccupiedBlocks | undefined;
   private size_: Triple | undefined;
 
   constructor(
@@ -56,6 +60,11 @@ export class PaintedVolumeTexture {
     return this.distanceTexture_;
   }
 
+  /** Per-block "may hold the surface" flags, allocated with the class texture. */
+  get blocksTexture(): WebGLTexture | undefined {
+    return this.blocksTexture_;
+  }
+
   get size(): Triple | undefined {
     return this.size_;
   }
@@ -65,15 +74,26 @@ export class PaintedVolumeTexture {
     // `clear` reallocates at the same size: keep the CPU mirror and zero it
     // rather than dropping a texture-sized array for the collector.
     const previousField = this.distanceField;
+    const previousBlocks = this.occupiedBlocks;
     this.release();
     const { gl } = this;
     drainErrors(gl);
+    const blocks = previousBlocks?.hasTextureSize(size)
+      ? previousBlocks
+      : new PaintedVolumeOccupiedBlocks(size);
     const texture = createVolumeStorage(gl, gl.R8UI, gl.NEAREST, size);
     const distance = createVolumeStorage(gl, gl.R8, gl.LINEAR, size);
+    const blocksTexture = createVolumeStorage(
+      gl,
+      gl.R8UI,
+      gl.NEAREST,
+      blocks.gridSize,
+    );
     const error = gl.getError();
     if (error !== gl.NO_ERROR) {
       gl.deleteTexture(texture);
       gl.deleteTexture(distance);
+      gl.deleteTexture(blocksTexture);
       this.logger.error(
         "editing",
         "3D preview: the GPU could not allocate the painted-volume texture",
@@ -83,6 +103,8 @@ export class PaintedVolumeTexture {
     }
     this.texture_ = texture;
     this.distanceTexture_ = distance;
+    this.blocksTexture_ = blocksTexture;
+    this.occupiedBlocks = blocks;
     this.size_ = [size[0], size[1], size[2]];
     if (previousField?.hasSize(this.size_)) {
       previousField.clear();
@@ -98,17 +120,26 @@ export class PaintedVolumeTexture {
    * recompute the distances the change can affect.
    */
   uploadBox(texelBox: TexelBox, bytes: Uint8Array): void {
-    const { texture_, distanceTexture_, distanceField } = this;
+    const {
+      texture_,
+      distanceTexture_,
+      distanceField,
+      blocksTexture_,
+      occupiedBlocks,
+    } = this;
     if (
       texture_ === undefined ||
       distanceTexture_ === undefined ||
-      distanceField === undefined
+      distanceField === undefined ||
+      blocksTexture_ === undefined ||
+      occupiedBlocks === undefined
     ) {
       return;
     }
     const { gl } = this;
     distanceField.writeClasses(texelBox, bytes);
     const distances = distanceField.distancesAround(texelBox);
+    const blockFlags = occupiedBlocks.flagsAfterWrite(texelBox, distanceField);
     const previousAlignment = gl.getParameter(gl.UNPACK_ALIGNMENT) as number;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, TIGHT_UNPACK_ALIGNMENT);
     uploadVolumeBox(gl, texture_, texelBox, gl.RED_INTEGER, bytes);
@@ -118,6 +149,13 @@ export class PaintedVolumeTexture {
       distances.texelBox,
       gl.RED,
       distances.bytes,
+    );
+    uploadVolumeBox(
+      gl,
+      blocksTexture_,
+      blockFlags.blockBox,
+      gl.RED_INTEGER,
+      blockFlags.bytes,
     );
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, previousAlignment);
   }
@@ -145,6 +183,13 @@ export class PaintedVolumeTexture {
     gl.bindTexture(gl.TEXTURE_3D, this.distanceTexture_ ?? null);
   }
 
+  /** Bind the block-flag texture to texture unit `unit`; leaves that unit active. */
+  bindBlocks(unit: number): void {
+    const { gl } = this;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_3D, this.blocksTexture_ ?? null);
+  }
+
   dispose(): void {
     this.release();
   }
@@ -154,8 +199,13 @@ export class PaintedVolumeTexture {
     if (this.distanceTexture_ !== undefined) {
       this.gl.deleteTexture(this.distanceTexture_);
     }
+    if (this.blocksTexture_ !== undefined) {
+      this.gl.deleteTexture(this.blocksTexture_);
+    }
     this.texture_ = undefined;
     this.distanceTexture_ = undefined;
+    this.blocksTexture_ = undefined;
+    this.occupiedBlocks = undefined;
     this.distanceField = undefined;
     this.size_ = undefined;
   }

@@ -19,8 +19,10 @@
  * gets fragments). Each fragment rebuilds its view ray from the inverse
  * model-view-projection, clips it to the box and walks it texel by texel
  * (Amanatides–Woo DDA), sampling the field twice per texel and bisecting
- * the first crossing; the colour is the class of the nearest occupied texel
- * inward from the surface. Working in texel indices, with the texel → display matrix folded
+ * the first crossing; 8³ blocks with no occupied texel near them are crossed
+ * in one step (`painted_volume_occupied_blocks.ts`), so the cost of a ray
+ * follows what is painted along it rather than the size of the box. The
+ * colour is the class of the nearest occupied texel inward from the surface. Working in texel indices, with the texel → display matrix folded
  * into the projection, makes anisotropic voxels come out right for free.
  *
  * The layer draws in the opaque pass and writes the hit's depth itself, so
@@ -33,6 +35,7 @@
 
 import { PAINTED_VOLUME_DISTANCE_RANGE } from "#src/editing/painted_volume/painted_volume_distance_field.js";
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
+import { PAINTED_VOLUME_BLOCK_SIZE } from "#src/editing/painted_volume/painted_volume_occupied_blocks.js";
 import { PAINTED_VOLUME_PALETTE_SIZE } from "#src/editing/painted_volume/painted_volume_segment_palette.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
 import type {
@@ -96,6 +99,7 @@ export interface PaintedVolumeView {
 const OCCUPANCY_SAMPLER = Symbol("paintedVolumeOccupancy");
 const DISTANCE_SAMPLER = Symbol("paintedVolumeDistance");
 const PALETTE_SAMPLER = Symbol("paintedVolumePalette");
+const BLOCKS_SAMPLER = Symbol("paintedVolumeBlocks");
 const BOX_VERTEX_COUNT = 36;
 
 const glsl_cursorHidesTexel = `
@@ -244,6 +248,36 @@ bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
 }
 `;
 
+const glsl_blockSkip = `
+const int BLOCK_SIZE = ${PAINTED_VOLUME_BLOCK_SIZE};
+
+// False when no texel the field interpolates inside this texel's block is
+// occupied: every sample there reads below one half.
+bool blockMayHoldSurface(ivec3 texel) {
+  return texelFetch(uOccupiedBlocks, texel / BLOCK_SIZE, 0).r != 0u;
+}
+
+// Ray parameter where the ray leaves the block holding texel, and the axis of
+// the face it leaves through.
+float blockExit(vec3 origin, vec3 ray, ivec3 texel, ivec3 stepDirection,
+                out int exitAxis) {
+  ivec3 blockFirst = (texel / BLOCK_SIZE) * BLOCK_SIZE;
+  float tExit = 1.0e30;
+  exitAxis = 0;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (stepDirection[axis] == 0) continue;
+    float face = float(stepDirection[axis] > 0 ? blockFirst[axis] + BLOCK_SIZE
+                                               : blockFirst[axis]);
+    float tFace = (face - origin[axis]) / ray[axis];
+    if (tFace < tExit) {
+      tExit = tFace;
+      exitAxis = axis;
+    }
+  }
+  return tExit;
+}
+`;
+
 const glsl_marchMain = `
 vec2 ndc = vClipPosition.xy / vClipPosition.w;
 // The ray runs from the near plane through the point at NDC depth 0. The far
@@ -306,7 +340,43 @@ if (distancePrevious >= 0.5) {
   }
   insideUndrawn = true;
 }
+// The block whose flag was read last; its flag is read once per block entered.
+ivec3 flagBlock = ivec3(-1);
+bool flagMayHoldSurface = true;
 for (int i = 0; i < uMaxSteps; ++i) {
+  if (texel / BLOCK_SIZE != flagBlock) {
+    flagBlock = texel / BLOCK_SIZE;
+    flagMayHoldSurface = blockMayHoldSurface(texel);
+  }
+  if (!flagMayHoldSurface) {
+    // As if marched texel by texel: every sample read below one half, the
+    // last one where the ray leaves the block.
+    int exitAxis;
+    float tExit = blockExit(nearPoint, ray, texel, stepDirection, exitAxis);
+    insideUndrawn = false;
+    distancePrevious = 0.0;
+    tPrevious = min(tExit, tEnd);
+    tHit = tExit;
+    if (tHit > tEnd) break;
+    ivec3 blockFirst = (texel / BLOCK_SIZE) * BLOCK_SIZE;
+    ivec3 blockLast = blockFirst + (BLOCK_SIZE - 1);
+    // Off the exit axis the exit point is inside the block; clamp away the
+    // rounding of floor() on a face.
+    texel = clamp(ivec3(floor(nearPoint + ray * tHit)), blockFirst, blockLast);
+    texel[exitAxis] = stepDirection[exitAxis] > 0 ? blockLast[exitAxis] + 1
+                                                  : blockFirst[exitAxis] - 1;
+    if (any(lessThan(texel, firstTexel)) || any(greaterThan(texel, lastTexel))) {
+      break;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+      if (stepDirection[axis] == 0) continue;
+      float boundary = float(texel[axis] + (stepDirection[axis] > 0 ? 1 : 0));
+      tNextBoundary[axis] = (boundary - nearPoint[axis]) / ray[axis];
+    }
+    cellNormal = vec3(0.0);
+    cellNormal[exitAxis] = -float(stepDirection[exitAxis]);
+    continue;
+  }
   if (insideUndrawn) {
     vec3 rgb;
     uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
@@ -373,6 +443,7 @@ export function buildPaintedVolumeShader(gl: GL): ShaderProgram {
   builder.addTextureSampler("usampler3D", "uOccupancy", OCCUPANCY_SAMPLER);
   builder.addTextureSampler("sampler3D", "uDistance", DISTANCE_SAMPLER);
   builder.addTextureSampler("sampler2D", "uPalette", PALETTE_SAMPLER);
+  builder.addTextureSampler("usampler3D", "uOccupiedBlocks", BLOCKS_SAMPLER);
   builder.addUniform("highp mat4", "uModelViewProjection");
   builder.addUniform("highp mat4", "uInvModelViewProjection");
   builder.addUniform("highp mat3", "uNormalToDisplay");
@@ -403,6 +474,7 @@ gl_Position.z = 0.0;
   builder.addFragmentCode(glsl_intersectOccupiedBox);
   builder.addFragmentCode(glsl_distance);
   builder.addFragmentCode(glsl_shadeHit);
+  builder.addFragmentCode(glsl_blockSkip);
   builder.setFragmentMain(glsl_marchMain);
   return builder.build();
 }
@@ -438,6 +510,7 @@ export class PaintedVolumeRenderer extends RefCounted {
     source.texture.bind(shader.textureUnit(OCCUPANCY_SAMPLER));
     source.texture.bindDistance(shader.textureUnit(DISTANCE_SAMPLER));
     source.palette.bind(shader.textureUnit(PALETTE_SAMPLER));
+    source.texture.bindBlocks(shader.textureUnit(BLOCKS_SAMPLER));
     this.setViewUniforms(view);
     this.setVolumeUniforms(source, occupiedBox);
     this.setCursorUniforms(source.cursorFootprint);
