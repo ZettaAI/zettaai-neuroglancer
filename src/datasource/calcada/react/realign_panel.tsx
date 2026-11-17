@@ -71,6 +71,7 @@ export interface RealignPanelSession {
   readonly summary: WatchableValueInterface<RealignSummary>;
   drawBox(): void;
   addCorrespondence(): void;
+  autoDetect(): Promise<void>;
   apply(): Promise<void>;
   clearPreview(): void;
   cancel(): void;
@@ -157,11 +158,9 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
   const [maxShiftPx, setMaxShiftPx] = useState(DEFAULT_MAX_SHIFT_PX);
   const [confirming, setConfirming] = useState(false);
   const working = status.kind === "working" || status.kind === "committing";
-  const canApply =
-    !working &&
-    summary.unavailableReason === undefined &&
-    summary.hasBox &&
-    summary.lineCount > 0;
+  const canAutoDetect =
+    !working && summary.unavailableReason === undefined && summary.hasBox;
+  const canApply = canAutoDetect && summary.lineCount > 0;
 
   // A commit changes the branch it runs on, so on main there is nothing to
   // draw — only the way out, as the Trace tab does, and what merges into
@@ -261,6 +260,15 @@ export function RealignPanel({ session }: { session: RealignPanelSession }) {
             onClick={() => session.addCorrespondence()}
           >
             Add correspondence
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={!canAutoDetect}
+            title="Find correspondences between the box's section and the reference section automatically"
+            onClick={() => void session.autoDetect()}
+          >
+            Auto-detect
           </Button>
           <Button
             size="xs"

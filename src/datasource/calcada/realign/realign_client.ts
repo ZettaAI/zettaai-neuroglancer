@@ -10,6 +10,12 @@ import {
   buildApplyCorrespondencesForm,
   parseApplyCorrespondencesResponse,
 } from "#src/datasource/calcada/realign/apply_correspondences_request.js";
+import type { CropCorrespondence } from "#src/datasource/calcada/realign/automatic_correspondences_request.js";
+import {
+  AUTOMATIC_CORRESPONDENCES_PATH,
+  buildAutomaticCorrespondencesForm,
+  parseAutomaticCorrespondences,
+} from "#src/datasource/calcada/realign/automatic_correspondences_request.js";
 import type { CorrespondenceLine } from "#src/datasource/calcada/realign/realign_selection.js";
 import { joinBackendUrl } from "#src/editing/backend/backend_client.js";
 import type { BackendEndpoint } from "#src/editing/backend/backend_endpoint.js";
@@ -115,14 +121,52 @@ export async function applyCorrespondences(
     lines,
     referenceCrop?.data,
   );
+  const response = await postToGpuBackend(
+    endpoint,
+    APPLY_CORRESPONDENCES_PATH,
+    body,
+    "application/octet-stream",
+    fetchImpl,
+    signal,
+  );
+  return parseApplyCorrespondencesResponse(await response.arrayBuffer());
+}
+
+export async function computeAutomaticCorrespondences(
+  endpoint: BackendEndpoint,
+  moving: RealignCrop,
+  reference: RealignCrop,
+  existing: readonly CorrespondenceLine[],
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<CropCorrespondence[]> {
+  const response = await postToGpuBackend(
+    endpoint,
+    AUTOMATIC_CORRESPONDENCES_PATH,
+    buildAutomaticCorrespondencesForm(moving, reference, existing),
+    "application/json",
+    fetchImpl,
+    signal,
+  );
+  return parseAutomaticCorrespondences(await response.json(), moving);
+}
+
+async function postToGpuBackend(
+  endpoint: BackendEndpoint,
+  path: string,
+  body: FormData,
+  accept: string,
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<Response> {
   const init = await unlessCancelled(
     Promise.resolve(endpoint.authorize({ method: "POST", body })),
     signal,
   );
   const headers = new Headers(init.headers);
-  headers.set("Accept", "application/octet-stream");
+  headers.set("Accept", accept);
   const response = await unlessCancelled(
-    fetchImpl(joinBackendUrl(endpoint.baseUrl, APPLY_CORRESPONDENCES_PATH), {
+    fetchImpl(joinBackendUrl(endpoint.baseUrl, path), {
       ...init,
       headers,
       signal,
@@ -135,7 +179,7 @@ export async function applyCorrespondences(
       `HTTP ${response.status}: ${await response.text()}`,
     );
   }
-  return parseApplyCorrespondencesResponse(await response.arrayBuffer());
+  return response;
 }
 
 /**

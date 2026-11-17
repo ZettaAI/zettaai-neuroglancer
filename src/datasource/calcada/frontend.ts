@@ -126,6 +126,7 @@ import {
 } from "#src/datasource/calcada/filter_library.js";
 import { FilterPresetsClient } from "#src/datasource/calcada/filter_presets.js";
 import { editTookLabel } from "#src/datasource/calcada/graph_edit_duration.js";
+import { addGraphImageLayer } from "#src/datasource/calcada/graph_image_layer.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import { meshModelResolution } from "#src/datasource/calcada/mesh_model_resolution.js";
 import type { PieceSphere } from "#src/datasource/calcada/piece_centers.js";
@@ -5215,6 +5216,18 @@ class GraphConnection extends SegmentationGraphSourceConnection {
         },
       ),
     );
+    void addGraphImageLayer(
+      layer.manager,
+      layer,
+      {
+        table: graph.info.app!.table,
+        segmentationUrl: graph.info.app!.segmentationUrl,
+        graphUrl: graph.graphServer.baseUrl,
+        branchId: graph.branchId,
+        hasImage: () => graph.graphServer.hasGraphImage(),
+      },
+      () => this.wasDisposed === true,
+    );
     layer.tabs.add(CALCADA_REALIGN_TAB_ID, {
       label: "Realign",
       order: -19,
@@ -7116,6 +7129,8 @@ function appendCoordParams(
   return `${url}${sep}${parts.join("&")}`;
 }
 
+const NO_GRAPH_IMAGE_STATUSES = [404, 409];
+
 function realignQuery(box: RealignBox, branchId: number): string {
   const params = new URLSearchParams({
     bbox: `${box.x0},${box.y0},${box.x1},${box.y1}`,
@@ -7539,6 +7554,26 @@ class CalcadaGraphServerInterface {
       `${baseUrl}/candidates/decision${query ? `?${query}` : ""}`,
       { method: "POST", body: candidateDecisionBody(request) },
     );
+  }
+
+  /**
+   * Whether calcada serves an image for the graph: it answers 409 when the
+   * graph has none, and an older calcada knows no image route at all.
+   */
+  async hasGraphImage(): Promise<boolean> {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    try {
+      await fetchOkImpl(`${baseUrl}/image/${MAIN_BRANCH_ID}/info`);
+      return true;
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        NO_GRAPH_IMAGE_STATUSES.includes(error.status)
+      ) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   async fetchRealignSection(

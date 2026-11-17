@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyCorrespondences,
   calcadaRefusal,
+  computeAutomaticCorrespondences,
   RealignError,
   realignErrorMessage,
 } from "#src/datasource/calcada/realign/realign_client.js";
@@ -87,6 +88,41 @@ describe("applyCorrespondences", () => {
     const error = await pending;
     expect((error as RealignError).kind).toBe("cancelled");
     expect(realignErrorMessage(error)).toMatch(/cancelled/i);
+  });
+});
+
+describe("computeAutomaticCorrespondences", () => {
+  it("posts both crops for JSON and reads the matches back", async () => {
+    const big = { data: new Uint8Array(100 * 100), width: 100, height: 100 };
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            lines: [{ id: "0", start: [50, 40], end: [52, 45] }],
+            num_inliers: 0,
+            num_matches: 1,
+          }),
+          { status: 200 },
+        ),
+    );
+    const found = await computeAutomaticCorrespondences(
+      endpoint,
+      big,
+      big,
+      [],
+      fetchImpl as unknown as typeof fetch,
+    );
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe(
+      "https://gpu.example/alignment/compute_automatic_correspondences",
+    );
+    const headers = new Headers(init.headers);
+    expect(headers.get("Authorization")).toBe("Bearer token");
+    expect(headers.get("Accept")).toBe("application/json");
+    expect(found).toEqual([{ start: [50, 40], end: [52, 45] }]);
   });
 });
 

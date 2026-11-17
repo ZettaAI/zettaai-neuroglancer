@@ -25,6 +25,7 @@ const CALCADA_GRAPH = new RegExp(
   String.raw`(https?:\/\/[^/]+)${TABLE_PATH}([^/|?]+)`,
 );
 const REVISION_SEPARATOR = ".";
+const PRECOMPUTED_IMAGE_FORMAT = "|neuroglancer-precomputed:";
 export const NO_REVISION = 0;
 
 // One counter for the page: sessions over one graph share its image layer.
@@ -52,6 +53,17 @@ export function isCalcadaImageSource(url: string, graphUrl: string): boolean {
     graph !== undefined &&
     graph === calcadaGraph(graphUrl)
   );
+}
+
+/**
+ * calcada's image source of the graph at `segmentationUrl` (the calcada
+ * layer's `…/table/{graph}`, `middleauth+` prefix included) on `branchId`.
+ */
+export function graphImageSource(
+  segmentationUrl: string,
+  branchId: number,
+): string {
+  return `${segmentationUrl}/image/${branchId}/${PRECOMPUTED_IMAGE_FORMAT}`;
 }
 
 /** Points calcada's image source at `branchId`, under `revision`. */

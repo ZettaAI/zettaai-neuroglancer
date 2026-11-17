@@ -54,6 +54,15 @@ describe("RealignCoordinates", () => {
   it("turns a graph section back into annotation z", () => {
     expect(coordinates.graphVoxelZToAnnotationZ(3104)).toBe(2648);
   });
+
+  it("turns a graph-voxel point back into annotation coordinates", () => {
+    const point = coordinates.graphVoxelsToAnnotation(
+      [10.5, 20.5, 3104.5],
+      new Float32Array(3),
+    );
+    expect(Array.from(point)).toEqual([10.5, 20.5, 2648.5]);
+    expect(coordinates.toGraphVoxels(point)).toEqual([10.5, 20.5, 3104.5]);
+  });
 });
 
 describe("boxSpanInAnnotationZ", () => {

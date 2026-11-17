@@ -107,10 +107,30 @@ export class RealignCoordinates {
 
   graphVoxelZToAnnotationZ(voxelZ: number): number {
     const { scale, offset } = this.axes[Z];
-    const globalZ =
-      (voxelZ * this.resolution[Z] * METRES_PER_NANOMETRE) /
-      this.globalScales[Z];
-    return (globalZ - offset) / scale;
+    return (this.graphVoxelToGlobal(voxelZ, Z) - offset) / scale;
+  }
+
+  /**
+   * A graph-voxel point in annotation coordinates. Annotation axes no global
+   * axis maps to keep their values from `template`.
+   */
+  graphVoxelsToAnnotation(
+    voxel: ArrayLike<number>,
+    template: Float32Array,
+  ): Float32Array {
+    const point = template.slice();
+    this.axes.forEach(({ annotationAxis, scale, offset }, axis) => {
+      point[annotationAxis] =
+        (this.graphVoxelToGlobal(voxel[axis], axis) - offset) / scale;
+    });
+    return point;
+  }
+
+  private graphVoxelToGlobal(value: number, axis: number): number {
+    return (
+      (value * this.resolution[axis] * METRES_PER_NANOMETRE) /
+      this.globalScales[axis]
+    );
   }
 
   private globalToGraphVoxel(value: number, axis: number): number {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   calcadaImageSource,
+  graphImageSource,
   isCalcadaImageSource,
 } from "#src/datasource/calcada/realign/image_source.js";
 
@@ -9,6 +10,18 @@ const SOURCE =
   "middleauth+https://calcada.example/segmentation/table/fafb/image/0/|neuroglancer-precomputed:";
 
 describe("calcada image source", () => {
+  it("builds the graph's image source from the calcada layer's URL", () => {
+    const source = graphImageSource(
+      "middleauth+https://calcada.example/segmentation/api/v1/table/fafb",
+      3,
+    );
+    expect(source).toBe(
+      "middleauth+https://calcada.example/segmentation/api/v1/table/fafb/image/3/|neuroglancer-precomputed:",
+    );
+    expect(isCalcadaImageSource(source, GRAPH_URL)).toBe(true);
+    expect(calcadaImageSource(source, 3, 2)).toContain("/image/3.2/|");
+  });
+
   it("recognises calcada's image source and nothing else", () => {
     expect(isCalcadaImageSource(SOURCE, GRAPH_URL)).toBe(true);
     expect(

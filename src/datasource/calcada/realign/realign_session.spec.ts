@@ -21,6 +21,7 @@ import {
 } from "#src/datasource/calcada/realign/realign_commit.js";
 import type { RealignGraph } from "#src/datasource/calcada/realign/realign_session.js";
 import {
+  REALIGN_MISALIGNMENT_LAYER,
   REALIGN_PREVIEW_LAYER,
   REALIGN_SEGMENTATION_PREVIEW_LAYER,
   RealignSession,
@@ -169,6 +170,42 @@ describe("RealignSession drawing", () => {
     expect(summary.arrows[0].sections).toEqual([3104, 3103]);
   });
 
+  it("adds auto-detected correspondences from the box's section to the reference", () => {
+    const { session, source } = drawingSession();
+    addCommitted(source, {
+      id: "box",
+      type: AnnotationType.AXIS_ALIGNED_BOUNDING_BOX,
+      description: "",
+      pointA: Float32Array.of(100, 100, 3104),
+      pointB: Float32Array.of(200, 200, 3106),
+      properties: [0],
+    });
+    const summaries: unknown[] = [];
+    session.summary.changed.add(() => summaries.push(session.summary.value));
+    session["addCropCorrespondences"](
+      {
+        box: { x0: 100, y0: 100, x1: 200, y1: 200, z: 3105 },
+        referenceSection: 3104,
+        lines: [],
+        rejected: [],
+      },
+      [
+        { start: [20, 10], end: [22, 13] },
+        { start: [50, 60], end: [50, 60] },
+      ],
+    );
+
+    const summary = session.summary.value;
+    expect(summary.lineCount).toBe(2);
+    expect(summary.rejected).toEqual([]);
+    expect(summary.arrows.map(({ sections }) => sections)).toEqual([
+      [3105, 3104],
+      [3105, 3104],
+    ]);
+    expect(summary.arrows[0].lengthPx).toBeCloseTo(Math.hypot(2, 3));
+    expect(summaries).toHaveLength(1);
+  });
+
   it("stretches the box over the new pair when the reference moves", () => {
     const { session, source } = drawingSession();
     addCommitted(source, {
@@ -189,12 +226,16 @@ describe("RealignSession drawing", () => {
 });
 
 describe("RealignSession.clearPreview", () => {
-  it("removes the image and the segmentation previews", () => {
+  it("removes the image, misalignment and segmentation previews", () => {
     const image = { name: REALIGN_PREVIEW_LAYER };
+    const misalignment = { name: REALIGN_MISALIGNMENT_LAYER };
     const segmentation = { name: REALIGN_SEGMENTATION_PREVIEW_LAYER };
     const removeManagedLayer = vi.fn();
     const layers = {
-      rootLayers: { managedLayers: [image, segmentation], removeManagedLayer },
+      rootLayers: {
+        managedLayers: [image, misalignment, segmentation],
+        removeManagedLayer,
+      },
       add: vi.fn(),
     } as unknown as LayerListSpecification;
     const graph = {
@@ -207,6 +248,7 @@ describe("RealignSession.clearPreview", () => {
     } as unknown as RealignGraph;
     new RealignSession(layers, graph).clearPreview();
     expect(removeManagedLayer).toHaveBeenCalledWith(image);
+    expect(removeManagedLayer).toHaveBeenCalledWith(misalignment);
     expect(removeManagedLayer).toHaveBeenCalledWith(segmentation);
   });
 });

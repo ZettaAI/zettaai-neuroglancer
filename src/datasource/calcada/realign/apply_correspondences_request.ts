@@ -39,6 +39,8 @@ const PORTAL_OPTIMIZATION = {
 export interface ApplyCorrespondencesResult {
   readonly field: FloatTensor;
   readonly warpedImage?: FloatTensor;
+  /** The detector's map, in the encoding's range: above 0 where misaligned. */
+  readonly misalignment?: FloatTensor;
 }
 
 /** With a reference crop, image similarity weighs in as in the portal. */
@@ -66,7 +68,8 @@ export async function buildApplyCorrespondencesForm(
       ? { mse_weight: 0 }
       : { tgt_encoding_shape: shape, mse_weight: REFERENCE_MSE_WEIGHT }),
     ...PORTAL_OPTIMIZATION,
-    run_misd: false,
+    // The misalignment detector compares the warped crop with the reference.
+    run_misd: referenceCrop !== undefined,
     run_warp: true,
     zero_boundary: true,
   };
@@ -140,7 +143,24 @@ export async function parseApplyCorrespondencesResponse(
   if (tensors.field === undefined) {
     throw new Error("apply_correspondences response carries no field");
   }
-  return { field: tensors.field, warpedImage: tensors.warpedImage };
+  return {
+    field: tensors.field,
+    warpedImage: tensors.warpedImage,
+    misalignment: tensors.misdImage,
+  };
+}
+
+// web_api scales the detector's 0/255 mask to the float encoding's [-1, 1].
+const MISALIGNED_THRESHOLD = 0;
+export const MISALIGNED_VALUE = UINT8_MAX;
+
+/** The detector's map as a crop: MISALIGNED_VALUE where misaligned, else 0. */
+export function misalignmentToUint8(
+  misalignment: FloatTensor,
+): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(misalignment.data, (value) =>
+    value > MISALIGNED_THRESHOLD ? MISALIGNED_VALUE : 0,
+  );
 }
 
 export function warpedImageToUint8(

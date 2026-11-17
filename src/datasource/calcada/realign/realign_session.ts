@@ -23,23 +23,29 @@ import type {
 } from "#src/annotation/index.js";
 import { AnnotationType } from "#src/annotation/index.js";
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
+import { graphImageDataSources } from "#src/datasource/calcada/graph_image_layer.js";
 import type {
   ArrowRow,
   RealignStatus,
   RealignSummary,
 } from "#src/datasource/calcada/react/realign_panel.js";
 import type { FloatTensor } from "#src/datasource/calcada/realign/apply_correspondences_request.js";
-import { warpedImageToUint8 } from "#src/datasource/calcada/realign/apply_correspondences_request.js";
+import {
+  MISALIGNED_VALUE,
+  misalignmentToUint8,
+  warpedImageToUint8,
+} from "#src/datasource/calcada/realign/apply_correspondences_request.js";
+import type { CropCorrespondence } from "#src/datasource/calcada/realign/automatic_correspondences_request.js";
 import { gpuBackend } from "#src/datasource/calcada/realign/gpu_backend_endpoint.js";
 import {
   calcadaImageSource,
-  isCalcadaImageSource,
   nextImageRevision,
   NO_REVISION,
 } from "#src/datasource/calcada/realign/image_source.js";
 import {
   isReverseArrowKey,
   isSectionToggleKey,
+  REALIGN_ARROW_PROPERTIES,
   reversedLine,
   withRejectedFlag,
 } from "#src/datasource/calcada/realign/realign_arrows.js";
@@ -50,6 +56,7 @@ import type {
 import {
   applyCorrespondences,
   calcadaRefusal,
+  computeAutomaticCorrespondences,
   RealignError,
   realignErrorMessage,
 } from "#src/datasource/calcada/realign/realign_client.js";
@@ -108,6 +115,19 @@ import { HttpError } from "#src/util/http_request.js";
 export const REALIGN_PREVIEW_LAYER = "realign preview";
 export const REALIGN_SEGMENTATION_PREVIEW_LAYER =
   "realign preview (segmentation)";
+export const REALIGN_MISALIGNMENT_LAYER = "realign misalignment";
+
+// Red over what the detector flags; calcada stores the rest of the box as 1
+// and leaves 0 outside it.
+export const REALIGN_MISALIGNMENT_SHADER = `
+void main() {
+  if (getDataValue().value < ${MISALIGNED_VALUE}u) {
+    emitTransparent();
+    return;
+  }
+  emitRGBA(vec4(1.0, 0.0, 0.0, 0.4));
+}
+`;
 
 // Zero is what the preview volume holds outside the box; calcada writes a real
 // zero inside it as 1, so only the outside turns transparent.
@@ -127,6 +147,8 @@ const Y_AXIS = 1;
 const Z_AXIS = 2;
 // A section's middle, where Neuroglancer puts the view when stepping to it.
 const SECTION_CENTRE = 0.5;
+// SIFT puts a keypoint at a pixel's centre on the integer coordinate.
+const PIXEL_CENTRE = 0.5;
 // Layers older sessions added for the realign patch volumes; the graph's image
 // layer now reads calcada's composited image instead.
 const LEGACY_PATCH_LAYERS = ["realign patch", "realign patch (main)"] as const;
@@ -228,6 +250,8 @@ export class RealignSession extends RefCounted {
   readonly referenceOffset = new WatchableValue(DEFAULT_REFERENCE_OFFSET);
   private committing = false;
   private undoing = false;
+  // Auto-detect adds its correspondences one by one, then refreshes once.
+  private addingInBulk = false;
   private imageRevision = NO_REVISION;
   private readonly commitsRequests = latestRequestGate();
   private unwatchSource: (() => void) | undefined;
@@ -305,19 +329,11 @@ export class RealignSession extends RefCounted {
     }
     const { box, lines } = selection;
     const branchId = this.graph.branchId.value;
-    this.inFlight?.abort();
-    const controller = new AbortController();
-    this.inFlight = controller;
-    const { signal } = controller;
-    try {
-      this.setWorking("Reading the sections…");
-      const [crop, referenceCrop] = await Promise.all([
-        this.graph.graphServer.fetchRealignSection(box, branchId),
-        this.graph.graphServer.fetchRealignSection(
-          { ...box, z: selection.referenceSection },
-          branchId,
-        ),
-      ]);
+    await this.runGpuRequest(async (signal) => {
+      const [crop, referenceCrop] = await this.readSections(
+        selection,
+        branchId,
+      );
       if (signal.aborted) return;
       this.setWorking("Computing the field…");
       const result = await applyCorrespondences(
@@ -345,6 +361,13 @@ export class RealignSession extends RefCounted {
       };
       this.refreshSummary();
       this.showPreview(preview.layerSource);
+      const misalignmentNote = await this.previewMisalignment(
+        box,
+        branchId,
+        result.misalignment,
+        signal,
+      );
+      if (signal.aborted) return;
       const segmentationNote = await this.previewSegmentation(
         box,
         branchId,
@@ -354,14 +377,125 @@ export class RealignSession extends RefCounted {
       if (signal.aborted) return;
       this.status.value = {
         kind: "done",
-        message: `Preview updated — press Q to switch ${box.z} ↔ ${selection.referenceSection}.${segmentationNote}`,
+        message: `Preview updated — press Q to switch ${box.z} ↔ ${selection.referenceSection}.${misalignmentNote}${segmentationNote}`,
       };
+    });
+  }
+
+  /**
+   * Adds correspondences SIFT finds between the box's crops on the moving and
+   * the reference section, as the portal's Auto-detect does.
+   */
+  async autoDetect(): Promise<void> {
+    const backend = gpuBackend();
+    if ("unavailableReason" in backend) {
+      this.setError(backend.unavailableReason);
+      return;
+    }
+    const selection = this.currentSelection();
+    if (selection === undefined) {
+      this.setError("Draw a box first.");
+      return;
+    }
+    const branchId = this.graph.branchId.value;
+    await this.runGpuRequest(async (signal) => {
+      const [moving, reference] = await this.readSections(selection, branchId);
+      if (signal.aborted) return;
+      this.setWorking("Finding correspondences…");
+      const found = await computeAutomaticCorrespondences(
+        backend.endpoint,
+        moving,
+        reference,
+        selection.lines,
+        fetch,
+        signal,
+      );
+      if (signal.aborted) return;
+      this.addCropCorrespondences(selection, found);
+      this.status.value =
+        found.length === 0
+          ? { kind: "done", message: "No correspondences found in the box." }
+          : {
+              kind: "done",
+              message: `Added ${found.length} correspondences — check them, then Apply.`,
+            };
+    });
+  }
+
+  /** Runs `request` as the one GPU request in flight, until Cancel or a newer one. */
+  private async runGpuRequest(
+    request: (signal: AbortSignal) => Promise<void>,
+  ): Promise<void> {
+    this.inFlight?.abort();
+    const controller = new AbortController();
+    this.inFlight = controller;
+    const { signal } = controller;
+    try {
+      await request(signal);
     } catch (error) {
       if (signal.aborted) return;
       this.setError(realignErrorMessage(calcadaError(error)));
     } finally {
       if (this.inFlight === controller) this.inFlight = undefined;
     }
+  }
+
+  private readSections(
+    { box, referenceSection }: RealignSelection,
+    branchId: number,
+  ): Promise<[RealignCrop, RealignCrop]> {
+    this.setWorking("Reading the sections…");
+    return Promise.all([
+      this.graph.graphServer.fetchRealignSection(box, branchId),
+      this.graph.graphServer.fetchRealignSection(
+        { ...box, z: referenceSection },
+        branchId,
+      ),
+    ]);
+  }
+
+  private addCropCorrespondences(
+    { box, referenceSection }: RealignSelection,
+    found: readonly CropCorrespondence[],
+  ): void {
+    const source = this.watchedSource;
+    const coordinates = this.drawing?.coordinates();
+    const boxAnnotation =
+      source === undefined ? undefined : [...source].find(isBox);
+    if (
+      source === undefined ||
+      coordinates === undefined ||
+      boxAnnotation === undefined
+    ) {
+      return;
+    }
+    const toAnnotation = ([y, x]: readonly [number, number], section: number) =>
+      coordinates.graphVoxelsToAnnotation(
+        [
+          box.x0 + x + PIXEL_CENTRE,
+          box.y0 + y + PIXEL_CENTRE,
+          section + SECTION_CENTRE,
+        ],
+        boxAnnotation.pointA,
+      );
+    this.addingInBulk = true;
+    try {
+      for (const { start, end } of found) {
+        source.add({
+          id: "",
+          type: AnnotationType.LINE,
+          description: "",
+          pointA: toAnnotation(start, box.z),
+          pointB: toAnnotation(end, referenceSection),
+          properties: REALIGN_ARROW_PROPERTIES.map(
+            ({ default: value }) => value,
+          ),
+        });
+      }
+    } finally {
+      this.addingInBulk = false;
+    }
+    this.refreshSummary();
   }
 
   /** Abandons a running Apply, including one waiting on the Google login. */
@@ -381,6 +515,7 @@ export class RealignSession extends RefCounted {
   private removePreviewLayer(): void {
     this.removeManagedLayers([
       REALIGN_PREVIEW_LAYER,
+      REALIGN_MISALIGNMENT_LAYER,
       REALIGN_SEGMENTATION_PREVIEW_LAYER,
     ]);
     if (this.underPreview !== undefined) {
@@ -429,6 +564,32 @@ export class RealignSession extends RefCounted {
     return (
       metresPerVoxel / this.layers.root.coordinateSpace.value.scales[Z_AXIS]
     );
+  }
+
+  /**
+   * Shows where the warped section still disagrees with the reference, so the
+   * proofreader sees where to add correspondences. Like the segmentation
+   * preview, a failure only adds a note to the status.
+   */
+  private async previewMisalignment(
+    box: RealignBox,
+    branchId: number,
+    misalignment: FloatTensor | undefined,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (misalignment === undefined) return "";
+    try {
+      this.setWorking("Showing the misalignment…");
+      const preview = await this.graph.graphServer.putRealignPreview(
+        box,
+        branchId,
+        misalignmentToUint8(misalignment),
+      );
+      if (!signal.aborted) this.showMisalignment(preview.layerSource);
+      return "";
+    } catch (error) {
+      return ` The misalignment map failed: ${realignErrorMessage(calcadaError(error))}`;
+    }
   }
 
   /**
@@ -598,14 +759,13 @@ export class RealignSession extends RefCounted {
    */
   private followImageSource(): void {
     const branchId = this.graph.branchId.value;
-    for (const { layer } of this.layers.rootLayers.managedLayers) {
-      if (!(layer instanceof ImageUserLayer)) continue;
-      for (const dataSource of layer.dataSources) {
-        const { spec } = dataSource;
-        if (!isCalcadaImageSource(spec.url, this.graph.graphUrl)) continue;
-        const url = calcadaImageSource(spec.url, branchId, this.imageRevision);
-        if (url !== spec.url) dataSource.spec = { ...spec, url };
-      }
+    for (const dataSource of graphImageDataSources(
+      this.layers,
+      this.graph.graphUrl,
+    )) {
+      const { spec } = dataSource;
+      const url = calcadaImageSource(spec.url, branchId, this.imageRevision);
+      if (url !== spec.url) dataSource.spec = { ...spec, url };
     }
   }
 
@@ -677,7 +837,9 @@ export class RealignSession extends RefCounted {
     if (this.watchedSource === source) return;
     this.unwatchSource?.();
     this.watchedSource = source;
-    const refresh = () => this.refreshSummary();
+    const refresh = () => {
+      if (!this.addingInBulk) this.refreshSummary();
+    };
     const offs = [
       source.childAdded.add(refresh),
       source.childUpdated.add(refresh),
@@ -967,6 +1129,20 @@ export class RealignSession extends RefCounted {
     this.layers.add(managed, this.previewIndex());
   }
 
+  private showMisalignment(source: string): void {
+    const previous = this.findManagedLayer(REALIGN_MISALIGNMENT_LAYER);
+    if (previous !== undefined) {
+      this.layers.rootLayers.removeManagedLayer(previous);
+    }
+    const managed = makeLayer(this.layers, REALIGN_MISALIGNMENT_LAYER, {
+      type: "image",
+      source,
+      shader: REALIGN_MISALIGNMENT_SHADER,
+      opacity: REALIGN_PREVIEW_OPACITY,
+    });
+    this.layers.add(managed, this.aboveLayer(REALIGN_PREVIEW_LAYER));
+  }
+
   private showSegmentationPreview(source: string, section: number): void {
     const previous = this.findManagedLayer(REALIGN_SEGMENTATION_PREVIEW_LAYER);
     if (previous !== undefined) {
@@ -984,6 +1160,14 @@ export class RealignSession extends RefCounted {
   private segmentationPreviewIndex(): number | undefined {
     const index = this.layers.rootLayers.managedLayers.findIndex(
       (managed) => managed.layer === this.drawing?.layer,
+    );
+    return index === -1 ? undefined : index + 1;
+  }
+
+  /** Directly above the layer named `name`, or on top when there is none. */
+  private aboveLayer(name: string): number | undefined {
+    const index = this.layers.rootLayers.managedLayers.findIndex(
+      (managed) => managed.name === name,
     );
     return index === -1 ? undefined : index + 1;
   }

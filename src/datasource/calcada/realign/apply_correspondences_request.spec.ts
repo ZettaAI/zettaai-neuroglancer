@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildApplyCorrespondencesForm,
+  MISALIGNED_VALUE,
+  misalignmentToUint8,
   parseApplyCorrespondencesResponse,
   warpedImageToUint8,
 } from "#src/datasource/calcada/realign/apply_correspondences_request.js";
@@ -70,6 +72,7 @@ describe("buildApplyCorrespondencesForm", () => {
     expect(metadata).toMatchObject({
       tgt_encoding_shape: [1, 2, 2, 1],
       mse_weight: 1,
+      run_misd: true,
     });
     const target = new Float32Array(
       await gunzip(form.get("tgt-encoding-data") as Blob),
@@ -104,6 +107,24 @@ describe("parseApplyCorrespondencesResponse", () => {
     expect(result.warpedImage?.shape).toEqual([1, 2, 2, 1]);
   });
 
+  it("reads the misalignment map after the warped image", async () => {
+    const field = new Float32Array([1, 2]);
+    const warped = new Float32Array([0.5]);
+    const misalignment = new Float32Array([1]);
+    const result = await parseApplyCorrespondencesResponse(
+      binaryResponse(
+        {
+          relaxed_field_shape: [2, 1, 1, 1],
+          warped_image_shape: [1, 1, 1, 1],
+          misd_image_shape: [1, 1, 1, 1],
+        },
+        [field, warped, misalignment],
+      ),
+    );
+    expect(Array.from(result.warpedImage!.data)).toEqual([0.5]);
+    expect(Array.from(result.misalignment!.data)).toEqual([1]);
+  });
+
   it("gunzips a compressed body", async () => {
     const plain = binaryResponse({ relaxed_field_shape: [2, 1, 1, 1] }, [
       new Float32Array([1, 2]),
@@ -132,5 +153,18 @@ describe("warpedImageToUint8", () => {
         }),
       ),
     ).toEqual([0, 128, 255, 255, 0]);
+  });
+});
+
+describe("misalignmentToUint8", () => {
+  it("marks what the detector flags and leaves the rest 0", () => {
+    expect(
+      Array.from(
+        misalignmentToUint8({
+          data: new Float32Array([1, -1, 0, 0.2]),
+          shape: [1, 4, 1, 1],
+        }),
+      ),
+    ).toEqual([MISALIGNED_VALUE, 0, 0, MISALIGNED_VALUE]);
   });
 });

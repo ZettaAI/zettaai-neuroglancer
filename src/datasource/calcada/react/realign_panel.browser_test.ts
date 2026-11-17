@@ -46,6 +46,7 @@ function makeSession(
     summary: new WatchableValue<RealignSummary>(summary),
     drawBox: vi.fn(),
     addCorrespondence: vi.fn(),
+    autoDetect: vi.fn(async () => {}),
     apply,
     clearPreview: vi.fn(),
     cancel: vi.fn(),
@@ -185,6 +186,28 @@ describe("RealignPanel", () => {
     });
     await mountPanel(session);
     expect(button("Apply").disabled).toBe(true);
+  });
+
+  it("auto-detects in a box that has no correspondences yet", async () => {
+    const { session } = makeSession({
+      hasBox: true,
+      lineCount: 0,
+      rejected: [],
+    });
+    await mountPanel(session);
+    expect(button("Apply").disabled).toBe(true);
+    button("Auto-detect").click();
+    expect(session.autoDetect).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables Auto-detect without a box", async () => {
+    const { session } = makeSession({
+      hasBox: false,
+      lineCount: 0,
+      rejected: [],
+    });
+    await mountPanel(session);
+    expect(button("Auto-detect").disabled).toBe(true);
   });
 
   it("shows the status message", async () => {
