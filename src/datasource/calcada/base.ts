@@ -20,15 +20,16 @@ import type { KvStoreContext } from "#src/kvstore/context.js";
 import { ReadableHttpKvStore } from "#src/kvstore/http/common.js";
 import { joinBaseUrlAndPath } from "#src/kvstore/url.js";
 import type { RawMeshData } from "#src/mesh/backend.js";
+import type { VertexAttributeInfo } from "#src/skeleton/base.js";
 import type {
   ChunkLayoutOptions,
   SliceViewChunkSource,
   SliceViewChunkSpecification,
   SliceViewChunkSpecificationBaseOptions,
   SliceViewChunkSpecificationOptions,
-  DataType,
 } from "#src/sliceview/base.js";
 import { makeSliceViewChunkSpecification } from "#src/sliceview/base.js";
+import { DataType } from "#src/util/data_type.js";
 import type { mat4 } from "#src/util/geom.js";
 import type { FetchOk, HttpError } from "#src/util/http_request.js";
 import { parseUint64 } from "#src/util/json.js";
@@ -121,6 +122,24 @@ export class MeshSourceParameters {
 
   static RPC_ID = "calcada/MeshSource";
 }
+
+export class SkeletonSourceParameters {
+  // The meshing URL; segment skeletons are served below it at /skeleton/{id}.
+  url: string;
+  branchId: number;
+
+  static RPC_ID = "calcada/SkeletonSource";
+}
+
+// Calcada stitches a segment's piece skeletons and marks where the segment
+// really ends; both attributes are float32, in this order on the wire.
+export const CALCADA_SKELETON_VERTEX_ATTRIBUTES = new Map<
+  string,
+  VertexAttributeInfo
+>([
+  ["radius", { dataType: DataType.FLOAT32, numComponents: 1 }],
+  ["endpoint", { dataType: DataType.FLOAT32, numComponents: 1 }],
+]);
 
 export class MultiscaleMeshMetadata {
   transform: mat4;
