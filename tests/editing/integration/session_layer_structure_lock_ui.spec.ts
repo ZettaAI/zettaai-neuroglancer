@@ -360,7 +360,14 @@ describe("data-sources tab URL input and add-source icon", () => {
 
   function fakeDataSource() {
     return {
-      layer: { manager: {}, managedLayer: layer },
+      // A real layer always has these; the Source tab's "Bucket history"
+      // block reads them to decide whether this source hosts the time picker.
+      layer: {
+        manager: {},
+        managedLayer: layer,
+        dataSources: [],
+        dataSourcesChanged: new NullarySignal(),
+      },
       spec: { url: URL },
       messages: new MessageList(),
       progressListener: { addListener() {}, removeListener() {} },

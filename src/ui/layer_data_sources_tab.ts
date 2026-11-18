@@ -44,6 +44,7 @@ import type {
 } from "#src/layer/layer_data_source.js";
 import { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
 import { createImageLayerAsMultiChannel } from "#src/layer/multi_channel_setup.js";
+import { makeVersionTimeSourceSection } from "#src/layer/version_time_control.js";
 import { MeshSource, MultiscaleMeshSource } from "#src/mesh/frontend.js";
 import { SkeletonSource } from "#src/skeleton/frontend.js";
 import { MultiscaleVolumeChunkSource } from "#src/sliceview/volume/frontend.js";
@@ -462,6 +463,11 @@ export class DataSourceView extends RefCounted {
     source.progressListener.addListener(progressListenerWidget);
     this.registerDisposer(() =>
       source.progressListener.removeListener(progressListenerWidget),
+    );
+    // "Bucket history" time picker, right under the URL it rewrites; empty
+    // unless this source reads through `|versioned:`.
+    element.appendChild(
+      this.registerDisposer(makeVersionTimeSourceSection(source)).element,
     );
     this.updateView();
   }
