@@ -63,6 +63,7 @@ import type {
 } from "#src/datasource/calcada/base.js";
 import {
   CALCADA_BULK_LINK_RPC_ID,
+  CALCADA_SKELETON_VERTEX_ATTRIBUTES,
   CHUNKED_GRAPH_LAYER_RPC_ID,
   CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   ChunkedGraphSourceParameters,
@@ -78,6 +79,7 @@ import {
   parseCalcadaError,
   PYCG_APP_VERSION,
   RENDER_RATIO_LIMIT,
+  SkeletonSourceParameters as CalcadaSkeletonSourceParameters,
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
 } from "#src/datasource/calcada/base.js";
 import {
@@ -307,6 +309,7 @@ import {
 } from "#src/segmentation_graph/source.js";
 import type { SharedDisjointUint64Sets } from "#src/shared_disjoint_sets.js";
 import { SharedWatchableValue } from "#src/shared_watchable_value.js";
+import { SkeletonSource } from "#src/skeleton/frontend.js";
 import type {
   FrontendTransformedSource,
   SliceViewSingleResolutionSource,
@@ -485,6 +488,35 @@ const WHITE_COLOR = vec3.fromValues(1, 1, 1);
 // Trace candidates get their own colour so they never read as pending merges,
 // which are red.
 const YELLOW_COLOR = vec3.fromValues(1, 1, 0);
+
+class CalcadaSkeletonSource extends WithParameters(
+  WithSharedKvStoreContext(SkeletonSource),
+  CalcadaSkeletonSourceParameters,
+) {
+  private readonly liveBranchId: WatchableValueInterface<number> | undefined;
+
+  constructor(chunkManager: ChunkManager, options: any) {
+    super(chunkManager, options);
+    this.liveBranchId = options.branchId;
+  }
+
+  initializeCounterpart(rpc: RPC, options: any) {
+    if (this.liveBranchId !== undefined) {
+      options.branchId = this.registerDisposer(
+        SharedWatchableValue.makeFromExisting(rpc, this.liveBranchId),
+      ).rpcId;
+    }
+    super.initializeCounterpart(rpc, options);
+  }
+
+  get skeletonVertexCoordinatesInVoxels() {
+    return false;
+  }
+
+  get vertexAttributes() {
+    return CALCADA_SKELETON_VERTEX_ATTRIBUTES;
+  }
+}
 
 class CalcadaMeshSource extends WithParameters(
   WithSharedKvStoreContext(MeshSource),
@@ -1141,6 +1173,27 @@ async function getVolumeDataSource(
       default: true,
       subsource: { mesh: meshSource },
       subsourceToModelSubspaceTransform,
+    });
+  }
+  if (info.skeletons !== undefined) {
+    // Served as one stitched skeleton per segment, in nm.
+    const skeletonSource = sharedKvStoreContext.chunkManager.getChunkSource(
+      CalcadaSkeletonSource,
+      {
+        sharedKvStoreContext,
+        parameters: {
+          url: info.app!.meshingUrl,
+          branchId: state.branchId.value,
+        },
+        branchId: state.branchId,
+      } as never,
+    );
+    subsources.push({
+      id: "skeletons",
+      default: false,
+      subsource: { mesh: skeletonSource },
+      subsourceToModelSubspaceTransform:
+        getSubsourceToModelSubspaceTransform(info),
     });
   }
   return {

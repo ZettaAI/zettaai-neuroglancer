@@ -37,6 +37,8 @@ import {
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
   VolumeChunkEncoding,
   MeshSourceParameters,
+  SkeletonSourceParameters,
+  CALCADA_SKELETON_VERTEX_ATTRIBUTES,
   CHUNKED_GRAPH_LAYER_RPC_ID,
   CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   RENDER_RATIO_LIMIT,
@@ -76,6 +78,9 @@ import { RenderLayerBackend } from "#src/render_layer_backend.js";
 import { withSegmentationLayerBackendState } from "#src/segmentation_display_state/backend.js";
 import { getObjectKey } from "#src/segmentation_display_state/base.js";
 import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
+import type { SkeletonChunk } from "#src/skeleton/backend.js";
+import { SkeletonSource } from "#src/skeleton/backend.js";
+import { decodeSkeletonChunk } from "#src/skeleton/decode_precomputed_skeleton.js";
 import type { SliceViewChunkSourceBackend } from "#src/sliceview/backend.js";
 import { deserializeTransformedSources } from "#src/sliceview/backend.js";
 import { decodeCompressedSegmentationChunk } from "#src/sliceview/backend_chunk_decoders/compressed_segmentation.js";
@@ -345,6 +350,42 @@ export class CalcadaVolumeChunkSource extends WithParameters(
     const { pieces, roots } = parseLutTrailer(lutBuffer);
     if (pieces.length > 0) linkChunkEquivalences(pieces, roots, branchId);
     await this.chunkDecoder(chunk, signal, rawChunk);
+  }
+}
+
+@registerSharedObject()
+export class CalcadaSkeletonSource extends WithParameters(
+  WithSharedKvStoreContextCounterpart(SkeletonSource),
+  SkeletonSourceParameters,
+) {
+  // Follows the layer's branch like CalcadaMeshSource: a branch-only root has
+  // no pieces on main.
+  branchId: SharedWatchableValue<number> | undefined;
+  httpSource = getHttpSource(
+    this.sharedKvStoreContext.kvStoreContext,
+    this.parameters.url,
+  );
+
+  constructor(rpc: RPC, options: any) {
+    super(rpc, options);
+    if (options.branchId !== undefined) {
+      this.branchId = rpc.get(options.branchId);
+    }
+  }
+
+  async download(chunk: SkeletonChunk, signal: AbortSignal) {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const branchId = this.branchId?.value ?? this.parameters.branchId;
+    const query = branchId > 0 ? `?branch_id=${branchId}` : "";
+    const response = await fetchOkImpl(
+      `${baseUrl}/skeleton/${chunk.objectId}${query}`,
+      { signal },
+    );
+    decodeSkeletonChunk(
+      chunk,
+      await response.arrayBuffer(),
+      CALCADA_SKELETON_VERTEX_ATTRIBUTES,
+    );
   }
 }
 
