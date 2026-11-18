@@ -445,6 +445,20 @@ describe("painted-volume shader", () => {
       }
     });
   });
+
+  it("discards only in main, as the D3D11 shader compiler requires", () => {
+    webglTest((gl) => {
+      const shader = buildPaintedVolumeShader(gl);
+      try {
+        const code = shader.fragmentSource.replace(/\/\/.*$/gm, "");
+        const [beforeMain, ...rest] = code.split("void main()");
+        expect(rest).toHaveLength(1);
+        expect(beforeMain).not.toMatch(/\bdiscard\b/);
+      } finally {
+        shader.dispose();
+      }
+    });
+  });
 });
 
 describe("painted-volume ray march", () => {

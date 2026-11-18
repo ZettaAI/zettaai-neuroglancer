@@ -216,6 +216,12 @@ vec3 surfaceNormal(vec3 point, vec3 ray) {
 `;
 
 const glsl_shadeHit = `
+// Set when the hit lies beyond the far plane; main() then discards the
+// fragment. Discarding in a function the march loop calls makes the D3D11
+// shader compiler (FXC, behind ANGLE on Windows) fail at draw time, and the
+// viewer loses its WebGL context.
+bool hitBeyondFarPlane = false;
+
 // Lit colour (as the mesh shader lights), the hit's own depth, which
 // replaces the proxy face's depth both in the depth buffer and in out_z, and
 // the pick id of the segment's class, so hovering it picks the segment.
@@ -225,7 +231,10 @@ void shadeHit(vec3 rgb, uint segmentClass, vec3 texelNormal, vec3 hitPoint) {
   vec4 hitClip = uModelViewProjection * vec4(hitPoint, 1.0);
   float depth = (hitClip.z / hitClip.w + 1.0) * 0.5;
   // The ray is not cut at the far plane (see the march), so cut the hit here.
-  if (depth > 1.0) discard;
+  if (depth > 1.0) {
+    hitBeyondFarPlane = true;
+    return;
+  }
   gl_FragDepth = depth;
   uint pickId = uPickIdBase == 0u ? 0u : uPickIdBase + segmentClass;
   emit(vec4(rgb * lighting, 1.0), pickId);
@@ -356,6 +365,7 @@ if (distancePrevious >= 0.5) {
     cellNormal[entryAxis] = -float(stepDirection[entryAxis]);
     if (shadeSurface(nearPoint + ray * tStart, cellNormal, firstTexel,
                      lastTexel)) {
+      if (hitBeyondFarPlane) discard;
       return;
     }
   }
@@ -403,6 +413,7 @@ for (int i = 0; i < uMaxSteps; ++i) {
     uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
     if (drawnColor(texel, segmentClass, rgb)) {
       shadeHit(rgb, segmentClass, cellNormal, nearPoint + ray * tHit);
+      if (hitBeyondFarPlane) discard;
       return;
     }
   }
@@ -434,6 +445,7 @@ for (int i = 0; i < uMaxSteps; ++i) {
       vec3 hitPoint = nearPoint + ray * tSurface;
       if (shadeSurface(hitPoint, surfaceNormal(hitPoint, ray), firstTexel,
                        lastTexel)) {
+        if (hitBeyondFarPlane) discard;
         return;
       }
       insideUndrawn = true;
