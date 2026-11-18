@@ -115,10 +115,6 @@ export function watchHostsVersionTime(
 }
 
 /**
- * Earliest time the layer's `info` file existed, so the picker cannot select
- * a time before the layer had any data. `0` (no limit) when unknown.
- */
-/**
  * The picker commits every keystroke and clamps it to its lower limit, so a
  * limit inside a day would snap a half-typed time (hour "1" of "15:30") to
  * the limit. The limit is therefore the start of the day the layer appeared:
@@ -139,6 +135,10 @@ function earliestTimeSourceOf(layer: UserLayer): string | undefined {
     : versionedKvStoreUrlOf(dataSource.spec.url);
 }
 
+/**
+ * Earliest time the layer's `info` file existed, so the picker cannot select
+ * a time before the layer had any data. `0` (no limit) when unknown.
+ */
 async function getEarliestLayerTime(layer: UserLayer): Promise<number> {
   const kvStoreUrl = earliestTimeSourceOf(layer);
   if (kvStoreUrl === undefined) return 0;
@@ -151,16 +151,6 @@ async function getEarliestLayerTime(layer: UserLayer): Promise<number> {
   return (await store.earliestVersionTime(path, {})) ?? 0;
 }
 
-/**
- * State behind the "Bucket history" time picker.
- *
- * The picker writes every change into `intermediateTimestamp` (a draft). A
- * draft is applied to the layer right away when it comes from the calendar or
- * the clear button, but not while the time field is being typed in: each
- * applied time reloads the layer, so applying every keystroke would reload it
- * for each half-typed value (e.g. hour "0" of "01:…"). Typing is applied by
- * `applyDraft()` on Enter or when the field loses focus.
- */
 /**
  * What the layer's bucket can show for past times. `"checking"` until known;
  * `"unknown"` when the check failed for another reason (the picker then
@@ -185,6 +175,16 @@ async function getLayerHistoryStatus(
   return store.historyStatus({});
 }
 
+/**
+ * State behind the "Bucket history" time picker.
+ *
+ * The picker writes every change into `intermediateTimestamp` (a draft). A
+ * draft is applied to the layer right away when it comes from the calendar or
+ * the clear button, but not while the time field is being typed in: each
+ * applied time reloads the layer, so applying every keystroke would reload it
+ * for each half-typed value (e.g. hour "0" of "01:…"). Typing is applied by
+ * `applyDraft()` on Enter or when the field loses focus.
+ */
 export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
   const intermediateTimestamp = new WatchableValue<number | undefined>(
     getLayerVersionTime(layer),
