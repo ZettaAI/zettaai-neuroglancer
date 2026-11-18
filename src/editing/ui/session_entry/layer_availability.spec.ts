@@ -206,6 +206,9 @@ describe("computeLayerAvailability — tier-2 constraints", () => {
     );
     // Product restriction — the wording must not imply a technical fault.
     expect(UNSUPPORTED_IN_SESSION_DETAIL).not.toMatch(/broken|error|fault/i);
+    // Names every blocked scheme, so a versioned layer's hint is not about
+    // some other kind of layer.
+    expect(UNSUPPORTED_IN_SESSION_DETAIL).toContain("|versioned:");
   });
 
   it("disables both options for a region-overlap failure with both extents in the detail", () => {
