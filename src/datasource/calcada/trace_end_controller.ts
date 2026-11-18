@@ -2,7 +2,10 @@ import { errorMessage } from "#src/datasource/calcada/annotation_tables/annotati
 import type { Verdict } from "#src/datasource/calcada/candidate_filter_tree.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import type { EndSphere } from "#src/datasource/calcada/trace_cursor/end_sphere.js";
-import type { CheckOutcome } from "#src/datasource/calcada/trace_end_check.js";
+import type {
+  CheckOutcome,
+  TraceDecision,
+} from "#src/datasource/calcada/trace_end_check.js";
 import {
   checkOutcome,
   endPointOf,
@@ -48,6 +51,9 @@ export interface TraceEndDeps {
   ): Promise<void>;
   startThreshold(): number;
   radiusNm(): number;
+  /** The trace's segment now; undefined once the trace is gone. */
+  seedRoot(): bigint | undefined;
+  decided(): ReadonlySet<bigint>;
   branchId(): number;
   write(row: TraceEndpointRow, branchId: number): Promise<bigint>;
   remove(
@@ -68,9 +74,14 @@ const GRAPH_UNKNOWN_ERROR = "Could not load the piece graph for the end check";
 const CHILDREN_READ_ERROR = "Could not read the merged piece's candidates";
 const SPHERE_READ_ERROR = "Could not look for candidates around the trace end";
 
+/** The decision an end is asked after; undefined at the seed sphere. */
+interface EndOrigin {
+  after: TraceDecision;
+  lineId: bigint;
+}
+
 interface EndCheck {
-  /** The rejected candidate's; undefined at the seed sphere. */
-  lineId: bigint | undefined;
+  origin: EndOrigin | undefined;
   endPoint: Float32Array;
   radiusNm: number;
   /** What `found` was read with; the sphere can shrink below it and grow back. */
@@ -104,8 +115,18 @@ interface PreparedReject {
   found: Promise<EdgeCandidate[] | undefined>;
 }
 
+/** The ends of an accepted segment still to ask about; never changed in place. */
+interface AcceptEnds {
+  lineId: bigint;
+  /** Shown while the ends are still being read. */
+  contact: Float32Array;
+  depth: number;
+  ends: Promise<readonly Float32Array[]>;
+  next: number;
+}
+
 type HistoryEntry =
-  | { kind: "accept"; lineId: bigint }
+  | { kind: "accept"; lineId: bigint; points: readonly Float32Array[] }
   | {
       kind: "endpoint";
       check: EndCheck;
@@ -114,6 +135,8 @@ type HistoryEntry =
       branchId: number;
       rowId: Promise<bigint | undefined>;
       mark: unknown;
+      /** What was left to ask when it was answered. */
+      acceptEnds: readonly AcceptEnds[];
     };
 
 export class TraceEndController {
@@ -124,6 +147,8 @@ export class TraceEndController {
   private token = 0;
   private history: HistoryEntry[] = [];
   private prepared: PreparedReject | undefined;
+  // Newest accept last, so its ends are asked before the ones above it.
+  private acceptEnds: AcceptEnds[] = [];
 
   constructor(private readonly deps: TraceEndDeps) {}
 
@@ -163,16 +188,25 @@ export class TraceEndController {
   }
 
   /**
-   * Asks for an end only inside a look-deeper round. `seedRoot` is the seed
-   * before the merge: a child leading into it is now inside.
+   * `ends` are the accepted segment's, farthest from the contact first; each
+   * is asked about once the trace has nowhere to go on to. `seedRoot` is the
+   * seed before the merge: a child leading into it is now inside.
    */
   async afterAccept(
     candidate: EdgeCandidate,
     children: Promise<readonly EdgeCandidate[]>,
+    ends: Promise<readonly Float32Array[]>,
     seedRoot: bigint,
     depth: number,
     decided: ReadonlySet<bigint>,
   ): Promise<void> {
+    this.acceptEnds.push({
+      lineId: candidate.lineId,
+      contact: endPointOf("accept", candidate),
+      depth: depth + 1,
+      ends: ends.catch(() => []),
+      next: 0,
+    });
     const token = this.invalidate();
     const round = this.round;
     this.showChecking(
@@ -237,7 +271,7 @@ export class TraceEndController {
     }
     await this.checkAround(
       endPointOf("reject", candidate),
-      candidate.lineId,
+      { after: "reject", lineId: candidate.lineId },
       depth,
       decided,
       (endPoint, radiusNm) =>
@@ -263,7 +297,7 @@ export class TraceEndController {
 
   private async checkAround(
     endPoint: Float32Array,
-    lineId: bigint | undefined,
+    origin: EndOrigin | undefined,
     depth: number,
     decided: ReadonlySet<bigint>,
     lookUp: (
@@ -281,7 +315,7 @@ export class TraceEndController {
       const outcome = await this.outcomeAt(found, decided, undefined, token);
       if (outcome === undefined) return;
       this.check = {
-        lineId,
+        origin,
         endPoint,
         radiusNm,
         readRadiusNm: radiusNm,
@@ -406,10 +440,7 @@ export class TraceEndController {
           threshold: this.threshold,
           radiusNm: check.radiusNm,
           position: check.endPoint,
-          ...(check.lineId !== undefined && {
-            after: "reject",
-            lineId: check.lineId,
-          }),
+          ...check.origin,
         },
         branchId,
       )
@@ -427,6 +458,7 @@ export class TraceEndController {
       branchId,
       rowId,
       mark: this.deps.undoMark(),
+      acceptEnds: [...this.acceptEnds],
     });
     this.close();
   }
@@ -485,6 +517,7 @@ export class TraceEndController {
     if (filled !== undefined) this.settle(filled, threshold);
   }
 
+  /** Skips the end in question; the ends still to ask about stay asked. */
   dismiss(): void {
     this.prepared = undefined;
     if (this.prompt !== undefined) {
@@ -496,6 +529,15 @@ export class TraceEndController {
       this.round = undefined;
       this.deps.changed();
     }
+  }
+
+  /** Shuts the prompt without asking about the next end, e.g. for an undo. */
+  interrupt(): void {
+    this.prepared = undefined;
+    this.round = undefined;
+    this.invalidate();
+    this.setPrompt(undefined);
+    this.deps.showNext();
   }
 
   async undo(): Promise<boolean> {
@@ -521,6 +563,7 @@ export class TraceEndController {
     }
     if (token !== this.token) return true;
     this.round = undefined;
+    this.acceptEnds = [...newest.acceptEnds];
     this.check = newest.check;
     this.open(newest.threshold);
     return true;
@@ -531,20 +574,30 @@ export class TraceEndController {
     return newest?.kind === "endpoint" ? newest.mark : undefined;
   }
 
-  noteAccept(lineId: bigint): void {
-    this.history.push({ kind: "accept", lineId });
+  noteAccept(candidate: EdgeCandidate): void {
+    this.history.push({
+      kind: "accept",
+      lineId: candidate.lineId,
+      points: [candidate.pointA, candidate.pointB],
+    });
   }
 
   forgetAccept(): void {
     const index = this.history.findLastIndex(
       (entry) => entry.kind === "accept",
     );
-    if (index >= 0) this.history.splice(index, 1);
+    if (index < 0) return;
+    const [forgotten] = this.history.splice(index, 1);
+    if (forgotten.kind !== "accept") return;
+    this.acceptEnds = this.acceptEnds.filter(
+      (ends) => ends.lineId !== forgotten.lineId,
+    );
   }
 
   reset(): void {
     this.invalidate();
     this.history = [];
+    this.acceptEnds = [];
     this.prepared = undefined;
     this.round = undefined;
     this.setPrompt(undefined);
@@ -604,9 +657,55 @@ export class TraceEndController {
 
   private close() {
     this.round = undefined;
-    this.invalidate();
-    this.setPrompt(undefined);
-    this.deps.showNext();
+    const token = this.invalidate();
+    const next = this.acceptEnds.pop();
+    if (next === undefined) {
+      this.setPrompt(undefined);
+      this.deps.showNext();
+      return;
+    }
+    void this.askAcceptEnd(next, token);
+  }
+
+  private async askAcceptEnd(acceptEnds: AcceptEnds, token: number) {
+    const radiusNm = this.deps.radiusNm();
+    this.showChecking(
+      radiusNm,
+      this.deps.startThreshold(),
+      acceptEnds.contact,
+      false,
+    );
+    const ends = await acceptEnds.ends;
+    if (token !== this.token) return;
+    let index = acceptEnds.next;
+    while (index < ends.length && this.reached(ends[index], radiusNm)) {
+      ++index;
+    }
+    const seedRoot = this.deps.seedRoot();
+    if (index >= ends.length || seedRoot === undefined) {
+      this.close();
+      return;
+    }
+    if (index + 1 < ends.length) {
+      this.acceptEnds.push({ ...acceptEnds, next: index + 1 });
+    }
+    await this.checkAround(
+      ends[index],
+      { after: "accept", lineId: acceptEnds.lineId },
+      acceptEnds.depth,
+      this.deps.decided(),
+      (endPoint, checkRadiusNm) =>
+        this.deps.fetchAround(seedRoot, endPoint, checkRadiusNm),
+    );
+  }
+
+  /** An accept or an answered end of the trace is already there. */
+  private reached(end: Float32Array, radiusNm: number): boolean {
+    return this.history.some((entry) =>
+      (entry.kind === "accept" ? entry.points : [entry.check.endPoint]).some(
+        (point) => this.deps.insideEndSphere(point, end, radiusNm),
+      ),
+    );
   }
 
   private invalidate(): number {

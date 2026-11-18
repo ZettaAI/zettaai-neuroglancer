@@ -15,6 +15,7 @@ import { TRACE_SPHERE_RADIUS_MIN_NM } from "#src/datasource/calcada/trace_state.
 const START_THRESHOLD = 0.3;
 const RADIUS_NM = 1000;
 const SEED_ROOT = 99n;
+const MERGED_ROOT = 98n;
 const DEPTH = 2;
 const MAIN_BRANCH = 0;
 const OTHER_BRANCH = 7;
@@ -102,6 +103,16 @@ class FakeDeps implements TraceEndDeps {
   graphFillLeavesUnknown = false;
   verdictThresholds: (number | undefined)[] = [];
   mark: unknown = "edit-1";
+  currentSeedRoot: bigint | undefined = MERGED_ROOT;
+  decidedLines = new Set<bigint>();
+
+  seedRoot() {
+    return this.currentSeedRoot;
+  }
+
+  decided() {
+    return this.decidedLines;
+  }
 
   fetchAround(seedRoot: bigint, center: Float32Array, radiusNm: number) {
     const result = deferred<EdgeCandidate[]>();
@@ -192,10 +203,12 @@ function acceptWith(
   controller: TraceEndController,
   children: EdgeCandidate[],
   decided: ReadonlySet<bigint> = new Set(),
+  ends: readonly Float32Array[] = [],
 ) {
   return controller.afterAccept(
     DECIDED,
     Promise.resolve(children),
+    Promise.resolve(ends),
     SEED_ROOT,
     DEPTH,
     decided,
@@ -301,6 +314,7 @@ describe("TraceEndController", () => {
     await controller.afterAccept(
       DECIDED,
       Promise.reject(new Error("HTTP 503")),
+      Promise.resolve([]),
       SEED_ROOT,
       DEPTH,
       new Set(),
@@ -542,6 +556,7 @@ describe("TraceEndController", () => {
     await controller.afterAccept(
       lower,
       Promise.reject(new Error("HTTP 503")),
+      Promise.resolve([]),
       SEED_ROOT,
       DEPTH,
       new Set([30n]),
@@ -859,7 +874,7 @@ describe("TraceEndController", () => {
   it("undo with an accept on top returns false", async () => {
     const { deps, controller } = setUp();
     await answerWithRow(controller, deps, 55n);
-    controller.noteAccept(6n);
+    controller.noteAccept(candidate({ lineId: 6n }));
     expect(await controller.undo()).toBe(false);
     expect(deps.removed).toEqual([]);
     expect(controller.prompt).toBeUndefined();
@@ -867,7 +882,7 @@ describe("TraceEndController", () => {
 
   it("endpoints above an accept are undone before it", async () => {
     const { deps, controller } = setUp();
-    controller.noteAccept(5n);
+    controller.noteAccept(candidate({ lineId: 5n }));
     await answerWithRow(controller, deps, 55n);
     await answerWithRow(controller, deps, 56n);
     expect(await controller.undo()).toBe(true);
@@ -888,14 +903,14 @@ describe("TraceEndController", () => {
   it("has no endpoint mark when an accept is newest", async () => {
     const { deps, controller } = setUp();
     await answerWithRow(controller, deps, 55n);
-    controller.noteAccept(6n);
+    controller.noteAccept(candidate({ lineId: 6n }));
     expect(controller.newestEndpointMark()).toBeUndefined();
   });
 
   it("forgetAccept drops the newest accept from the history", async () => {
     const { deps, controller } = setUp();
     await answerWithRow(controller, deps, 55n);
-    controller.noteAccept(6n);
+    controller.noteAccept(candidate({ lineId: 6n }));
     controller.forgetAccept();
     expect(await controller.undo()).toBe(true);
     expect(deps.removed).toEqual([55n]);
@@ -1151,5 +1166,201 @@ describe("TraceEndController", () => {
     deps.branch = MAIN_BRANCH;
     expect(await controller.undo()).toBe(true);
     expect(deps.removedOn).toEqual([OTHER_BRANCH]);
+  });
+});
+
+describe("TraceEndController, the ends of an accepted segment", () => {
+  const FAR_END = Float32Array.of(5000, 0, 0);
+  const NEAR_END = Float32Array.of(3000, 0, 0);
+  // Inside the end sphere around the accept's own contact.
+  const CONTACT_END = Float32Array.of(4, 5, 600);
+
+  async function acceptWithEnds(
+    controller: TraceEndController,
+    children: EdgeCandidate[],
+    ends: readonly Float32Array[],
+  ) {
+    controller.noteAccept(DECIDED);
+    await acceptWith(controller, children, new Set(), ends);
+  }
+
+  async function findAtEnd(deps: FakeDeps, found: EdgeCandidate[] = []) {
+    await settle();
+    deps.fetches.at(-1)!.result.resolve(found);
+    await settle();
+  }
+
+  it("asks about each end, farthest first, around the merged segment", async () => {
+    const { deps, controller } = setUp();
+    await acceptWithEnds(controller, [LOW], [FAR_END, NEAR_END]);
+    await findAtEnd(deps);
+    expect(deps.fetches[0]).toMatchObject({
+      seedRoot: MERGED_ROOT,
+      center: FAR_END,
+      radiusNm: RADIUS_NM,
+    });
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: FAR_END,
+    });
+    controller.answer("certain");
+    await findAtEnd(deps);
+    expect(deps.fetches[1].center).toBe(NEAR_END);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: NEAR_END,
+    });
+    controller.answer("uncertain");
+    expect(deps.writes.map((write) => write.row)).toEqual([
+      {
+        status: "certain",
+        threshold: START_THRESHOLD,
+        radiusNm: RADIUS_NM,
+        position: FAR_END,
+        after: "accept",
+        lineId: DECIDED.lineId,
+      },
+      {
+        status: "uncertain",
+        threshold: START_THRESHOLD,
+        radiusNm: RADIUS_NM,
+        position: NEAR_END,
+        after: "accept",
+        lineId: DECIDED.lineId,
+      },
+    ]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("does not ask about the end the accept itself joined at", async () => {
+    const { deps, controller } = setUp();
+    await acceptWithEnds(controller, [LOW], [CONTACT_END]);
+    await settle();
+    expect(deps.fetches).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("goes on with a candidate that passes at an end, one level below the accept", async () => {
+    const { deps, controller } = setUp();
+    const atEnd = candidate({ lineId: 30n, score: 0.8 });
+    await acceptWithEnds(controller, [LOW], [FAR_END]);
+    await findAtEnd(deps, [atEnd]);
+    expect(deps.continued).toEqual([{ candidate: atEnd, depth: DEPTH + 1 }]);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("keeps the ends for after the branch a passing child leads into", async () => {
+    const { deps, controller } = setUp();
+    const child = candidate({ lineId: 30n, score: 0.8 });
+    await acceptWithEnds(controller, [child], [FAR_END]);
+    expect(deps.continued).toEqual([{ candidate: child, depth: DEPTH + 1 }]);
+    expect(deps.fetches).toEqual([]);
+    await decide(controller, deps, "reject", []);
+    controller.answer("certain");
+    await findAtEnd(deps);
+    expect(deps.fetches.at(-1)!.center).toBe(FAR_END);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: FAR_END,
+    });
+  });
+
+  it("skips an end a later accept already reached", async () => {
+    const { deps, controller } = setUp();
+    const child = candidate({ lineId: 30n, score: 0.8 });
+    await acceptWithEnds(controller, [child], [FAR_END]);
+    controller.noteAccept(
+      candidate({ lineId: 31n, pointA: FAR_END, pointB: FAR_END }),
+    );
+    await decide(controller, deps, "reject", []);
+    controller.answer("certain");
+    await settle();
+    expect(deps.fetches).toHaveLength(1);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("undoing an end's answer asks it again, then the next one", async () => {
+    const { deps, controller } = setUp();
+    await acceptWithEnds(controller, [LOW], [FAR_END, NEAR_END]);
+    await findAtEnd(deps);
+    controller.answer("certain");
+    deps.writes[0].result.resolve(55n);
+    await findAtEnd(deps);
+    expect(controller.prompt?.endPoint).toBe(NEAR_END);
+    expect(await controller.undo()).toBe(true);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: FAR_END,
+    });
+    controller.answer("uncertain");
+    await findAtEnd(deps);
+    expect(controller.prompt).toMatchObject({
+      phase: "open",
+      endPoint: NEAR_END,
+    });
+  });
+
+  it("dismiss skips the end in question and asks the next", async () => {
+    const { deps, controller } = setUp();
+    await acceptWithEnds(controller, [LOW], [FAR_END, NEAR_END]);
+    await findAtEnd(deps);
+    controller.dismiss();
+    await findAtEnd(deps);
+    expect(controller.prompt).toMatchObject({ endPoint: NEAR_END });
+    expect(deps.writes).toEqual([]);
+  });
+
+  it("interrupt shuts the prompt and asks nothing more for now", async () => {
+    const { deps, controller } = setUp();
+    await acceptWithEnds(controller, [LOW], [FAR_END, NEAR_END]);
+    await findAtEnd(deps);
+    controller.interrupt();
+    await settle();
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.fetches).toHaveLength(1);
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("forgetting the accept forgets the ends it still had to ask about", async () => {
+    const { deps, controller } = setUp();
+    const child = candidate({ lineId: 30n, score: 0.8 });
+    await acceptWithEnds(controller, [child], [FAR_END]);
+    controller.forgetAccept();
+    await decide(controller, deps, "reject", []);
+    controller.answer("certain");
+    await settle();
+    expect(deps.fetches).toHaveLength(1);
+    expect(controller.prompt).toBeUndefined();
+  });
+
+  it("an accept whose skeleton could not be read asks about no end", async () => {
+    const { deps, controller } = setUp();
+    controller.noteAccept(DECIDED);
+    await controller.afterAccept(
+      DECIDED,
+      Promise.resolve([LOW]),
+      Promise.reject(new Error("HTTP 422")),
+      SEED_ROOT,
+      DEPTH,
+      new Set(),
+    );
+    await settle();
+    expect(deps.fetches).toEqual([]);
+    expect(controller.prompt).toBeUndefined();
+    expect(deps.shownNext).toBe(1);
+  });
+
+  it("reset forgets every end still to ask about", async () => {
+    const { deps, controller } = setUp();
+    const child = candidate({ lineId: 30n, score: 0.8 });
+    await acceptWithEnds(controller, [child], [FAR_END]);
+    controller.reset();
+    await decide(controller, deps, "reject", []);
+    controller.answer("certain");
+    await settle();
+    expect(deps.fetches).toHaveLength(1);
   });
 });

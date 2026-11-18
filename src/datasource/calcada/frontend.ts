@@ -197,6 +197,11 @@ import {
   isStaleRoot,
 } from "#src/datasource/calcada/root_resolution.js";
 import { SegmentPairCandidates } from "#src/datasource/calcada/segment_pair_candidates.js";
+import type { SegmentSkeleton } from "#src/datasource/calcada/segment_skeleton_ends.js";
+import {
+  decodeSegmentSkeleton,
+  segmentEndsNm,
+} from "#src/datasource/calcada/segment_skeleton_ends.js";
 import { firstShownOverGraph } from "#src/datasource/calcada/shown_graph_layer.js";
 import type { CutLineNm } from "#src/datasource/calcada/split_cuts_table.js";
 import {
@@ -3195,6 +3200,8 @@ class ZettaTraceSession extends RefCounted {
       startThreshold: () =>
         scoreFloor(state.filter.value, state.scoreRange.value),
       radiusNm: () => state.endRadiusNm.value,
+      seedRoot: () => state.seedRoot.value,
+      decided: () => this.decided,
       branchId: () => this.branchId,
       write: (row, branchId) => connection.traceEndpoints.write(branchId, row),
       remove: (rowId, status, branchId) =>
@@ -4402,6 +4409,8 @@ class ZettaTraceSession extends RefCounted {
     // moment it is absorbed, so afterwards there is no id left to ask about.
     const childrenRead = this.readChildren(accepted.partnerRootId);
     const children = childrenOrNone(childrenRead);
+    // Read before the merge for the same reason; an unreadable skeleton asks about no end.
+    const ends = this.partnerEnds(accepted).catch(() => []);
 
     let merged: { root: bigint; operationId: number };
     try {
@@ -4435,7 +4444,7 @@ class ZettaTraceSession extends RefCounted {
       pointA: accepted.pointA,
       pointB: accepted.pointB,
     });
-    if (sameTrace()) this.endController.noteAccept(accepted.lineId);
+    if (sameTrace()) this.endController.noteAccept(accepted);
     // The edit handler skips the trace's own merges (the trace is busy), so the
     // roots they retire are recorded here. Without this, leaving the trace put
     // the pre-merge seed back on screen: a dead id still drawn from cached mesh
@@ -4474,6 +4483,7 @@ class ZettaTraceSession extends RefCounted {
       void this.endController.afterAccept(
         accepted,
         childrenRead,
+        ends,
         seedRoot,
         acceptedDepth,
         this.decided,
@@ -4481,6 +4491,23 @@ class ZettaTraceSession extends RefCounted {
     }
     this.setBusy(false);
     void this.refreshGraphContext();
+  }
+
+  /**
+   * Where the segment about to be merged in ends, farthest from the contact
+   * first; none when the graph has no skeletons or this one is unreadable.
+   */
+  private async partnerEnds(accepted: EdgeCandidate): Promise<Float32Array[]> {
+    const coordinateSpace = this.layer.manager.root.coordinateSpace.value;
+    const contactNm = globalToNanometres(accepted.pointB, coordinateSpace);
+    if (contactNm === undefined) return [];
+    const skeleton = await this.connection.graph.fetchSegmentSkeleton(
+      accepted.partnerRootId,
+    );
+    return segmentEndsNm(skeleton, contactNm).flatMap((endNm) => {
+      const end = nanometresToGlobal(endNm, coordinateSpace);
+      return end === undefined ? [] : [end];
+    });
   }
 
   /**
@@ -4736,7 +4763,7 @@ class ZettaTraceSession extends RefCounted {
       this.setStatus("Nothing to undo for this seed");
       return;
     }
-    this.endController.dismiss();
+    this.endController.interrupt();
     this.setBusy(true);
     this.setProgress("Undoing…");
     try {
@@ -8655,6 +8682,14 @@ export class CalcadaGraphSource extends SegmentationGraphSource {
    * Where each piece of a segment is, read from its mesh manifest — the same
    * request the mesh layer makes, so it is usually answered from cache.
    */
+  async fetchSegmentSkeleton(rootId: bigint): Promise<SegmentSkeleton> {
+    const { fetchOkImpl, baseUrl } = this.meshingHttpSource;
+    const branchId = this.branchId.value;
+    const query = branchId > 0 ? `?branch_id=${branchId}` : "";
+    const response = await fetchOkImpl(`${baseUrl}/skeleton/${rootId}${query}`);
+    return decodeSegmentSkeleton(await response.arrayBuffer());
+  }
+
   async fetchPieceSpheres(rootId: bigint): Promise<Map<bigint, PieceSphere>> {
     const { fetchOkImpl, baseUrl } = this.meshingHttpSource;
     const path = buildManifestPath(rootId, 0, this.branchId.value);
