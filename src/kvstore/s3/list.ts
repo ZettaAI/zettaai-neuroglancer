@@ -239,3 +239,11 @@ export function getS3UrlKind(
 ): S3UrlKind | null | undefined {
   return getUrlKindCache(memoize).get(origin);
 }
+
+export function setS3UrlKind(
+  memoize: StringMemoize,
+  origin: string,
+  urlKind: S3UrlKind,
+) {
+  getUrlKindCache(memoize).set(origin, urlKind);
+}

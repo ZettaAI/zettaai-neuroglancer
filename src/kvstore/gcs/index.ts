@@ -25,6 +25,16 @@ import type {
   StatResponse,
 } from "#src/kvstore/index.js";
 import { encodePathForUrl } from "#src/kvstore/url.js";
+import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
+import {
+  EARLIER_VERSIONS_PAGE_SIZE,
+  parseListingTime,
+} from "#src/kvstore/versioned/object_version_store.js";
+import type {
+  GcsObjectGeneration,
+  ObjectVersionLifetime,
+} from "#src/kvstore/versioned/version_at_time.js";
+import { gcsGenerationLifetimes } from "#src/kvstore/versioned/version_at_time.js";
 import type { FetchOk } from "#src/util/http_request.js";
 import { fetchOk } from "#src/util/http_request.js";
 import {
@@ -35,17 +45,18 @@ import {
   verifyString,
   verifyStringArray,
 } from "#src/util/json.js";
+import type { ProgressOptions } from "#src/util/progress_listener.js";
 import { ProgressSpan } from "#src/util/progress_listener.js";
 import { getRandomHexString } from "#src/util/random.js";
 
-export class GcsKvStore implements KvStore {
+export class GcsKvStore implements KvStore, ObjectVersionStore {
   constructor(
     public bucket: string,
     public baseUrlForDisplay: string = `gs://${bucket}/`,
     private fetchOkImpl: FetchOk = fetchOk,
   ) {}
 
-  private getObjectUrl(key: string): string {
+  private getObjectUrl(key: string, generation?: string): string {
     // Include random query string parameter (ignored by GCS) to bypass GCS cache
     // and ensure a cached response is never used.
     //
@@ -66,6 +77,9 @@ export class GcsKvStore implements KvStore {
     return (
       `https://storage.googleapis.com/storage/v1/b/${this.bucket}/o/` +
       `${encodeURIComponent(key)}?alt=media` +
+      (generation === undefined
+        ? ""
+        : `&generation=${encodeURIComponent(generation)}`) +
       `&neuroglancer=${getRandomHexString()}`
     );
   }
@@ -137,6 +151,128 @@ export class GcsKvStore implements KvStore {
     };
   }
 
+  /**
+   * Lists every generation of exactly `key` on a bucket with object versioning
+   * (noncurrent generations included). Requires `storage.objects.list`.
+   */
+  async listObjectVersions(
+    key: string,
+    options: Partial<ProgressOptions>,
+  ): Promise<ObjectVersionLifetime[]> {
+    const { progressListener } = options;
+    using _span =
+      progressListener === undefined
+        ? undefined
+        : new ProgressSpan(progressListener, {
+            message: `Listing versions of ${this.getUrl(key)}`,
+          });
+    const generations: GcsObjectGeneration[] = [];
+    let pageToken: string | undefined;
+    do {
+      const response = await this.fetchOkImpl(
+        `https://storage.googleapis.com/storage/v1/b/${this.bucket}/o?` +
+          `versions=true&prefix=${encodeURIComponent(key)}` +
+          // Bound the listing to exactly `key`: without it, `by_id/1` would
+          // page through every version of `by_id/1*`.
+          `&startOffset=${encodeURIComponent(key)}` +
+          `&endOffset=${encodeURIComponent(key + "\x01")}` +
+          `&fields=${encodeURIComponent("items(name,generation,timeCreated,timeDeleted),nextPageToken")}` +
+          (pageToken === undefined
+            ? ""
+            : `&pageToken=${encodeURIComponent(pageToken)}`) +
+          `&neuroglancerOrigin=${encodeURIComponent(location.origin)}`,
+        { signal: options.signal, progressListener },
+      );
+      const responseJson = await response.json();
+      verifyObject(responseJson);
+      const items = verifyOptionalObjectProperty(
+        responseJson,
+        "items",
+        (items) => parseArray(items, parseGcsGenerationListItem),
+        [],
+      );
+      for (const { name, generation } of items) {
+        // Defensive: the offsets already exclude longer keys (`info_old`).
+        if (name === key) generations.push(generation);
+      }
+      pageToken = verifyOptionalObjectProperty(
+        responseJson,
+        "nextPageToken",
+        verifyString,
+      );
+    } while (pageToken !== undefined);
+    return gcsGenerationLifetimes(generations);
+  }
+
+  async hasEarlierVersions(
+    prefix: string,
+    options: Partial<ProgressOptions>,
+  ): Promise<boolean> {
+    const response = await this.fetchOkImpl(
+      `https://storage.googleapis.com/storage/v1/b/${this.bucket}/o?` +
+        `versions=true&prefix=${encodeURIComponent(prefix)}` +
+        `&maxResults=${EARLIER_VERSIONS_PAGE_SIZE}` +
+        `&fields=${encodeURIComponent("items(name,timeDeleted)")}` +
+        `&neuroglancerOrigin=${encodeURIComponent(location.origin)}`,
+      { signal: options.signal, progressListener: options.progressListener },
+    );
+    const responseJson = await response.json();
+    verifyObject(responseJson);
+    const items = verifyOptionalObjectProperty(
+      responseJson,
+      "items",
+      (items) =>
+        parseArray(items, (item) => {
+          verifyObject(item);
+          return {
+            name: verifyObjectProperty(item, "name", verifyString),
+            timeDeleted: verifyOptionalObjectProperty(
+              item,
+              "timeDeleted",
+              verifyString,
+            ),
+          };
+        }),
+      [],
+    );
+    // A generation stops being current at its `timeDeleted`; a name listed
+    // twice also has an earlier generation (emulators omit `timeDeleted`).
+    const names = new Set<string>();
+    for (const { name, timeDeleted } of items) {
+      if (timeDeleted !== undefined || names.has(name)) return true;
+      names.add(name);
+    }
+    return false;
+  }
+
+  readObjectVersion(
+    key: string,
+    versionId: string,
+    options: DriverReadOptions,
+  ): Promise<ReadResponse | undefined> {
+    return read(
+      this,
+      key,
+      this.getObjectUrl(key, versionId),
+      options,
+      this.fetchOkImpl,
+    );
+  }
+
+  statObjectVersion(
+    key: string,
+    versionId: string,
+    options: StatOptions,
+  ): Promise<StatResponse | undefined> {
+    return stat(
+      this,
+      key,
+      this.getObjectUrl(key, versionId),
+      options,
+      this.fetchOkImpl,
+    );
+  }
+
   getUrl(path: string) {
     return this.baseUrlForDisplay + encodePathForUrl(path);
   }
@@ -147,4 +283,27 @@ export class GcsKvStore implements KvStore {
   get supportsSuffixReads() {
     return true;
   }
+}
+
+function parseGcsGenerationListItem(item: unknown): {
+  name: string;
+  generation: GcsObjectGeneration;
+} {
+  verifyObject(item);
+  const timeDeleted = verifyOptionalObjectProperty(
+    item,
+    "timeDeleted",
+    verifyString,
+  );
+  return {
+    name: verifyObjectProperty(item, "name", verifyString),
+    generation: {
+      generation: verifyObjectProperty(item, "generation", verifyString),
+      timeCreated: parseListingTime(
+        verifyObjectProperty(item, "timeCreated", verifyString),
+      ),
+      timeDeleted:
+        timeDeleted === undefined ? undefined : parseListingTime(timeDeleted),
+    },
+  };
 }
