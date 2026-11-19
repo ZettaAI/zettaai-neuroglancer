@@ -37,30 +37,38 @@ Time control
 Any precomputed layer (image, segmentation, annotation) in a ``gs://`` or
 ``s3://`` bucket shows a :guilabel:`Version history` block in its
 :guilabel:`Source` tab, right under its URL, with a :guilabel:`Time` picker
-(the same picker as the Calcada/graphene time control):
+and a list of the layer's saved versions (the same picker as the
+Calcada/graphene time control):
 
-- Picking a time adds the adapter to the URL, e.g.
-  ``precomputed://gs://bucket/layer`` becomes
-  ``gs://bucket/layer/|versioned:@{TIMESTAMP}/|neuroglancer-precomputed:``,
-  and the layer shows the bucket as it was then (read-only).
-- Clearing the time removes the adapter again: the layer is back on its plain
-  URL, shows current data and can be edited.
+- Picking a time sets the layer's own ``versionTime`` (saved in the layer
+  state and share links, e.g. ``"versionTime": "2026-11-10T12:00:00Z"``).
+  The data source URL does not change and the data source is not loaded
+  again: the layer only requests its chunks again, read through the adapter
+  at that time. The layer shows the bucket as it was then (read-only).
+- Clearing the time returns the layer to current data; it can be edited
+  again.
 
-The time is per layer and is kept in the viewer state and share links. A URL
-that already contains ``|versioned:`` (with or without a time) shows the block
-too. For segmentation, the meshes, skeletons and segment properties its
-``info`` names by a relative path are read at the same time. A relative path
-that leaves the layer directory (``../…``) needs ``|versioned:`` placed higher
-up, for example right after the bucket:
+The time is per layer, also when several layers show the same data source.
+Image and segmentation volumes, segmentation meshes and skeletons, and
+annotations (by id, relationships and spatial index) are all read at the
+layer's time; each time is cached separately, so versions are never mixed
+and returning to a version already viewed reuses its cached chunks. The
+layer's ``info`` files (scales, bounds, segment properties) are read once,
+from the current data.
+
+A URL that contains ``|versioned:`` itself (written by hand) works as well:
+its timestamp applies to the whole data source, including its ``info``. A
+relative path that leaves the layer directory (``../…``) needs
+``|versioned:`` placed higher up, for example right after the bucket:
 ``gs://bucket/|versioned:@{TIMESTAMP}/path/to/layer/|neuroglancer-precomputed:``.
 
 The bucket needs object versioning (see Permissions); on a bucket without it,
 a past time finds no versions and the layer reports its files as missing.
 
-A layer read through ``|versioned:`` cannot take part in an edit session (it
-can only be Off): saving writes to the bucket's current objects, so editing
-past data would overwrite the live layer. To edit, use the URL without
-``|versioned:``.
+A layer viewed at a past time, or read through ``|versioned:``, cannot take
+part in an edit session (it can only be Off): saving writes to the bucket's
+current objects, so editing past data would overwrite the live layer. To
+edit, clear the time (and use a URL without ``|versioned:``).
 
 How a file is resolved
 ----------------------
@@ -90,6 +98,11 @@ Caveats
 - A time in the middle of a long write shows a mix of old and new files.
 - Lifecycle rules that delete noncurrent versions make older times unavailable.
 - Listing (URL completion) shows current file names.
+- A layer viewed at a past time uses the current ``info`` files: if the
+  layer's structure itself changed since (scales added, bounds changed), the
+  past chunks are shown with the current structure.
+- After switching versions, the layer is briefly empty where chunks of the
+  new version are still loading.
 - S3 records modification times with 1 second precision. A version counts as
   written at the end of its second, so data written after the chosen time is
   never shown, but the previous version may be shown for up to one second

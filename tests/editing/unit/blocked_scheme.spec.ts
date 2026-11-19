@@ -19,8 +19,16 @@ import { blockedSchemeOf } from "#src/editing/ui/layer_kind.js";
 import type { ManagedUserLayer } from "#src/layer/index.js";
 
 function managedWithUrls(...urls: string[]) {
+  return managedAtTime(undefined, ...urls);
+}
+
+/** Layer viewed at `versionTime` ("Version history"; `undefined` = latest). */
+function managedAtTime(versionTime: number | undefined, ...urls: string[]) {
   return {
-    layer: { dataSources: urls.map((url) => ({ spec: { url } })) },
+    layer: {
+      dataSources: urls.map((url) => ({ spec: { url } })),
+      versionTime: { value: versionTime },
+    },
   } as unknown as ManagedUserLayer;
 }
 
@@ -59,6 +67,16 @@ describe("blockedSchemeOf", () => {
         ),
       ),
     ).toBe("versioned");
+  });
+
+  test("a layer viewed at a past time is blocked; its url stays plain", () => {
+    const time = Date.UTC(2026, 10, 10, 12, 0, 0);
+    expect(
+      blockedSchemeOf(managedAtTime(time, "precomputed://gs://b/layer")),
+    ).toBe("versioned");
+    expect(
+      blockedSchemeOf(managedAtTime(undefined, "precomputed://gs://b/layer")),
+    ).toBeUndefined();
   });
 
   test("no layer", () => {

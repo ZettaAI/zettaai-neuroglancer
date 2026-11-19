@@ -31,10 +31,11 @@ export function layerKindOf(
  * sources may only be Off — this is a product restriction, not a technical
  * fault of the layer, which stays fully usable outside the session.
  *
- * `versioned` covers any source read through `|versioned:`: at a past time
- * the save path writes to the bucket's current objects, so editing past data
- * would overwrite the live layer with it; and the save path cuts the URL at
- * the first `|`, dropping any path after `versioned:`.
+ * `versioned` covers a layer viewed at a past time (`UserLayer.versionTime`,
+ * TM-521) and any source read through `|versioned:`: the save path writes to
+ * the bucket's current objects, so editing past data would overwrite the live
+ * layer with it; and the save path cuts the URL at the first `|`, dropping any
+ * path after `versioned:`.
  */
 export type BlockedScheme = "calcada" | "graphene" | "middleauth" | "versioned";
 
@@ -63,6 +64,7 @@ export function blockedSchemeOf(
 ): BlockedScheme | undefined {
   const userLayer = managed?.layer;
   if (userLayer == null) return undefined;
+  if (userLayer.versionTime.value !== undefined) return "versioned";
   for (const dataSource of userLayer.dataSources) {
     const url = dataSource.spec.url;
     for (const [scheme, matches] of BLOCKED_SCHEME_MATCHERS) {

@@ -43,6 +43,11 @@ import {
   LayerDataSource,
   layerDataSourceSpecificationFromJson,
 } from "#src/layer/layer_data_source.js";
+import {
+  requestChunksAtNewVersionTime,
+  TrackableVersionTime,
+  VERSION_TIME_JSON_KEY,
+} from "#src/layer/layer_version_time.js";
 import { createImageLayerAsMultiChannel } from "#src/layer/multi_channel_setup.js";
 import type {
   DisplayDimensions,
@@ -407,6 +412,9 @@ export class UserLayer extends RefCounted {
   dataSourcesChanged = new NullarySignal();
   dataSources: LayerDataSource[] = [];
 
+  /** Zetta (TM-521): time chosen in "Version history"; unset = latest data. */
+  versionTime = new TrackableVersionTime();
+
   get manager() {
     return this.managedLayer.manager;
   }
@@ -427,6 +435,17 @@ export class UserLayer extends RefCounted {
     this.pick.changed.add(this.layersChanged.dispatch);
     this.dataSourcesChanged.add(this.specificationChanged.dispatch);
     this.dataSourcesChanged.add(() => this.updateDataSubsourceActivations());
+    this.versionTime.changed.add(this.specificationChanged.dispatch);
+    // Viewing past data blocks editing (`blockedSchemeOf`): let layer lists
+    // such as the edit-session entry re-check the layer.
+    this.versionTime.changed.add(this.layersChanged.dispatch);
+    this.versionTime.changed.add(() => {
+      // Volumes: same sources, chunks requested again at the new time.
+      requestChunksAtNewVersionTime(this.renderLayers);
+      // Meshes, skeletons, annotations: re-activated with sources at the new
+      // time (their activation is keyed on the time).
+      this.updateDataSubsourceActivations();
+    });
     this.messages.changed.add(this.layersChanged.dispatch);
     for (const tab of USER_LAYER_TABS) {
       this.tabs.add(tab.id, {
@@ -579,6 +598,8 @@ export class UserLayer extends RefCounted {
     if ((this.constructor as typeof UserLayer).supportsPickOption) {
       this.pick.restoreState(specification[PICK_JSON_KEY]);
     }
+    // Before the data sources, so their first chunks are read at this time.
+    this.versionTime.restoreState(specification[VERSION_TIME_JSON_KEY]);
     for (const spec of this.getDataSourceSpecifications(specification)) {
       this.addDataSource(spec);
     }
@@ -646,6 +667,7 @@ export class UserLayer extends RefCounted {
     return {
       type: this.type,
       [SOURCE_JSON_KEY]: dataSourcesToJson(this.dataSources),
+      [VERSION_TIME_JSON_KEY]: this.versionTime.toJSON(),
       [TOOL_JSON_KEY]: this.tool.toJSON(),
       [TOOL_BINDINGS_JSON_KEY]: this.toolBinder.toJSON(),
       [LOCAL_COORDINATE_SPACE_JSON_KEY]: this.localCoordinateSpace.toJSON(),

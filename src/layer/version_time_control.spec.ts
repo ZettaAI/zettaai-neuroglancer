@@ -17,6 +17,7 @@
 import { describe, expect, test } from "vitest";
 import type { UserLayer } from "#src/layer/index.js";
 import type { LayerDataSource } from "#src/layer/layer_data_source.js";
+import { TrackableVersionTime } from "#src/layer/layer_version_time.js";
 import {
   firstVersionedDataSource,
   getLayerVersionTime,
@@ -28,12 +29,12 @@ import {
 import { RefCounted } from "#src/util/disposable.js";
 import { NullarySignal } from "#src/util/signal.js";
 
-const LIVE = "gs://b/layer/|versioned:|neuroglancer-precomputed:";
 const TIME = Date.UTC(2026, 10, 10, 12, 0, 0);
-const PAST =
-  "gs://b/layer/|versioned:@2026-11-10T12:00:00Z/|neuroglancer-precomputed:";
-// A bucket precomputed layer with no time chosen: plain, editable URL.
+// A bucket precomputed layer. Its URL stays the same at every time: the
+// chosen time is layer state of its own (`versionTime`).
 const CURRENT = "precomputed://gs://b/layer";
+// Same layer read through the `versioned:` adapter, written by hand.
+const LIVE = "gs://b/layer/|versioned:|neuroglancer-precomputed:";
 // No time can be chosen for a source outside a GCS/S3 bucket.
 const NOT_BUCKET = "precomputed://https://example.com/other";
 
@@ -58,6 +59,9 @@ class FakeDataSource {
 
 class FakeLayer extends RefCounted {
   dataSourcesChanged = new NullarySignal();
+  versionTime = new TrackableVersionTime();
+  /** Times applied to the layer (each re-requests its chunks). */
+  appliedTimes: (number | undefined)[] = [];
   dataSources: FakeDataSource[];
   sessionLocked = false;
   managedLayer = {
@@ -85,54 +89,55 @@ class FakeLayer extends RefCounted {
       },
     },
   };
-  constructor(urls: string[]) {
+  constructor(urls: string[], time?: number) {
     super();
     this.dataSources = urls.map((url) => new FakeDataSource(this, { url }));
+    this.versionTime.value = time;
+    this.versionTime.changed.add(() =>
+      this.appliedTimes.push(this.versionTime.value),
+    );
   }
   asUserLayer() {
     return this as unknown as UserLayer;
   }
+  get urls() {
+    return this.dataSources.map(({ spec }) => spec.url);
+  }
+  get specAssignments() {
+    return this.dataSources.map((dataSource) => dataSource.specAssignments);
+  }
 }
 
 describe("layer version time", () => {
-  test("reads the time from the versioned source", () => {
+  test("is the layer's own time, not read from the urls", () => {
     expect(getLayerVersionTime(new FakeLayer([LIVE]).asUserLayer())).toBe(
       undefined,
     );
     expect(
-      getLayerVersionTime(new FakeLayer([NOT_BUCKET, PAST]).asUserLayer()),
+      getLayerVersionTime(
+        new FakeLayer([NOT_BUCKET, CURRENT], TIME).asUserLayer(),
+      ),
     ).toBe(TIME);
   });
 
-  test("invalid time reads as live (the data source reports the error)", () => {
-    const layer = new FakeLayer([
-      "gs://b/layer/|versioned:@bad/|neuroglancer-precomputed:",
-    ]);
-    expect(getLayerVersionTime(layer.asUserLayer())).toBeUndefined();
-  });
-
-  test("a time adds the adapter to bucket sources only; clearing restores the plain url", () => {
+  test("choosing and clearing a time never changes a data source url", () => {
     const layer = new FakeLayer([CURRENT, NOT_BUCKET]);
     setLayerVersionTime(layer.asUserLayer(), TIME);
-    expect(layer.dataSources.map(({ spec }) => spec.url)).toEqual([
-      PAST,
-      NOT_BUCKET,
-    ]);
-    // Not marked as typed by hand, so NG keeps the URL form as written.
-    expect(layer.dataSources[0].spec.setManually).toBeUndefined();
-    expect(layer.dataSources[1].specAssignments).toBe(0);
+    expect(layer.versionTime.value).toBe(TIME);
     setLayerVersionTime(layer.asUserLayer(), undefined);
-    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
+    expect(layer.versionTime.value).toBeUndefined();
+    expect(layer.urls).toEqual([CURRENT, NOT_BUCKET]);
+    expect(layer.specAssignments).toEqual([0, 0]);
   });
 
-  test("same time does not reload the source", () => {
-    const layer = new FakeLayer([PAST]);
+  test("same time is not applied again", () => {
+    const layer = new FakeLayer([CURRENT], TIME);
     setLayerVersionTime(layer.asUserLayer(), TIME);
-    expect(layer.dataSources[0].specAssignments).toBe(0);
+    expect(layer.appliedTimes).toEqual([]);
   });
 
   test("picker is hosted under the first versioned source only", () => {
-    const layer = new FakeLayer([NOT_BUCKET, CURRENT, PAST]);
+    const layer = new FakeLayer([NOT_BUCKET, CURRENT, LIVE]);
     const [plain, first, second] = layer.dataSources;
     expect(firstVersionedDataSource(layer.asUserLayer())).toBe(first);
     expect(watchHostsVersionTime(plain.asLayerDataSource()).value).toBe(false);
@@ -160,7 +165,7 @@ describe("layer version time", () => {
 });
 
 describe("picker state", () => {
-  test("picking a time rewrites the source url; clearing returns to the plain url", () => {
+  test("picking a time sets the layer time; clearing returns to the latest data", () => {
     const layer = new FakeLayer([CURRENT]);
     const context = new RefCounted();
     const { intermediateTimestamp } = makeVersionTimeState(
@@ -169,13 +174,15 @@ describe("picker state", () => {
     );
     expect(intermediateTimestamp.value).toBeUndefined();
     intermediateTimestamp.value = TIME;
-    expect(layer.dataSources[0].spec.url).toBe(PAST);
+    expect(layer.versionTime.value).toBe(TIME);
     intermediateTimestamp.value = undefined;
-    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
+    expect(layer.versionTime.value).toBeUndefined();
+    expect(layer.urls).toEqual([CURRENT]);
+    expect(layer.specAssignments).toEqual([0]);
     context.dispose();
   });
 
-  test("typing a time reloads the layer once, on Enter or leaving the field", () => {
+  test("typing a time is applied once, on Enter or leaving the field", () => {
     const layer = new FakeLayer([CURRENT]);
     const context = new RefCounted();
     const { intermediateTimestamp, startTyping, finishTyping } =
@@ -185,11 +192,9 @@ describe("picker state", () => {
     intermediateTimestamp.value = TIME - 3600_000;
     intermediateTimestamp.value = TIME - 60_000;
     intermediateTimestamp.value = TIME;
-    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
-    expect(layer.dataSources[0].specAssignments).toBe(0);
+    expect(layer.appliedTimes).toEqual([]);
     finishTyping();
-    expect(layer.dataSources[0].spec.url).toBe(PAST);
-    expect(layer.dataSources[0].specAssignments).toBe(1);
+    expect(layer.appliedTimes).toEqual([TIME]);
     context.dispose();
   });
 
@@ -201,16 +206,16 @@ describe("picker state", () => {
     startTyping();
     intermediateTimestamp.value = TIME;
     applyTypedTime();
-    expect(layer.dataSources[0].spec.url).toBe(PAST);
+    expect(layer.appliedTimes).toEqual([TIME]);
     intermediateTimestamp.value = TIME - 3600_000;
-    expect(layer.dataSources[0].spec.url).toBe(PAST);
+    expect(layer.appliedTimes).toEqual([TIME]);
     finishTyping();
-    expect(layer.dataSources[0].specAssignments).toBe(2);
+    expect(layer.appliedTimes).toEqual([TIME, TIME - 3600_000]);
     context.dispose();
   });
 
-  test("leaving the field without a change does not reload", () => {
-    const layer = new FakeLayer([PAST]);
+  test("leaving the field without a change does not apply anything", () => {
+    const layer = new FakeLayer([CURRENT], TIME);
     const context = new RefCounted();
     const { startTyping, finishTyping } = makeVersionTimeState(
       layer.asUserLayer(),
@@ -218,25 +223,25 @@ describe("picker state", () => {
     );
     startTyping();
     finishTyping();
-    expect(layer.dataSources[0].specAssignments).toBe(0);
+    expect(layer.appliedTimes).toEqual([]);
     context.dispose();
   });
 
-  test("follows url changes made elsewhere (state, share link)", () => {
-    const layer = new FakeLayer([LIVE]);
+  test("follows time changes made elsewhere (state, share link)", () => {
+    const layer = new FakeLayer([CURRENT]);
     const context = new RefCounted();
     const { intermediateTimestamp } = makeVersionTimeState(
       layer.asUserLayer(),
       context,
     );
-    layer.dataSources[0].spec = { url: PAST };
+    layer.versionTime.value = TIME;
     expect(intermediateTimestamp.value).toBe(TIME);
-    expect(layer.dataSources[0].specAssignments).toBe(1);
+    expect(layer.appliedTimes).toEqual([TIME]);
     context.dispose();
   });
 
   test("layer locked by an edit session keeps its time", () => {
-    const layer = new FakeLayer([LIVE]);
+    const layer = new FakeLayer([CURRENT]);
     layer.sessionLocked = true;
     const context = new RefCounted();
     const { intermediateTimestamp } = makeVersionTimeState(
@@ -245,12 +250,13 @@ describe("picker state", () => {
     );
     intermediateTimestamp.value = TIME;
     expect(intermediateTimestamp.value).toBeUndefined();
-    expect(layer.dataSources[0].spec.url).toBe(LIVE);
+    expect(layer.versionTime.value).toBeUndefined();
+    expect(layer.appliedTimes).toEqual([]);
     context.dispose();
   });
 
   test("unknown earliest time leaves the picker without a limit", async () => {
-    const layer = new FakeLayer([LIVE]);
+    const layer = new FakeLayer([CURRENT]);
     const context = new RefCounted();
     const { timestampLimit } = makeVersionTimeState(
       layer.asUserLayer(),
@@ -262,17 +268,15 @@ describe("picker state", () => {
   });
 
   test("bucket history is looked up again only when the layer changes", () => {
-    const layer = new FakeLayer([LIVE]);
+    const layer = new FakeLayer([CURRENT]);
     const context = new RefCounted();
     makeVersionTimeState(layer.asUserLayer(), context);
     // One lookup = two kvstore requests: history check + earliest time.
     expect(layer.earliestTimeLookups).toBe(2);
     // Choosing a time reads the same layer: no new lookup.
-    layer.dataSources[0].spec = { url: PAST };
+    setLayerVersionTime(layer.asUserLayer(), TIME);
     expect(layer.earliestTimeLookups).toBe(2);
-    layer.dataSources[0].spec = {
-      url: "gs://b/other/|versioned:|neuroglancer-precomputed:",
-    };
+    layer.dataSources[0].spec = { url: "precomputed://gs://b/other" };
     expect(layer.earliestTimeLookups).toBe(4);
     context.dispose();
   });

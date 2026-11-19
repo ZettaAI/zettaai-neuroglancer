@@ -23,10 +23,10 @@ import type {
   ObjectChangesPage,
   ObjectVersionStore,
 } from "#src/kvstore/versioned/object_version_store.js";
-import { getVersionTimeFromUrl } from "#src/kvstore/versioned/url.js";
 import type { ObjectVersionLifetime } from "#src/kvstore/versioned/version_at_time.js";
 import { VersionedKvStore } from "#src/kvstore/versioned/versioned_kvstore.js";
 import type { LayerDataSource } from "#src/layer/layer_data_source.js";
+import { TrackableVersionTime } from "#src/layer/layer_version_time.js";
 import { makeVersionTimeSourceSection } from "#src/layer/version_time_control.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { HttpError } from "#src/util/http_request.js";
@@ -49,13 +49,9 @@ import {
 
 const TIMEOUT = { timeout: 5000 };
 
-// A bucket precomputed layer with no time chosen: plain, editable URL.
+// A bucket precomputed layer. Its URL stays the same at every time: the
+// chosen time is layer state of its own (`versionTime`).
 const CURRENT = "precomputed://gs://b/layer";
-
-/** `|versioned:` URL of the same layer at `time`. */
-function pastUrl(time: number) {
-  return `gs://b/layer/|versioned:@${new Date(time).toISOString()}/|neuroglancer-precomputed:`;
-}
 
 /** Yesterday at `hours:minutes:seconds` local time: always in the past. */
 function yesterdayAt(hours: number, minutes: number, seconds: number) {
@@ -135,6 +131,7 @@ class FakeDataSource {
 
 class FakeLayer extends RefCounted {
   dataSourcesChanged = new NullarySignal();
+  versionTime = new TrackableVersionTime();
   dataSources: FakeDataSource[];
   managedLayer = {
     name: "layer",
@@ -188,7 +185,10 @@ function mountSourceSections(
     infoCreated,
     changePages = [],
     answer,
+    time,
   }: {
+    /** Time the layer is viewed at when the Source tab opens. */
+    time?: number;
     history?: HistoryAnswer;
     infoCreated?: number;
     changePages?: number[][];
@@ -199,6 +199,7 @@ function mountSourceSections(
   const bucket = new FakeBucket(history, infoCreated, changePages);
   if (answer !== undefined) bucket.answer = answer;
   const layer = new FakeLayer(urls, bucket);
+  layer.versionTime.value = time;
   const elements = layer.dataSources.map((dataSource) => {
     const widget = makeVersionTimeSourceSection(
       dataSource as unknown as LayerDataSource,
@@ -237,7 +238,7 @@ function timeField(section: HTMLElement) {
 }
 
 function chosenTime(layer: FakeLayer) {
-  return getVersionTimeFromUrl(layer.dataSources[0].spec.url);
+  return layer.versionTime.value;
 }
 
 describe("Version history in the Source tab", () => {
@@ -274,7 +275,8 @@ describe("Version history in the Source tab", () => {
 
   it("no permission but a time already in the url: picker kept to clear it", async () => {
     const time = yesterdayAt(12, 0, 0);
-    const { elements } = mountSourceSections([pastUrl(time)], {
+    const { elements } = mountSourceSections([CURRENT], {
+      time,
       history: "no-permission",
     });
     const section = await sectionShown(elements[0]);
@@ -296,7 +298,9 @@ describe("Version history in the Source tab", () => {
 
   it("a typed time is applied on Enter, not while typing", async () => {
     const start = yesterdayAt(12, 0, 0);
-    const { layer, elements } = mountSourceSections([pastUrl(start)]);
+    const { layer, elements } = mountSourceSections([CURRENT], {
+      time: start,
+    });
     const section = await sectionShown(elements[0]);
     await noteShown(section, VERSION_TIME_PAST_NOTE);
     const field = timeField(section)!;
@@ -314,7 +318,9 @@ describe("Version history in the Source tab", () => {
 
   it("a typed time is applied when the field loses focus", async () => {
     const start = yesterdayAt(12, 0, 0);
-    const { layer, elements } = mountSourceSections([pastUrl(start)]);
+    const { layer, elements } = mountSourceSections([CURRENT], {
+      time: start,
+    });
     const section = await sectionShown(elements[0]);
     const field = timeField(section)!;
     await userEvent.click(field);
@@ -328,10 +334,10 @@ describe("Version history in the Source tab", () => {
 
   it("a time before the layer existed shows its first version", async () => {
     const infoCreated = yesterdayAt(12, 0, 0);
-    const { layer, elements } = mountSourceSections(
-      [pastUrl(yesterdayAt(13, 0, 0))],
-      { infoCreated },
-    );
+    const { layer, elements } = mountSourceSections([CURRENT], {
+      time: yesterdayAt(13, 0, 0),
+      infoCreated,
+    });
     const section = await sectionShown(elements[0]);
     // The earliest time is looked up when the section mounts; the fake bucket
     // answers within a few microtasks, so one macrotask is plenty.
@@ -348,10 +354,10 @@ describe("Version history in the Source tab", () => {
     expect(field.value).toBe("12:00:00");
   });
 
-  it("clearing the time returns to the plain, editable url", async () => {
-    const { layer, elements } = mountSourceSections([
-      pastUrl(yesterdayAt(12, 0, 0)),
-    ]);
+  it("clearing the time returns to the latest data; the url never changes", async () => {
+    const { layer, elements } = mountSourceSections([CURRENT], {
+      time: yesterdayAt(12, 0, 0),
+    });
     const section = await sectionShown(elements[0]);
     await noteShown(section, VERSION_TIME_PAST_NOTE);
     await userEvent.click(
@@ -360,8 +366,9 @@ describe("Version history in the Source tab", () => {
       )!,
     );
     await vi.waitFor(() => {
-      expect(layer.dataSources[0].spec.url).toBe("precomputed://gs://b/layer");
+      expect(chosenTime(layer)).toBeUndefined();
     }, TIMEOUT);
+    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
     await noteShown(section, VERSION_TIME_LIVE_NOTE);
   });
 });
@@ -434,16 +441,15 @@ describe("version list", () => {
       ][2],
     );
     await vi.waitFor(() => expect(chosenTime(layer)).toBe(copy), TIMEOUT);
+    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
     expect(shownVersion(section)).toBe(formatMoment(copy));
     await openList(section);
     await optionsShown(ALL);
     await userEvent.click(
       document.querySelector<HTMLElement>('[data-slot="select-item"]')!,
     );
-    await vi.waitFor(
-      () => expect(layer.dataSources[0].spec.url).toBe(CURRENT),
-      TIMEOUT,
-    );
+    await vi.waitFor(() => expect(chosenTime(layer)).toBeUndefined(), TIMEOUT);
+    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
   });
 
   it("◀ ▶ step through the versions", async () => {
@@ -464,15 +470,14 @@ describe("version list", () => {
     await userEvent.click(button(section, NEWER_VERSION_LABEL));
     await vi.waitFor(() => expect(chosenTime(layer)).toBe(painted), TIMEOUT);
     await userEvent.click(button(section, NEWER_VERSION_LABEL));
-    await vi.waitFor(
-      () => expect(layer.dataSources[0].spec.url).toBe(CURRENT),
-      TIMEOUT,
-    );
+    await vi.waitFor(() => expect(chosenTime(layer)).toBeUndefined(), TIMEOUT);
+    expect(layer.dataSources[0].spec.url).toBe(CURRENT);
   });
 
   it("a time typed between versions is shown as it is", async () => {
     const between = painted + 10_000;
-    const { elements } = mountSourceSections([pastUrl(between)], {
+    const { elements } = mountSourceSections([CURRENT], {
+      time: between,
       changePages: [writes],
     });
     const section = await sectionShown(elements[0]);

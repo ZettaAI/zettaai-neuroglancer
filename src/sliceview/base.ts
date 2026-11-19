@@ -583,6 +583,12 @@ export interface SliceViewSourceOptions {
   multiscaleToViewTransform: Float32Array;
   displayRank: number;
   modelChannelDimensionIndices: readonly number[];
+  /**
+   * Zetta (TM-521): time to read the data at (epoch milliseconds), chosen in
+   * the layer's "Version history"; `undefined` reads the latest data. Only
+   * sources in a bucket with object versioning use it.
+   */
+  versionTime?: number;
 }
 
 export function getCombinedTransform(

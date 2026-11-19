@@ -93,17 +93,6 @@ export function isVersionedUrl(url: string): boolean {
 }
 
 /**
- * Time chosen in a pipeline URL's `versioned:` part, or `undefined` when the
- * URL has no `versioned:` part or no time (current data). Throws on an
- * invalid time.
- */
-export function getVersionTimeFromUrl(url: string): number | undefined {
-  const match = url.match(VERSIONED_URL_PART_PATTERN);
-  if (match === null || match[1] === undefined) return undefined;
-  return parseVersionTime(match[1]);
-}
-
-/**
  * Rewrites the time of the `versioned:` part of a pipeline URL. `undefined`
  * returns to current data. URLs without a `versioned:` part are returned as is.
  */
@@ -162,41 +151,11 @@ function plainPrecomputedBucketUrl(url: string): string | undefined {
 
 /**
  * Whether a time can be chosen for this data source: it already reads through
- * `versioned:`, or it is a precomputed layer in a GCS/S3 bucket (the adapter
- * is then added when a time is chosen).
+ * `versioned:`, or it is a precomputed layer in a GCS/S3 bucket (its chunks
+ * are then read through the adapter, see `chunkUrlAtVersionTime`).
  */
 export function canChooseVersionTime(url: string): boolean {
   return isVersionedUrl(url) || plainPrecomputedBucketUrl(url) !== undefined;
-}
-
-/**
- * Data source URL showing the data at `time`, or current data for
- * `undefined`. Choosing a time adds the `versioned:` adapter; clearing it
- * removes the adapter again, so a layer with no time chosen has its plain URL
- * (and stays editable). A plain precomputed URL comes back in the short
- * `precomputed://bucket/path` form. URLs a time cannot be chosen for are
- * returned as is.
- */
-export function chooseVersionTimeInUrl(
-  url: string,
-  time: number | undefined,
-): string {
-  const match = url.match(VERSIONED_URL_PART_PATTERN);
-  if (match !== null) {
-    if (time !== undefined) return setVersionTimeInUrl(url, time);
-    const withoutAdapter =
-      url.substring(0, match.index!) +
-      url.substring(match.index! + match[0].length);
-    const bucketUrl = plainPrecomputedBucketUrl(withoutAdapter);
-    return bucketUrl === undefined
-      ? withoutAdapter
-      : PRECOMPUTED_LEGACY_PREFIX + bucketUrl.replace(/\/$/, "");
-  }
-  const bucketUrl = plainPrecomputedBucketUrl(url);
-  if (bucketUrl === undefined || time === undefined) return url;
-  return (
-    bucketUrl + "|" + formatVersionedUrlPart(time) + PRECOMPUTED_PIPELINE_SUFFIX
-  );
 }
 
 /**
@@ -211,4 +170,19 @@ export function versionedKvStoreUrlOf(url: string): string | undefined {
   return bucketUrl === undefined
     ? undefined
     : bucketUrl + "|" + formatVersionedUrlPart(undefined);
+}
+
+/**
+ * Chunk URL reading `url` (a plain GCS/S3 directory, e.g.
+ * `gs://b/layer/8_8_40/`) as it was at `time`:
+ * `gs://b/layer/8_8_40/|versioned:@<time>/`. Returned unchanged without a
+ * time or for anything that is not a plain bucket URL, so such sources keep
+ * showing the latest data.
+ */
+export function chunkUrlAtVersionTime(
+  url: string,
+  time: number | undefined,
+): string {
+  if (time === undefined || !BUCKET_URL_PATTERN.test(url)) return url;
+  return url + "|" + formatVersionedUrlPart(time);
 }

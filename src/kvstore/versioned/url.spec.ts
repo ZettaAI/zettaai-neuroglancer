@@ -19,9 +19,8 @@ import { parsePipelineUrlComponent } from "#src/kvstore/url.js";
 import {
   formatVersionTime,
   canChooseVersionTime,
-  chooseVersionTimeInUrl,
+  chunkUrlAtVersionTime,
   getVersionedKvStoreUrl,
-  getVersionTimeFromUrl,
   isVersionedUrl,
   parseVersionTime,
   parseVersionedUrl,
@@ -89,12 +88,6 @@ describe("pipeline url", () => {
     expect(isVersionedUrl("gs://b/versioned:/|zarr:")).toBe(false);
   });
 
-  test("reads the time", () => {
-    expect(getVersionTimeFromUrl(live)).toBeUndefined();
-    expect(getVersionTimeFromUrl(past)).toBe(TIME);
-    expect(getVersionTimeFromUrl("gs://b/layer/")).toBeUndefined();
-  });
-
   test("sets and clears the time", () => {
     expect(setVersionTimeInUrl(live, TIME)).toBe(past);
     expect(setVersionTimeInUrl(past, undefined)).toBe(live);
@@ -139,7 +132,7 @@ test("kvstore part of a data source url", () => {
   expect(getVersionedKvStoreUrl("gs://b/layer/|zarr:")).toBeUndefined();
 });
 
-describe("choosing a time adds and removes the adapter", () => {
+describe("bucket sources a time can be chosen for", () => {
   const LEGACY = "precomputed://gs://b/layer";
   const PIPELINE = "gs://b/layer/|neuroglancer-precomputed:";
   const AT_TIME =
@@ -167,42 +160,42 @@ describe("choosing a time adds and removes the adapter", () => {
     }
   });
 
-  test("a time turns the short precomputed:// form into a versioned url", () => {
-    expect(chooseVersionTimeInUrl(LEGACY, TIME)).toBe(AT_TIME);
-    expect(chooseVersionTimeInUrl(PIPELINE, TIME)).toBe(AT_TIME);
-  });
-
-  test("clearing the time restores the plain short form (editable)", () => {
-    expect(chooseVersionTimeInUrl(AT_TIME, undefined)).toBe(LEGACY);
-    expect(
-      chooseVersionTimeInUrl(
-        "gs://b/layer/|versioned:|neuroglancer-precomputed:",
-        undefined,
-      ),
-    ).toBe(LEGACY);
-    expect(
-      chooseVersionTimeInUrl(
-        "gs://b/|versioned:@2026-11-10T12:00:00Z/dir/layer/|neuroglancer-precomputed:",
-        undefined,
-      ),
-    ).toBe("precomputed://gs://b/dir/layer");
-  });
-
-  test("changing the time keeps the versioned url; plain stays plain", () => {
-    expect(chooseVersionTimeInUrl(AT_TIME, TIME + 1000)).toBe(
-      "gs://b/layer/|versioned:@2026-11-10T12:00:01Z/|neuroglancer-precomputed:",
-    );
-    expect(chooseVersionTimeInUrl(LEGACY, undefined)).toBe(LEGACY);
-    expect(
-      chooseVersionTimeInUrl("precomputed://https://example.com/layer", TIME),
-    ).toBe("precomputed://https://example.com/layer");
-  });
-
   test("versioned kvstore of a source, with no time", () => {
     expect(versionedKvStoreUrlOf(LEGACY)).toBe("gs://b/layer/|versioned:");
     expect(versionedKvStoreUrlOf(AT_TIME)).toBe("gs://b/layer/|versioned:");
     expect(
       versionedKvStoreUrlOf("precomputed://https://example.com/layer"),
     ).toBeUndefined();
+  });
+});
+
+describe("chunkUrlAtVersionTime", () => {
+  const time = Date.UTC(2026, 10, 10, 12, 0, 0);
+  test.for([
+    [
+      "gs://b/layer/8_8_40/",
+      "gs://b/layer/8_8_40/|versioned:@2026-11-10T12:00:00Z/",
+    ],
+    [
+      "s3://b/layer/mesh/",
+      "s3://b/layer/mesh/|versioned:@2026-11-10T12:00:00Z/",
+    ],
+  ])("%s is read at the time", ([url, expected]) => {
+    expect(chunkUrlAtVersionTime(url, time)).toBe(expected);
+  });
+
+  test.for([
+    // Not a bucket with object versions.
+    "https://example.com/layer/8_8_40/",
+    // Already read through a pipeline (e.g. `versioned:` written by hand).
+    "gs://b/layer/|versioned:@2026-01-01T00:00:00Z/8_8_40/",
+  ])("%s is left as it is", (url) => {
+    expect(chunkUrlAtVersionTime(url, time)).toBe(url);
+  });
+
+  test("no time: latest data", () => {
+    expect(chunkUrlAtVersionTime("gs://b/layer/8_8_40/", undefined)).toBe(
+      "gs://b/layer/8_8_40/",
+    );
   });
 });

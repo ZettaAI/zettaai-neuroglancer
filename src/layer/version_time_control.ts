@@ -20,9 +20,11 @@
  * and behaviour as the Calcada/graphene time control: pick a time to view the
  * data as it was then, clear to return to current data.
  *
- * The chosen time lives in the data source URL (`|versioned:@<time>/`), so it
- * is saved in the layer state and share links, and the picker is shown in the
- * Source tab right under that URL, once per layer, for any layer type.
+ * The chosen time is layer state of its own (`UserLayer.versionTime`, saved
+ * in the layer JSON and share links), not part of the data source URL: like
+ * the Calcada timestamp, switching versions keeps the data source loaded and
+ * only re-requests the layer's chunks. The picker is shown in the Source tab
+ * right under the URL, once per layer, for any layer type.
  */
 
 import "#src/datasource/calcada/calcada.css";
@@ -32,8 +34,6 @@ import { groupChangeMoments } from "#src/kvstore/versioned/change_moments.js";
 import type { ObjectChangesPage } from "#src/kvstore/versioned/object_version_store.js";
 import {
   canChooseVersionTime,
-  chooseVersionTimeInUrl,
-  getVersionTimeFromUrl,
   versionedKvStoreUrlOf,
 } from "#src/kvstore/versioned/url.js";
 import { VersionedKvStore } from "#src/kvstore/versioned/versioned_kvstore.js";
@@ -55,38 +55,20 @@ function versionedDataSources(layer: UserLayer): LayerDataSource[] {
   );
 }
 
-/** Time chosen on the layer's versioned data sources (`undefined` = live). */
+/** Time the layer is viewed at (`undefined` = latest data). */
 export function getLayerVersionTime(layer: UserLayer): number | undefined {
-  for (const dataSource of versionedDataSources(layer)) {
-    try {
-      const time = getVersionTimeFromUrl(dataSource.spec.url);
-      if (time !== undefined) return time;
-    } catch {
-      // An invalid time is reported by the data source itself.
-    }
-  }
-  return undefined;
+  return layer.versionTime.value;
 }
 
 /**
- * Sets the time on every data source of the layer a time can be chosen for,
- * reloading each one whose URL changes. A time adds the `versioned:` adapter
- * (read-only past data); `undefined` removes it again, back to the plain,
- * editable URL.
+ * Views the layer at `time` (`undefined` = latest data). The data sources
+ * stay loaded; only the layer's chunks are requested again.
  */
 export function setLayerVersionTime(
   layer: UserLayer,
   time: number | undefined,
 ): void {
-  for (const dataSource of versionedDataSources(layer)) {
-    const existingSpec = dataSource.spec;
-    const url = chooseVersionTimeInUrl(existingSpec.url, time);
-    if (url === existingSpec.url) continue;
-    // Not `setManually`: that makes NG rewrite the URL into its canonical
-    // long form once loaded, which would turn the restored
-    // `precomputed://bucket/layer` into `bucket/layer/|neuroglancer-precomputed:`.
-    dataSource.spec = { ...existingSpec, url };
-  }
+  layer.versionTime.value = time;
 }
 
 /** The data source whose Source-tab view hosts the layer's time picker. */
@@ -98,10 +80,9 @@ export function firstVersionedDataSource(
 
 /**
  * True while `dataSource` is the layer's first `versioned:` source. Signals
- * only when that answer flips: the section is rebuilt on every signal, and
- * choosing a time rewrites the data source URL, so signalling on every data
- * source change would remount the picker (and drop keyboard focus) after each
- * typed digit.
+ * only when that answer flips: the section is rebuilt on every signal, so
+ * signalling on every data source change would remount the picker (and drop
+ * keyboard focus) whenever a data source changes.
  */
 export function watchHostsVersionTime(
   dataSource: LayerDataSource,
@@ -316,8 +297,8 @@ class LayerChangesListing {
  * The picker writes every change into `intermediateTimestamp` (a draft). A
  * draft is applied to the layer right away when it comes from the calendar or
  * the clear button, but not while the time field is being typed in: each
- * applied time reloads the layer, so applying every keystroke would reload it
- * for each half-typed value (e.g. hour "0" of "01:…"). Typing is applied by
+ * applied time re-requests the layer's chunks, so applying every keystroke
+ * would load data for each half-typed value (e.g. hour "0" of "01:…"). Typing is applied by
  * `applyDraft()` on Enter or when the field loses focus.
  */
 export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
@@ -387,9 +368,9 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
       showLayerTime();
       return;
     }
-    // Second line of defence: `blockedSchemeOf` already keeps `|versioned:`
-    // layers out of edit sessions, but a session must never see its layer's
-    // data source swapped underneath it if that ever changes.
+    // Second line of defence: `blockedSchemeOf` already keeps layers viewed
+    // at a past time out of edit sessions, but a session layer must never
+    // switch to past data underneath the session.
     if (isSessionLayer(layer.managedLayer)) {
       showLayerTime();
       StatusMessage.showTemporaryMessage(
@@ -406,6 +387,11 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
     layer.dataSourcesChanged.add(() => {
       updateEarliestTime();
       // Keep a half-typed draft; it is applied or dropped when typing ends.
+      if (!typing) showLayerTime();
+    }),
+  );
+  context.registerDisposer(
+    layer.versionTime.changed.add(() => {
       if (!typing) showLayerTime();
     }),
   );
