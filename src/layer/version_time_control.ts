@@ -29,6 +29,7 @@ import "#src/datasource/calcada/calcada.css";
 import { isSessionLayer } from "#src/editing/adapters/session_layer_structure_lock.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
 import { groupChangeMoments } from "#src/kvstore/versioned/change_moments.js";
+import type { ObjectChangesPage } from "#src/kvstore/versioned/object_version_store.js";
 import {
   canChooseVersionTime,
   chooseVersionTimeInUrl,
@@ -208,10 +209,9 @@ class LayerChangesListing {
   private cursor: string | undefined;
   private hasEarlierVersion = false;
   private complete = false;
-  private read = false;
+  /** Listing pages read so far. */
+  private pagesRead = 0;
   private reading = false;
-  /** Next read starts the listing over (`refresh`). */
-  private restart = false;
 
   constructor(
     private store: VersionedKvStore | undefined,
@@ -220,17 +220,8 @@ class LayerChangesListing {
     private versionMoments: WatchableValue<VersionMoments>,
   ) {}
 
-  /**
-   * Reads the listing again from the start, to pick up changes saved since
-   * (one request). The shown list stays until the new one arrives.
-   */
-  refresh() {
-    if (this.reading || this.store === undefined) return;
-    this.restart = true;
-    void this.readPages(1, { quiet: true });
-  }
-
-  async readPages(pages: number, { quiet = false } = {}) {
+  /** Reads `pages` more listing pages and shows each as it arrives. */
+  async readPages(pages: number) {
     const { store } = this;
     if (store === undefined) {
       this.historyStatus.value = "unknown";
@@ -238,33 +229,17 @@ class LayerChangesListing {
     }
     if (this.reading) return;
     this.reading = true;
-    if (!quiet) this.publish(true);
+    this.publish(true);
     try {
-      for (let page = 0; page < pages; ++page) {
-        const result = await store.listChanges(
-          this.restart ? undefined : this.cursor,
-          {},
-        );
+      for (let page = 0; page < pages && !this.complete; ++page) {
+        const result = await store.listChanges(this.cursor, {});
         if (!this.isCurrent()) return;
         if (result === "no-permission") {
           this.historyStatus.value = "no-permission";
           return;
         }
-        if (this.restart) {
-          this.restart = false;
-          this.changeTimes = [];
-          this.hasEarlierVersion = false;
-        }
-        this.changeTimes.push(...result.changeTimes);
-        this.hasEarlierVersion ||= result.hasEarlierVersion;
-        this.cursor = result.nextCursor;
-        this.complete = result.nextCursor === undefined;
-        this.read = true;
-        this.historyStatus.value = this.hasEarlierVersion
-          ? "available"
-          : "none-found";
+        this.addPage(result);
         this.publish(!this.complete && page + 1 < pages);
-        if (this.complete) break;
       }
     } catch {
       if (this.isCurrent() && this.historyStatus.value === "checking") {
@@ -276,6 +251,52 @@ class LayerChangesListing {
     }
   }
 
+  /**
+   * Reads the listing again from the start, as far as it was read before, to
+   * pick up changes saved since (one request for a layer with up to 1000
+   * stored versions). The shown list stays until the new one is complete.
+   */
+  async refresh() {
+    const { store } = this;
+    if (store === undefined || this.reading || this.pagesRead === 0) return;
+    this.reading = true;
+    const pages = this.pagesRead;
+    const fresh = new LayerChangesListing(
+      store,
+      this.isCurrent,
+      this.historyStatus,
+      this.versionMoments,
+    );
+    try {
+      for (let page = 0; page < pages && !fresh.complete; ++page) {
+        const result = await store.listChanges(fresh.cursor, {});
+        if (!this.isCurrent() || result === "no-permission") return;
+        fresh.addPage(result);
+      }
+      this.changeTimes = fresh.changeTimes;
+      this.cursor = fresh.cursor;
+      this.hasEarlierVersion = fresh.hasEarlierVersion;
+      this.complete = fresh.complete;
+      this.pagesRead = fresh.pagesRead;
+    } catch {
+      // Keep the list already shown; the next open tries again.
+    } finally {
+      this.reading = false;
+      if (this.isCurrent()) this.publish(false);
+    }
+  }
+
+  private addPage(result: ObjectChangesPage) {
+    this.changeTimes.push(...result.changeTimes);
+    this.hasEarlierVersion ||= result.hasEarlierVersion;
+    this.cursor = result.nextCursor;
+    this.complete = result.nextCursor === undefined;
+    ++this.pagesRead;
+    this.historyStatus.value = this.hasEarlierVersion
+      ? "available"
+      : "none-found";
+  }
+
   private publish(loading: boolean) {
     const all = groupChangeMoments(this.changeTimes);
     // With every object listed the newest moment is the latest data itself.
@@ -284,7 +305,7 @@ class LayerChangesListing {
       latestChange: this.complete ? all[0] : undefined,
       complete: this.complete,
       loading,
-      read: this.read,
+      read: this.pagesRead > 0,
     };
   }
 }
@@ -405,7 +426,7 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
     },
     /** Re-read the version list for changes saved since it was read. */
     refreshChanges: () => {
-      changesListing?.refresh();
+      void changesListing?.refresh();
     },
     /** Read further listing pages to find older changes of a large layer. */
     searchMoreChanges: () => {

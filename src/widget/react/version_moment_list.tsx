@@ -20,7 +20,8 @@ import type { ListboxOption } from "#src/widget/listbox_dropdown.js";
 import { SearchableSelect } from "#src/widget/react/searchable_select.js";
 import { Button } from "@/components/ui/button";
 
-export const LATEST_VERSION_LABEL = "Latest";
+/** The current data, as Calcada's Label control names it. */
+export const LATEST_VERSION_LABEL = "— live —";
 export const OLDER_VERSION_LABEL = "Older version";
 export const NEWER_VERSION_LABEL = "Newer version";
 export const VERSION_LIST_LABEL = "Version";
@@ -35,17 +36,11 @@ export function formatMoment(time: number) {
 }
 
 function versionOptions(
-  { moments, latestChange }: VersionMoments,
+  { moments }: VersionMoments,
   current: number | undefined,
 ): ListboxOption[] {
   const options: ListboxOption[] = [
-    {
-      key: LATEST_KEY,
-      label:
-        latestChange === undefined
-          ? LATEST_VERSION_LABEL
-          : `${LATEST_VERSION_LABEL} · ${formatMoment(latestChange)}`,
-    },
+    { key: LATEST_KEY, label: LATEST_VERSION_LABEL },
     ...moments.map((time) => ({
       key: String(time),
       label: formatMoment(time),

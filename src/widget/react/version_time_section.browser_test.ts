@@ -409,11 +409,7 @@ describe("version list", () => {
     )!;
   }
 
-  const ALL = [
-    `${LATEST_VERSION_LABEL} · ${formatMoment(erased)}`,
-    formatMoment(painted),
-    formatMoment(copy),
-  ];
+  const ALL = [LATEST_VERSION_LABEL, formatMoment(painted), formatMoment(copy)];
 
   it("lists each save once, newest first; the newest is the latest data", async () => {
     const { elements } = mountSourceSections([CURRENT], {
@@ -497,7 +493,7 @@ describe("version list", () => {
     bucket.changePages = [[...writes, saved]];
     await openList(section);
     await optionsShown([
-      `${LATEST_VERSION_LABEL} · ${formatMoment(saved)}`,
+      LATEST_VERSION_LABEL,
       formatMoment(erased),
       formatMoment(painted),
       formatMoment(copy),
@@ -513,16 +509,27 @@ describe("version list", () => {
     await noteShown(section, PARTIAL_LIST_NOTE);
     // Opening the Source tab reads one page: the history check itself.
     expect(bucket.listedPages).toBe(1);
-    // Not everything listed: the newest found is not known to be the latest.
-    expect(shownVersion(section)).toBe(LATEST_VERSION_LABEL);
+    // Not everything listed: the newest found is not known to be the
+    // latest data, so it is listed as a version of its own.
+    await openList(section);
+    await optionsShown([LATEST_VERSION_LABEL, formatMoment(copy)]);
+    await userEvent.keyboard("{Escape}");
     await userEvent.click(
       [...section.querySelectorAll("button")].find(
         (candidate) => candidate.textContent === SEARCH_MORE_LABEL,
       )!,
     );
-    await vi.waitFor(() => expect(shownVersion(section)).toBe(ALL[0]), TIMEOUT);
-    expect(bucket.listedPages).toBe(3);
-    expect(section.textContent).not.toContain(PARTIAL_LIST_NOTE);
+    await vi.waitFor(
+      () => expect(section.textContent).not.toContain(PARTIAL_LIST_NOTE),
+      TIMEOUT,
+    );
+    // Source tab open (1) + re-read on opening the list (1) + 2 more pages.
+    expect(bucket.listedPages).toBe(4);
+    // Opening the list again re-reads as far as was read: all 3 pages, so
+    // the versions found by "Search more files" stay listed.
+    await openList(section);
+    await optionsShown(ALL);
+    expect(bucket.listedPages).toBe(7);
   });
 
   it("no permission: no list", async () => {

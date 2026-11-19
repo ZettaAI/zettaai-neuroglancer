@@ -17,8 +17,15 @@ import type {
 } from "#src/layer/version_time_control.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { VersionMomentList } from "#src/widget/react/version_moment_list.js";
+import { cn } from "@/lib/utils";
 
 export const VERSION_TIME_SECTION_TITLE = "Bucket history";
+
+/** Name of the row with the version dropdown (Calcada's is "Label"). */
+export const VERSION_ROW_NAME = "Version";
+
+/** Row names share one width so the controls line up, as in Calcada. */
+const ROW_NAME_CLASS = "w-14 shrink-0 text-sm";
 
 export const VERSION_TIME_LIVE_NOTE =
   "Showing current data (editable). Pick a time to view the bucket as it was then; the bucket needs object versioning.";
@@ -102,15 +109,8 @@ export function VersionTimeSection({
       <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {VERSION_TIME_SECTION_TITLE}
       </div>
-      {status !== "no-permission" && (
-        <VersionMomentList
-          versionMoments={versionMoments}
-          intermediateTimestamp={intermediateTimestamp}
-          chooseTime={chooseTime}
-          searchMoreChanges={searchMoreChanges}
-          refreshChanges={refreshChanges}
-        />
-      )}
+      {/* Same rows as the Calcada Graph tab: Time, then the list of moments
+          (Calcada: Label), each with its name in a left column. */}
       {showPicker && (
         <div
           className="flex items-center gap-2"
@@ -126,11 +126,27 @@ export function VersionTimeSection({
             }
           }}
         >
-          <span className="shrink-0 text-sm">Time</span>
+          <span className={ROW_NAME_CLASS}>Time</span>
           <CalcadaTimestampPicker
             intermediateTimestamp={intermediateTimestamp}
             timestampLimit={timestampLimit}
           />
+        </div>
+      )}
+      {status !== "no-permission" && (
+        <div className="flex items-start gap-2">
+          <span className={cn(ROW_NAME_CLASS, "leading-7")}>
+            {VERSION_ROW_NAME}
+          </span>
+          <div className="min-w-0 flex-1">
+            <VersionMomentList
+              versionMoments={versionMoments}
+              intermediateTimestamp={intermediateTimestamp}
+              chooseTime={chooseTime}
+              searchMoreChanges={searchMoreChanges}
+              refreshChanges={refreshChanges}
+            />
+          </div>
         </div>
       )}
       <div
