@@ -123,7 +123,7 @@ export interface S3ObjectVersionEntry {
  * cost of showing the previous version for up to one second after a write.
  * Times with sub-second precision (some S3-compatible servers) are used as is.
  */
-function s3EffectiveWriteTime(lastModified: number) {
+export function s3EffectiveWriteTime(lastModified: number) {
   return lastModified % 1000 === 0 ? lastModified + 999 : lastModified;
 }
 

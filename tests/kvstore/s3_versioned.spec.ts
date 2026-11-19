@@ -328,7 +328,7 @@ test("a read cancelled during url style detection does not fail reads waiting fo
   expect(lifetimes.map(({ versionId }) => versionId)).toEqual(["v1"]);
 });
 
-describe("earlier versions under a prefix", () => {
+describe("changes under a prefix", () => {
   async function storeFor(url: string) {
     return (await sharedKvStoreContext()).kvStoreContext.getKvStore(url)
       .store as unknown as ObjectVersionStore;
@@ -336,11 +336,11 @@ describe("earlier versions under a prefix", () => {
 
   test("a rewritten object counts as history", async () => {
     // `layer/info` was rewritten in beforeAll.
-    expect(
-      await (
-        await storeFor(`s3://${BUCKET}/`)
-      ).hasEarlierVersions("layer/", {}),
-    ).toBe(true);
+    const page = await (
+      await storeFor(`s3://${BUCKET}/`)
+    ).listChangesUnder("layer/", undefined, {});
+    expect(page.hasEarlierVersion).toBe(true);
+    expect(page.nextCursor).toBeUndefined();
   });
 
   test("a bucket with only current versions has none", async () => {
@@ -358,10 +358,50 @@ describe("earlier versions under a prefix", () => {
           ),
       ),
     );
-    expect(
-      await (
-        await storeFor("s3://plainbucket/")
-      ).hasEarlierVersions("layer/", {}),
-    ).toBe(false);
+    const page = await (
+      await storeFor("s3://plainbucket/")
+    ).listChangesUnder("layer/", undefined, {});
+    expect(page.hasEarlierVersion).toBe(false);
+    // `LastModified` has whole seconds: counted from the end of that second.
+    expect(page.changeTimes).toEqual([
+      Date.parse("2026-01-01T00:00:00.000Z") + 999,
+    ]);
+  });
+
+  test("a truncated listing continues from its markers", async () => {
+    const requests: URL[] = [];
+    (await msw()).use(
+      http.get("https://pagedbucket.s3.amazonaws.com/", ({ request }) => {
+        const url = new URL(request.url);
+        requests.push(url);
+        const first = url.searchParams.get("key-marker") === null;
+        return new HttpResponse(
+          '<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+            (first
+              ? "<IsTruncated>true</IsTruncated>" +
+                "<NextKeyMarker>layer/a</NextKeyMarker>" +
+                "<NextVersionIdMarker>v1</NextVersionIdMarker>" +
+                "<Version><Key>layer/a</Key><VersionId>v1</VersionId>" +
+                "<IsLatest>true</IsLatest>" +
+                "<LastModified>2026-01-01T00:00:00.000Z</LastModified></Version>"
+              : "<IsTruncated>false</IsTruncated>" +
+                "<DeleteMarker><Key>layer/b</Key><VersionId>v2</VersionId>" +
+                "<IsLatest>true</IsLatest>" +
+                "<LastModified>2026-01-02T00:00:00.000Z</LastModified></DeleteMarker>") +
+            "</ListVersionsResult>",
+          { headers: { "content-type": "application/xml" } },
+        );
+      }),
+    );
+    const store = await storeFor("s3://pagedbucket/");
+    const first = await store.listChangesUnder("layer/", undefined, {});
+    expect(first.hasEarlierVersion).toBe(false);
+    expect(first.nextCursor).toBeDefined();
+    const second = await store.listChangesUnder("layer/", first.nextCursor, {});
+    expect(second.hasEarlierVersion).toBe(true);
+    expect(second.nextCursor).toBeUndefined();
+    const last = requests[requests.length - 1];
+    expect(last.searchParams.get("key-marker")).toBe("layer/a");
+    expect(last.searchParams.get("version-id-marker")).toBe("v1");
   });
 });

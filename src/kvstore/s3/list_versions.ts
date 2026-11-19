@@ -14,15 +14,19 @@
  * limitations under the License.
  */
 
+import type { ObjectChangesPage } from "#src/kvstore/versioned/object_version_store.js";
 import {
-  EARLIER_VERSIONS_PAGE_SIZE,
+  CHANGES_PAGE_SIZE,
   parseListingTime,
 } from "#src/kvstore/versioned/object_version_store.js";
 import type {
   ObjectVersionLifetime,
   S3ObjectVersionEntry,
 } from "#src/kvstore/versioned/version_at_time.js";
-import { s3VersionLifetimes } from "#src/kvstore/versioned/version_at_time.js";
+import {
+  s3EffectiveWriteTime,
+  s3VersionLifetimes,
+} from "#src/kvstore/versioned/version_at_time.js";
 import type { FetchOk } from "#src/util/http_request.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 
@@ -81,7 +85,7 @@ interface ListVersionsPage {
   versions: ListedVersion[];
   /** A later key appeared: listings are sorted by key, so `key` is complete. */
   passedKey: boolean;
-  nextMarkers: { keyMarker: string; versionIdMarker: string } | undefined;
+  nextMarkers: ListingMarkers | undefined;
 }
 
 function parseListVersionsPage(
@@ -89,11 +93,7 @@ function parseListVersionsPage(
   key: string,
   firstListIndex: number,
 ): ListVersionsPage {
-  if (!/<ListVersionsResult[\s>]/.test(text)) {
-    throw new Error(
-      `Expected a ListVersionsResult, received: ${text.slice(0, 100)}`,
-    );
-  }
+  verifyListVersionsResult(text);
   const versions: ListedVersion[] = [];
   let passedKey = false;
   const entryPattern = /<(Version|DeleteMarker)>([\s\S]*?)<\/\1>/g;
@@ -117,25 +117,43 @@ function parseListVersionsPage(
       listIndex: firstListIndex + versions.length,
     });
   }
-  // Result-level fields, outside the entries.
-  const summary = text.replace(entryPattern, "");
-  const isTruncated = childText(summary, "IsTruncated") === "true";
   return {
     versions,
     passedKey,
-    nextMarkers: isTruncated
-      ? {
-          keyMarker: decodeListedKey(
-            requiredChildText(summary, "ListVersionsResult", "NextKeyMarker"),
-          ),
-          versionIdMarker: requiredChildText(
-            summary,
-            "ListVersionsResult",
-            "NextVersionIdMarker",
-          ),
-        }
-      : undefined,
+    nextMarkers: parseNextMarkers(text.replace(entryPattern, "")),
   };
+}
+
+type ListingMarkers = { keyMarker: string; versionIdMarker: string };
+
+/** Where a truncated listing continues; `summary` = result minus entries. */
+function parseNextMarkers(summary: string): ListingMarkers | undefined {
+  if (childText(summary, "IsTruncated") !== "true") return undefined;
+  return {
+    keyMarker: decodeListedKey(
+      requiredChildText(summary, "ListVersionsResult", "NextKeyMarker"),
+    ),
+    versionIdMarker: requiredChildText(
+      summary,
+      "ListVersionsResult",
+      "NextVersionIdMarker",
+    ),
+  };
+}
+
+function markersQuery(markers: ListingMarkers | undefined) {
+  return markers === undefined
+    ? ""
+    : `&key-marker=${encodeURIComponent(markers.keyMarker)}` +
+        `&version-id-marker=${encodeURIComponent(markers.versionIdMarker)}`;
+}
+
+function verifyListVersionsResult(text: string) {
+  if (!/<ListVersionsResult[\s>]/.test(text)) {
+    throw new Error(
+      `Expected a ListVersionsResult, received: ${text.slice(0, 100)}`,
+    );
+  }
 }
 
 /**
@@ -167,10 +185,7 @@ export async function listS3ObjectVersions(
   do {
     const response = await fetchOkImpl(
       `${bucketUrl}?versions&prefix=${encodeURIComponent(key)}&encoding-type=url` +
-        (markers === undefined
-          ? ""
-          : `&key-marker=${encodeURIComponent(markers.keyMarker)}` +
-            `&version-id-marker=${encodeURIComponent(markers.versionIdMarker)}`),
+        markersQuery(markers),
       {
         headers: { accept: "application/xml,text/xml" },
         signal: options.signal,
@@ -190,19 +205,23 @@ export async function listS3ObjectVersions(
 }
 
 /**
- * Whether the first `ListObjectVersions` page under `prefix` holds a
- * noncurrent version or a delete marker. `bucketUrl` as for
- * `listS3ObjectVersions`.
+ * One `ListObjectVersions` page under `prefix`: when each version and delete
+ * marker was written. `bucketUrl` as for `listS3ObjectVersions`; `cursor` is
+ * the previous page's `nextCursor`.
  */
-export async function hasS3EarlierVersions(
+export async function listS3ChangesUnder(
   bucketUrl: string,
   prefix: string,
+  cursor: string | undefined,
   fetchOkImpl: FetchOk,
   options: Partial<ProgressOptions>,
-): Promise<boolean> {
+): Promise<ObjectChangesPage> {
+  const markers =
+    cursor === undefined ? undefined : (JSON.parse(cursor) as ListingMarkers);
   const response = await fetchOkImpl(
     `${bucketUrl}?versions&prefix=${encodeURIComponent(prefix)}` +
-      `&max-keys=${EARLIER_VERSIONS_PAGE_SIZE}&encoding-type=url`,
+      `&max-keys=${CHANGES_PAGE_SIZE}&encoding-type=url` +
+      markersQuery(markers),
     {
       headers: { accept: "application/xml,text/xml" },
       signal: options.signal,
@@ -210,15 +229,30 @@ export async function hasS3EarlierVersions(
     },
   );
   const text = await response.text();
-  if (!/<ListVersionsResult[\s>]/.test(text)) {
-    throw new Error(
-      `Expected a ListVersionsResult, received: ${text.slice(0, 100)}`,
+  verifyListVersionsResult(text);
+  const entryPattern = /<(Version|DeleteMarker)>([\s\S]*?)<\/\1>/g;
+  const changeTimes: number[] = [];
+  let hasEarlierVersion = false;
+  for (const [, elementName, entry] of text.matchAll(entryPattern)) {
+    changeTimes.push(
+      s3EffectiveWriteTime(
+        parseListingTime(requiredChildText(entry, elementName, "LastModified")),
+      ),
     );
+    if (
+      elementName === "DeleteMarker" ||
+      childText(entry, "IsLatest") === "false"
+    ) {
+      hasEarlierVersion = true;
+    }
   }
-  return (
-    /<DeleteMarker>/.test(text) ||
-    /<IsLatest>\s*false\s*<\/IsLatest>/.test(text)
-  );
+  const nextMarkers = parseNextMarkers(text.replace(entryPattern, ""));
+  return {
+    changeTimes,
+    hasEarlierVersion,
+    nextCursor:
+      nextMarkers === undefined ? undefined : JSON.stringify(nextMarkers),
+  };
 }
 
 export function getS3ObjectVersionUrl(objectUrl: string, versionId: string) {

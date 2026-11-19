@@ -11,8 +11,12 @@
 
 import { CalcadaTimestampPicker } from "#src/datasource/calcada/react/timestamp_picker.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
-import type { VersionHistoryStatus } from "#src/layer/version_time_control.js";
+import type {
+  VersionHistoryStatus,
+  VersionMoments,
+} from "#src/layer/version_time_control.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
+import { VersionMomentList } from "#src/widget/react/version_moment_list.js";
 
 export const VERSION_TIME_SECTION_TITLE = "Bucket history";
 
@@ -59,6 +63,9 @@ export function VersionTimeSection({
   intermediateTimestamp,
   timestampLimit,
   historyStatus,
+  versionMoments,
+  chooseTime,
+  searchMoreChanges,
   startTyping,
   applyTypedTime,
   finishTyping,
@@ -66,6 +73,11 @@ export function VersionTimeSection({
   intermediateTimestamp: WatchableValueInterface<number | undefined>;
   timestampLimit: WatchableValueInterface<number>;
   historyStatus: WatchableValueInterface<VersionHistoryStatus>;
+  versionMoments: WatchableValueInterface<VersionMoments>;
+  /** Show the layer at a time from the version list (`undefined` = latest). */
+  chooseTime: (time: number | undefined) => void;
+  /** Look through more of a large layer's files for older changes. */
+  searchMoreChanges: () => void;
   /** The time-of-day field got focus. */
   startTyping: () => void;
   /** Enter in the time-of-day field. */
@@ -90,6 +102,14 @@ export function VersionTimeSection({
       <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {VERSION_TIME_SECTION_TITLE}
       </div>
+      {status !== "no-permission" && (
+        <VersionMomentList
+          versionMoments={versionMoments}
+          intermediateTimestamp={intermediateTimestamp}
+          chooseTime={chooseTime}
+          searchMoreChanges={searchMoreChanges}
+        />
+      )}
       {showPicker && (
         <div
           className="flex items-center gap-2"

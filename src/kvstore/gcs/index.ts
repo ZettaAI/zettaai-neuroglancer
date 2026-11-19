@@ -25,9 +25,12 @@ import type {
   StatResponse,
 } from "#src/kvstore/index.js";
 import { encodePathForUrl } from "#src/kvstore/url.js";
-import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
+import type {
+  ObjectChangesPage,
+  ObjectVersionStore,
+} from "#src/kvstore/versioned/object_version_store.js";
 import {
-  EARLIER_VERSIONS_PAGE_SIZE,
+  CHANGES_PAGE_SIZE,
   parseListingTime,
 } from "#src/kvstore/versioned/object_version_store.js";
 import type {
@@ -204,15 +207,19 @@ export class GcsKvStore implements KvStore, ObjectVersionStore {
     return gcsGenerationLifetimes(generations);
   }
 
-  async hasEarlierVersions(
+  async listChangesUnder(
     prefix: string,
+    cursor: string | undefined,
     options: Partial<ProgressOptions>,
-  ): Promise<boolean> {
+  ): Promise<ObjectChangesPage> {
     const response = await this.fetchOkImpl(
       `https://storage.googleapis.com/storage/v1/b/${this.bucket}/o?` +
         `versions=true&prefix=${encodeURIComponent(prefix)}` +
-        `&maxResults=${EARLIER_VERSIONS_PAGE_SIZE}` +
-        `&fields=${encodeURIComponent("items(name,timeDeleted)")}` +
+        `&maxResults=${CHANGES_PAGE_SIZE}` +
+        `&fields=${encodeURIComponent("items(name,timeCreated,timeDeleted),nextPageToken")}` +
+        (cursor === undefined
+          ? ""
+          : `&pageToken=${encodeURIComponent(cursor)}`) +
         `&neuroglancerOrigin=${encodeURIComponent(location.origin)}`,
       { signal: options.signal, progressListener: options.progressListener },
     );
@@ -226,23 +233,41 @@ export class GcsKvStore implements KvStore, ObjectVersionStore {
           verifyObject(item);
           return {
             name: verifyObjectProperty(item, "name", verifyString),
+            timeCreated: verifyObjectProperty(item, "timeCreated", (value) =>
+              parseListingTime(verifyString(value)),
+            ),
             timeDeleted: verifyOptionalObjectProperty(
               item,
               "timeDeleted",
-              verifyString,
+              (value) => parseListingTime(verifyString(value)),
             ),
           };
         }),
       [],
     );
+    const changeTimes: number[] = [];
     // A generation stops being current at its `timeDeleted`; a name listed
     // twice also has an earlier generation (emulators omit `timeDeleted`).
+    let hasEarlierVersion = false;
     const names = new Set<string>();
-    for (const { name, timeDeleted } of items) {
-      if (timeDeleted !== undefined || names.has(name)) return true;
+    for (const { name, timeCreated, timeDeleted } of items) {
+      changeTimes.push(timeCreated);
+      if (timeDeleted !== undefined) {
+        changeTimes.push(timeDeleted);
+        hasEarlierVersion = true;
+      }
+      if (names.has(name)) hasEarlierVersion = true;
       names.add(name);
     }
-    return false;
+    return {
+      changeTimes,
+      hasEarlierVersion,
+      nextCursor: verifyOptionalObjectProperty(
+        responseJson,
+        "nextPageToken",
+        verifyString,
+      ),
+    };
   }
 
   readObjectVersion(

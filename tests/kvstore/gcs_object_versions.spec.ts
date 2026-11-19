@@ -180,17 +180,32 @@ test("listing is bounded to exactly the key", async () => {
   expect(listUrls[0].searchParams.get("endOffset")).toBe("info\x01");
 });
 
-describe("earlier versions under a prefix", () => {
+describe("changes under a prefix", () => {
+  const CREATED = "2026-01-01T00:00:00Z";
+  const DELETED = "2026-01-02T00:00:00Z";
   test.for([
-    ["no noncurrent generation", [{ name: "a" }, { name: "b" }], false],
+    [
+      "no noncurrent generation",
+      [
+        { name: "a", timeCreated: CREATED },
+        { name: "b", timeCreated: CREATED },
+      ],
+      false,
+    ],
     [
       "a noncurrent generation",
-      [{ name: "a", timeDeleted: "2026-01-01T00:00:00Z" }, { name: "a" }],
+      [
+        { name: "a", timeCreated: CREATED, timeDeleted: DELETED },
+        { name: "a", timeCreated: DELETED },
+      ],
       true,
     ],
     [
       "a name listed twice (no timeDeleted)",
-      [{ name: "a" }, { name: "a" }],
+      [
+        { name: "a", timeCreated: CREATED },
+        { name: "a", timeCreated: DELETED },
+      ],
       true,
     ],
     ["no objects", undefined, false],
@@ -206,11 +221,47 @@ describe("earlier versions under a prefix", () => {
       ),
     );
     const store = new GcsKvStore("historybucket");
-    expect(await store.hasEarlierVersions("layer/", {})).toBe(expected);
+    const page = await store.listChangesUnder("layer/", undefined, {});
+    expect(page.hasEarlierVersion).toBe(expected);
+    expect(page.nextCursor).toBeUndefined();
     expect(requests).toHaveLength(1);
     const url = new URL(requests[0]);
     expect(url.searchParams.get("versions")).toBe("true");
     expect(url.searchParams.get("prefix")).toBe("layer/");
     expect(url.searchParams.get("maxResults")).toBe("1000");
+  });
+
+  test("lists write and delete times, page by page", async () => {
+    const requests: URL[] = [];
+    (await msw()).use(
+      http.get(
+        "https://storage.googleapis.com/storage/v1/b/historybucket/o",
+        ({ request }) => {
+          const url = new URL(request.url);
+          requests.push(url);
+          return HttpResponse.json(
+            url.searchParams.get("pageToken") === null
+              ? {
+                  items: [
+                    { name: "a", timeCreated: CREATED, timeDeleted: DELETED },
+                  ],
+                  nextPageToken: "page2",
+                }
+              : { items: [{ name: "a", timeCreated: DELETED }] },
+          );
+        },
+      ),
+    );
+    const store = new GcsKvStore("historybucket");
+    const first = await store.listChangesUnder("layer/", undefined, {});
+    expect(first.changeTimes).toEqual([
+      Date.parse(CREATED),
+      Date.parse(DELETED),
+    ]);
+    expect(first.nextCursor).toBe("page2");
+    const second = await store.listChangesUnder("layer/", first.nextCursor, {});
+    expect(second.changeTimes).toEqual([Date.parse(DELETED)]);
+    expect(second.nextCursor).toBeUndefined();
+    expect(requests[1].searchParams.get("pageToken")).toBe("page2");
   });
 });

@@ -25,7 +25,10 @@ import type {
 } from "#src/kvstore/index.js";
 import { KvStoreFileHandle, NotFoundError } from "#src/kvstore/index.js";
 import type { ObjectVersionHistoryCache } from "#src/kvstore/versioned/object_version_history_cache.js";
-import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
+import type {
+  ObjectChangesPage,
+  ObjectVersionStore,
+} from "#src/kvstore/versioned/object_version_store.js";
 import { getVersionedUrl } from "#src/kvstore/versioned/url.js";
 import type { ObjectVersionLifetime } from "#src/kvstore/versioned/version_at_time.js";
 import {
@@ -133,18 +136,16 @@ export class VersionedKvStore implements KvStore {
   }
 
   /**
-   * Whether this layer's bucket can show past data: `"available"` when an
-   * earlier version exists under the layer, `"none-found"` when none does in
-   * the first listing page (no object versioning, or nothing rewritten yet),
-   * `"no-permission"` when version listing is refused.
+   * One page of changes under this layer (see
+   * `ObjectVersionStore.listChangesUnder`), or `"no-permission"` when version
+   * listing is refused.
    */
-  async historyStatus(
+  async listChanges(
+    cursor: string | undefined,
     options: Partial<ProgressOptions>,
-  ): Promise<"available" | "none-found" | "no-permission"> {
+  ): Promise<ObjectChangesPage | "no-permission"> {
     try {
-      return (await this.base.hasEarlierVersions(this.root, options))
-        ? "available"
-        : "none-found";
+      return await this.base.listChangesUnder(this.root, cursor, options);
     } catch (e) {
       if (e instanceof HttpError && (e.status === 401 || e.status === 403)) {
         return "no-permission";

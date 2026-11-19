@@ -38,11 +38,14 @@ import {
 } from "#src/kvstore/s3/list.js";
 import {
   getS3ObjectVersionUrl,
-  hasS3EarlierVersions,
+  listS3ChangesUnder,
   listS3ObjectVersions,
 } from "#src/kvstore/s3/list_versions.js";
 import { joinBaseUrlAndPath } from "#src/kvstore/url.js";
-import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
+import type {
+  ObjectChangesPage,
+  ObjectVersionStore,
+} from "#src/kvstore/versioned/object_version_store.js";
 import type { ObjectVersionLifetime } from "#src/kvstore/versioned/version_at_time.js";
 import type { FetchOk } from "#src/util/http_request.js";
 import { fetchOk, HttpError } from "#src/util/http_request.js";
@@ -240,10 +243,11 @@ export class ReadableS3KvStore<
     );
   }
 
-  async hasEarlierVersions(
+  async listChangesUnder(
     prefix: string,
+    cursor: string | undefined,
     options: Partial<ProgressOptions>,
-  ): Promise<boolean> {
+  ): Promise<ObjectChangesPage> {
     let urlKind: S3UrlKind | undefined = this.knownToBeVirtualHostedStyle
       ? "virtual"
       : this.knownVersionListingUrlKind();
@@ -253,9 +257,10 @@ export class ReadableS3KvStore<
       urlKind = this.knownVersionListingUrlKind() ?? "virtual";
     }
     if (urlKind === "virtual") {
-      return hasS3EarlierVersions(
+      return listS3ChangesUnder(
         this.baseUrl,
         prefix,
+        cursor,
         this.fetchOkImpl,
         options,
       );
@@ -267,9 +272,10 @@ export class ReadableS3KvStore<
         `Path-style S3 URL ${this.getUrl(prefix)} must specify bucket`,
       );
     }
-    return hasS3EarlierVersions(
+    return listS3ChangesUnder(
       joinBaseUrlAndPath(this.baseUrl, prefix.substring(0, separator + 1)),
       prefix.substring(separator + 1),
+      cursor,
       this.fetchOkImpl,
       options,
     );

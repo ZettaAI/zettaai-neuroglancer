@@ -28,7 +28,7 @@
 import "#src/datasource/calcada/calcada.css";
 import { isSessionLayer } from "#src/editing/adapters/session_layer_structure_lock.js";
 import { mountComponent } from "#src/editing/ui/interop/react/component_mount.js";
-import { pipelineUrlJoin } from "#src/kvstore/url.js";
+import { groupChangeMoments } from "#src/kvstore/versioned/change_moments.js";
 import {
   canChooseVersionTime,
   chooseVersionTimeInUrl,
@@ -140,15 +140,9 @@ function earliestTimeSourceOf(layer: UserLayer): string | undefined {
  * a time before the layer had any data. `0` (no limit) when unknown.
  */
 async function getEarliestLayerTime(layer: UserLayer): Promise<number> {
-  const kvStoreUrl = earliestTimeSourceOf(layer);
-  if (kvStoreUrl === undefined) return 0;
-  const { kvStoreContext } =
-    layer.manager.dataSourceProviderRegistry.sharedKvStoreContext;
-  const { store, path } = kvStoreContext.getKvStore(
-    pipelineUrlJoin(kvStoreUrl, "info"),
-  );
-  if (!(store instanceof VersionedKvStore)) return 0;
-  return (await store.earliestVersionTime(path, {})) ?? 0;
+  const store = layerVersionedStore(layer);
+  if (store === undefined) return 0;
+  return (await store.earliestVersionTime("info", {})) ?? 0;
 }
 
 /**
@@ -163,16 +157,110 @@ export type VersionHistoryStatus =
   | "no-permission"
   | "unknown";
 
-async function getLayerHistoryStatus(
-  layer: UserLayer,
-): Promise<Exclude<VersionHistoryStatus, "checking">> {
+/** Change moments of the layer found so far (see `groupChangeMoments`). */
+export interface VersionMoments {
+  /** Earlier versions to pick from, newest first; the latest data excluded. */
+  moments: number[];
+  /** When the latest data was written, once every object was listed. */
+  latestChange: number | undefined;
+  /** Every object under the layer was listed: `moments` is the full history. */
+  complete: boolean;
+  /** A listing page is being read. */
+  loading: boolean;
+}
+
+const NO_MOMENTS: VersionMoments = {
+  moments: [],
+  latestChange: undefined,
+  complete: false,
+  loading: false,
+};
+
+/** Listing pages read per "Search more files" click (1000 versions each). */
+export const MORE_CHANGES_PAGES = 5;
+
+function layerVersionedStore(layer: UserLayer): VersionedKvStore | undefined {
   const kvStoreUrl = earliestTimeSourceOf(layer);
-  if (kvStoreUrl === undefined) return "unknown";
+  if (kvStoreUrl === undefined) return undefined;
   const { kvStoreContext } =
     layer.manager.dataSourceProviderRegistry.sharedKvStoreContext;
-  const { store } = kvStoreContext.getKvStore(kvStoreUrl);
-  if (!(store instanceof VersionedKvStore)) return "unknown";
-  return store.historyStatus({});
+  try {
+    const { store } = kvStoreContext.getKvStore(kvStoreUrl);
+    return store instanceof VersionedKvStore ? store : undefined;
+  } catch {
+    // An unusable URL is reported by the data source itself; the history
+    // block just has nothing to list.
+    return undefined;
+  }
+}
+
+/**
+ * Lists the layer's changes page by page and keeps `historyStatus` and
+ * `versionMoments` up to date. The first page is the same single request
+ * that tells whether the bucket has history, so the moments cost nothing
+ * extra for layers up to 1000 stored versions.
+ */
+class LayerChangesListing {
+  private changeTimes: number[] = [];
+  private cursor: string | undefined;
+  private hasEarlierVersion = false;
+  private complete = false;
+  private reading = false;
+
+  constructor(
+    private store: VersionedKvStore | undefined,
+    private isCurrent: () => boolean,
+    private historyStatus: WatchableValue<VersionHistoryStatus>,
+    private versionMoments: WatchableValue<VersionMoments>,
+  ) {}
+
+  async readPages(pages: number) {
+    const { store } = this;
+    if (store === undefined) {
+      this.historyStatus.value = "unknown";
+      return;
+    }
+    if (this.reading) return;
+    this.reading = true;
+    this.publish(true);
+    try {
+      for (let page = 0; page < pages; ++page) {
+        const result = await store.listChanges(this.cursor, {});
+        if (!this.isCurrent()) return;
+        if (result === "no-permission") {
+          this.historyStatus.value = "no-permission";
+          return;
+        }
+        this.changeTimes.push(...result.changeTimes);
+        this.hasEarlierVersion ||= result.hasEarlierVersion;
+        this.cursor = result.nextCursor;
+        this.complete = result.nextCursor === undefined;
+        this.historyStatus.value = this.hasEarlierVersion
+          ? "available"
+          : "none-found";
+        this.publish(!this.complete && page + 1 < pages);
+        if (this.complete) break;
+      }
+    } catch {
+      if (this.isCurrent() && this.historyStatus.value === "checking") {
+        this.historyStatus.value = "unknown";
+      }
+    } finally {
+      this.reading = false;
+      if (this.isCurrent()) this.publish(false);
+    }
+  }
+
+  private publish(loading: boolean) {
+    const all = groupChangeMoments(this.changeTimes);
+    // With every object listed the newest moment is the latest data itself.
+    this.versionMoments.value = {
+      moments: this.complete ? all.slice(1) : all,
+      latestChange: this.complete ? all[0] : undefined,
+      complete: this.complete,
+      loading,
+    };
+  }
 }
 
 /**
@@ -193,6 +281,8 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
   // clamps each keystroke to it, see `startOfLocalDay`).
   const timestampLimit = new WatchableValue<number>(0);
   const historyStatus = new WatchableValue<VersionHistoryStatus>("checking");
+  const versionMoments = new WatchableValue<VersionMoments>(NO_MOMENTS);
+  let changesListing: LayerChangesListing | undefined;
   // Exact time the layer appeared; an applied time is clamped to it.
   let earliestTime = 0;
   let typing = false;
@@ -206,18 +296,14 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
     earliestTime = 0;
     timestampLimit.value = 0;
     historyStatus.value = "checking";
-    getLayerHistoryStatus(layer).then(
-      (status) => {
-        if (!context.wasDisposed && earliestTimeSource === source) {
-          historyStatus.value = status;
-        }
-      },
-      () => {
-        if (!context.wasDisposed && earliestTimeSource === source) {
-          historyStatus.value = "unknown";
-        }
-      },
+    versionMoments.value = NO_MOMENTS;
+    changesListing = new LayerChangesListing(
+      layerVersionedStore(layer),
+      () => !context.wasDisposed && earliestTimeSource === source,
+      historyStatus,
+      versionMoments,
     );
+    void changesListing.readPages(1);
     getEarliestLayerTime(layer).then(
       (time) => {
         if (!context.wasDisposed && earliestTimeSource === source) {
@@ -285,6 +371,16 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
     intermediateTimestamp,
     timestampLimit,
     historyStatus,
+    versionMoments,
+    /** Show the layer at `time` (`undefined` = latest data) right away. */
+    chooseTime: (time: number | undefined) => {
+      typing = false;
+      intermediateTimestamp.value = time;
+    },
+    /** Read further listing pages to find older changes of a large layer. */
+    searchMoreChanges: () => {
+      void changesListing?.readPages(MORE_CHANGES_PAGES);
+    },
     /** The time field got focus: hold typed changes until applied. */
     startTyping: () => {
       typing = true;

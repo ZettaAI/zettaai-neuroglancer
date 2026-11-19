@@ -282,9 +282,10 @@ test("history check failing for another reason leaves the picker usable", async 
   const layer = new FakeLayer([CURRENT]);
   const context = new RefCounted();
   const { historyStatus } = makeVersionTimeState(layer.asUserLayer(), context);
-  expect(historyStatus.value).toBe("checking");
+  // The fake kvstore throws: nothing can be listed, and it is not a
+  // permission answer, so "unknown" right away (no request to wait for).
+  expect(historyStatus.value).toBe("unknown");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  // The fake kvstore throws: not a permission answer, so "unknown".
   expect(historyStatus.value).toBe("unknown");
   context.dispose();
 });

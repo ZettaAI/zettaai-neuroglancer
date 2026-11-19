@@ -45,20 +45,32 @@ export interface ObjectVersionStore {
     options: StatOptions,
   ): Promise<StatResponse | undefined>;
   /**
-   * Whether the first page of the version listing under `prefix` holds an
-   * earlier (noncurrent) version or a delete marker: one cheap request that
-   * tells a bucket with history from one without (no object versioning, or
-   * nothing rewritten yet). A large directory can have history only past the
-   * first page, so `false` means "none found", not "none".
+   * One page of the version listing of every object under `prefix`: when
+   * objects there were written or deleted. Pass the previous page's
+   * `nextCursor` to continue. Listings are sorted by name, so a partial
+   * listing covers the first objects by name, not the latest changes.
    */
-  hasEarlierVersions(
+  listChangesUnder(
     prefix: string,
+    cursor: string | undefined,
     options: Partial<ProgressOptions>,
-  ): Promise<boolean>;
+  ): Promise<ObjectChangesPage>;
 }
 
-/** Versions looked at by `hasEarlierVersions` (one listing page). */
-export const EARLIER_VERSIONS_PAGE_SIZE = 1000;
+export interface ObjectChangesPage {
+  /** Milliseconds since the epoch of each write or delete in this page. */
+  changeTimes: number[];
+  /**
+   * The page holds an overwritten or deleted version, so the bucket keeps
+   * history (object versioning is on and something changed).
+   */
+  hasEarlierVersion: boolean;
+  /** Continues the listing; `undefined` once every object was listed. */
+  nextCursor: string | undefined;
+}
+
+/** Versions per `listChangesUnder` page (the GCS and S3 maximum). */
+export const CHANGES_PAGE_SIZE = 1000;
 
 export function isObjectVersionStore(
   store: KvStore,
@@ -68,7 +80,7 @@ export function isObjectVersionStore(
     typeof candidate.listObjectVersions === "function" &&
     typeof candidate.readObjectVersion === "function" &&
     typeof candidate.statObjectVersion === "function" &&
-    typeof candidate.hasEarlierVersions === "function"
+    typeof candidate.listChangesUnder === "function"
   );
 }
 

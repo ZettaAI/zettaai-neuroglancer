@@ -19,7 +19,10 @@ import { userEvent } from "@vitest/browser/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ObjectVersionHistoryCache } from "#src/kvstore/versioned/object_version_history_cache.js";
-import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
+import type {
+  ObjectChangesPage,
+  ObjectVersionStore,
+} from "#src/kvstore/versioned/object_version_store.js";
 import { getVersionTimeFromUrl } from "#src/kvstore/versioned/url.js";
 import type { ObjectVersionLifetime } from "#src/kvstore/versioned/version_at_time.js";
 import { VersionedKvStore } from "#src/kvstore/versioned/versioned_kvstore.js";
@@ -28,6 +31,15 @@ import { makeVersionTimeSourceSection } from "#src/layer/version_time_control.js
 import { RefCounted } from "#src/util/disposable.js";
 import { HttpError } from "#src/util/http_request.js";
 import { NullarySignal } from "#src/util/signal.js";
+import {
+  formatMoment,
+  LATEST_VERSION_LABEL,
+  NEWER_VERSION_LABEL,
+  OLDER_VERSION_LABEL,
+  PARTIAL_LIST_NOTE,
+  SEARCH_MORE_LABEL,
+  VERSION_LIST_LABEL,
+} from "#src/widget/react/version_moment_list.js";
 import {
   VERSION_TIME_LIVE_NOTE,
   VERSION_TIME_NO_PERMISSION_NOTE,
@@ -56,20 +68,35 @@ function yesterdayAt(hours: number, minutes: number, seconds: number) {
 
 type HistoryAnswer = "available" | "none-found" | "no-permission";
 
-/** Bucket under the layer: the history answer and when `info` first appeared. */
+/**
+ * Bucket under the layer: the history answer, when `info` first appeared,
+ * and the write times listed page by page (one array per listing page).
+ */
 class FakeBucket implements ObjectVersionStore {
+  listedPages = 0;
   constructor(
     private history: HistoryAnswer,
     private infoCreated: number | undefined,
+    private changePages: number[][],
   ) {}
   getUrl(key: string) {
     return `gs://b/${key}`;
   }
-  async hasEarlierVersions() {
+  async listChangesUnder(
+    _prefix: string,
+    cursor: string | undefined,
+  ): Promise<ObjectChangesPage> {
     if (this.history === "no-permission") {
       throw new HttpError("https://storage.googleapis.com/", 403, "Forbidden");
     }
-    return this.history === "available";
+    const page = cursor === undefined ? 0 : Number(cursor);
+    ++this.listedPages;
+    return {
+      changeTimes: this.changePages[page] ?? [],
+      hasEarlierVersion: this.history === "available",
+      nextCursor:
+        page + 1 < this.changePages.length ? String(page + 1) : undefined,
+    };
   }
   async listObjectVersions(key: string): Promise<ObjectVersionLifetime[]> {
     if (this.infoCreated === undefined || !key.endsWith("info")) return [];
@@ -157,9 +184,15 @@ function mountSourceSections(
   {
     history = "available",
     infoCreated,
-  }: { history?: HistoryAnswer; infoCreated?: number } = {},
+    changePages = [],
+  }: {
+    history?: HistoryAnswer;
+    infoCreated?: number;
+    changePages?: number[][];
+  } = {},
 ) {
-  const layer = new FakeLayer(urls, new FakeBucket(history, infoCreated));
+  const bucket = new FakeBucket(history, infoCreated, changePages);
+  const layer = new FakeLayer(urls, bucket);
   const elements = layer.dataSources.map((dataSource) => {
     const widget = makeVersionTimeSourceSection(
       dataSource as unknown as LayerDataSource,
@@ -168,7 +201,7 @@ function mountSourceSections(
     mounted.push({ element: widget.element, dispose: () => widget.dispose() });
     return widget.element;
   });
-  return { layer, elements };
+  return { layer, elements, bucket };
 }
 
 function sectionIn(element: HTMLElement) {
@@ -324,5 +357,140 @@ describe("Bucket history in the Source tab", () => {
       expect(layer.dataSources[0].spec.url).toBe("precomputed://gs://b/layer");
     }, TIMEOUT);
     await noteShown(section, VERSION_TIME_LIVE_NOTE);
+  });
+});
+
+describe("version list", () => {
+  // Our real test: a copy, then a save that painted a blob, then one that
+  // erased half of it. Each save wrote several chunks a second or two apart.
+  const copy = yesterdayAt(13, 38, 41);
+  const painted = yesterdayAt(15, 1, 41);
+  const erased = yesterdayAt(15, 2, 59);
+  const writes = [
+    copy - 2000,
+    copy,
+    painted - 1000,
+    painted,
+    erased - 1000,
+    erased,
+  ];
+
+  function listIn(section: HTMLElement) {
+    return section.querySelector<HTMLElement>(
+      `[role="listbox"][aria-label="${VERSION_LIST_LABEL}"]`,
+    );
+  }
+
+  function rowLabels(section: HTMLElement) {
+    return [...listIn(section)!.querySelectorAll('[role="option"]')].map(
+      (row) => row.textContent,
+    );
+  }
+
+  function listShown(section: HTMLElement, rows: number) {
+    return vi.waitFor(() => {
+      expect(listIn(section)?.querySelectorAll('[role="option"]').length).toBe(
+        rows,
+      );
+    }, TIMEOUT);
+  }
+
+  function button(section: HTMLElement, label: string) {
+    return section.querySelector<HTMLButtonElement>(
+      `button[aria-label="${label}"]`,
+    )!;
+  }
+
+  it("lists each save once, newest first; the newest is the latest data", async () => {
+    const { elements } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await listShown(section, 3);
+    expect(rowLabels(section)).toEqual([
+      `${LATEST_VERSION_LABEL} · ${formatMoment(erased)}`,
+      formatMoment(painted),
+      formatMoment(copy),
+    ]);
+  });
+
+  it("picking a version shows the layer then; Latest returns to editable data", async () => {
+    const { layer, elements } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await listShown(section, 3);
+    await userEvent.click(
+      [...listIn(section)!.querySelectorAll<HTMLElement>('[role="option"]')][2],
+    );
+    await vi.waitFor(() => expect(chosenTime(layer)).toBe(copy), TIMEOUT);
+    await userEvent.click(
+      listIn(section)!.querySelector<HTMLElement>('[role="option"]')!,
+    );
+    await vi.waitFor(
+      () => expect(layer.dataSources[0].spec.url).toBe(CURRENT),
+      TIMEOUT,
+    );
+  });
+
+  it("◀ ▶ step through the versions", async () => {
+    const { layer, elements } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await listShown(section, 3);
+    expect(button(section, NEWER_VERSION_LABEL).disabled).toBe(true);
+    await userEvent.click(button(section, OLDER_VERSION_LABEL));
+    await vi.waitFor(() => expect(chosenTime(layer)).toBe(painted), TIMEOUT);
+    await userEvent.click(button(section, OLDER_VERSION_LABEL));
+    await vi.waitFor(() => expect(chosenTime(layer)).toBe(copy), TIMEOUT);
+    await vi.waitFor(
+      () => expect(button(section, OLDER_VERSION_LABEL).disabled).toBe(true),
+      TIMEOUT,
+    );
+    await userEvent.click(button(section, NEWER_VERSION_LABEL));
+    await vi.waitFor(() => expect(chosenTime(layer)).toBe(painted), TIMEOUT);
+    await userEvent.click(button(section, NEWER_VERSION_LABEL));
+    await vi.waitFor(
+      () => expect(layer.dataSources[0].spec.url).toBe(CURRENT),
+      TIMEOUT,
+    );
+  });
+
+  it("a large layer is listed one page at a time, on request", async () => {
+    const { elements, bucket } = mountSourceSections([CURRENT], {
+      changePages: [[copy], [painted], [erased]],
+    });
+    const section = await sectionShown(elements[0]);
+    await noteShown(section, PARTIAL_LIST_NOTE);
+    // Opening the Source tab reads one page: the history check itself.
+    expect(bucket.listedPages).toBe(1);
+    // Not everything listed: the newest found is not known to be the latest.
+    expect(rowLabels(section)).toEqual([
+      LATEST_VERSION_LABEL,
+      formatMoment(copy),
+    ]);
+    await userEvent.click(
+      [...section.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === SEARCH_MORE_LABEL,
+      )!,
+    );
+    await listShown(section, 3);
+    expect(rowLabels(section)).toEqual([
+      `${LATEST_VERSION_LABEL} · ${formatMoment(erased)}`,
+      formatMoment(painted),
+      formatMoment(copy),
+    ]);
+    expect(bucket.listedPages).toBe(3);
+    expect(section.textContent).not.toContain(PARTIAL_LIST_NOTE);
+  });
+
+  it("no permission: no list", async () => {
+    const { elements } = mountSourceSections([CURRENT], {
+      history: "no-permission",
+    });
+    const section = await sectionShown(elements[0]);
+    await noteShown(section, VERSION_TIME_NO_PERMISSION_NOTE);
+    expect(listIn(section)).toBeNull();
   });
 });

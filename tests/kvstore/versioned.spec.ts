@@ -384,12 +384,13 @@ test("paths relative to a layer read at a time stay at that time (segmentation m
   ).toBe(`gs://${BUCKET}/|versioned:@${time}/dataset/other_layer/skeletons`);
 });
 
-test("history status of a layer: available, or no permission", async () => {
+test("changes of a layer: with history, or no permission", async () => {
   const { kvStoreContext } = await sharedKvStoreContext();
   const versioned = kvStoreContext.getKvStore(
     `gs://${BUCKET}/image/|versioned:`,
   ).store as VersionedKvStore;
-  expect(await versioned.historyStatus({})).toBe("available");
+  const page = await versioned.listChanges(undefined, {});
+  expect(page !== "no-permission" && page.hasEarlierVersion).toBe(true);
   (await msw()).use(
     http.get(
       "https://storage.googleapis.com/storage/v1/b/privatebucket/o",
@@ -399,5 +400,5 @@ test("history status of a layer: available, or no permission", async () => {
   const forbidden = kvStoreContext.getKvStore(
     "gs://privatebucket/layer/|versioned:",
   ).store as VersionedKvStore;
-  expect(await forbidden.historyStatus({})).toBe("no-permission");
+  expect(await forbidden.listChanges(undefined, {})).toBe("no-permission");
 });
