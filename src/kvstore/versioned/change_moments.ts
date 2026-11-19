@@ -9,10 +9,11 @@
  */
 
 /**
- * Writes closer together than this belong to one change: one save writes many
- * chunks over a few seconds.
+ * Writes closer together than this belong to one change: one save writes its
+ * chunks within milliseconds of each other, while two saves by hand are
+ * seconds apart (6 s seen in practice), so they stay separate moments.
  */
-export const CHANGE_GAP_MS = 10_000;
+export const CHANGE_GAP_MS = 2_000;
 
 /**
  * Groups object write/delete times into change moments, newest first. Each

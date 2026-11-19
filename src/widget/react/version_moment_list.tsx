@@ -10,7 +10,7 @@
  */
 
 import { format } from "date-fns";
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
 
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import { neighbourMoment } from "#src/kvstore/versioned/change_moments.js";
@@ -23,6 +23,7 @@ export const LATEST_VERSION_LABEL = "Latest";
 export const OLDER_VERSION_LABEL = "Older version";
 export const NEWER_VERSION_LABEL = "Newer version";
 export const VERSION_LIST_LABEL = "Versions";
+export const REFRESH_VERSIONS_LABEL = "Look for new versions";
 export const SEARCH_MORE_LABEL = "Search more files";
 export const PARTIAL_LIST_NOTE =
   "Large layer: only changes found so far are listed.";
@@ -41,11 +42,14 @@ export function VersionMomentList({
   intermediateTimestamp,
   chooseTime,
   searchMoreChanges,
+  refreshChanges,
 }: {
   versionMoments: WatchableValueInterface<VersionMoments>;
   intermediateTimestamp: WatchableValueInterface<number | undefined>;
   chooseTime: (time: number | undefined) => void;
   searchMoreChanges: () => void;
+  /** `force`: re-read now, not only if the list is a few seconds old. */
+  refreshChanges: (force?: boolean) => void;
 }) {
   const { moments, latestChange, complete, loading } =
     useWatchable(versionMoments);
@@ -63,7 +67,12 @@ export function VersionMomentList({
     ...moments.map((time) => ({ time, label: formatMoment(time) })),
   ];
   return (
-    <div className="flex flex-col gap-1">
+    // New saves happen while the block is open: re-read the list (at most
+    // every few seconds) when the pointer comes to it.
+    <div
+      className="flex flex-col gap-1"
+      onPointerEnter={() => refreshChanges()}
+    >
       <div className="flex items-center gap-1">
         <Button
           variant="ghost"
@@ -91,6 +100,15 @@ export function VersionMomentList({
           }}
         >
           <ChevronRightIcon />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={REFRESH_VERSIONS_LABEL}
+          title={REFRESH_VERSIONS_LABEL}
+          onClick={() => refreshChanges(true)}
+        >
+          <RefreshCwIcon />
         </Button>
       </div>
       <div

@@ -37,6 +37,7 @@ import {
   NEWER_VERSION_LABEL,
   OLDER_VERSION_LABEL,
   PARTIAL_LIST_NOTE,
+  REFRESH_VERSIONS_LABEL,
   SEARCH_MORE_LABEL,
   VERSION_LIST_LABEL,
 } from "#src/widget/react/version_moment_list.js";
@@ -77,7 +78,7 @@ class FakeBucket implements ObjectVersionStore {
   constructor(
     private history: HistoryAnswer,
     private infoCreated: number | undefined,
-    private changePages: number[][],
+    public changePages: number[][],
   ) {}
   getUrl(key: string) {
     return `gs://b/${key}`;
@@ -362,18 +363,11 @@ describe("Bucket history in the Source tab", () => {
 
 describe("version list", () => {
   // Our real test: a copy, then a save that painted a blob, then one that
-  // erased half of it. Each save wrote several chunks a second or two apart.
+  // erased half of it. Each save wrote several chunks milliseconds apart.
   const copy = yesterdayAt(13, 38, 41);
   const painted = yesterdayAt(15, 1, 41);
   const erased = yesterdayAt(15, 2, 59);
-  const writes = [
-    copy - 2000,
-    copy,
-    painted - 1000,
-    painted,
-    erased - 1000,
-    erased,
-  ];
+  const writes = [copy - 53, copy, painted - 31, painted, erased - 31, erased];
 
   function listIn(section: HTMLElement) {
     return section.querySelector<HTMLElement>(
@@ -483,6 +477,48 @@ describe("version list", () => {
     ]);
     expect(bucket.listedPages).toBe(3);
     expect(section.textContent).not.toContain(PARTIAL_LIST_NOTE);
+  });
+
+  it("a save made while the block is open shows up on refresh", async () => {
+    const { elements, bucket } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await listShown(section, 3);
+    const saved = erased + 9000;
+    bucket.changePages = [[...writes, saved]];
+    await userEvent.click(button(section, REFRESH_VERSIONS_LABEL));
+    await listShown(section, 4);
+    expect(rowLabels(section)).toEqual([
+      `${LATEST_VERSION_LABEL} · ${formatMoment(saved)}`,
+      formatMoment(erased),
+      formatMoment(painted),
+      formatMoment(copy),
+    ]);
+  });
+
+  it("pointing at the list re-reads it, at most every few seconds", async () => {
+    const { elements, bucket } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await listShown(section, 3);
+    expect(bucket.listedPages).toBe(1);
+    // Right after the first read: too soon, nothing is read.
+    await userEvent.hover(listIn(section)!);
+    expect(bucket.listedPages).toBe(1);
+    await userEvent.unhover(listIn(section)!);
+    // A few seconds later a new save is picked up.
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 5000);
+    try {
+      bucket.changePages = [[...writes, erased + 9000]];
+      await userEvent.hover(listIn(section)!);
+      await listShown(section, 4);
+      expect(bucket.listedPages).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("no permission: no list", async () => {

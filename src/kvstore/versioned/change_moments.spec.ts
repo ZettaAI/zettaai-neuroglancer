@@ -20,20 +20,21 @@ const MINUTE = 60 * SECOND;
 
 describe("change moments", () => {
   test("writes of one save become one moment at its last write", () => {
-    expect(
-      groupChangeMoments([
-        0,
-        2 * SECOND,
-        5 * SECOND,
-        3 * MINUTE,
-        3 * MINUTE + SECOND,
-      ]),
-    ).toEqual([3 * MINUTE + SECOND, 5 * SECOND]);
+    // One save writes its chunks milliseconds apart.
+    expect(groupChangeMoments([0, 7, 53, 3 * MINUTE, 3 * MINUTE + 31])).toEqual(
+      [3 * MINUTE + 31, 53],
+    );
+  });
+
+  test("saves a few seconds apart stay separate moments", () => {
+    // Real saves by hand, 6-9 s apart.
+    const saves = [0, 9 * SECOND, 16 * SECOND, 22 * SECOND];
+    expect(groupChangeMoments(saves)).toEqual([...saves].reverse());
   });
 
   test("a long save stays one moment while its writes keep coming", () => {
-    const writes = Array.from({ length: 30 }, (_, i) => i * 5 * SECOND);
-    expect(groupChangeMoments(writes)).toEqual([29 * 5 * SECOND]);
+    const writes = Array.from({ length: 30 }, (_, i) => i * SECOND);
+    expect(groupChangeMoments(writes)).toEqual([29 * SECOND]);
   });
 
   test("unsorted and repeated times", () => {
