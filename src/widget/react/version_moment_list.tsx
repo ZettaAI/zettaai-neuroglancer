@@ -79,20 +79,10 @@ export function VersionMomentList({
   const older = neighbourMoment(moments, current, "older");
   const newer = neighbourMoment(moments, current, "newer");
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={OLDER_VERSION_LABEL}
-          title={OLDER_VERSION_LABEL}
-          disabled={older === null}
-          onClick={() => {
-            if (older !== null) chooseTime(older);
-          }}
-        >
-          <ChevronLeftIcon />
-        </Button>
+    <div className="flex min-w-0 flex-col gap-1">
+      {/* The dropdown starts where the date above starts; ◀ ▶ sit at the
+          end, where the clear button is above. */}
+      <div className="flex items-center gap-1.5">
         <SearchableSelect
           className="min-w-0 flex-1"
           options={versionOptions(state, current)}
@@ -105,6 +95,18 @@ export function VersionMomentList({
           onOpen={refreshChanges}
           ariaLabel={VERSION_LIST_LABEL}
         />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={OLDER_VERSION_LABEL}
+          title={OLDER_VERSION_LABEL}
+          disabled={older === null}
+          onClick={() => {
+            if (older !== null) chooseTime(older);
+          }}
+        >
+          <ChevronLeftIcon />
+        </Button>
         <Button
           variant="ghost"
           size="icon-sm"

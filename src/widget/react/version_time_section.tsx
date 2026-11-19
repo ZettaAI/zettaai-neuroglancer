@@ -19,13 +19,13 @@ import type { WatchableValueInterface } from "#src/trackable_value.js";
 import { VersionMomentList } from "#src/widget/react/version_moment_list.js";
 import { cn } from "@/lib/utils";
 
-export const VERSION_TIME_SECTION_TITLE = "Bucket history";
+export const VERSION_TIME_SECTION_TITLE = "Version history";
 
 /** Name of the row with the version dropdown (Calcada's is "Label"). */
 export const VERSION_ROW_NAME = "Version";
 
-/** Row names share one width so the controls line up, as in Calcada. */
-const ROW_NAME_CLASS = "w-14 shrink-0 text-sm";
+/** Row names, in the first column of the rows grid. */
+const ROW_NAME_CLASS = "text-sm";
 
 export const VERSION_TIME_LIVE_NOTE =
   "Showing current data (editable). Pick a time to view the bucket as it was then; the bucket needs object versioning.";
@@ -110,35 +110,38 @@ export function VersionTimeSection({
         {VERSION_TIME_SECTION_TITLE}
       </div>
       {/* Same rows as the Calcada Graph tab: Time, then the list of moments
-          (Calcada: Label), each with its name in a left column. */}
-      {showPicker && (
-        <div
-          className="flex items-center gap-2"
-          onFocus={(event) => {
-            if (isTimeField(event.target)) startTyping();
-          }}
-          onBlur={(event) => {
-            if (isTimeField(event.target)) finishTyping();
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && isTimeField(event.target)) {
-              applyTypedTime();
-            }
-          }}
-        >
-          <span className={ROW_NAME_CLASS}>Time</span>
-          <CalcadaTimestampPicker
-            intermediateTimestamp={intermediateTimestamp}
-            timestampLimit={timestampLimit}
-          />
-        </div>
-      )}
-      {status !== "no-permission" && (
-        <div className="flex items-start gap-2">
-          <span className={cn(ROW_NAME_CLASS, "leading-7")}>
-            {VERSION_ROW_NAME}
-          </span>
-          <div className="min-w-0 flex-1">
+          (Calcada: Label). A two-column grid lines the controls up: names on
+          the left, controls from one edge to the other, buttons at the end. */}
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5">
+        {showPicker && (
+          <>
+            <span className={ROW_NAME_CLASS}>Time</span>
+            <div
+              className="min-w-0 [&>.neuroglancer-calcada-timestamp-picker]:w-full"
+              onFocus={(event) => {
+                if (isTimeField(event.target)) startTyping();
+              }}
+              onBlur={(event) => {
+                if (isTimeField(event.target)) finishTyping();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && isTimeField(event.target)) {
+                  applyTypedTime();
+                }
+              }}
+            >
+              <CalcadaTimestampPicker
+                intermediateTimestamp={intermediateTimestamp}
+                timestampLimit={timestampLimit}
+              />
+            </div>
+          </>
+        )}
+        {status !== "no-permission" && (
+          <>
+            <span className={cn(ROW_NAME_CLASS, "self-start leading-7")}>
+              {VERSION_ROW_NAME}
+            </span>
             <VersionMomentList
               versionMoments={versionMoments}
               intermediateTimestamp={intermediateTimestamp}
@@ -146,9 +149,9 @@ export function VersionTimeSection({
               searchMoreChanges={searchMoreChanges}
               refreshChanges={refreshChanges}
             />
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </div>
       <div
         role={note.warning ? "status" : undefined}
         className={
