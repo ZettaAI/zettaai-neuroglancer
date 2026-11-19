@@ -198,6 +198,8 @@
     "#src/editing/ui/tool_settings/tracked_segment_list.js": "./src/editing/ui/tool_settings/tracked_segment_list.tsx",
     "#src/widget/react/truncated_label.js": "./src/widget/react/truncated_label.tsx",
     "#src/widget/react/searchable_select.js": "./src/widget/react/searchable_select.tsx",
+    "#src/widget/react/version_time_section.js": "./src/widget/react/version_time_section.tsx",
+    "#src/widget/react/version_moment_list.js": "./src/widget/react/version_moment_list.tsx",
     "#src/datasource/calcada/react/rejected_by_picker.js": "./src/datasource/calcada/react/rejected_by_picker.tsx",
     "#src/datasource/calcada/react/trace_panel.js": "./src/datasource/calcada/react/trace_panel.tsx",
     "#src/datasource/calcada/react/trace_notice.js": "./src/datasource/calcada/react/trace_notice.tsx",
@@ -586,6 +588,12 @@
       "neuroglancer/kvstore:none_by_default": "./src/util/false.ts",
       "neuroglancer/kvstore/s3:disabled": "./src/util/false.ts",
       "default": "./src/kvstore/s3/register_backend.ts"
+    },
+    "#kvstore/versioned/register": {
+      "neuroglancer/kvstore/versioned:enabled": "./src/kvstore/versioned/register.ts",
+      "neuroglancer/kvstore:none_by_default": "./src/util/false.ts",
+      "neuroglancer/kvstore/versioned:disabled": "./src/util/false.ts",
+      "default": "./src/kvstore/versioned/register.ts"
     },
     "#kvstore/zip/register_frontend": {
       "neuroglancer/kvstore/zip:enabled": "./src/kvstore/zip/register_frontend.ts",

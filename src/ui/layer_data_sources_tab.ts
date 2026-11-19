@@ -44,6 +44,7 @@ import type {
 } from "#src/layer/layer_data_source.js";
 import { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
 import { createImageLayerAsMultiChannel } from "#src/layer/multi_channel_setup.js";
+import { makeVersionTimeSourceSection } from "#src/layer/version_time_control.js";
 import { MeshSource, MultiscaleMeshSource } from "#src/mesh/frontend.js";
 import { SkeletonSource } from "#src/skeleton/frontend.js";
 import { MultiscaleVolumeChunkSource } from "#src/sliceview/volume/frontend.js";
@@ -454,6 +455,13 @@ export class DataSourceView extends RefCounted {
     const { element } = this;
     element.classList.add("neuroglancer-layer-data-source");
     element.appendChild(urlInput.element);
+    // "Version history" time picker, right under the URL it rewrites; empty
+    // unless this source is a precomputed layer in a GCS/S3 bucket. Above the
+    // messages and load progress: picking a version reloads the source, and
+    // the progress lines that come and go must not move the picker.
+    element.appendChild(
+      this.registerDisposer(makeVersionTimeSourceSection(source)).element,
+    );
     element.appendChild(
       this.registerDisposer(new MessagesView(source.messages)).element,
     );

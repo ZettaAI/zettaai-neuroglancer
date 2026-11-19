@@ -24,7 +24,11 @@ import {
   makeDataBoundsBoundingBoxAnnotationSet,
   parseAnnotationPropertySpecs,
 } from "#src/annotation/index.js";
-import type { ChunkManager } from "#src/chunk_manager/frontend.js";
+import type {
+  ChunkManager,
+  ChunkSourceConstructor,
+  GettableChunkSource,
+} from "#src/chunk_manager/frontend.js";
 import { WithParameters } from "#src/chunk_manager/frontend.js";
 import type {
   BoundingBox,
@@ -72,6 +76,8 @@ import {
   parseUrlSuffix,
   pipelineUrlJoin,
 } from "#src/kvstore/url.js";
+import { chunkUrlAtVersionTime } from "#src/kvstore/versioned/url.js";
+import { registerSiblingAtVersionTime } from "#src/kvstore/versioned/version_time_source.js";
 import { VertexPositionFormat } from "#src/mesh/base.js";
 import { MeshSource, MultiscaleMeshSource } from "#src/mesh/frontend.js";
 import type {
@@ -367,11 +373,17 @@ export class PrecomputedMultiscaleVolumeChunkSource extends MultiscaleVolumeChun
                   sharedKvStoreContext: this.sharedKvStoreContext,
                   spec,
                   parameters: {
-                    url: kvstoreEnsureDirectoryPipelineUrl(
-                      this.sharedKvStoreContext.kvStoreContext.resolveRelativePath(
-                        this.url,
-                        scaleInfo.key,
+                    // Zetta (TM-521): a chosen version time reads the scale
+                    // through `versioned:`; each time gets its own chunk
+                    // source, so versions never share cached chunks.
+                    url: chunkUrlAtVersionTime(
+                      kvstoreEnsureDirectoryPipelineUrl(
+                        this.sharedKvStoreContext.kvStoreContext.resolveRelativePath(
+                          this.url,
+                          scaleInfo.key,
+                        ),
                       ),
+                      volumeSourceOptions.versionTime,
                     ),
                     encoding: scaleInfo.encoding,
                     sharding: scaleInfo.sharding,
@@ -445,16 +457,51 @@ export class PrecomputedAnnotationSource extends MultiscaleAnnotationSourceBase 
   }
 }
 
+/**
+ * Zetta (TM-521): gets a chunk source that can also be read at a past time
+ * (`siblingAtVersionTime`). The sibling for a time is the same source with
+ * its bucket URLs read through `versioned:` (`optionsAtVersionTime`); it is a
+ * separate chunk source, so versions never share cached chunks.
+ */
+function getChunkSourceReadableAtVersionTime<T extends GettableChunkSource>(
+  chunkManager: ChunkManager,
+  constructorFunction: ChunkSourceConstructor<T>,
+  options: T["OPTIONS"],
+  optionsAtVersionTime: (time: number) => T["OPTIONS"],
+): T {
+  const source = chunkManager.getChunkSource(constructorFunction, options);
+  registerSiblingAtVersionTime(source, (time) =>
+    chunkManager.getChunkSource(
+      constructorFunction,
+      optionsAtVersionTime(time),
+    ),
+  );
+  return source;
+}
+
+/** Zetta (TM-521): `parameters` with its `url` read at `time`. */
+function parametersAtVersionTime<Parameters extends { url: string }>(
+  parameters: Parameters,
+  time: number,
+): Parameters {
+  return { ...parameters, url: chunkUrlAtVersionTime(parameters.url, time) };
+}
+
 function getLegacyMeshSource(
   sharedKvStoreContext: SharedKvStoreContext,
   parameters: MeshSourceParameters,
 ) {
-  return sharedKvStoreContext.chunkManager.getChunkSource(
+  return getChunkSourceReadableAtVersionTime(
+    sharedKvStoreContext.chunkManager,
     PrecomputedMeshSource,
     {
       parameters,
       sharedKvStoreContext,
     },
+    (time) => ({
+      parameters: parametersAtVersionTime(parameters, time),
+      sharedKvStoreContext,
+    }),
   );
 }
 
@@ -687,17 +734,24 @@ async function getMeshSource(
       `Invalid vertex quantization bits: ${vertexQuantizationBits}`,
     );
   }
+  const format = {
+    fragmentRelativeVertices: true,
+    vertexPositionFormat,
+  };
   return {
-    source: sharedKvStoreContext.chunkManager.getChunkSource(
+    source: getChunkSourceReadableAtVersionTime(
+      sharedKvStoreContext.chunkManager,
       PrecomputedMultiscaleMeshSource,
       {
         sharedKvStoreContext,
         parameters: { url, metadata },
-        format: {
-          fragmentRelativeVertices: true,
-          vertexPositionFormat,
-        },
+        format,
       },
+      (time) => ({
+        sharedKvStoreContext,
+        parameters: parametersAtVersionTime({ url, metadata }, time),
+        format,
+      }),
     ),
     transform: metadata.transform,
     segmentPropertyMap,
@@ -715,7 +769,8 @@ async function getSkeletonSource(
     options,
   );
   return {
-    source: sharedKvStoreContext.chunkManager.getChunkSource(
+    source: getChunkSourceReadableAtVersionTime(
+      sharedKvStoreContext.chunkManager,
       PrecomputedSkeletonSource,
       {
         sharedKvStoreContext,
@@ -724,6 +779,10 @@ async function getSkeletonSource(
           metadata,
         },
       },
+      (time) => ({
+        sharedKvStoreContext,
+        parameters: parametersAtVersionTime({ url, metadata }, time),
+      }),
     ),
     transform: metadata.transform,
     segmentPropertyMap,
@@ -1053,6 +1112,27 @@ class AnnotationMetadata {
     );
     this.spatialIndices.reverse();
   }
+
+  /**
+   * Zetta (TM-521): the same annotations with every bucket URL (by id,
+   * relationships, spatial index levels) read at `time`.
+   */
+  atVersionTime(time: number): AnnotationMetadata {
+    const { parameters } = this;
+    return Object.assign(Object.create(AnnotationMetadata.prototype), this, {
+      parameters: {
+        ...parameters,
+        byId: parametersAtVersionTime(parameters.byId, time),
+        relationships: parameters.relationships.map((relationship) =>
+          parametersAtVersionTime(relationship, time),
+        ),
+      },
+      spatialIndices: this.spatialIndices.map((level) => ({
+        ...level,
+        parameters: parametersAtVersionTime(level.parameters, time),
+      })),
+    });
+  }
 }
 
 function getAnnotationDataSource(
@@ -1072,12 +1152,21 @@ function getAnnotationDataSource(
         id: "default",
         default: true,
         subsource: {
-          annotation: sharedKvStoreContext.chunkManager.getChunkSource(
+          annotation: getChunkSourceReadableAtVersionTime(
+            sharedKvStoreContext.chunkManager,
             PrecomputedAnnotationSource,
             {
               sharedKvStoreContext,
               metadata: info,
               parameters: info.parameters,
+            },
+            (time) => {
+              const metadataAtTime = info.atVersionTime(time);
+              return {
+                sharedKvStoreContext,
+                metadata: metadataAtTime,
+                parameters: metadataAtTime.parameters,
+              };
             },
           ),
         },

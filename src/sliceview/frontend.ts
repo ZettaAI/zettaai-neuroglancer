@@ -978,6 +978,9 @@ export function getVolumetricTransformedSources(
     displayRank: displayRank,
     multiscaleToViewTransform: multiscaleToViewTransform,
     modelChannelDimensionIndices: transform.channelToRenderLayerDimensions,
+    // Zetta (TM-521): the layer's chosen version time, so each layer reads
+    // its own time even when layers share one data source.
+    versionTime: layer?.userLayer?.versionTime?.value,
   });
   const { voxelPhysicalScales: globalScales } = displayDimensionRenderInfo;
   try {
