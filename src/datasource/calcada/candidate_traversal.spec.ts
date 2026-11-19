@@ -3,8 +3,10 @@ import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js
 import {
   bestAlternative,
   describePartnerChoice,
+  formatScore,
 } from "#src/datasource/calcada/candidate_ranking.js";
 import {
+  continueAt,
   nextDecidedEntry,
   nextEntry,
   prependChildren,
@@ -30,6 +32,8 @@ function candidate(
     pointB: Float32Array.of(1, 1, 1),
     nInterfaces: 1,
     modelDecision: "defer",
+    label: "",
+    hidingDecision: "",
     partnerVoxels: 0,
     partnerClasses: {
       perikaryon: 0,
@@ -107,6 +111,32 @@ describe("prependChildren", () => {
       new Set([2n]),
     );
     expect(lineIds(next)).toEqual([3, 1]);
+  });
+});
+
+describe("continueAt", () => {
+  it("puts a candidate the pool lacks at the head at the given depth", () => {
+    const pool = seedPool([candidate(1, 0.9), candidate(2, 0.5)]);
+    const next = continueAt(pool, candidate(3, 0.1), 4, true);
+    expect(lineIds(next)).toEqual([3, 1, 2]);
+    expect(next[0].depth).toBe(4);
+  });
+
+  it("leaves the walk as it is for a queued candidate the filters pass", () => {
+    const pool = seedPool([candidate(1, 0.9), candidate(2, 0.5)]);
+    expect(continueAt(pool, candidate(2, 0.5), 0, true)).toBe(pool);
+  });
+
+  it("moves a queued candidate the filters hide to the head, keeping its depth", () => {
+    const pool = prependChildren(
+      seedPool([candidate(1, 0.9)]),
+      [candidate(2, 0.5), candidate(3, 0.4)],
+      1,
+      new Set(),
+    );
+    const next = continueAt(pool, candidate(3, 0.4), 0, false);
+    expect(lineIds(next)).toEqual([3, 2, 1]);
+    expect(next[0].depth).toBe(2);
   });
 });
 
@@ -264,5 +294,19 @@ describe("describePartnerChoice", () => {
     expect(describePartnerChoice(0.5, candidate(1, 0.7)).seedIsBest).toBe(
       false,
     );
+  });
+
+  it("names the alternative's label beside its score", () => {
+    const labelled = { ...candidate(1, 0.7), label: "thin-neck" };
+    expect(describePartnerChoice(0.5, labelled).text).toBe(
+      "Candidate has an alternative: score 0.70 (thin-neck)",
+    );
+  });
+});
+
+describe("formatScore", () => {
+  it("puts a label after the score, and nothing without one", () => {
+    expect(formatScore(0.873, "thin-neck")).toBe("0.87 (thin-neck)");
+    expect(formatScore(0.873, "")).toBe("0.87");
   });
 });

@@ -46,6 +46,7 @@ interface PanelSetup {
   busy?: boolean;
   hasSegment?: boolean;
   picking?: boolean;
+  branchId?: number;
 }
 
 let calls: string[] = [];
@@ -55,6 +56,7 @@ async function makeConnection({
   busy = true,
   hasSegment = true,
   picking = false,
+  branchId = 1,
 }: PanelSetup = {}): Promise<TracePanelConnection> {
   const { library } = await libraryWith({
     axons: "both axon >= 30%",
@@ -84,7 +86,7 @@ async function makeConnection({
     calls.push(name);
   };
   return {
-    graph: { branchId: new WatchableValue(1) },
+    graph: { branchId: new WatchableValue(branchId) },
     state: { zettaTraceState, overviewState },
     segmentSession: {
       changed: new NullarySignal(),
@@ -104,6 +106,7 @@ async function makeConnection({
             piece: {
               pieceId: 1n,
               bestScore: 0.87,
+              bestLabel: "",
               bestPartnerPiece: 2n,
               bestPartnerRoot: 3n,
               bestPartnerVoxels: 2125,
@@ -128,14 +131,62 @@ async function makeConnection({
       reject: () => {},
       canUndo: () => false,
       skip: () => {},
+      markAmbiguous: () => {},
       start: record("start"),
       accept: async () => {},
       undoLast: async () => {},
+    },
+    // Not the trace's: the same whether it is busy or idle.
+    pairCandidates: {
+      changed: new NullarySignal(),
+      status: "2 contacts in 1 pair between 2 segments",
+      pairs: [
+        {
+          rootA: 10n,
+          rootB: 20n,
+          contacts: [
+            {
+              lineId: 9n,
+              score: 0.87,
+              label: "thin-neck",
+              hidingDecision: "",
+              pointA: Float32Array.of(0, 0, 0),
+              pointB: Float32Array.of(2, 2, 2),
+            },
+            {
+              lineId: 8n,
+              score: 0.41,
+              label: "",
+              hidingDecision: "reject",
+              pointA: Float32Array.of(0, 0, 0),
+              pointB: Float32Array.of(4, 4, 4),
+            },
+          ],
+        },
+      ],
+      dimensions: () => [
+        { name: "x", scale: "8nm" },
+        { name: "y", scale: "8nm" },
+        { name: "z", scale: "40nm" },
+      ],
+      list: async () => {
+        calls.push("listPairs");
+      },
+      goTo: record("goToPair"),
+      showSegment: (root, parent) => {
+        const segment = parent.appendChild(document.createElement("div"));
+        segment.className = "fake-segment";
+        segment.textContent = String(root);
+        return () => segment.remove();
+      },
     },
     listCandidateReviewers: async () => [],
     filterLibrary: library,
   };
 }
+
+const CHIP_INSET_PX = 4;
+const BUTTON_ROW_GAP_PX = 8;
 
 let tab: HTMLDivElement;
 let disposer: Disposer;
@@ -152,7 +203,8 @@ async function mountPanel(connection: TracePanelConnection) {
   document.body.appendChild(tab);
   disposer = mountComponent(tab, CalcadaTracePanel, { connection });
   await vi.waitFor(() => {
-    expect(tab.querySelector(".calcada-trace-panel-navigator")).not.toBe(null);
+    // Shown on main as well as on a branch.
+    expect(tab.querySelector(".calcada-trace-panel-pairs")).not.toBe(null);
   });
 }
 
@@ -283,6 +335,49 @@ describe("CalcadaTracePanel", () => {
     expect((await button("Detect split errors")).disabled).toBe(false);
   });
 
+  it("lists the candidates between the segments on screen and goes to one", async () => {
+    await mountPanel(await makeConnection());
+    calls = [];
+    const pairs = ".calcada-trace-panel-pairs";
+    (await button("List", pairs)).click();
+    const entries = [
+      ...tab.querySelectorAll<HTMLElement>(
+        `${pairs} .neuroglancer-annotation-list-entry`,
+      ),
+    ];
+    // Like an annotation list's line: both ends' coordinates, then the score.
+    expect(
+      entries.map((entry) =>
+        [...entry.children].map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      ["ꕹ", "000", "222", "0.87 (thin-neck)"],
+      ["ꕹ", "000", "444", "0.41 · rejected"],
+    ]);
+    entries[0].click();
+    expect(calls).toEqual(["listPairs", "goToPair"]);
+    const text = tab.querySelector(pairs)?.textContent;
+    expect(text).toContain("2 contacts in 1 pair between 2 segments");
+    // Its two segments one under the other, as the Seg tab shows them.
+    expect(
+      [
+        ...tab.querySelectorAll(
+          `${pairs} .calcada-trace-panel-pair .fake-segment`,
+        ),
+      ].map((segment) => segment.textContent),
+    ).toEqual(["10", "20"]);
+    expect(
+      tab.querySelector(`${pairs} .neuroglancer-annotation-list-header`)
+        ?.textContent,
+    ).toBe("x8nmy8nmz40nm");
+  });
+
+  it("lists the candidates between segments on main too", async () => {
+    await mountPanel(await makeConnection({ branchId: 0 }));
+    expect(tab.textContent).toContain("Trace works on a branch only");
+    await button("List", ".calcada-trace-panel-pairs");
+  });
+
   it("says to Ctrl+click while the segment is being selected", async () => {
     await mountPanel(await makeConnection({ picking: true }));
     expect(
@@ -358,6 +453,52 @@ describe("CalcadaTracePanel", () => {
     );
   });
 
+  it("offers Ambiguous beside Skip, on the up arrow", async () => {
+    await mountPanel(await makeConnection());
+    const ambiguous = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLButtonElement>(
+          ".calcada-trace-panel-buttons button",
+        ),
+      ].find((button) => button.textContent?.includes("Ambiguous"));
+      expect(found).not.toBe(undefined);
+      return found!;
+    });
+    expect(ambiguous.querySelector(".neuroglancer-key-chip")?.textContent).toBe(
+      "↑",
+    );
+  });
+
+  it("leaves room around a key chip and between rows of buttons", async () => {
+    await mountPanel(await makeConnection());
+    const chip = await vi.waitFor(() => {
+      const found = tab.querySelector<HTMLElement>(
+        ".calcada-trace-panel-button-hint button .neuroglancer-key-chip",
+      );
+      expect(found).not.toBe(null);
+      return found!;
+    });
+    const button = chip.closest("button")!;
+    const chipBox = chip.getBoundingClientRect();
+    const buttonBox = button.getBoundingClientRect();
+    expect(chipBox.top - buttonBox.top).toBeGreaterThanOrEqual(CHIP_INSET_PX);
+    expect(buttonBox.bottom - chipBox.bottom).toBeGreaterThanOrEqual(
+      CHIP_INSET_PX,
+    );
+    const row = tab.querySelector<HTMLElement>(".calcada-trace-panel-buttons")!;
+    expect(parseFloat(getComputedStyle(row).rowGap)).toBeGreaterThanOrEqual(
+      BUTTON_ROW_GAP_PX,
+    );
+  });
+
+  it("offers no option to zoom the 3D view to each candidate", async () => {
+    await mountPanel(await makeConnection());
+    await vi.waitFor(() =>
+      expect(tab.textContent).toContain("Centre on each candidate"),
+    );
+    expect(tab.textContent).not.toContain("Zoom the 3D view");
+  });
+
   it("shows split error points while tracing when the box is ticked", async () => {
     const connection = await makeConnection();
     await mountPanel(connection);
@@ -373,6 +514,43 @@ describe("CalcadaTracePanel", () => {
     await vi.waitFor(() =>
       expect(connection.state.zettaTraceState.showSplitPoints.value).toBe(true),
     );
+  });
+
+  it("the sphere radius input sets the default every trace starts at", async () => {
+    const connection = await makeConnection();
+    const state = connection.state.zettaTraceState;
+    await mountPanel(connection);
+    const input = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLLabelElement>(".calcada-trace-panel-row"),
+      ].find((label) => label.textContent?.includes("Default sphere radius"));
+      expect(found).toBeDefined();
+      return found!.querySelector<HTMLInputElement>("input")!;
+    });
+    await userEvent.fill(input, "800");
+    await vi.waitFor(() => expect(state.sphereRadiusDefaultNm.value).toBe(800));
+    expect(state.sphereRadiusNm.value).toBe(800);
+  });
+
+  it("the end radius input sets endRadiusNm in both scopes", async () => {
+    const connection = await makeConnection();
+    const state = connection.state.zettaTraceState;
+    await mountPanel(connection);
+    const input = await vi.waitFor(() => {
+      const found = [
+        ...tab.querySelectorAll<HTMLLabelElement>(".calcada-trace-panel-row"),
+      ].find((label) => label.textContent?.includes("End check radius"));
+      expect(found).toBeDefined();
+      return found!.querySelector<HTMLInputElement>("input")!;
+    });
+    for (const scope of ["sphere", "segment"] as const) {
+      state.scope.value = scope;
+      await vi.waitFor(() => expect(input.disabled).toBe(false));
+      await userEvent.fill(input, scope === "sphere" ? "300" : "400");
+      await vi.waitFor(() =>
+        expect(state.endRadiusNm.value).toBe(scope === "sphere" ? 300 : 400),
+      );
+    }
   });
 
   it("starts a trace from the tab", async () => {

@@ -83,6 +83,7 @@ describe("TraceSphereState", () => {
     );
     trace.active.value = true;
     trace.sphereCenter.value = Float32Array.of(100, 200, 300);
+    state.revealed.value = true;
     selection.hasSelectedSegment = false;
     selection.changed.dispatch();
 
@@ -105,6 +106,27 @@ describe("TraceSphereState", () => {
     trace.sphereCenter.value = Float32Array.of(100, 200, 300);
     trace.aiming.value = true;
     expect(Array.from(state.center.value!)).toEqual([5, 6, 7]);
+    state.dispose();
+    trace.dispose();
+  });
+
+  it("hides the placed sphere unless it is revealed", () => {
+    const { mouseState, selection, coordinateSpace } = makeHost();
+    const trace = new ZettaTraceState();
+    const state = new TraceSphereState(
+      trace,
+      mouseState as any,
+      selection as any,
+      coordinateSpace as any,
+    );
+    trace.active.value = true;
+    trace.sphereCenter.value = Float32Array.of(100, 200, 300);
+    expect(state.visible.value).toBe(false);
+    state.revealed.value = true;
+    expect(state.visible.value).toBe(true);
+    expect(Array.from(state.center.value!)).toEqual([100, 200, 300]);
+    state.revealed.value = false;
+    expect(state.visible.value).toBe(false);
     state.dispose();
     trace.dispose();
   });

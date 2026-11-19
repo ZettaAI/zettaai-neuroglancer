@@ -252,6 +252,7 @@ export class CalcadaTableAnnotationSource extends LocalAnnotationSource {
       if (this.pending.has(id)) this.dropPlaced(id);
       return Promise.resolve();
     }
+    if (this.readonly) return Promise.resolve();
     const inFlight = this.deletesInFlight.get(id);
     if (inFlight !== undefined) return inFlight;
     const annotation = reference.value;

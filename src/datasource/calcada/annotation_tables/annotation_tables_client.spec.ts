@@ -17,6 +17,7 @@ import {
   AnnotationTableForbidden,
   AnnotationTableMissing,
   createAnnotationRow,
+  createAnnotationTable,
   deleteAnnotationRows,
   fetchAnnotationRows,
   fetchSegmentCounts,
@@ -552,12 +553,17 @@ describe("fetchAnnotationRows", () => {
   });
 });
 
+const MAIN_BRANCH = 0;
+const BRANCH = 7;
+const BRANCH_ROWS_URL = `${BASE}/annotation/tables/a/annotations?branch_id=${BRANCH}`;
+
 describe("deleteAnnotationRows", () => {
   it("maps 403 and 404 to the table errors", async () => {
     const forbidden = await deleteAnnotationRows(
       vi.fn(() => failing(403, "forbidden")),
       BASE,
       "a",
+      MAIN_BRANCH,
       [1n],
     ).catch((e) => e);
     expect(forbidden).toBeInstanceOf(AnnotationTableForbidden);
@@ -567,16 +573,28 @@ describe("deleteAnnotationRows", () => {
       vi.fn(() => failing(404, "annotation table not found")),
       BASE,
       "a",
+      MAIN_BRANCH,
       [1n],
     ).catch((e) => e);
     expect(missing).toBeInstanceOf(AnnotationTableMissing);
+  });
+
+  it("sends the branch with a delete", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({}),
+    );
+    await deleteAnnotationRows(fetchOk, BASE, "a", BRANCH, [1n]);
+    expect(String(fetchOk.mock.calls[0][0])).toBe(BRANCH_ROWS_URL);
   });
 
   it("delete sends ids as strings", async () => {
     const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
       json({}),
     );
-    await deleteAnnotationRows(fetchOk, BASE, "a", [BigInt(BIG_ID), 2n]);
+    await deleteAnnotationRows(fetchOk, BASE, "a", MAIN_BRANCH, [
+      BigInt(BIG_ID),
+      2n,
+    ]);
     const [url, init] = fetchOk.mock.calls[0];
     expect(String(url)).toBe(`${BASE}/annotation/tables/a/annotations`);
     expect(init?.method).toBe("DELETE");
@@ -593,6 +611,7 @@ describe("createAnnotationRow", () => {
       fetchOk,
       BASE,
       "a",
+      MAIN_BRANCH,
       new Map([
         ["pre", [1, 2, 3]],
         ["post", [4, 5, 6]],
@@ -616,11 +635,27 @@ describe("createAnnotationRow", () => {
     });
   });
 
+  it("sends the branch with a created row", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ ids: [BIG_ID] }),
+    );
+    await createAnnotationRow(
+      fetchOk,
+      BASE,
+      "a",
+      BRANCH,
+      new Map([["pt", [1, 2, 3]]]),
+      {},
+    );
+    expect(String(fetchOk.mock.calls[0][0])).toBe(BRANCH_ROWS_URL);
+  });
+
   it("names the server's reason when it refuses the row", async () => {
     const refused = await createAnnotationRow(
       vi.fn(() => failing(422, "no piece at the position of point at")),
       BASE,
       "a",
+      MAIN_BRANCH,
       new Map([["at", [1, 2, 3]]]),
       {},
     ).catch((e) => e);
@@ -634,6 +669,7 @@ describe("createAnnotationRow", () => {
       vi.fn(() => failing(403, "forbidden")),
       BASE,
       "a",
+      MAIN_BRANCH,
       new Map([["pt", [1, 2, 3]]]),
       {},
     ).catch((e) => e);
@@ -647,7 +683,7 @@ describe("updateAnnotationRow", () => {
     const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
       json({ ids: [BIG_ID] }),
     );
-    await updateAnnotationRow(fetchOk, BASE, "a", BigInt(BIG_ID), {
+    await updateAnnotationRow(fetchOk, BASE, "a", MAIN_BRANCH, BigInt(BIG_ID), {
       size: 2.5,
       kind: "spine",
     });
@@ -659,11 +695,20 @@ describe("updateAnnotationRow", () => {
     });
   });
 
+  it("sends the branch with an updated row", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({ ids: [BIG_ID] }),
+    );
+    await updateAnnotationRow(fetchOk, BASE, "a", BRANCH, 1n, {});
+    expect(String(fetchOk.mock.calls[0][0])).toBe(BRANCH_ROWS_URL);
+  });
+
   it("names the server's reason when it refuses the payload", async () => {
     const refused = await updateAnnotationRow(
       vi.fn(() => failing(422, "payload does not match the schema")),
       BASE,
       "a",
+      MAIN_BRANCH,
       1n,
       { size: "big" },
     ).catch((e) => e);
@@ -677,6 +722,7 @@ describe("updateAnnotationRow", () => {
       vi.fn(() => failing(403, "forbidden")),
       BASE,
       "a",
+      MAIN_BRANCH,
       1n,
       {},
     ).catch((e) => e);
@@ -709,5 +755,48 @@ describe("retryOnceIfUnauthorized", () => {
       HttpError,
     );
     expect(attempt).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createAnnotationTable", () => {
+  const request = {
+    tableName: "ends",
+    schemaType: "trace_endpoint",
+    schemaVersion: 1,
+    voxelResolution: [4, 4, 40],
+    description: "Trace ends",
+    readPermission: "PUBLIC",
+    writePermission: "PUBLIC",
+  } as const;
+
+  it("posts the server's fields", async () => {
+    const fetchOk = vi.fn(async (_url: RequestInfo, _init?: RequestInit) =>
+      json({}),
+    );
+    expect(await createAnnotationTable(fetchOk, BASE, request)).toBe("created");
+    const [url, init] = fetchOk.mock.calls[0];
+    expect(String(url)).toBe(`${BASE}/annotation/tables`);
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      table_name: "ends",
+      schema_type: "trace_endpoint",
+      schema_version: 1,
+      voxel_resolution: [4, 4, 40],
+      description: "Trace ends",
+      read_permission: "PUBLIC",
+      write_permission: "PUBLIC",
+    });
+  });
+
+  it('a 409 is "exists"', async () => {
+    const fetchOk = vi.fn(() => failing(409, "table already exists"));
+    expect(await createAnnotationTable(fetchOk, BASE, request)).toBe("exists");
+  });
+
+  it("another refusal throws its message", async () => {
+    const fetchOk = vi.fn(() => failing(400, "unknown schema"));
+    await expect(createAnnotationTable(fetchOk, BASE, request)).rejects.toThrow(
+      "unknown schema",
+    );
   });
 });

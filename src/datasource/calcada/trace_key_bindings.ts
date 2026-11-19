@@ -28,6 +28,17 @@ export const CALCADA_TRACE_TOGGLE_ACTION = "calcada-toggle-zetta-trace";
 // A mode like the other two, bound straight to a key for the same reason.
 export const CALCADA_SPLIT_DETECTION_TOGGLE_ACTION =
   "calcada-toggle-split-detection";
+// Lists the candidates between the segments on screen from anywhere, as the
+// Trace tab's List button does.
+export const CALCADA_LIST_PAIR_CANDIDATES_ACTION =
+  "calcada-list-pair-candidates";
+/** Held, not pressed, so they are no actions: see held_key_reveal.ts. */
+export const SEED_SPHERE_REVEAL_KEY = "keyj";
+export const END_SPHERE_REVEAL_KEY = "keyk";
+const SPHERE_SHORTCUTS: readonly ModeShortcut[] = [
+  { keys: [SEED_SPHERE_REVEAL_KEY], label: "Hold: seed sphere" },
+  { keys: [END_SPHERE_REVEAL_KEY], label: "Hold: end sphere" },
+];
 
 function plusMinusBindings(mode: string) {
   const plus = { action: `${mode}-plus` };
@@ -46,6 +57,7 @@ export const ZETTA_TRACE_INPUT_EVENT_MAP = EventActionMap.fromObject({
   "at:arrowleft": { action: "reject-candidate" },
   "at:arrowright": { action: "accept-candidate" },
   "at:arrowdown": { action: "skip-candidate" },
+  "at:arrowup": { action: "ambiguous-candidate" },
   // Its own action name, not the shared "undo": the merge and cut tools listen
   // for that one on window, and a keypress resolving to it would run their
   // handler and this one both — two reverts from a single press.
@@ -96,13 +108,24 @@ export const TRACE_MODE_SHORTCUTS: readonly ModeShortcut[] = [
   { keys: traceChords("accept-candidate"), label: "Accept" },
   { keys: traceChords("reject-candidate"), label: "Reject" },
   { keys: traceChords("skip-candidate"), label: "Skip" },
+  { keys: traceChords("ambiguous-candidate"), label: "Ambiguous" },
   {
     keys: traceChords(`${TRACE_KEYS_MODE}-minus`),
     pairKeys: traceChords(`${TRACE_KEYS_MODE}-plus`),
     label: "Lowest score",
   },
   { keys: traceChords("trace-undo"), label: "Undo" },
+  ...SPHERE_SHORTCUTS,
   { keys: traceChords("exit-trace"), label: "Exit" },
+];
+
+export const TRACE_END_MODE_SHORTCUTS: readonly ModeShortcut[] = [
+  { keys: traceChords("accept-candidate"), label: "Certain end" },
+  { keys: traceChords("reject-candidate"), label: "Uncertain end" },
+  { keys: traceChords("skip-candidate"), label: "Look deeper" },
+  { keys: traceChords("ambiguous-candidate"), label: "Back" },
+  ...SPHERE_SHORTCUTS,
+  { keys: traceChords("exit-trace"), label: "Close" },
 ];
 
 export const TRACE_AIM_MODE_SHORTCUTS: readonly ModeShortcut[] = [

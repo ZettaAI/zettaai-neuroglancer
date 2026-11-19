@@ -92,6 +92,8 @@ export interface PieceOverview {
   /** The candidate this row stands for; absent for a piece offering none. */
   lineId?: bigint;
   bestScore: number;
+  /** The best candidate's label; empty without one. */
+  bestLabel: string;
   /** The piece its best candidate would merge in; 0 when it offers none. */
   bestPartnerPiece: bigint;
   /** The segment holding that piece — what actually has a mesh to load. */
@@ -119,6 +121,7 @@ export function parsePieceOverviews(raw: readonly any[]): PieceOverview[] {
     const row: PieceOverview = {
       pieceId: parseUint64(piece.piece_id),
       bestScore: Number(piece.best_score),
+      bestLabel: "",
       bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
       bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
       bestPartnerVoxels: Number(piece.best_partner_voxels ?? 0),
@@ -138,6 +141,7 @@ export function parsePieceOverviews(raw: readonly any[]): PieceOverview[] {
         ...row,
         lineId: parseUint64(candidate.line_id),
         bestScore: Number(candidate.score),
+        bestLabel: String(candidate.label ?? ""),
         bestPartnerPiece: parseUint64(candidate.partner_piece),
         bestPartnerRoot: parseUint64(candidate.partner_root),
         bestPartnerVoxels: Number(candidate.partner_voxels ?? 0),

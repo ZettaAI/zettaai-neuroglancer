@@ -1,6 +1,7 @@
 import type { DecisionTiming } from "#src/datasource/calcada/decision_timing.js";
 
-export type CandidateVerdict = "accept" | "reject" | "defer";
+/** "ambiguous": the contact cannot be judged, which keeps it out of training data. */
+export type CandidateVerdict = "accept" | "reject" | "defer" | "ambiguous";
 
 export interface CandidateDecisionRequest {
   lineId: bigint;
