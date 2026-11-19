@@ -40,6 +40,8 @@ import {
 } from "#src/layer/index.js";
 import type { LoadedDataSubsource } from "#src/layer/layer_data_source.js";
 import { layerDataSourceSpecificationFromJson } from "#src/layer/layer_data_source.js";
+import { sourceAtLayerVersionTime } from "#src/layer/layer_version_time.js";
+
 import * as json_keys from "#src/layer/segmentation/json_keys.js";
 import { registerLayerControls } from "#src/layer/segmentation/layer_controls.js";
 import {
@@ -917,37 +919,52 @@ export class SegmentationUserLayer extends Base {
           this.displayState.segmentationGroupState.value,
         );
       } else if (mesh !== undefined) {
-        loadedSubsource.activate(() => {
-          const displayState = {
-            ...this.displayState,
-            transform: loadedSubsource.getRenderLayerTransform(),
-          };
-          if (mesh instanceof MeshSource) {
-            loadedSubsource.addRenderLayer(
-              new MeshLayer(this.manager.chunkManager, mesh, displayState),
-            );
-          } else if (mesh instanceof MultiscaleMeshSource) {
-            loadedSubsource.addRenderLayer(
-              new MultiscaleMeshLayer(
-                this.manager.chunkManager,
-                mesh,
-                displayState,
-              ),
-            );
-          } else {
-            const base = new SkeletonLayer(
-              this.manager.chunkManager,
+        const versionTime = this.versionTime.value;
+        loadedSubsource.activate(
+          (refCounted) => {
+            // Zetta (TM-521): read at the layer's chosen version time.
+            const meshAtTime = sourceAtLayerVersionTime(
               mesh,
-              displayState,
+              versionTime,
+              refCounted,
             );
-            loadedSubsource.addRenderLayer(
-              new PerspectiveViewSkeletonLayer(base.addRef()),
-            );
-            loadedSubsource.addRenderLayer(
-              new SliceViewPanelSkeletonLayer(/* transfer ownership */ base),
-            );
-          }
-        }, this.displayState.segmentationGroupState.value);
+            const displayState = {
+              ...this.displayState,
+              transform: loadedSubsource.getRenderLayerTransform(),
+            };
+            if (meshAtTime instanceof MeshSource) {
+              loadedSubsource.addRenderLayer(
+                new MeshLayer(
+                  this.manager.chunkManager,
+                  meshAtTime,
+                  displayState,
+                ),
+              );
+            } else if (meshAtTime instanceof MultiscaleMeshSource) {
+              loadedSubsource.addRenderLayer(
+                new MultiscaleMeshLayer(
+                  this.manager.chunkManager,
+                  meshAtTime,
+                  displayState,
+                ),
+              );
+            } else {
+              const base = new SkeletonLayer(
+                this.manager.chunkManager,
+                meshAtTime,
+                displayState,
+              );
+              loadedSubsource.addRenderLayer(
+                new PerspectiveViewSkeletonLayer(base.addRef()),
+              );
+              loadedSubsource.addRenderLayer(
+                new SliceViewPanelSkeletonLayer(/* transfer ownership */ base),
+              );
+            }
+          },
+          this.displayState.segmentationGroupState.value,
+          versionTime,
+        );
       } else if (segmentPropertyMap !== undefined) {
         if (!isGroupRoot) {
           loadedSubsource.deactivate(

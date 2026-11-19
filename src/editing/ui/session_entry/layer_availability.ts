@@ -151,8 +151,9 @@ export const RETRY_ARIA_LABEL = "Retry loading metadata";
  * NOT a technical fault — the wording must not imply the layer is broken.
  */
 export const UNSUPPORTED_IN_SESSION_DETAIL =
-  "Calcada, Graphene, and https+middleauth layers can't be part of an edit " +
-  "session. They stay available outside the session.";
+  "Calcada, Graphene, and https+middleauth layers, and layers showing a " +
+  "past version (Version history), can't be part of an edit session. They " +
+  "stay available outside the session.";
 
 /**
  * Full detail for `no-region-overlap`. Includes both extents so the user can
