@@ -58,7 +58,7 @@ function noteFor(
 }
 
 /**
- * "Bucket history" block of the Source tab, shown under the URL of a
+ * "Version history" block of the Source tab, shown under the URL of a
  * precomputed data source in a GCS/S3 bucket. It sits next to the URL because
  * choosing a time rewrites that URL (adds `|versioned:@<time>/`), and clearing
  * the time restores the plain URL.

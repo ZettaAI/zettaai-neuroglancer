@@ -464,7 +464,7 @@ export class DataSourceView extends RefCounted {
     this.registerDisposer(() =>
       source.progressListener.removeListener(progressListenerWidget),
     );
-    // "Bucket history" time picker, right under the URL it rewrites; empty
+    // "Version history" time picker, right under the URL it rewrites; empty
     // unless this source reads through `|versioned:`.
     element.appendChild(
       this.registerDisposer(makeVersionTimeSourceSection(source)).element,

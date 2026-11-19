@@ -35,7 +35,7 @@ Time control
 ------------
 
 Any precomputed layer (image, segmentation, annotation) in a ``gs://`` or
-``s3://`` bucket shows a :guilabel:`Bucket history` block in its
+``s3://`` bucket shows a :guilabel:`Version history` block in its
 :guilabel:`Source` tab, right under its URL, with a :guilabel:`Time` picker
 (the same picker as the Calcada/graphene time control):
 

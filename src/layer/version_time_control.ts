@@ -15,7 +15,7 @@
  */
 
 /**
- * "Bucket history" time picker for layers whose data source reads a bucket
+ * "Version history" time picker for layers whose data source reads a bucket
  * with object versioning through the `versioned:` kvstore adapter. Same picker
  * and behaviour as the Calcada/graphene time control: pick a time to view the
  * data as it was then, clear to return to current data.
@@ -311,7 +311,7 @@ class LayerChangesListing {
 }
 
 /**
- * State behind the "Bucket history" time picker.
+ * State behind the "Version history" time picker.
  *
  * The picker writes every change into `intermediateTimestamp` (a draft). A
  * draft is applied to the layer right away when it comes from the calendar or
@@ -447,7 +447,7 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
 }
 
 /**
- * The "Bucket history" block of the Source tab for `dataSource`: shown under
+ * The "Version history" block of the Source tab for `dataSource`: shown under
  * its URL while it is the layer's first `versioned:` source, empty otherwise.
  * One picker per layer, since the time applies to all its versioned sources.
  */

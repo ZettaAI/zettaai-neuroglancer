@@ -9,7 +9,7 @@
  */
 
 /**
- * The "Bucket history" block of the Source tab, driven in a real browser:
+ * The "Version history" block of the Source tab, driven in a real browser:
  * the section built by `makeVersionTimeSourceSection` (as the Source tab
  * mounts it), the real picker, and a real `VersionedKvStore` over a fake
  * bucket, so the history check and the earliest-time lookup run for real.
@@ -219,7 +219,7 @@ function sectionIn(element: HTMLElement) {
 function sectionShown(element: HTMLElement) {
   return vi.waitFor(() => {
     const section = sectionIn(element);
-    if (section === null) throw new Error("Bucket history not rendered yet");
+    if (section === null) throw new Error("Version history not rendered yet");
     return section;
   }, TIMEOUT);
 }
@@ -240,7 +240,7 @@ function chosenTime(layer: FakeLayer) {
   return getVersionTimeFromUrl(layer.dataSources[0].spec.url);
 }
 
-describe("Bucket history in the Source tab", () => {
+describe("Version history in the Source tab", () => {
   it("is shown once per layer, under its first bucket data source", async () => {
     const { elements } = mountSourceSections([
       "precomputed://https://example.com/not-a-bucket",
