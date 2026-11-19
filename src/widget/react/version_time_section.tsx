@@ -79,8 +79,8 @@ export function VersionTimeSection({
   chooseTime: (time: number | undefined) => void;
   /** Look through more of a large layer's files for older changes. */
   searchMoreChanges: () => void;
-  /** Re-read the version list (`force`: now, not only if a few seconds old). */
-  refreshChanges: (force?: boolean) => void;
+  /** Re-read the version list (saves made since it was read). */
+  refreshChanges: () => void;
   /** The time-of-day field got focus. */
   startTyping: () => void;
   /** Enter in the time-of-day field. */

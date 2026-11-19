@@ -37,9 +37,7 @@ import {
   NEWER_VERSION_LABEL,
   OLDER_VERSION_LABEL,
   PARTIAL_LIST_NOTE,
-  REFRESH_VERSIONS_LABEL,
   SEARCH_MORE_LABEL,
-  VERSION_LIST_LABEL,
 } from "#src/widget/react/version_moment_list.js";
 import {
   VERSION_TIME_LIVE_NOTE,
@@ -369,24 +367,33 @@ describe("version list", () => {
   const erased = yesterdayAt(15, 2, 59);
   const writes = [copy - 53, copy, painted - 31, painted, erased - 31, erased];
 
-  function listIn(section: HTMLElement) {
-    return section.querySelector<HTMLElement>(
-      `[role="listbox"][aria-label="${VERSION_LIST_LABEL}"]`,
+  function trigger(section: HTMLElement) {
+    return section.querySelector<HTMLElement>('[data-slot="select-trigger"]');
+  }
+
+  /** The dropdown's options, in order (they render in a portal). */
+  function optionLabels() {
+    return [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="select-item"]'),
+    ].map(
+      (item) =>
+        item.querySelector('[data-slot="tooltip-trigger"]')?.textContent,
     );
   }
 
-  function rowLabels(section: HTMLElement) {
-    return [...listIn(section)!.querySelectorAll('[role="option"]')].map(
-      (row) => row.textContent,
-    );
+  async function openList(section: HTMLElement) {
+    await vi.waitFor(() => expect(trigger(section)).not.toBeNull(), TIMEOUT);
+    await userEvent.click(trigger(section)!);
   }
 
-  function listShown(section: HTMLElement, rows: number) {
-    return vi.waitFor(() => {
-      expect(listIn(section)?.querySelectorAll('[role="option"]').length).toBe(
-        rows,
-      );
-    }, TIMEOUT);
+  function optionsShown(labels: string[]) {
+    return vi.waitFor(() => expect(optionLabels()).toEqual(labels), TIMEOUT);
+  }
+
+  /** The version the dropdown shows (its label, without the arrow icon). */
+  function shownVersion(section: HTMLElement) {
+    return trigger(section)?.querySelector('[data-slot="tooltip-trigger"]')
+      ?.textContent;
   }
 
   function button(section: HTMLElement, label: string) {
@@ -395,17 +402,20 @@ describe("version list", () => {
     )!;
   }
 
+  const ALL = [
+    `${LATEST_VERSION_LABEL} · ${formatMoment(erased)}`,
+    formatMoment(painted),
+    formatMoment(copy),
+  ];
+
   it("lists each save once, newest first; the newest is the latest data", async () => {
     const { elements } = mountSourceSections([CURRENT], {
       changePages: [writes],
     });
     const section = await sectionShown(elements[0]);
-    await listShown(section, 3);
-    expect(rowLabels(section)).toEqual([
-      `${LATEST_VERSION_LABEL} · ${formatMoment(erased)}`,
-      formatMoment(painted),
-      formatMoment(copy),
-    ]);
+    await vi.waitFor(() => expect(shownVersion(section)).toBe(ALL[0]), TIMEOUT);
+    await openList(section);
+    await optionsShown(ALL);
   });
 
   it("picking a version shows the layer then; Latest returns to editable data", async () => {
@@ -413,13 +423,19 @@ describe("version list", () => {
       changePages: [writes],
     });
     const section = await sectionShown(elements[0]);
-    await listShown(section, 3);
+    await openList(section);
+    await optionsShown(ALL);
     await userEvent.click(
-      [...listIn(section)!.querySelectorAll<HTMLElement>('[role="option"]')][2],
+      [
+        ...document.querySelectorAll<HTMLElement>('[data-slot="select-item"]'),
+      ][2],
     );
     await vi.waitFor(() => expect(chosenTime(layer)).toBe(copy), TIMEOUT);
+    expect(shownVersion(section)).toBe(formatMoment(copy));
+    await openList(section);
+    await optionsShown(ALL);
     await userEvent.click(
-      listIn(section)!.querySelector<HTMLElement>('[role="option"]')!,
+      document.querySelector<HTMLElement>('[data-slot="select-item"]')!,
     );
     await vi.waitFor(
       () => expect(layer.dataSources[0].spec.url).toBe(CURRENT),
@@ -432,7 +448,7 @@ describe("version list", () => {
       changePages: [writes],
     });
     const section = await sectionShown(elements[0]);
-    await listShown(section, 3);
+    await vi.waitFor(() => expect(shownVersion(section)).toBe(ALL[0]), TIMEOUT);
     expect(button(section, NEWER_VERSION_LABEL).disabled).toBe(true);
     await userEvent.click(button(section, OLDER_VERSION_LABEL));
     await vi.waitFor(() => expect(chosenTime(layer)).toBe(painted), TIMEOUT);
@@ -451,6 +467,37 @@ describe("version list", () => {
     );
   });
 
+  it("a time typed between versions is shown as it is", async () => {
+    const between = painted + 10_000;
+    const { elements } = mountSourceSections([pastUrl(between)], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await vi.waitFor(
+      () => expect(shownVersion(section)).toBe(formatMoment(between)),
+      TIMEOUT,
+    );
+  });
+
+  it("opening the list picks up a save made since", async () => {
+    const { elements, bucket } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+    });
+    const section = await sectionShown(elements[0]);
+    await vi.waitFor(() => expect(shownVersion(section)).toBe(ALL[0]), TIMEOUT);
+    expect(bucket.listedPages).toBe(1);
+    const saved = erased + 9000;
+    bucket.changePages = [[...writes, saved]];
+    await openList(section);
+    await optionsShown([
+      `${LATEST_VERSION_LABEL} · ${formatMoment(saved)}`,
+      formatMoment(erased),
+      formatMoment(painted),
+      formatMoment(copy),
+    ]);
+    expect(bucket.listedPages).toBe(2);
+  });
+
   it("a large layer is listed one page at a time, on request", async () => {
     const { elements, bucket } = mountSourceSections([CURRENT], {
       changePages: [[copy], [painted], [erased]],
@@ -460,65 +507,15 @@ describe("version list", () => {
     // Opening the Source tab reads one page: the history check itself.
     expect(bucket.listedPages).toBe(1);
     // Not everything listed: the newest found is not known to be the latest.
-    expect(rowLabels(section)).toEqual([
-      LATEST_VERSION_LABEL,
-      formatMoment(copy),
-    ]);
+    expect(shownVersion(section)).toBe(LATEST_VERSION_LABEL);
     await userEvent.click(
       [...section.querySelectorAll("button")].find(
         (candidate) => candidate.textContent === SEARCH_MORE_LABEL,
       )!,
     );
-    await listShown(section, 3);
-    expect(rowLabels(section)).toEqual([
-      `${LATEST_VERSION_LABEL} · ${formatMoment(erased)}`,
-      formatMoment(painted),
-      formatMoment(copy),
-    ]);
+    await vi.waitFor(() => expect(shownVersion(section)).toBe(ALL[0]), TIMEOUT);
     expect(bucket.listedPages).toBe(3);
     expect(section.textContent).not.toContain(PARTIAL_LIST_NOTE);
-  });
-
-  it("a save made while the block is open shows up on refresh", async () => {
-    const { elements, bucket } = mountSourceSections([CURRENT], {
-      changePages: [writes],
-    });
-    const section = await sectionShown(elements[0]);
-    await listShown(section, 3);
-    const saved = erased + 9000;
-    bucket.changePages = [[...writes, saved]];
-    await userEvent.click(button(section, REFRESH_VERSIONS_LABEL));
-    await listShown(section, 4);
-    expect(rowLabels(section)).toEqual([
-      `${LATEST_VERSION_LABEL} · ${formatMoment(saved)}`,
-      formatMoment(erased),
-      formatMoment(painted),
-      formatMoment(copy),
-    ]);
-  });
-
-  it("pointing at the list re-reads it, at most every few seconds", async () => {
-    const { elements, bucket } = mountSourceSections([CURRENT], {
-      changePages: [writes],
-    });
-    const section = await sectionShown(elements[0]);
-    await listShown(section, 3);
-    expect(bucket.listedPages).toBe(1);
-    // Right after the first read: too soon, nothing is read.
-    await userEvent.hover(listIn(section)!);
-    expect(bucket.listedPages).toBe(1);
-    await userEvent.unhover(listIn(section)!);
-    // A few seconds later a new save is picked up.
-    const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 5000);
-    try {
-      bucket.changePages = [[...writes, erased + 9000]];
-      await userEvent.hover(listIn(section)!);
-      await listShown(section, 4);
-      expect(bucket.listedPages).toBe(2);
-    } finally {
-      clock.mockRestore();
-    }
   });
 
   it("no permission: no list", async () => {
@@ -527,6 +524,6 @@ describe("version list", () => {
     });
     const section = await sectionShown(elements[0]);
     await noteShown(section, VERSION_TIME_NO_PERMISSION_NOTE);
-    expect(listIn(section)).toBeNull();
+    expect(trigger(section)).toBeNull();
   });
 });

@@ -179,9 +179,6 @@ const NO_MOMENTS: VersionMoments = {
 /** Listing pages read per "Search more files" click (1000 versions each). */
 export const MORE_CHANGES_PAGES = 5;
 
-/** Least time between two automatic re-reads of the version list. */
-export const REFRESH_INTERVAL_MS = 3000;
-
 function layerVersionedStore(layer: UserLayer): VersionedKvStore | undefined {
   const kvStoreUrl = earliestTimeSourceOf(layer);
   if (kvStoreUrl === undefined) return undefined;
@@ -211,8 +208,6 @@ class LayerChangesListing {
   private reading = false;
   /** Next read starts the listing over (`refresh`). */
   private restart = false;
-  /** When the last read started, to keep refreshes rare. */
-  private lastReadStart = 0;
 
   constructor(
     private store: VersionedKvStore | undefined,
@@ -223,12 +218,10 @@ class LayerChangesListing {
 
   /**
    * Reads the listing again from the start, to pick up changes saved since
-   * (one request). The shown list stays until the new one arrives, and
-   * nothing is read if a read started less than `minimumIntervalMs` ago.
+   * (one request). The shown list stays until the new one arrives.
    */
-  refresh(minimumIntervalMs = REFRESH_INTERVAL_MS) {
+  refresh() {
     if (this.reading || this.store === undefined) return;
-    if (Date.now() - this.lastReadStart < minimumIntervalMs) return;
     this.restart = true;
     void this.readPages(1, { quiet: true });
   }
@@ -241,7 +234,6 @@ class LayerChangesListing {
     }
     if (this.reading) return;
     this.reading = true;
-    this.lastReadStart = Date.now();
     if (!quiet) this.publish(true);
     try {
       for (let page = 0; page < pages; ++page) {
@@ -405,12 +397,9 @@ export function makeVersionTimeState(layer: UserLayer, context: RefCounted) {
       typing = false;
       intermediateTimestamp.value = time;
     },
-    /**
-     * Re-read the version list for changes saved since it was read (the
-     * pointer came to the block, or the refresh button: `force`).
-     */
-    refreshChanges: (force = false) => {
-      changesListing?.refresh(force ? 0 : REFRESH_INTERVAL_MS);
+    /** Re-read the version list for changes saved since it was read. */
+    refreshChanges: () => {
+      changesListing?.refresh();
     },
     /** Read further listing pages to find older changes of a large layer. */
     searchMoreChanges: () => {
