@@ -38,6 +38,19 @@ import type {
  */
 export const DEFAULT_COVERAGE_THRESHOLD = 0.5;
 
+/**
+ * Largest accepted {@link PaintingMaskConfig.binaryClosing}, in voxels — the
+ * same cap as the portal voxel editor's slider. Closing runs inside the brush
+ * footprint with an empty border, so a closing at or above the brush radius
+ * erodes the whole stroke away; the cap keeps typical brushes usable.
+ */
+export const MAX_BINARY_CLOSING = 32;
+
+/** Clamp a closing count to `[0, MAX_BINARY_CLOSING]` whole voxels. */
+export function clampBinaryClosing(voxels: number): number {
+  return Math.min(MAX_BINARY_CLOSING, Math.max(0, Math.floor(voxels)));
+}
+
 export interface PaintingMaskConfig {
   readonly imageLayerId: LayerId;
   /**
@@ -215,10 +228,9 @@ export interface PaintWriteBatch {
  * A masked-brush footprint resolved to a dense per-voxel mask on one z-slice
  * (TM-317 Phase B). `mask` is `1` where the brush should paint, dense and
  * x-fastest over `[loTx, loTx+maskW) × [loTy, loTy+maskH)` at z = `cz`, in
- * GLOBAL target voxel coordinates — the exact output of the pyodide
- * whole-pipeline compute. The worker pool stamps `value` into the overlay SAB
- * slots where the mask bit is set, so the main thread does neither the
- * sample-back nor the slot write.
+ * GLOBAL target voxel coordinates. The worker pool stamps `value` into the
+ * overlay SAB slots where the mask bit is set, so the main thread does
+ * neither the sample-back nor the slot write.
  */
 export interface StrokeFootprintMask {
   readonly loTx: number;
@@ -245,18 +257,6 @@ export interface PaintCompute {
    * 3D depending on `input.mode`; progressive + cancelable (TM-269).
    */
   fill(input: FillInput): Promise<PaintWriteBatch>;
-  /**
-   * Compute the masked-brush footprint mask for a stroke via the pyodide
-   * whole-pipeline, WITHOUT scattering it into a write batch — for the
-   * worker-SAB apply route (TM-317 Phase B). Returns `null` when the stroke is
-   * not eligible for that route (no mask, 1-voxel brush, z-varying path, the
-   * pyodide worker is not ready, or the worker call failed), so the caller
-   * falls back to the byte-identical `applyBrushStroke` + main-thread apply.
-   * Optional so existing `PaintCompute` mocks need not implement it.
-   */
-  computeMaskedStrokeFootprint?(
-    input: BrushStrokeInput,
-  ): Promise<StrokeFootprintMask | null>;
   /**
    * Pass a precomputed footprint through the image mask (threshold + morphology)
    * and build its writes, for a closed stroke's fill under a mask that can

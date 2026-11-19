@@ -47,8 +47,10 @@
  *   1. IDENTITY of inputs. Both call this module's `planOwnedWrite`, resolve
  *      through the same `NgLayerMetadataSource` instance, and read the same
  *      `SessionRegionSnapshot` object. `collectDirtyChunks` hands both sides
- *      the SAME `ChunkContentRef` — `contentRefFromBuffer` captures an
- *      immutable clone that `retain()` closes over — not two equal ones.
+ *      the SAME `ChunkContentRef` — the overlay's ref (built by
+ *      `contentRefWithDeferredHash`, `deferred_content_hash.ts`) captures an
+ *      immutable clone that `retain()` closes over and caches its hash on
+ *      first read — not two equal ones.
  *   2. ATOMICITY. There is not one macrotask boundary between the host's
  *      collect and the library's collect inside `runSave`: `retain()` is an
  *      already-resolved promise, `NgLayerMetadataSource.resolve` is `async`
@@ -295,9 +297,9 @@ export function planOwnedWrite(
     ownedBox,
     coversWholeChunk,
   };
-  // A whole-chunk region hashes exactly what `contentRefFromBuffer` already
-  // hashed, so reuse it — that is the overwhelming majority of chunks, and it
-  // keeps this off the hot path for interior chunks.
+  // A whole-chunk region hashes exactly the bytes the content ref holds, so
+  // use its hash — computed here on first read, once per ref (TM-373), and
+  // cached for the other side of the save.
   const hash = coversWholeChunk
     ? chunk.contentRef.hash
     : ownedRegionHash(chunk.bytes.asView(), geometry);

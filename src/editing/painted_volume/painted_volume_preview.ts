@@ -244,6 +244,7 @@ function planExtent(
     scale.voxelOffset,
     options.maxTextureDim,
     options.budgetBytes,
+    scale.sizeVoxels,
   );
 }
 

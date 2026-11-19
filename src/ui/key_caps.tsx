@@ -16,6 +16,7 @@ import {
   chordKeyLabels,
   formatChord,
   preferredChord,
+  shownChords,
 } from "#src/ui/key_chord_format.js";
 import type { ModeShortcut } from "#src/ui/mode_shortcuts.js";
 
@@ -30,6 +31,26 @@ export function KeyCaps({ keys }: { keys: readonly string[] }) {
         <kbd key={label} class="neuroglancer-key-chip">
           {label}
         </kbd>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * Every key that does the action, `− / Num−`, for the shortcut sheet: there a
+ * key taken by a rebind must visibly go, not leave the action showing a key
+ * the annotator never chose.
+ */
+export function AllKeyCaps({ keys }: { keys: readonly string[] }) {
+  const chords = shownChords(keys);
+  if (chords.length <= 1) return <KeyCaps keys={keys} />;
+  return (
+    <span class="neuroglancer-key-chips">
+      {chords.map((chord, i) => (
+        <span class="neuroglancer-key-chips" key={chord}>
+          {i > 0 && <span class="neuroglancer-key-chips-separator">/</span>}
+          <KeyCaps keys={[chord]} />
+        </span>
       ))}
     </span>
   );

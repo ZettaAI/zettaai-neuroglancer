@@ -21,7 +21,11 @@ import { radiusToSize, sizeToRadius } from "#src/editing/brush_size_presets.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
 import type { PaintingMaskConfig } from "#src/editing/tool_runtimes/paint_types.js";
-import { DEFAULT_COVERAGE_THRESHOLD } from "#src/editing/tool_runtimes/paint_types.js";
+import {
+  clampBinaryClosing,
+  DEFAULT_COVERAGE_THRESHOLD,
+  MAX_BINARY_CLOSING,
+} from "#src/editing/tool_runtimes/paint_types.js";
 import type { PaintingState } from "#src/editing/tool_runtimes/painting_tools.js";
 import {
   booleanDescriptor,
@@ -73,6 +77,12 @@ function parseCount(raw: string): number | null {
   return raw.trim() !== "" && Number.isFinite(n)
     ? Math.max(0, Math.floor(n))
     : null;
+}
+
+/** Parse a binary-closing count, capped at {@link MAX_BINARY_CLOSING}, or null. */
+function parseClosing(raw: string): number | null {
+  const count = parseCount(raw);
+  return count === null ? null : clampBinaryClosing(count);
 }
 
 export function PaintingBrush({
@@ -469,7 +479,7 @@ function BrushMask({
           apply: (steps) => {
             const m = painting.getState().mask;
             if (m === undefined) return;
-            const v = Math.max(0, m.binaryClosing + steps);
+            const v = clampBinaryClosing(m.binaryClosing + steps);
             if (v !== m.binaryClosing) {
               painting.patchState({ mask: { ...m, binaryClosing: v } });
             }
@@ -653,14 +663,15 @@ function BrushMask({
           <ParamLabel
             text="Binary closing"
             setting
-            hint="Closes gaps and small holes in the mask by this many voxels (morphological closing). 0 disables it."
+            hint={`Closes gaps and small holes in the mask by this many voxels (morphological closing), up to ${MAX_BINARY_CLOSING}. Keep it below half the brush size, or the stroke erodes away. 0 disables it.`}
           />
           <ParamInput<number>
             type="number"
             min={0}
+            max={MAX_BINARY_CLOSING}
             step={1}
             value={mask?.binaryClosing ?? 0}
-            parse={parseCount}
+            parse={parseClosing}
             disabled={paramsDisabled}
             onCommit={(binaryClosing) => patchMask({ binaryClosing })}
           />

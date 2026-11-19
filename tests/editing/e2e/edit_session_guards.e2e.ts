@@ -177,7 +177,7 @@ async function openGuardsPage(
   const context = await browser.newContext({
     baseURL: `http://localhost:${PORT}`,
   });
-  // The config's 10-minute test timeout is sized for pyodide paint runs; a UI
+  // The config's 10-minute test timeout is sized for long paint runs; a UI
   // action that can't find its target should fail in seconds, not spin that
   // long. (Waits that need longer pass their own timeout.)
   context.setDefaultTimeout(20_000);

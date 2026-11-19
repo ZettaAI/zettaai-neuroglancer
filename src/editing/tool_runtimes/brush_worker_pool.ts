@@ -127,7 +127,7 @@ function launchWorker(): void {
 
 /**
  * Pre-boot one worker so the first stroke of a session does not pay the
- * worker-bundle load latency mid-stroke (mirrors the pyodide `warmup()`).
+ * worker-bundle load latency mid-stroke.
  * Idempotent and best-effort: only launches when the pool is empty; a load
  * failure is surfaced by `failPool` (which resets `numWorkers` to 0, so the next
  * real request retries). Safe to call when the worker path is unavailable —

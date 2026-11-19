@@ -193,6 +193,155 @@ async function beginRealStroke(page: Page): Promise<{ x: number; y: number }> {
   return center;
 }
 
+interface ValueReadback {
+  error?: string;
+  /** Patched voxels holding the asked-for value. */
+  valueCount: number;
+  bbox: { lo: Vec3; hi: Vec3 } | null;
+  distinctValues: string[];
+}
+
+/** Read the target's patches, counting the voxels that hold `value`. */
+const readValue = (
+  page: Page,
+  originOffset: Vec3,
+  value: string,
+): Promise<ValueReadback> =>
+  page.evaluate((arg) => (window as any).__editPaintBenchReadback(arg), {
+    originOffset,
+    countValue: value,
+  }) as Promise<ValueReadback>;
+
+/**
+ * Fill tests place everything in target voxels from the panel centre, which
+ * the scenarios put on a corner of the fixture's 32-voxel segment blocks.
+ * `(16, 16)` is therefore the middle of one block, and a ring of radius 8
+ * around it stays inside that block, cutting it in two.
+ *
+ * That is what makes these tests see a fill that reads the target from the
+ * wrong chunk: the offset fixture is shifted by whole blocks, so a misread
+ * block has the same shape as the real one. Only the drawn ring, which a
+ * misread chunk does not hold, tells the two apart.
+ */
+const RING_CENTER: readonly [number, number] = [16, 16];
+const RING_RADIUS = 8;
+/** On the ring's outline, so a click there lands on the ring itself. */
+const ON_RING: readonly [number, number] = [
+  RING_CENTER[0] + RING_RADIUS,
+  RING_CENTER[1] + 0.5,
+];
+/** Segment IDs the fixtures never use (they hold 1..7). */
+const RING_VALUE = 100;
+const INSIDE_FILL_VALUE = 101;
+const RECOLOR_VALUE = 102;
+const RING_STEP_MS = 80;
+/**
+ * Thick enough that the drawn outline has no voxels touching only diagonally:
+ * a flood steps along the axes, so a thinner ring can leak through its corners.
+ */
+const RING_BRUSH_RADIUS = 3;
+
+/**
+ * The ring as points one {@link RING_STEP_MS} apart: the brush keeps only the
+ * latest pointer sample per frame, so points sent faster are dropped and the
+ * "ring" is a single dab. It goes round one and a half times: on a slow target
+ * (uint64 compressed segmentation) the end of a stroke can be dropped too, and
+ * a ring that only just closes would then have a gap the fill leaks through.
+ */
+function ringPath(): [number, number][] {
+  const steps = 48;
+  const turns = 1.5;
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const angle = (2 * Math.PI * turns * i) / steps;
+    return [
+      RING_CENTER[0] + RING_RADIUS * Math.cos(angle),
+      RING_CENTER[1] + RING_RADIUS * Math.sin(angle),
+    ];
+  });
+}
+
+/** Draw the ring with value {@link RING_VALUE} on the slice in view. */
+async function drawRing(page: Page): Promise<void> {
+  await page.evaluate(
+    async ({ path, value, stepMs, radius }) => {
+      const host = (window as any).viewer.editSessionHost;
+      host.painting.state.patchState({ activeValue: value });
+      await (window as any).__editPaintBenchVoxelStroke({
+        path,
+        radius,
+        stepMs,
+        settleTimeoutMs: 30000,
+      });
+    },
+    {
+      path: ringPath(),
+      value: RING_VALUE,
+      stepMs: RING_STEP_MS,
+      radius: RING_BRUSH_RADIUS,
+    },
+  );
+}
+
+/** Move the view one section along z (the fixtures are 16 sections deep). */
+const stepSection = (page: Page, delta: number): Promise<void> =>
+  page.evaluate((step) => {
+    const viewer = (window as any).viewer;
+    const position = Float32Array.from(viewer.position.value as Float32Array);
+    position[2] += step;
+    viewer.position.value = position;
+  }, delta);
+
+/**
+ * Click the Fill tool at `voxel` (target voxels from the view position) with
+ * the real mouse, so the click goes through the same pointer path as a user's,
+ * and wait until the fill has written everything.
+ */
+async function fillAt(
+  page: Page,
+  voxel: readonly [number, number],
+  options: { value: number; mode: "2d" | "3d"; originOffset: Vec3 },
+): Promise<void> {
+  const client = await page.evaluate(
+    ({ voxel, value, mode }) => {
+      const viewer = (window as any).viewer;
+      const host = viewer.editSessionHost;
+      host.selectTool("painting.fill");
+      host.painting.state.patchState({ activeValue: value, fillMode: mode });
+      // The slice panel, not the viewer-wide canvas behind it: a real pointer
+      // maps through the panel's rect, whose centre is the view position.
+      const rect = document
+        .querySelector(".neuroglancer-rendered-data-panel")!
+        .getBoundingClientRect();
+      const voxelsPerPixel = viewer.crossSectionScale.value as number;
+      return {
+        x: rect.left + rect.width / 2 + voxel[0] / voxelsPerPixel,
+        y: rect.top + rect.height / 2 + voxel[1] / voxelsPerPixel,
+      };
+    },
+    { voxel, value: options.value, mode: options.mode },
+  );
+  await page.mouse.click(client.x, client.y);
+  const filled = async () =>
+    (await readValue(page, options.originOffset, String(options.value)))
+      .valueCount;
+  await expect.poll(filled, { timeout: 30000 }).toBeGreaterThan(0);
+  await expect.poll(() => strokeIsLive(page), { timeout: 30000 }).toBe(false);
+  // Settled once two reads a moment apart agree.
+  await expect
+    .poll(
+      async () => {
+        const first = await filled();
+        await page.waitForTimeout(150);
+        return first === (await filled());
+      },
+      { timeout: 30000 },
+    )
+    .toBe(true);
+}
+
+const sectionsSpanned = (bbox: { lo: Vec3; hi: Vec3 } | null): number =>
+  bbox === null ? 0 : bbox.hi[2] - bbox.lo[2];
+
 const SHOT_DIR = path.resolve(HERE, "../../../test-results/correctness");
 
 function slug(s: string): string {
@@ -365,6 +514,98 @@ for (const { scenario, hasImage } of SCENARIOS) {
         within(filled.bbox!, region),
         `bbox ${JSON.stringify(filled.bbox)} escaped region ${JSON.stringify(region)}`,
       ).toBe(true);
+    });
+
+    test("Fill 2D inside a drawn outline fills only inside it", async () => {
+      test.skip(scenarioError !== undefined, scenarioError);
+      await undoAllPaint(page);
+      await drawRing(page);
+      const ring = await readValue(page, region.lo, String(RING_VALUE));
+      expect(ring.error ?? "", `readback error: ${ring.error}`).toBe("");
+      expect(ring.valueCount, "the ring was not drawn").toBeGreaterThan(0);
+
+      await fillAt(page, RING_CENTER, {
+        value: INSIDE_FILL_VALUE,
+        mode: "2d",
+        originOffset: region.lo,
+      });
+      const afterRing = await readValue(page, region.lo, String(RING_VALUE));
+      const inside = await readValue(
+        page,
+        region.lo,
+        String(INSIDE_FILL_VALUE),
+      );
+      // The ring walls the fill in: none of it is painted over, and nothing
+      // lands outside the ring's own bounding box.
+      expect(afterRing.valueCount, "the fill painted over the ring").toBe(
+        ring.valueCount,
+      );
+      expect(afterRing.bbox, "the fill leaked out of the ring").toEqual(
+        ring.bbox,
+      );
+      expect(afterRing.distinctValues.sort()).toEqual(
+        [String(RING_VALUE), String(INSIDE_FILL_VALUE)].sort(),
+      );
+      // Inside a radius-8 ring drawn 2 voxels wide: well under the 32×32 block
+      // a fill that cannot see the ring paints.
+      expect(inside.valueCount).toBeLessThan(Math.PI * RING_RADIUS ** 2);
+      expect(sectionsSpanned(afterRing.bbox)).toBe(1);
+    });
+
+    test("Fill recolors a segment on its section in 2D and through the sections in 3D", async () => {
+      test.skip(scenarioError !== undefined, scenarioError);
+      await undoAllPaint(page);
+      // The same ring on two neighbouring sections: one segment, 3D-connected.
+      await drawRing(page);
+      const ringOnThisSection = (
+        await readValue(page, region.lo, String(RING_VALUE))
+      ).valueCount;
+      await stepSection(page, 1);
+      await drawRing(page);
+      await stepSection(page, -1);
+      const ring = await readValue(page, region.lo, String(RING_VALUE));
+      expect(ring.error ?? "", `readback error: ${ring.error}`).toBe("");
+      expect(
+        sectionsSpanned(ring.bbox),
+        "the ring is not on two sections",
+      ).toBe(2);
+
+      await fillAt(page, ON_RING, {
+        value: RECOLOR_VALUE,
+        mode: "2d",
+        originOffset: region.lo,
+      });
+      const recolored2d = await readValue(
+        page,
+        region.lo,
+        String(RECOLOR_VALUE),
+      );
+      const left2d = await readValue(page, region.lo, String(RING_VALUE));
+      // 2D: the ring on this section only, all of it, nothing else.
+      expect(recolored2d.valueCount).toBe(ringOnThisSection);
+      expect(left2d.valueCount, "2D recolored the other section").toBe(
+        ring.valueCount - ringOnThisSection,
+      );
+
+      await page.evaluate(() =>
+        (window as any).viewer.editSessionHost.activeSession.value.undo(),
+      );
+      await fillAt(page, ON_RING, {
+        value: RECOLOR_VALUE,
+        mode: "3d",
+        originOffset: region.lo,
+      });
+      const recolored3d = await readValue(
+        page,
+        region.lo,
+        String(RECOLOR_VALUE),
+      );
+      const left3d = await readValue(page, region.lo, String(RING_VALUE));
+      // 3D: the whole segment, through both sections, and nothing else.
+      expect(left3d.valueCount, "3D missed part of the segment").toBe(0);
+      expect(recolored3d.valueCount).toBe(ring.valueCount);
+      // No voxel outside the ring was painted.
+      expect(recolored3d.bbox).toEqual(ring.bbox);
     });
 
     for (const release of ["off every panel", "with Ctrl held"] as const) {

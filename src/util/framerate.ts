@@ -27,7 +27,7 @@ interface QueryInfo {
   wasEnded: boolean;
 }
 
-interface FrameDeltaInfo {
+export interface FrameDeltaInfo {
   frameDelta: number;
   frameNumber: number;
 }
@@ -155,6 +155,11 @@ export class FramerateMonitor {
     if (this.storedTimeDeltas.length > this.numStoredTimes) {
       this.storedTimeDeltas = this.storedTimeDeltas.slice(-this.numStoredTimes);
     }
+  }
+
+  /** Like `getLastFrameTimesInMs`, keeping the frame number of each time. */
+  getLastFrameTimings(numberOfFrames: number = 10): FrameDeltaInfo[] {
+    return this.storedTimeDeltas.slice(-numberOfFrames);
   }
 
   getLastFrameTimesInMs(numberOfFrames: number = 10) {

@@ -217,6 +217,28 @@ describe("tooling_persist", () => {
     expect(patch!.mask).toEqual(mask);
   });
 
+  it("caps a restored binary closing at the portal's 32 voxels", () => {
+    // A URL or older state can carry any closing; above the cap a stroke
+    // erodes away to nothing, so restoring clamps it like the panel does.
+    const mask = {
+      imageLayerId: IMAGE,
+      imageResolution: RES,
+      thresholdLow: 10,
+      thresholdHigh: 200,
+      coverageThreshold: 0.5,
+      minComponentSize: 0,
+      binaryClosing: 50,
+      filterComponentsFirst: false,
+    };
+    const serialized = serializeTooling("painting.brush", state({ mask }));
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(
+      parsed!.painting!,
+      allowed(TARGET, IMAGE),
+    );
+    expect(patch!.mask).toEqual({ ...mask, binaryClosing: 32 });
+  });
+
   it("repairs a stale mask resolution to a resolution the session opened", () => {
     // A persisted `imageResolution` that the session never opened (e.g. a finer
     // scale from the image layer's datasource pyramid) would otherwise drive
@@ -301,53 +323,19 @@ describe("tooling_persist", () => {
     expect(patch!.mask).toBeUndefined();
   });
 
-  it("round-trips per-user keybind overrides", () => {
-    const serialized = serializeTooling("painting.brush", state(), {
-      brush: ["control+keyq"],
-      undo: ["control+keyu", "keyz"],
-    });
-    const parsed = parseTooling(roundTrip(serialized));
-    expect(parsed?.keybinds).toEqual({
-      brush: ["control+keyq"],
-      undo: ["control+keyu", "keyz"],
-    });
-  });
-
-  it("omits keybinds when there are no overrides", () => {
-    const serialized = serializeTooling("painting.brush", state(), {});
-    expect("keybinds" in serialized).toBe(false);
-    const parsed = parseTooling(roundTrip(serialized));
-    expect(parsed?.keybinds).toBeUndefined();
-  });
-
-  it("coerces a single-string keybind value to a one-element array", () => {
-    // Hand-authored / legacy state may store a bare string instead of a list.
+  it("ignores keybinds in a block saved before they moved to the browser", () => {
+    // Older links still carry `keybinds`; another person's layout must not
+    // come in with them.
     const parsed = parseTooling({
       activeToolId: null,
-      keybinds: { brush: "control+keyq" },
+      keybinds: { brush: ["control+keyq"] },
     });
-    expect(parsed?.keybinds).toEqual({ brush: ["control+keyq"] });
-  });
-
-  it("skips malformed keybind entries but keeps the valid ones", () => {
-    const parsed = parseTooling({
-      activeToolId: null,
-      keybinds: {
-        brush: ["control+keyq"],
-        bad: 42,
-        empty: [],
-        mixed: ["keya", 7, "keyb"],
-      },
-    });
-    expect(parsed?.keybinds).toEqual({
-      brush: ["control+keyq"],
-      mixed: ["keya", "keyb"],
-    });
-  });
-
-  it("ignores a non-object keybinds field without dropping the block", () => {
-    const parsed = parseTooling({ activeToolId: null, keybinds: 42 });
     expect(parsed).toEqual({ activeToolId: null });
+  });
+
+  it("does not write keybinds into the block", () => {
+    const serialized = serializeTooling("painting.brush", state());
+    expect("keybinds" in serialized).toBe(false);
   });
 
   it("is tolerant of malformed input", () => {

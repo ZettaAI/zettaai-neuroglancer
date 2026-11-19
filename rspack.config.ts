@@ -1,11 +1,7 @@
 import path from "node:path";
 import process from "node:process";
 import { defineConfig } from "@rspack/cli";
-import {
-  CopyRspackPlugin,
-  HtmlRspackPlugin,
-  ProgressPlugin,
-} from "@rspack/core";
+import { HtmlRspackPlugin, ProgressPlugin } from "@rspack/core";
 import { normalizeConfigurationWithDefine } from "./build_tools/rspack/configuration_with_define.js";
 import packageJson from "./package.json" with { type: "json" };
 
@@ -25,21 +21,6 @@ function zettaDefine(name: string) {
   const value = process.env[name];
   return value ? { [name]: JSON.stringify(value) } : {};
 }
-
-// Pyodide is self-hosted (TM-322): cross-origin isolation
-// (`Cross-Origin-Embedder-Policy: require-corp`, needed for SharedArrayBuffer)
-// forbids streaming pyodide from the jsDelivr CDN, so all pyodide assets must be
-// served same-origin. The core runtime comes from the `pyodide` npm package; the
-// numpy/scipy/openblas wheels (not in that package) are vendored under
-// `pyodide_packages/`. Both are emitted to `dist/client/pyodide/` below and
-// loaded same-origin by `morphology_handler.ts`.
-const PYODIDE_CORE_FILES = [
-  "pyodide.mjs",
-  "pyodide.asm.js",
-  "pyodide.asm.wasm",
-  "python_stdlib.zip",
-  "pyodide-lock.json",
-];
 
 export default defineConfig((env, args) => {
   const mode = args.mode === "production" ? "production" : "development";
@@ -152,27 +133,6 @@ export default defineConfig((env, args) => {
       new HtmlRspackPlugin({
         title: "neuroglancer",
       }),
-      // Self-host pyodide (TM-322): emit the core runtime (from the npm package)
-      // and the vendored numpy/scipy/openblas wheels to `dist/client/pyodide/`,
-      // which `morphology_handler.ts` loads same-origin.
-      new CopyRspackPlugin({
-        patterns: [
-          ...PYODIDE_CORE_FILES.map((file) => ({
-            from: path.resolve(
-              import.meta.dirname,
-              "node_modules",
-              "pyodide",
-              file,
-            ),
-            to: "pyodide/[name][ext]",
-          })),
-          {
-            from: path.resolve(import.meta.dirname, "pyodide_packages"),
-            to: "pyodide",
-            globOptions: { ignore: ["**/README.md"] },
-          },
-        ],
-      }),
     ],
     output: {
       path: path.resolve(import.meta.dirname, "dist", "client"),
@@ -220,6 +180,9 @@ export default defineConfig((env, args) => {
       //    edit session's tools append their own API group (e.g.
       //    `/segmentation/propagate_mask`). Without it the backend is only
       //    reachable when an embedding host injects it via `configureBackend()`.
+      //  - NEUROGLANCER_ZETTA_GPU_BACKEND_URL — root URL of the GPU web API;
+      //    model inference (`/segmentation/propagate_mask`) goes there. Without
+      //    it those requests use NEUROGLANCER_ZETTA_BACKEND_URL.
       //  - NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP — enables browser Google
       //    OAuth (client id only, NO secret) and sends the OIDC id_token as the
       //    bearer for an IAP-protected backend. Precedence over the static token.
@@ -229,6 +192,7 @@ export default defineConfig((env, args) => {
       //    google_oauth2_redirect.html receives the Google login response, for
       //    origins (PR previews) not authorized on the OAuth client.
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_URL"),
+      ...zettaDefine("NEUROGLANCER_ZETTA_GPU_BACKEND_URL"),
       ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_CLIENT_ID_IAP"),
       ...zettaDefine("NEUROGLANCER_ZETTA_BACKEND_TOKEN"),
       ...zettaDefine("NEUROGLANCER_ZETTA_GOOGLE_REDIRECT_PROXY_URL"),

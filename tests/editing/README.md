@@ -1,6 +1,6 @@
 # Edit-session test suite
 
-Tests for the edit-session painting stack (scheduler → pointer→voxel → pyodide
+Tests for the edit-session painting stack (scheduler → pointer→voxel → mask
 compute → commit → GPU → save). Conventions (tiers, naming, vocabulary) are in
 [`docs/TESTING.md`](../../docs/TESTING.md); this is the suite-specific guide.
 
@@ -42,7 +42,7 @@ testdata/editing/manifest.json ──generate.py──▶ precomputed buckets + 
    fake-gcs-server ──harness/gcs_route.ts──▶ rewrite storage.googleapis.com → local
         │
         ▼  harness/build_ng_state.ts (scenario → ngState + editSession)
-   built app (serve_dist.mjs, COOP/COEP → SAB + pyodide) auto-opens the session
+   built app (serve_dist.mjs, COOP/COEP → SAB) auto-opens the session
         │
         ▼  harness/e2e_setup.ts: openScenarioPage + warmupPaintPath
    deterministic stamp → __editPaintBench read-back → assert
@@ -91,10 +91,44 @@ Sweeps brush sizes × {masked, unmasked, eraser} on the large `perf_*` fixture
   render loop, so `frameDraw` / `gpu.upload` / `mirror.fuse` (the RENDER phase)
   are absent.
 - Before measuring, the harness warms the data (8 max-radius stamps) so chunks
-  are resident and pyodide is booted.
+  are resident.
 - Output: a table in stdout + `test-results/edit_paint_bench.json`.
 - Perf-regression **baseline comparison** (committed baselines + tolerance) is a
   follow-up (TM-331 Phase 3).
+
+## large-chunk benchmark (`perf/edit_paint_large_chunk.perf.ts`, TM-373)
+
+Paint cost on 4096²×1 chunks against a 256² control, on the large-chunk fixture
+set (see `testdata/editing/README.md`). Its own Playwright project
+(`perf-large-chunk`), so `npm run perf` does not need the 1.4 GB fixtures.
+
+```bash
+npm run perf:large-chunk          # fixtures + build + run
+npm run perf:large-chunk:headed   # real render loop (frameDraw, GPU upload)
+```
+
+- Per fixture: 5 unmasked strokes in one chunk (the first is the first touch),
+  undo all (undo depth), a closed-loop fill unmasked and masked (refused or
+  not), a stroke across a chunk junction, a long diagonal stroke, and 3 masked
+  strokes + undo. Unmasked strokes redo by replay (no after-image, so
+  `edit.record()` is cheap); masked ones keep an after-image — those show the
+  stroke-end copy + hash and the shallower undo.
+- Strokes are placed in voxels (`__editPaintBenchVoxelStroke`), so a path hits
+  the same voxels whatever the chunk size; the first stroke checks it landed
+  where it was aimed.
+- Layers read straight from fake-gcs over http (`sourceFor`), not through
+  `gcs_route`: `route.fulfill` sends bodies over the DevTools protocol, whose
+  100 MB buffer a 128 MB chunk overflows (the browser is killed).
+- Output: a markdown table in stdout and `test-results/edit_paint_large_chunk.md`
+  (+ `.json`, and one file per fixture in `test-results/edit_paint_large_chunk/`).
+- Memory: after each step, a GC, CDP `Runtime.getHeapUsage` and a heap
+  snapshot; buffers of ≥ 1 MB are split by owner (NG mirror, the library's
+  overlay copies and history, an inactive session, `ng.host.<field>`) from
+  their shortest retaining path (`harness/heap_buffer_owners.ts`). The
+  stroke table's `heap MB` is `usedJSHeapSize` and misses buffers: read the
+  memory table instead. Main thread only; the snapshots add ~1 min to the run.
+- Micro-costs of one chunk (decode, copy, hash, full fuse) by chunk size:
+  `npx vitest bench --run src/editing/adapters/baseline_chunk_costs.benchmark.ts`.
 
 ## `// TUNE:` points (dial in on a live GPU)
 

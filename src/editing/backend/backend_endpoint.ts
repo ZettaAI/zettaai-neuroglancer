@@ -51,6 +51,16 @@ export interface BackendEndpoint {
   readonly baseUrl: string;
 
   /**
+   * Absolute root URL of the **GPU** web API: a second deployment of the same
+   * backend (same routes, same auth) that runs model inference on a GPU.
+   * Requests sent with the `"gpu"` {@link BackendTarget} go here; everything
+   * else keeps using {@link baseUrl}. Optional: without it, `"gpu"` requests
+   * fall back to {@link baseUrl}, so a host that only knows one backend keeps
+   * working unchanged.
+   */
+  readonly gpuBaseUrl?: string;
+
+  /**
    * Apply authentication to an outgoing request, returning the (possibly new)
    * `RequestInit` the client will fetch with.
    *
@@ -83,6 +93,23 @@ export interface BackendEndpoint {
    * simply propagates, since a retry could not help). Optional for that reason.
    */
   invalidate?(): void;
+}
+
+/**
+ * Which deployment of the backend a request goes to: `"api"` is
+ * {@link BackendEndpoint.baseUrl}, `"gpu"` is {@link BackendEndpoint.gpuBaseUrl}
+ * (falling back to `baseUrl` when the host did not provide one).
+ */
+export type BackendTarget = "api" | "gpu";
+
+/** The root URL a request for `target` goes to on `endpoint`. */
+export function backendBaseUrl(
+  endpoint: BackendEndpoint,
+  target: BackendTarget,
+): string {
+  return target === "gpu"
+    ? (endpoint.gpuBaseUrl ?? endpoint.baseUrl)
+    : endpoint.baseUrl;
 }
 
 /**

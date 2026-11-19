@@ -19,8 +19,10 @@
  * gets fragments). Each fragment rebuilds its view ray from the inverse
  * model-view-projection, clips it to the box and walks it texel by texel
  * (Amanatides–Woo DDA), sampling the field twice per texel and bisecting
- * the first crossing; the colour is the class of the nearest occupied texel
- * inward from the surface. Working in texel indices, with the texel → display matrix folded
+ * the first crossing; 8³ blocks with no occupied texel near them are crossed
+ * in one step (`painted_volume_occupied_blocks.ts`), so the cost of a ray
+ * follows what is painted along it rather than the size of the box. The
+ * colour is the class of the nearest occupied texel inward from the surface. Working in texel indices, with the texel → display matrix folded
  * into the projection, makes anisotropic voxels come out right for free.
  *
  * The layer draws in the opaque pass and writes the hit's depth itself, so
@@ -33,6 +35,15 @@
 
 import { PAINTED_VOLUME_DISTANCE_RANGE } from "#src/editing/painted_volume/painted_volume_distance_field.js";
 import type { PaintedVolumeExtent } from "#src/editing/painted_volume/painted_volume_extent.js";
+import type { PaintedVolumeFrameTimings } from "#src/editing/painted_volume/painted_volume_frame_cost.js";
+import { PaintedVolumeFrameCost } from "#src/editing/painted_volume/painted_volume_frame_cost.js";
+import { PAINTED_VOLUME_BLOCK_SIZE } from "#src/editing/painted_volume/painted_volume_occupied_blocks.js";
+import { PaintedVolumeReducedMarch } from "#src/editing/painted_volume/painted_volume_reduced_march.js";
+import type { PaintedVolumeResolution } from "#src/editing/painted_volume/painted_volume_resolution_governor.js";
+import {
+  PAINTED_VOLUME_FULL_RESOLUTION,
+  PaintedVolumeResolutionGovernor,
+} from "#src/editing/painted_volume/painted_volume_resolution_governor.js";
 import { PAINTED_VOLUME_PALETTE_SIZE } from "#src/editing/painted_volume/painted_volume_segment_palette.js";
 import type { TexelBox } from "#src/editing/painted_volume/painted_volume_texel_frame.js";
 import type {
@@ -96,7 +107,21 @@ export interface PaintedVolumeView {
 const OCCUPANCY_SAMPLER = Symbol("paintedVolumeOccupancy");
 const DISTANCE_SAMPLER = Symbol("paintedVolumeDistance");
 const PALETTE_SAMPLER = Symbol("paintedVolumePalette");
+const BLOCKS_SAMPLER = Symbol("paintedVolumeBlocks");
 const BOX_VERTEX_COUNT = 36;
+/**
+ * Steps per ray when the governor asks for the emergency cap: far surfaces
+ * may be missing, but the frame is bounded on any GPU.
+ */
+export const PAINTED_VOLUME_EMERGENCY_MAX_STEPS = 256;
+
+/** Adapt the march's resolution to what frames cost on this GPU. */
+export interface PaintedVolumeAdaptiveOptions {
+  /** The viewer's frame timer (`DisplayContext`). */
+  readonly frameTimings: PaintedVolumeFrameTimings;
+  /** The resolution to draw at changed: draw again. */
+  readonly onResolutionChanged: () => void;
+}
 
 const glsl_cursorHidesTexel = `
 // True when the cursor's footprint covers this texel on the cursor's z: the
@@ -244,6 +269,36 @@ bool shadeSurface(vec3 hitPoint, vec3 texelNormal, ivec3 firstTexel,
 }
 `;
 
+const glsl_blockSkip = `
+const int BLOCK_SIZE = ${PAINTED_VOLUME_BLOCK_SIZE};
+
+// False when no texel the field interpolates inside this texel's block is
+// occupied: every sample there reads below one half.
+bool blockMayHoldSurface(ivec3 texel) {
+  return texelFetch(uOccupiedBlocks, texel / BLOCK_SIZE, 0).r != 0u;
+}
+
+// Ray parameter where the ray leaves the block holding texel, and the axis of
+// the face it leaves through.
+float blockExit(vec3 origin, vec3 ray, ivec3 texel, ivec3 stepDirection,
+                out int exitAxis) {
+  ivec3 blockFirst = (texel / BLOCK_SIZE) * BLOCK_SIZE;
+  float tExit = 1.0e30;
+  exitAxis = 0;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (stepDirection[axis] == 0) continue;
+    float face = float(stepDirection[axis] > 0 ? blockFirst[axis] + BLOCK_SIZE
+                                               : blockFirst[axis]);
+    float tFace = (face - origin[axis]) / ray[axis];
+    if (tFace < tExit) {
+      tExit = tFace;
+      exitAxis = axis;
+    }
+  }
+  return tExit;
+}
+`;
+
 const glsl_marchMain = `
 vec2 ndc = vClipPosition.xy / vClipPosition.w;
 // The ray runs from the near plane through the point at NDC depth 0. The far
@@ -306,7 +361,43 @@ if (distancePrevious >= 0.5) {
   }
   insideUndrawn = true;
 }
+// The block whose flag was read last; its flag is read once per block entered.
+ivec3 flagBlock = ivec3(-1);
+bool flagMayHoldSurface = true;
 for (int i = 0; i < uMaxSteps; ++i) {
+  if (texel / BLOCK_SIZE != flagBlock) {
+    flagBlock = texel / BLOCK_SIZE;
+    flagMayHoldSurface = blockMayHoldSurface(texel);
+  }
+  if (!flagMayHoldSurface) {
+    // As if marched texel by texel: every sample read below one half, the
+    // last one where the ray leaves the block.
+    int exitAxis;
+    float tExit = blockExit(nearPoint, ray, texel, stepDirection, exitAxis);
+    insideUndrawn = false;
+    distancePrevious = 0.0;
+    tPrevious = min(tExit, tEnd);
+    tHit = tExit;
+    if (tHit > tEnd) break;
+    ivec3 blockFirst = (texel / BLOCK_SIZE) * BLOCK_SIZE;
+    ivec3 blockLast = blockFirst + (BLOCK_SIZE - 1);
+    // Off the exit axis the exit point is inside the block; clamp away the
+    // rounding of floor() on a face.
+    texel = clamp(ivec3(floor(nearPoint + ray * tHit)), blockFirst, blockLast);
+    texel[exitAxis] = stepDirection[exitAxis] > 0 ? blockLast[exitAxis] + 1
+                                                  : blockFirst[exitAxis] - 1;
+    if (any(lessThan(texel, firstTexel)) || any(greaterThan(texel, lastTexel))) {
+      break;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+      if (stepDirection[axis] == 0) continue;
+      float boundary = float(texel[axis] + (stepDirection[axis] > 0 ? 1 : 0));
+      tNextBoundary[axis] = (boundary - nearPoint[axis]) / ray[axis];
+    }
+    cellNormal = vec3(0.0);
+    cellNormal[exitAxis] = -float(stepDirection[exitAxis]);
+    continue;
+  }
   if (insideUndrawn) {
     vec3 rgb;
     uint segmentClass = texelFetch(uOccupancy, texel, 0).r;
@@ -373,6 +464,7 @@ export function buildPaintedVolumeShader(gl: GL): ShaderProgram {
   builder.addTextureSampler("usampler3D", "uOccupancy", OCCUPANCY_SAMPLER);
   builder.addTextureSampler("sampler3D", "uDistance", DISTANCE_SAMPLER);
   builder.addTextureSampler("sampler2D", "uPalette", PALETTE_SAMPLER);
+  builder.addTextureSampler("usampler3D", "uOccupiedBlocks", BLOCKS_SAMPLER);
   builder.addUniform("highp mat4", "uModelViewProjection");
   builder.addUniform("highp mat4", "uInvModelViewProjection");
   builder.addUniform("highp mat3", "uNormalToDisplay");
@@ -403,6 +495,7 @@ gl_Position.z = 0.0;
   builder.addFragmentCode(glsl_intersectOccupiedBox);
   builder.addFragmentCode(glsl_distance);
   builder.addFragmentCode(glsl_shadeHit);
+  builder.addFragmentCode(glsl_blockSkip);
   builder.setFragmentMain(glsl_marchMain);
   return builder.build();
 }
@@ -415,10 +508,53 @@ export class PaintedVolumeRenderer extends RefCounted {
   private readonly invModelViewProjection = mat4.create();
   private readonly normalToDisplay = mat3.create();
 
-  constructor(private readonly gl: GL) {
+  private readonly governor: PaintedVolumeResolutionGovernor | undefined;
+  private readonly frameCost: PaintedVolumeFrameCost | undefined;
+  private readonly reducedMarch: PaintedVolumeReducedMarch | undefined;
+  /** Uncapped steps over the steps the current draw allows. */
+  private stepFactor = 1;
+
+  /**
+   * Without `adaptive` every frame marches at full resolution; with it, the
+   * resolution follows the measured frame cost
+   * (`painted_volume_resolution_governor.ts`). A browser without a GPU timer
+   * measures nothing, so it stays at full resolution as before.
+   */
+  constructor(
+    private readonly gl: GL,
+    adaptive?: PaintedVolumeAdaptiveOptions,
+  ) {
     super();
     this.shader = buildPaintedVolumeShader(gl);
     this.vertexIdHelper = this.registerDisposer(VertexIdHelper.get(gl));
+    if (adaptive === undefined || !adaptive.frameTimings.measuresFrameTimes) {
+      return;
+    }
+    const governor = new PaintedVolumeResolutionGovernor();
+    this.governor = governor;
+    this.frameCost = new PaintedVolumeFrameCost(
+      adaptive.frameTimings,
+      governor,
+      adaptive.onResolutionChanged,
+    );
+    this.reducedMarch = this.registerDisposer(
+      new PaintedVolumeReducedMarch(gl),
+    );
+  }
+
+  /** The resolution the next frame marches at. */
+  get resolution(): PaintedVolumeResolution {
+    return this.governor?.resolution ?? PAINTED_VOLUME_FULL_RESOLUTION;
+  }
+
+  /** Whether the resolution follows the measured cost. */
+  get adaptive(): boolean {
+    return this.governor !== undefined;
+  }
+
+  /** The latest measured frame time, when adapting; for diagnostics. */
+  get lastFrameMilliseconds(): number | undefined {
+    return this.frameCost?.lastFrameMilliseconds;
   }
 
   /** Draw into the bound framebuffer; GL state it changes is restored. */
@@ -431,29 +567,43 @@ export class PaintedVolumeRenderer extends RefCounted {
     if (!this.computeMatrices(texelToDisplay, view.viewProjectionMat)) return;
 
     const previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
+    const { resolution } = this;
+    const march = () => {
+      shader.bind();
+      source.texture.bind(shader.textureUnit(OCCUPANCY_SAMPLER));
+      source.texture.bindDistance(shader.textureUnit(DISTANCE_SAMPLER));
+      source.palette.bind(shader.textureUnit(PALETTE_SAMPLER));
+      source.texture.bindBlocks(shader.textureUnit(BLOCKS_SAMPLER));
+      this.setViewUniforms(view);
+      this.setVolumeUniforms(source, occupiedBox, resolution.capSteps);
+      this.setCursorUniforms(source.cursorFootprint);
+      this.drawProxyBox(resolution);
+    };
+    if (resolution.reduction === 1 || this.reducedMarch === undefined) {
+      march();
+    } else {
+      this.reducedMarch.draw(resolution.reduction, march);
+    }
+    gl.activeTexture(previousActiveTexture);
+  }
+
+  /** The march's one draw call; culling is restored. */
+  private drawProxyBox(resolution: PaintedVolumeResolution): void {
+    const { gl } = this;
     const cullFaceWasEnabled = gl.isEnabled(gl.CULL_FACE);
     const previousCullFaceMode = gl.getParameter(gl.CULL_FACE_MODE) as number;
-
-    shader.bind();
-    source.texture.bind(shader.textureUnit(OCCUPANCY_SAMPLER));
-    source.texture.bindDistance(shader.textureUnit(DISTANCE_SAMPLER));
-    source.palette.bind(shader.textureUnit(PALETTE_SAMPLER));
-    this.setViewUniforms(view);
-    this.setVolumeUniforms(source, occupiedBox);
-    this.setCursorUniforms(source.cursorFootprint);
-
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.FRONT);
     this.vertexIdHelper.enable();
     gl.drawArrays(gl.TRIANGLES, 0, BOX_VERTEX_COUNT);
+    this.frameCost?.noteDraw(resolution, this.stepFactor);
     this.vertexIdHelper.disable();
-
     gl.cullFace(previousCullFaceMode);
     if (!cullFaceWasEnabled) gl.disable(gl.CULL_FACE);
-    gl.activeTexture(previousActiveTexture);
   }
 
   override disposed(): void {
+    this.frameCost?.dispose();
     this.shader.dispose();
     super.disposed();
   }
@@ -498,6 +648,7 @@ export class PaintedVolumeRenderer extends RefCounted {
   private setVolumeUniforms(
     source: PaintedVolumeRenderSource,
     occupiedBox: TexelBox,
+    capSteps: boolean,
   ): void {
     const { gl, shader } = this;
     const { textureOrigin, factor, textureSize } = source.extent;
@@ -516,7 +667,12 @@ export class PaintedVolumeRenderer extends RefCounted {
     // A ray crosses at most one boundary per texel along each axis.
     const [sizeX, sizeY, sizeZ] = textureSize;
     gl.uniform3f(shader.uniform("uTextureSize"), sizeX, sizeY, sizeZ);
-    gl.uniform1i(shader.uniform("uMaxSteps"), sizeX + sizeY + sizeZ + 3);
+    const stepsToCrossTexture = sizeX + sizeY + sizeZ + 3;
+    const allowedSteps = capSteps
+      ? Math.min(stepsToCrossTexture, PAINTED_VOLUME_EMERGENCY_MAX_STEPS)
+      : stepsToCrossTexture;
+    this.stepFactor = stepsToCrossTexture / allowedSteps;
+    gl.uniform1i(shader.uniform("uMaxSteps"), allowedSteps);
     gl.uniform3f(
       shader.uniform("uTextureOrigin"),
       textureOrigin[0],
@@ -553,12 +709,37 @@ export class PaintedVolumeRenderer extends RefCounted {
 export class PaintedVolumeRenderLayer extends PerspectiveViewRenderLayer {
   private readonly renderer: PaintedVolumeRenderer;
 
+  /** With `frameTimings`, the resolution adapts to the GPU's frame cost. */
   constructor(
     gl: GL,
     private readonly source: PaintedVolumeRenderSource,
+    frameTimings?: PaintedVolumeFrameTimings,
   ) {
     super();
-    this.renderer = this.registerDisposer(new PaintedVolumeRenderer(gl));
+    this.renderer = this.registerDisposer(
+      new PaintedVolumeRenderer(
+        gl,
+        frameTimings === undefined
+          ? undefined
+          : {
+              frameTimings,
+              onResolutionChanged: () => this.redrawNeeded.dispatch(),
+            },
+      ),
+    );
+  }
+
+  /** The resolution the preview marches at now; for diagnostics and tests. */
+  get resolution(): PaintedVolumeResolution {
+    return this.renderer.resolution;
+  }
+
+  get adaptive(): boolean {
+    return this.renderer.adaptive;
+  }
+
+  get lastFrameMilliseconds(): number | undefined {
+    return this.renderer.lastFrameMilliseconds;
   }
 
   get isTransparent() {

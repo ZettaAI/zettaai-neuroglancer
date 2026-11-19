@@ -10,7 +10,7 @@
       // `redirectProxyOrigin` in google_oauth2.ts and docs/DEPLOY.md. Keep in
       // sync with google_oauth2_redirect.spec.ts.
       const proxiedOrigin =
-        /^https:\/\/neuroglancer-pr-[0-9]+-(?:349854005841\.us-east1\.run\.app|hhtsusnvoq-ue\.a\.run\.app)$/;
+        /^https:\/\/(?:portal(?:-dev)?\.research\.zetta\.ai|(?:neuroglancer|portal)-pr-[0-9]+(?:\.research\.zetta\.ai|-349854005841\.us-east1\.run\.app|-hhtsusnvoq-ue\.a\.run\.app))$/;
       function responseOrigin() {
         const encoded = (data.state || "").split(".")[1];
         if (encoded === undefined) return window.location.origin;

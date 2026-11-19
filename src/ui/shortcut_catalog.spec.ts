@@ -15,6 +15,8 @@ import { effectiveEditKeybinds } from "#src/editing/session_hotkey_binder.js";
 import {
   buildShortcutSections,
   filterShortcutSections,
+  rebindOutcomeMessage,
+  shadowedViewerKeyMessage,
 } from "#src/ui/shortcut_catalog.js";
 import { EventActionMap } from "#src/util/event_action_map.js";
 
@@ -93,5 +95,70 @@ describe("buildShortcutSections entry keys", () => {
     ]);
     // Inside a session Ctrl+E is the eraser, so the sheet starts at Cursor.
     expect(editRows(true).map((row) => row.label)).toEqual(["Cursor", "Brush"]);
+  });
+});
+
+describe("shadowedViewerKeyMessage", () => {
+  it("names the covered action by its sheet label", () => {
+    expect(shadowedViewerKeyMessage("A", "toggle-axis-lines")).toBe(
+      'While an edit session is open, A no longer does "Axis lines". Outside a session it works as before.',
+    );
+  });
+
+  it("falls back to the action id for an action the sheet does not list", () => {
+    expect(shadowedViewerKeyMessage("Q", "some-other-action")).toContain(
+      '"some-other-action"',
+    );
+  });
+});
+
+describe("rebindOutcomeMessage", () => {
+  const plain = (identifier: string) => identifier.toUpperCase();
+
+  it("says nothing for a free key", () => {
+    expect(
+      rebindOutcomeMessage("brush", "keyq", undefined, undefined, plain),
+    ).toBe("");
+  });
+
+  it("names a swap by the sheet's labels", () => {
+    expect(
+      rebindOutcomeMessage(
+        "erase",
+        "keys",
+        { name: "brush", keys: ["keyd"], swapped: true },
+        undefined,
+        plain,
+      ),
+    ).toBe("Eraser now uses KEYS. Brush took Eraser's old key, KEYD.");
+  });
+
+  it("says which keys an action keeps when it had more than one", () => {
+    expect(
+      rebindOutcomeMessage(
+        "brush",
+        "control+keyz",
+        { name: "undo", keys: ["meta+keyz"], swapped: false },
+        undefined,
+        plain,
+        true,
+      ),
+    ).toBe(
+      "Brush now uses CONTROL+KEYZ. Undo no longer uses CONTROL+KEYZ; it still works with META+KEYZ.",
+    );
+  });
+
+  it("adds the covered viewer action", () => {
+    expect(
+      rebindOutcomeMessage(
+        "cursor",
+        "keya",
+        undefined,
+        "toggle-axis-lines",
+        plain,
+      ),
+    ).toBe(
+      'While an edit session is open, KEYA no longer does "Axis lines". Outside a session it works as before.',
+    );
   });
 });

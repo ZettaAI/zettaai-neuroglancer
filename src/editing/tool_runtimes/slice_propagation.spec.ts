@@ -24,11 +24,14 @@ import {
   layerId,
   Resolution as ResolutionCtor,
 } from "@zettaai/edit-session";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ReadChunkAt } from "#src/editing/tool_runtimes/painting_tools.js";
 import type { MultipartPoster } from "#src/editing/tool_runtimes/propagate_mask_client.js";
+import { PropagationImageSlices } from "#src/editing/tool_runtimes/propagation_image_slices.js";
 import {
+  NoTrackedVoxelsError,
+  PROPAGATION_TIMING_PREFIX,
   propagateSlice,
   type PropagateSliceContext,
 } from "#src/editing/tool_runtimes/slice_propagation.js";
@@ -201,6 +204,21 @@ describe("propagateSlice", () => {
     expect([...(await partBytes(form, "image-data"))]).toEqual([6, 6, 6, 6]);
   });
 
+  it("refuses a current slice with no tracked voxels, before the backend", async () => {
+    // 300 is painted, but only 100 and 200 are tracked.
+    const { edit, writes } = fakeEdit(BigUint64Array.from([300n, 0n, 0n, 0n]));
+    const { client, requests } = fakeClient(
+      Uint8Array.from([1, 1, 1, 1]),
+      2,
+      2,
+    );
+    const run = propagateSlice(contextWith({ edit, client }));
+    await expect(run).rejects.toBeInstanceOf(NoTrackedVoxelsError);
+    await expect(run).rejects.toMatchObject({ z: 5 });
+    expect(requests).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
   it("reads the mask at the current Z", async () => {
     const { edit, reads } = fakeEdit(BigUint64Array.from([100n, 0n, 200n, 0n]));
     const { client } = fakeClient(Uint8Array.from([0, 0, 0, 0]), 2, 2);
@@ -324,5 +342,130 @@ describe("propagateSlice", () => {
     ]);
     expect([...(writes[0].valueMask ?? [])]).toEqual([1, 0, 0, 1]);
     expect(result.voxelsWritten).toBe(2);
+  });
+
+  it("starts the mask and image reads together (TM-518)", async () => {
+    const started: string[] = [];
+    const releases: (() => void)[] = [];
+    const held = <T>(label: string, value: () => Promise<T>) => {
+      started.push(label);
+      return new Promise<T>((resolve) => {
+        releases.push(() => resolve(value()));
+      });
+    };
+    const { edit: innerEdit } = fakeEdit(
+      BigUint64Array.from([100n, 0n, 200n, 0n]),
+    );
+    const edit = {
+      ...innerEdit,
+      readRegion: (target: WriteTarget, box: VoxelBox) =>
+        held("mask", () => innerEdit.readRegion(target, box)),
+      writeRegion: innerEdit.writeRegion,
+    } as unknown as Edit;
+    const innerReader = imageReader();
+    const readChunkAt: ReadChunkAt = (layer, resolution, chunkId) =>
+      held("image", () => innerReader(layer, resolution, chunkId));
+    const { client } = fakeClient(Uint8Array.from([0, 0, 0, 0]), 2, 2);
+
+    const step = propagateSlice({
+      ...contextWith({ edit, client }),
+      readChunkAt,
+    });
+    await Promise.resolve();
+    // Z 5 and 6 share image chunk z=0: one image read, alongside the mask read.
+    expect(started.sort()).toEqual(["image", "mask"]);
+    for (const release of releases) release();
+    await step;
+  });
+
+  it("stops before the backend when aborted during the reads", async () => {
+    const { edit, writes } = fakeEdit(
+      BigUint64Array.from([100n, 0n, 200n, 0n]),
+    );
+    const { client, requests } = fakeClient(
+      Uint8Array.from([1, 1, 1, 1]),
+      2,
+      2,
+    );
+    const abort = new AbortController();
+    const innerReader = imageReader();
+    const readChunkAt: ReadChunkAt = (layer, resolution, chunkId) => {
+      abort.abort();
+      return innerReader(layer, resolution, chunkId);
+    };
+    await expect(
+      propagateSlice({
+        ...contextWith({ edit, client }),
+        readChunkAt,
+        signal: abort.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(requests).toHaveLength(0);
+    expect(writes).toHaveLength(0);
+  });
+
+  it("takes image slices from the cache it is given", async () => {
+    let chunkReads = 0;
+    const innerReader = imageReader();
+    const countingReader: ReadChunkAt = (layer, resolution, chunkId) => {
+      chunkReads++;
+      return innerReader(layer, resolution, chunkId);
+    };
+    const imageSlices = new PropagationImageSlices(countingReader);
+    const { edit } = fakeEdit(BigUint64Array.from([100n, 0n, 200n, 0n]));
+    const { client, requests } = fakeClient(
+      Uint8Array.from([0, 0, 0, 0]),
+      2,
+      2,
+    );
+    const ctx = { ...contextWith({ edit, client }), imageSlices };
+    await propagateSlice(ctx);
+    await propagateSlice(ctx);
+    expect(chunkReads).toBe(1);
+    expect([...(await partBytes(requests[1], "image-data"))]).toEqual([
+      6, 6, 6, 6,
+    ]);
+  });
+
+  it("reads the next slice only when segments must be protected there", async () => {
+    const { edit, reads } = fakeEdit(BigUint64Array.from([100n, 0n, 200n, 0n]));
+    const { client } = fakeClient(Uint8Array.from([0, 0, 0, 0]), 2, 2);
+    await propagateSlice(contextWith({ edit, client }));
+    expect(reads.map((box) => box.origin[2])).toEqual([5]);
+
+    reads.length = 0;
+    await propagateSlice({
+      ...contextWith({ edit, client }),
+      protectedIds: [300n],
+    });
+    expect(reads.map((box) => box.origin[2]).sort()).toEqual([5, 6]);
+  });
+
+  it("does not write over protected segments on the next slice", async () => {
+    // The fake returns the same slice for both Z: [100, 0, 200, 0].
+    const { edit, writes } = fakeEdit(
+      BigUint64Array.from([100n, 0n, 200n, 0n]),
+    );
+    const { client } = fakeClient(Uint8Array.from([1, 1, 1, 1]), 2, 2);
+    const result = await propagateSlice({
+      ...contextWith({ edit, client }),
+      trackedIds: [100n],
+      protectedIds: [200n],
+    });
+    expect([...(writes[0].valueMask ?? [])]).toEqual([1, 1, 0, 1]);
+    expect(result.voxelsWritten).toBe(3);
+  });
+
+  it("records each phase as a performance measure", async () => {
+    const measure = vi.spyOn(performance, "measure");
+    const { edit } = fakeEdit(BigUint64Array.from([100n, 0n, 200n, 0n]));
+    const { client } = fakeClient(Uint8Array.from([0, 0, 0, 0]), 2, 2);
+    await propagateSlice(contextWith({ edit, client }));
+    expect(measure.mock.calls.map(([name]) => name)).toEqual(
+      ["read", "encode", "backend", "decode", "write"].map(
+        (phase) => PROPAGATION_TIMING_PREFIX + phase,
+      ),
+    );
+    measure.mockRestore();
   });
 });

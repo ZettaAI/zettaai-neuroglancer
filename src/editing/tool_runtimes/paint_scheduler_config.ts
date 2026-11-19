@@ -12,8 +12,8 @@
  * Runtime-tunable stroke scheduling mode (TM-317 scheduler fix).
  *
  * The masked-brush lag is a SCHEDULING problem, not a compute one: a single
- * disk is ~8 ms in the pyodide worker, but the current scheduler coalesces all
- * movement accumulated while the worker is busy into ONE swept capsule per call
+ * disk is a few ms, but the current scheduler coalesces all
+ * movement accumulated while the compute is busy into ONE swept capsule per call
  * with no drop, so per-call work grows with drag speed (a feedback loop). This
  * exposes two modes so they can be A/B-compared live from the console without a
  * rebuild:

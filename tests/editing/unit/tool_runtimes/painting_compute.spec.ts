@@ -15,7 +15,7 @@ import type {
 } from "@zettaai/edit-session";
 import { ChunkId, Resolution, layerId } from "@zettaai/edit-session";
 
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import {
   brushBoundsPadding,
@@ -23,8 +23,11 @@ import {
   brushRadiusSquared,
   brushStampAnchor,
 } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
-import type { MorphologyClient } from "#src/editing/tool_runtimes/morphology_client.js";
-import type { MorphologyRequest } from "#src/editing/tool_runtimes/morphology_request.js";
+import type {
+  applyMorphologyPipeline,
+  MaskBuffer,
+  MorphologyPipelineInput,
+} from "#src/editing/tool_runtimes/mask_compute.js";
 import type {
   BrushApplyInput,
   BrushStrokeInput,
@@ -33,23 +36,35 @@ import type {
 } from "#src/editing/tool_runtimes/paint_types.js";
 import { PaintingCompute } from "#src/editing/tool_runtimes/painting_compute.js";
 
-/**
- * Minimal stand-in for the pyodide `MorphologyClient` — only `apply` is used by
- * `PaintingCompute`. `apply` is a vitest mock so tests can assert the offload
- * request and control the processed mask (or force a failure to exercise the
- * TS fallback).
- */
-function fakeMorphology(
-  impl: (req: MorphologyRequest) => Promise<Uint8Array>,
-): { client: MorphologyClient; apply: ReturnType<typeof vi.fn> } {
-  const apply = vi.fn(impl);
-  // `isReady: () => false` keeps these TM-304 tests on the morphology `apply`
-  // offload path: the TM-317 whole-pipeline route is only taken when the worker
-  // reports ready (covered separately in painting_compute_pyodide_pipeline.spec).
-  return {
-    client: { apply, isReady: () => false } as unknown as MorphologyClient,
-    apply,
-  };
+// Morphology runs in TS (`mask_compute.ts`). Record every call to the real
+// kernel so the tests below can assert how often it runs and with which
+// request; `override` replaces the result of the next call only.
+const morphology = vi.hoisted(() => ({
+  calls: [] as MorphologyPipelineInput[],
+  override: undefined as
+    | ((input: MorphologyPipelineInput) => MaskBuffer)
+    | undefined,
+}));
+vi.mock(
+  "#src/editing/tool_runtimes/mask_compute.js",
+  async (importOriginal) => {
+    const original = await importOriginal<{
+      applyMorphologyPipeline: typeof applyMorphologyPipeline;
+    }>();
+    return {
+      ...original,
+      applyMorphologyPipeline: (input: MorphologyPipelineInput): MaskBuffer => {
+        morphology.calls.push(input);
+        const override = morphology.override;
+        morphology.override = undefined;
+        return (override ?? original.applyMorphologyPipeline)(input);
+      },
+    };
+  },
+);
+function resetMorphologyRecorder(): void {
+  morphology.calls.length = 0;
+  morphology.override = undefined;
 }
 
 const TARGET_RES = Resolution.from([8, 8, 40]);
@@ -988,7 +1003,9 @@ describe("PaintingCompute.applyBrush with mask", () => {
   });
 });
 
-describe("PaintingCompute morphology offload (TM-304)", () => {
+describe("PaintingCompute morphology (TM-304)", () => {
+  beforeEach(resetMorphologyRecorder);
+
   function maskedBrushInput(radius: number) {
     return {
       targetLayerId: TARGET_LAYER,
@@ -1012,78 +1029,42 @@ describe("PaintingCompute morphology offload (TM-304)", () => {
     };
   }
 
-  it("offloads morphology to the client with the disk-bbox request", async () => {
+  it("runs morphology once with the disk-bbox request", async () => {
     const radius = 3;
     const side = 2 * radius + 1;
-    // Echo the input mask back so the stamp reflects the worker's output.
-    const { client, apply } = fakeMorphology(async (req) => req.mask);
-    const compute = new PaintingCompute(client);
+    const compute = new PaintingCompute();
 
     await compute.applyBrush(maskedBrushInput(radius));
 
-    expect(apply).toHaveBeenCalledTimes(1);
-    const req = apply.mock.calls[0][0] as MorphologyRequest;
-    expect(req.shape).toEqual([side, side, 1]);
-    expect(req.mask).toHaveLength(side * side);
+    expect(morphology.calls).toHaveLength(1);
+    const req = morphology.calls[0];
+    expect(req.mask.shape).toEqual([side, side, 1]);
+    expect(req.mask.data).toHaveLength(side * side);
     // Params forwarded verbatim from the mask context.
     expect(req.binaryClosing).toBe(2);
     expect(req.minComponentSize).toBe(5);
     expect(req.filterComponentsFirst).toBe(true);
   });
 
-  it("uses the worker's processed mask to drive the stamp", async () => {
-    // Worker returns an all-zero mask → nothing should be painted, even though
-    // the threshold band (0..255) would otherwise pass every voxel.
-    const { client } = fakeMorphology(
-      async (req) => new Uint8Array(req.mask.length),
-    );
-    const compute = new PaintingCompute(client);
+  it("uses the processed mask to drive the stamp", async () => {
+    // Morphology returns an all-zero mask → nothing should be painted, even
+    // though the threshold band (0..255) would otherwise pass every voxel.
+    morphology.override = (input) => ({
+      data: new Uint8Array(input.mask.data.length),
+      shape: input.mask.shape,
+    });
+    const compute = new PaintingCompute();
 
     const batch = await compute.applyBrush(maskedBrushInput(3));
     let setBits = 0;
     for (const b of batch.chunks[0]?.valueMask ?? []) if (b !== 0) setBits++;
     expect(setBits).toBe(0);
   });
-
-  it("falls back to the TS pipeline when the worker rejects", async () => {
-    const { client, apply } = fakeMorphology(async () => {
-      throw new Error("worker boot failed");
-    });
-    const withWorker = new PaintingCompute(client);
-    const withoutWorker = new PaintingCompute(); // pure TS path
-
-    // Morphology IS requested (binaryClosing > 0) so the worker is invoked and
-    // can fail — closing of a full-band solid disk is identity, so both the
-    // fallback and the pure-TS compute still paint the full disk footprint.
-    const input = {
-      ...maskedBrushInput(3),
-      mask: {
-        imageLayerId: MASK_LAYER,
-        imageResolution: TARGET_RES,
-        thresholdLow: 0,
-        thresholdHigh: 255,
-        minComponentSize: 0,
-        binaryClosing: 1,
-        filterComponentsFirst: false,
-      },
-    };
-    const fallbackBatch = await withWorker.applyBrush(input);
-    const tsBatch = await withoutWorker.applyBrush(input);
-
-    expect(apply).toHaveBeenCalled(); // worker was attempted...
-    // ...and the fallback produced the same result as the pure-TS compute
-    // (closing shrinks the bbox-edge voxels, so this is < the raw disk).
-    const count = (b: typeof fallbackBatch) => {
-      let n = 0;
-      for (const v of b.chunks[0]?.valueMask ?? []) if (v !== 0) n++;
-      return n;
-    };
-    expect(count(fallbackBatch)).toBeGreaterThan(0);
-    expect(count(fallbackBatch)).toBe(count(tsBatch));
-  });
 });
 
 describe("PaintingCompute capsule stroke (TM-304)", () => {
+  beforeEach(resetMorphologyRecorder);
+
   // A masked stroke input on a single z-slice with morphology requested.
   function maskedStrokeInput(
     from: [number, number, number],
@@ -1118,30 +1099,28 @@ describe("PaintingCompute capsule stroke (TM-304)", () => {
   it("runs morphology ONCE for a whole same-z segment (per-segment union)", async () => {
     // A 24-voxel segment with radius 6: the old per-dab path (spacing radius/2)
     // would call morphology ~ceil(24/3)=8 times; the capsule calls it once.
-    const { client, apply } = fakeMorphology(async (req) => req.mask);
-    const compute = new PaintingCompute(client);
+    const compute = new PaintingCompute();
 
     await compute.applyBrushStroke(
       maskedStrokeInput([20, 32, 16], [44, 32, 16], 6),
     );
 
-    expect(apply).toHaveBeenCalledTimes(1);
+    expect(morphology.calls).toHaveLength(1);
     // The single request's footprint spans the whole segment bbox + radius.
-    const req = apply.mock.calls[0][0] as MorphologyRequest;
-    expect(req.shape[0]).toBeGreaterThanOrEqual(24 + 2 * 6); // x: |to-from| + 2r
-    expect(req.shape[2]).toBe(1); // single z-slice
+    const req = morphology.calls[0];
+    expect(req.mask.shape[0]).toBeGreaterThanOrEqual(24 + 2 * 6); // x: |to-from| + 2r
+    expect(req.mask.shape[2]).toBe(1); // single z-slice
   });
 
   it("falls back to per-dab (morphology per dab) for a z-varying segment", async () => {
-    const { apply, client } = fakeMorphology(async (req) => req.mask);
-    const compute = new PaintingCompute(client);
+    const compute = new PaintingCompute();
 
     // from/to on different z-slices → 3D sweep → per-dab fallback.
     await compute.applyBrushStroke(
       maskedStrokeInput([20, 32, 10], [20, 32, 34], 6),
     );
 
-    expect(apply.mock.calls.length).toBeGreaterThan(1);
+    expect(morphology.calls.length).toBeGreaterThan(1);
   });
 
   it("unmasked stroke paints a gap-free capsule covering both endpoints", async () => {

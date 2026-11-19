@@ -17,11 +17,13 @@ import type {
 } from "@zettaai/edit-session";
 import { Resolution as ResolutionCtor, layerId } from "@zettaai/edit-session";
 
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
-import { applyMorphologyPipeline } from "#src/editing/tool_runtimes/mask_compute.js";
-import type { MorphologyClient } from "#src/editing/tool_runtimes/morphology_client.js";
-import type { MorphologyRequest } from "#src/editing/tool_runtimes/morphology_request.js";
+import {
+  applyMorphologyPipeline,
+  type MaskBuffer,
+  type MorphologyPipelineInput,
+} from "#src/editing/tool_runtimes/mask_compute.js";
 import type {
   BrushApplyInput,
   PaintWriteBatch,
@@ -123,26 +125,42 @@ function paintedVoxelSet(batch: PaintWriteBatch): Set<string> {
   return out;
 }
 
-/**
- * Fake worker client: records morphology requests, applies an identity
- * transform. `isReady: false` keeps the masked stamp on the main-thread compute
- * path (the crop + morphology-round-trip behaviour under test), rather than the
- * TM-317 whole-pipeline route.
- */
-function fakeMorphologyClient(calls: MorphologyRequest[]): MorphologyClient {
-  return {
-    isReady: () => false,
-    apply: async (req: MorphologyRequest) => {
-      calls.push(req);
-      return req.mask;
-    },
-  } as unknown as MorphologyClient;
+// Morphology runs in TS (`mask_compute.ts`). Record every call to the real
+// kernel so the tests below can assert how often it runs and with which
+// request; `override` replaces the result of the next call only.
+const morphology = vi.hoisted(() => ({
+  calls: [] as MorphologyPipelineInput[],
+  override: undefined as
+    | ((input: MorphologyPipelineInput) => MaskBuffer)
+    | undefined,
+}));
+vi.mock(
+  "#src/editing/tool_runtimes/mask_compute.js",
+  async (importOriginal) => {
+    const original = await importOriginal<{
+      applyMorphologyPipeline: typeof applyMorphologyPipeline;
+    }>();
+    return {
+      ...original,
+      applyMorphologyPipeline: (input: MorphologyPipelineInput): MaskBuffer => {
+        morphology.calls.push(input);
+        const override = morphology.override;
+        morphology.override = undefined;
+        return (override ?? original.applyMorphologyPipeline)(input);
+      },
+    };
+  },
+);
+function resetMorphologyRecorder(): void {
+  morphology.calls.length = 0;
+  morphology.override = undefined;
 }
 
 describe("PaintingCompute morphology input crop + empty-mask skip", () => {
-  it("sends the worker only the set-byte bbox padded by the closing reach", async () => {
-    const calls: MorphologyRequest[] = [];
-    const compute = new PaintingCompute(fakeMorphologyClient(calls));
+  beforeEach(resetMorphologyRecorder);
+
+  it("runs morphology only over the set-byte bbox padded by the closing reach", async () => {
+    const compute = new PaintingCompute();
     // 4×4 in-band square at [30..33]² inside a 17×17 footprint (r=8 around 32):
     // mask bbox is i,j ∈ [6..9]; pad = closing + 1 = 2 → crop [4..11]² = 8×8.
     const square: (readonly [number, number])[] = [];
@@ -155,9 +173,9 @@ describe("PaintingCompute morphology input crop + empty-mask skip", () => {
         minComponentSize: 2,
       }),
     );
-    expect(calls).toHaveLength(1);
-    expect(calls[0].shape).toEqual([8, 8, 1]);
-    // Identity morphology → painted set is exactly the square; this also
+    expect(morphology.calls).toHaveLength(1);
+    expect(morphology.calls[0].mask.shape).toEqual([8, 8, 1]);
+    // Morphology keeps the square as is → painted set is exactly it; this also
     // proves the crop paste-back lands at the right absolute coordinates.
     const painted = paintedVoxelSet(batch);
     expect(painted.size).toBe(16);
@@ -166,9 +184,8 @@ describe("PaintingCompute morphology input crop + empty-mask skip", () => {
     }
   });
 
-  it("skips the worker round-trip entirely when the threshold mask is empty", async () => {
-    const calls: MorphologyRequest[] = [];
-    const compute = new PaintingCompute(fakeMorphologyClient(calls));
+  it("skips morphology entirely when the threshold mask is empty", async () => {
+    const compute = new PaintingCompute();
     const batch = await compute.applyBrush(
       brushInput(imageChunkWith([]), {
         radius: 8,
@@ -176,7 +193,7 @@ describe("PaintingCompute morphology input crop + empty-mask skip", () => {
         minComponentSize: 32,
       }),
     );
-    expect(calls).toHaveLength(0);
+    expect(morphology.calls).toHaveLength(0);
     expect(paintedVoxelSet(batch).size).toBe(0);
   });
 
@@ -196,7 +213,7 @@ describe("PaintingCompute morphology input crop + empty-mask skip", () => {
     const binaryClosing = 1;
     const minComponentSize = 3;
 
-    // Compute under test (in-process TS fallback; crop applies before it).
+    // Compute under test (crop applies before morphology).
     const compute = new PaintingCompute();
     const batch = await compute.applyBrush(
       brushInput(imageChunkWith(pixels), {

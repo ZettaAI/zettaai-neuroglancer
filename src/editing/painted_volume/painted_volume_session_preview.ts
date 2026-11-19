@@ -18,6 +18,7 @@
 
 import type { Logger } from "@zettaai/edit-session";
 
+import type { PaintedVolumeFrameTimings } from "#src/editing/painted_volume/painted_volume_frame_cost.js";
 import { paintedVolumeGpuFactory } from "#src/editing/painted_volume/painted_volume_gpu.js";
 import type { LockedLayerRegion } from "#src/editing/painted_volume/painted_volume_memory_budget.js";
 import {
@@ -35,6 +36,8 @@ export interface PaintedVolumeSessionInputs
   > {
   readonly gl: GL;
   readonly logger: Logger;
+  /** The viewer's frame timer, so the preview's resolution can adapt. */
+  readonly frameTimings?: PaintedVolumeFrameTimings;
   /** The chunk manager's `gpuMemory.sizeLimit`. */
   readonly gpuMemoryLimitBytes: number;
   /** Every locked `(layer, resolution)` region of the session. */
@@ -44,11 +47,18 @@ export interface PaintedVolumeSessionInputs
 export function createSessionPaintedVolumePreview(
   inputs: PaintedVolumeSessionInputs,
 ): PaintedVolumePreview {
-  const { gl, logger, gpuMemoryLimitBytes, lockedRegions, ...options } = inputs;
+  const {
+    gl,
+    logger,
+    frameTimings,
+    gpuMemoryLimitBytes,
+    lockedRegions,
+    ...options
+  } = inputs;
   return new PaintedVolumePreview({
     ...options,
     logger,
-    createGpu: paintedVolumeGpuFactory(gl, logger),
+    createGpu: paintedVolumeGpuFactory(gl, logger, frameTimings),
     maxTextureDim: gl.max3dTextureSize,
     budgetBytes: paintedVolumeBudgetBytes(
       gpuMemoryLimitBytes,

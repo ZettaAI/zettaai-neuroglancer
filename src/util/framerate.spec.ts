@@ -17,6 +17,7 @@
 import { describe, it, expect } from "vitest";
 import {
   DownsamplingBasedOnFrameRateCalculator,
+  FramerateMonitor,
   FrameTimingMethod,
 } from "#src/util/framerate.js";
 
@@ -124,5 +125,40 @@ describe("FrameRateCounter", () => {
       frameRateCounter.addFrame(i * 50);
     }
     expect(frameRateCounter.calculateDownsamplingRate()).toEqual(1);
+  });
+});
+
+describe("FramerateMonitor.getLastFrameTimings", () => {
+  /** A GL whose every ended query has finished, taking `nanoseconds`. */
+  function finishedQueriesGl(nanoseconds: number) {
+    return {
+      QUERY_RESULT_AVAILABLE: 0x8867,
+      QUERY_RESULT: 0x8866,
+      createQuery: () => ({}),
+      beginQuery: () => {},
+      endQuery: () => {},
+      deleteQuery: () => {},
+      getQueryParameter: (_query: object, parameter: number) =>
+        parameter === 0x8867 ? true : nanoseconds,
+    } as unknown as WebGL2RenderingContext;
+  }
+
+  it("keeps the frame number with each time, in the order measured", () => {
+    const monitor = new FramerateMonitor();
+    const gl = finishedQueriesGl(3e6);
+    const extension = { TIME_ELAPSED_EXT: 0x88bf };
+    for (const frameNumber of [5, 6]) {
+      monitor.startFrameTimeQuery(gl, extension, frameNumber);
+      monitor.endLastTimeQuery(gl, extension);
+    }
+    monitor.grabAnyFinishedQueryResults(gl);
+    expect(monitor.getLastFrameTimings(10)).toEqual([
+      { frameNumber: 5, frameDelta: 3 },
+      { frameNumber: 6, frameDelta: 3 },
+    ]);
+    expect(monitor.getLastFrameTimings(1)).toEqual([
+      { frameNumber: 6, frameDelta: 3 },
+    ]);
+    expect(monitor.getLastFrameTimesInMs(10)).toEqual([3, 3]);
   });
 });

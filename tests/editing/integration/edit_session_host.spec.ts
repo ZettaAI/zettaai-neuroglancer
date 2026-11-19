@@ -19,8 +19,11 @@ import {
   TrackableEditSessionIntent,
   type EditSessionIntent,
 } from "#src/editing/edit_session_host.js";
+import { WatchableValue } from "#src/trackable_value.js";
+import { Uint64OrderedSet } from "#src/uint64_ordered_set.js";
 import { NullarySignal } from "#src/util/signal.js";
 
+import { makeFakeSegmentationDisplayState } from "#tests/editing/fakes/fake_segmentation_display_state.js";
 import { createFakeViewer } from "#tests/editing/fakes/fake_viewer.js";
 
 // The host module transitively imports `src/webgl/shader_lib.ts`, which reads
@@ -402,6 +405,137 @@ describe("EditSessionHost restore window", () => {
     expect(host.sessionLock.restoringLayerIds.value).toBeUndefined();
     expect(host.sessionLock.isSessionLayer(layerId("L1"))).toBe(false);
     expect(host.sessionLock.isSessionLayer(layerId("L2"))).toBe(false);
+  });
+});
+
+describe("EditSessionHost segments shown in panels (TM-518)", () => {
+  let host: EditSessionHost;
+  let layersChanged: NullarySignal;
+  let layers: Map<string, unknown>;
+
+  /** A segmentation layer the host can read, with a real selection set. */
+  function segmentationLayer() {
+    const fake = makeFakeSegmentationDisplayState();
+    const selectedSegments = new Uint64OrderedSet();
+    Object.assign(fake.displayState.segmentationGroupState.value, {
+      selectedSegments,
+    });
+    // NG keeps visible ⊆ selected: showing a segment selects it.
+    fake.visibleSegments.changed.add((ids, add) => {
+      if (add && ids !== null) selectedSegments.add(ids);
+    });
+    return { fake, selectedSegments, managed: { layer: fake } };
+  }
+
+  beforeEach(() => {
+    layersChanged = new NullarySignal();
+    layers = new Map();
+    const viewer = createFakeViewer();
+    Object.assign(viewer.layerManager, {
+      layersChanged,
+      managedLayers: [],
+      getLayerByName: (name: string) => layers.get(name),
+    });
+    host = new EditSessionHost(viewer);
+  });
+
+  afterEach(() => {
+    host.dispose();
+  });
+
+  it("mounts NG's segment row for a segment, and nothing for a missing layer", () => {
+    const mask = segmentationLayer();
+    layers.set("mask", mask.managed);
+    Object.assign(mask.fake.displayState.segmentationGroupState.value, {
+      maxIdLength: new WatchableValue(0),
+      segmentPropertyMap: new WatchableValue(undefined),
+    });
+    const parent = document.createElement("div");
+    const unmount = host.mountSegmentListWidget(layerId("mask"), parent, 5n);
+    expect(
+      parent.querySelector(".neuroglancer-segment-list-entry-id")!.textContent,
+    ).toBe("5");
+    unmount!();
+    expect(parent.childElementCount).toBe(0);
+    expect(
+      host.mountSegmentListWidget(layerId("missing"), parent, 5n),
+    ).toBeUndefined();
+  });
+
+  it("signals selection, visibility and merge changes", () => {
+    const mask = segmentationLayer();
+    layers.set("mask", mask.managed);
+    const callback = vi.fn();
+    host.onSegmentDisplayChanged(layerId("mask"), callback);
+
+    mask.selectedSegments.add(1n);
+    mask.fake.visibleSegments.add(2n); // also selects it: two signals
+    mask.fake.segmentEquivalences.link(1n, 2n);
+    expect(callback).toHaveBeenCalledTimes(4);
+  });
+
+  it("follows a layer that is removed and created again", () => {
+    const first = segmentationLayer();
+    layers.set("mask", first.managed);
+    const callback = vi.fn();
+    host.onSegmentDisplayChanged(layerId("mask"), callback);
+
+    const second = segmentationLayer();
+    layers.set("mask", second.managed);
+    layersChanged.dispatch();
+    expect(callback).toHaveBeenCalledTimes(1);
+
+    first.selectedSegments.add(1n); // the old layer no longer counts
+    expect(callback).toHaveBeenCalledTimes(1);
+    second.selectedSegments.add(1n);
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops signalling once unsubscribed", () => {
+    const mask = segmentationLayer();
+    layers.set("mask", mask.managed);
+    const callback = vi.fn();
+    const unsubscribe = host.onSegmentDisplayChanged(layerId("mask"), callback);
+    unsubscribe();
+    mask.selectedSegments.add(1n);
+    layersChanged.dispatch();
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("shows auto-detected segments, which selects them", () => {
+    const mask = segmentationLayer();
+    layers.set("mask", mask.managed);
+    (host as any).showSegmentsOnLayer(layerId("mask"), [3n, 4n]);
+    // `visibleSegments` is a hash set: compare it as a set.
+    expect(new Set(mask.fake.visibleSegments)).toEqual(new Set([3n, 4n]));
+    expect([...mask.selectedSegments]).toEqual([3n, 4n]);
+  });
+
+  it("reports segments leaving the selection, and a clear as all", () => {
+    const mask = segmentationLayer();
+    layers.set("mask", mask.managed);
+    mask.selectedSegments.add([1n, 2n, 3n]);
+    const removed: unknown[] = [];
+    (host as any).onSelectedSegmentsRemoved(layerId("mask"), (ids: unknown) =>
+      removed.push(ids),
+    );
+    mask.selectedSegments.add(4n); // additions are not reported
+    mask.selectedSegments.delete(2n);
+    mask.selectedSegments.delete([1n, 3n]);
+    mask.selectedSegments.clear();
+    expect(removed).toEqual([[2n], [1n, 3n], "all"]);
+  });
+
+  it("tells a merged segment from an unmerged one", () => {
+    const mask = segmentationLayer();
+    layers.set("mask", mask.managed);
+    mask.fake.segmentEquivalences.link(5n, 6n);
+    expect((host as any).isMergedSegmentOnLayer(layerId("mask"), 5n)).toBe(
+      true,
+    );
+    expect((host as any).isMergedSegmentOnLayer(layerId("mask"), 9n)).toBe(
+      false,
+    );
   });
 });
 

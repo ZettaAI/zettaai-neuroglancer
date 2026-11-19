@@ -66,11 +66,40 @@ export class LocalPatchChunk {
     valueDone: false,
     maskDone: false,
   };
+  /**
+   * A box holding every voxel that has had `patched = 1` in this chunk, or
+   * `null` if none ever has (TM-373, PR 6). Only grows: a voxel that drops back
+   * to `patched = 0` (an undo) stays inside it. A new GPU texture starts all
+   * zero (WebGL2 zero-fills it) and only this box is uploaded — the mask is 0
+   * everywhere else, so the shader never reads the value there.
+   */
+  paintedBounds: ChunkVoxelBox | null = null;
 
   constructor(public readonly chunkDataSize: vec3) {
     const volume = chunkDataSize[0] * chunkDataSize[1] * chunkDataSize[2];
     this.data = new BigUint64Array(volume);
     this.patched = new Uint8Array(volume);
+  }
+
+  /** Grow {@link paintedBounds} to contain `box`. */
+  growPaintedBounds(box: ChunkVoxelBox): void {
+    const bounds = this.paintedBounds;
+    if (bounds === null) {
+      this.paintedBounds = { ...box };
+      return;
+    }
+    bounds.x0 = Math.min(bounds.x0, box.x0);
+    bounds.y0 = Math.min(bounds.y0, box.y0);
+    bounds.z0 = Math.min(bounds.z0, box.z0);
+    bounds.x1 = Math.max(bounds.x1, box.x1);
+    bounds.y1 = Math.max(bounds.y1, box.y1);
+    bounds.z1 = Math.max(bounds.z1, box.z1);
+  }
+
+  /** The whole chunk as a box. */
+  wholeChunkBox(): ChunkVoxelBox {
+    const [sizeX, sizeY, sizeZ] = this.chunkDataSize;
+    return { x0: 0, y0: 0, z0: 0, x1: sizeX - 1, y1: sizeY - 1, z1: sizeZ - 1 };
   }
 
   /** Require a full re-upload of both textures (e.g. whole-chunk replace). */
@@ -121,7 +150,9 @@ export class LocalPatchChunk {
     this.data[idx] = value;
     this.patched[idx] = 1;
     this.dirty = true;
-    this.mergePendingUpload({ x0: x, y0: y, z0: z, x1: x, y1: y, z1: z });
+    const voxel = { x0: x, y0: y, z0: z, x1: x, y1: y, z1: z };
+    this.growPaintedBounds(voxel);
+    this.mergePendingUpload(voxel);
     return true;
   }
 

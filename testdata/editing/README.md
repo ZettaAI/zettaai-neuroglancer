@@ -48,6 +48,26 @@ curl "http://localhost:9778/storage/v1/b/zetta-editing-test/o/img_u8_raw%2Finfo?
 | `load_img_u8_raw` | image | uint8 | raw | 256²×1 | 0 | 16 | session-load benchmark (1024² × 64) |
 | `load_seg_u64_cseg` | seg | uint64 | compressed_segmentation | 128²×16 | 0 | 16 + 32 | session-load benchmark (1024² × 64) |
 
+### Large-chunk set (`manifest_large_chunk.json`, TM-373)
+
+Kept out of `manifest.json` because it is ~1.4 GB of raw chunks and every
+`npm run e2e` / `npm run perf` regenerates the default set. Generate it with
+`npm run test:fixtures:large-chunk` (`generate.py --large-chunk`); it writes
+`fixtures_large_chunk.json` next to `fixtures.json`.
+
+| id | dtype | chunk | offset | size | axis exercised |
+|----|-------|-------|--------|------|----------------|
+| `large_seg_u64_4096_edge` | uint64 | 4096²×1 | 28943,8913,3404 | 1238×1065×11 | copy of the portal test dataset: each z-slice is one edge chunk |
+| `large_seg_u8_4096_edge` | uint8 | 4096²×1 | same | same | the same, uint8 (not transcoded) |
+| `large_seg_u64_256_edge` | uint64 | 256²×1 | same | same | the "fast" control on the same volume |
+| `large_seg_u64_4096_interior` | uint64 | 4096²×1 | 0 | 8192×8192×2 | interior chunks and a real 4-chunk junction |
+| `large_img_u8_edge` | uint8 image | 256²×1 | 28943,8913,3404 | 1238×1065×11 | mask image for the masked strokes |
+| `large_img_u8_interior` | uint8 image | 512²×1 | 0 | 8192×8192×2 | the same, for the interior volume |
+
+All are `raw`, like the portal data: NG transcodes the uint64 ones to
+compressed segmentation itself. Volumes above 2²⁶ voxels are written one chunk
+at a time.
+
 Add a fixture = add a manifest row + regenerate. Content is a deterministic
 function of global voxel coords (images: gradient; segmentations: blocky 32-voxel
 IDs, never 0), so reads are reproducible run-to-run.

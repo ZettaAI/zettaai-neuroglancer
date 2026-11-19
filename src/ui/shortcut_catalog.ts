@@ -22,7 +22,11 @@ import {
   keysForCustomAction,
   keysForCustomTool,
 } from "#src/ui/custom_keybinds.js";
-import { chordsForAction } from "#src/ui/key_chord_format.js";
+import {
+  chordsForAction,
+  isMacPlatform,
+  shownChords,
+} from "#src/ui/key_chord_format.js";
 import type { EventActionMap } from "#src/util/event_action_map.js";
 
 export interface ShortcutRow {
@@ -30,7 +34,7 @@ export interface ShortcutRow {
   readonly keys: readonly string[];
   /**
    * Set when the row's key can be changed from the sheet: only during a
-   * session, since a change is saved with the session's tool state.
+   * session, the only place the edit keys act.
    */
   readonly rebind?: EditKeybindName;
 }
@@ -85,6 +89,70 @@ const VIEW_ROWS: ReadonlyArray<[string, string]> = [
   ["toggle-axis-lines", "Axis lines"],
   ["open-command-palette", "Command palette"],
 ];
+
+/** The sheet's name for a viewer action, or the action id if it has none. */
+export function viewerActionLabel(action: string): string {
+  const row = [...SEGMENT_ACTION_ROWS, ...VIEW_ROWS].find(
+    ([rowAction]) => rowAction === action,
+  );
+  return row?.[1] ?? action;
+}
+
+/**
+ * Said after a rebind takes a viewer key: what the key stops doing, and that
+ * this only lasts while an edit session is open.
+ */
+export function shadowedViewerKeyMessage(
+  formattedKey: string,
+  action: string,
+): string {
+  return `While an edit session is open, ${formattedKey} no longer does "${viewerActionLabel(action)}". Outside a session it works as before.`;
+}
+
+/** The sheet's name for an edit action ("erase" → "Eraser"). */
+export function editKeybindLabel(name: EditKeybindName): string {
+  return EDIT_ROWS.find(([rowName]) => rowName === name)?.[1] ?? name;
+}
+
+/**
+ * What to tell the annotator after a rebind of `name` to `identifier`: which
+ * edit action gave the key up and the keys it has now, and which viewer action
+ * the key covers during a session. Empty when there is nothing to say.
+ * `formatKey` turns an identifier into what the caller shows for it.
+ */
+export function rebindOutcomeMessage(
+  name: EditKeybindName,
+  identifier: string,
+  displaced:
+    | {
+        readonly name: EditKeybindName;
+        readonly keys: readonly string[];
+        readonly swapped: boolean;
+      }
+    | undefined,
+  shadowedAction: string | undefined,
+  formatKey: (identifier: string) => string,
+  mac: boolean = isMacPlatform(),
+): string {
+  const key = formatKey(identifier);
+  const parts: string[] = [];
+  if (displaced !== undefined) {
+    const label = editKeybindLabel(name);
+    const ownerLabel = editKeybindLabel(displaced.name);
+    const ownerKeys = shownChords(displaced.keys, mac)
+      .map(formatKey)
+      .join(" / ");
+    parts.push(
+      displaced.swapped
+        ? `${label} now uses ${key}. ${ownerLabel} took ${label}'s old key, ${ownerKeys}.`
+        : `${label} now uses ${key}. ${ownerLabel} no longer uses ${key}; it still works with ${ownerKeys}.`,
+    );
+  }
+  if (shadowedAction !== undefined) {
+    parts.push(shadowedViewerKeyMessage(key, shadowedAction));
+  }
+  return parts.join(" ");
+}
 
 function keysWithAnyBinding(rows: readonly ShortcutRow[]): ShortcutRow[] {
   return rows.filter((row) => row.keys.length > 0);
