@@ -73,6 +73,8 @@ type HistoryAnswer = "available" | "none-found" | "no-permission";
  */
 class FakeBucket implements ObjectVersionStore {
   listedPages = 0;
+  /** Listing answers wait for this (a slow bucket). */
+  answer: Promise<void> = Promise.resolve();
   constructor(
     private history: HistoryAnswer,
     private infoCreated: number | undefined,
@@ -90,6 +92,7 @@ class FakeBucket implements ObjectVersionStore {
     }
     const page = cursor === undefined ? 0 : Number(cursor);
     ++this.listedPages;
+    await this.answer;
     return {
       changeTimes: this.changePages[page] ?? [],
       hasEarlierVersion: this.history === "available",
@@ -184,13 +187,17 @@ function mountSourceSections(
     history = "available",
     infoCreated,
     changePages = [],
+    answer,
   }: {
     history?: HistoryAnswer;
     infoCreated?: number;
     changePages?: number[][];
+    /** Listing answers wait for this (a slow bucket). */
+    answer?: Promise<void>;
   } = {},
 ) {
   const bucket = new FakeBucket(history, infoCreated, changePages);
+  if (answer !== undefined) bucket.answer = answer;
   const layer = new FakeLayer(urls, bucket);
   const elements = layer.dataSources.map((dataSource) => {
     const widget = makeVersionTimeSourceSection(
@@ -525,5 +532,21 @@ describe("version list", () => {
     const section = await sectionShown(elements[0]);
     await noteShown(section, VERSION_TIME_NO_PERMISSION_NOTE);
     expect(trigger(section)).toBeNull();
+  });
+
+  it("the block keeps its height while the bucket is checked", async () => {
+    let answer = () => {};
+    const { elements } = mountSourceSections([CURRENT], {
+      changePages: [writes],
+      answer: new Promise<void>((resolve) => {
+        answer = resolve;
+      }),
+    });
+    const section = await sectionShown(elements[0]);
+    await noteShown(section, VERSION_TIME_LIVE_NOTE);
+    const whileChecking = section.getBoundingClientRect().height;
+    answer();
+    await vi.waitFor(() => expect(shownVersion(section)).toBe(ALL[0]), TIMEOUT);
+    expect(section.getBoundingClientRect().height).toBe(whileChecking);
   });
 });

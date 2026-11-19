@@ -26,8 +26,6 @@ export const VERSION_TIME_LIVE_NOTE =
 export const VERSION_TIME_PAST_NOTE =
   "Viewing past data: read-only, editing is off. Clear the time to return to current, editable data.";
 
-export const VERSION_TIME_CHECKING_NOTE = "Checking this bucket's history…";
-
 export const VERSION_TIME_NO_PERMISSION_NOTE =
   "History unavailable: no permission to list this bucket's file versions. Ask for list access (storage.objects.list on GCS, s3:ListBucketVersions on S3).";
 
@@ -44,9 +42,8 @@ function noteFor(
   if (status === "none-found") {
     return { text: VERSION_TIME_NONE_FOUND_NOTE, warning: true };
   }
-  if (status === "checking" && !timeChosen) {
-    return { text: VERSION_TIME_CHECKING_NOTE, warning: false };
-  }
+  // While the bucket is being checked the usual note already holds; showing a
+  // separate "checking" line for a moment only made the block jump.
   return {
     text: timeChosen ? VERSION_TIME_PAST_NOTE : VERSION_TIME_LIVE_NOTE,
     warning: false,

@@ -27,7 +27,6 @@ export const VERSION_LIST_LABEL = "Version";
 export const SEARCH_MORE_LABEL = "Search more files";
 export const PARTIAL_LIST_NOTE =
   "Large layer: only changes found so far are listed.";
-export const SEARCHING_NOTE = "Looking for changes…";
 
 const LATEST_KEY = "latest";
 
@@ -80,7 +79,7 @@ export function VersionMomentList({
   refreshChanges: () => void;
 }) {
   const state = useWatchable(versionMoments);
-  const { moments, complete, loading } = state;
+  const { moments, complete, loading, read } = state;
   const current = useWatchable(intermediateTimestamp);
   const older = neighbourMoment(moments, current, "older");
   const newer = neighbourMoment(moments, current, "newer");
@@ -124,16 +123,19 @@ export function VersionMomentList({
           <ChevronRightIcon />
         </Button>
       </div>
-      {(loading || !complete) && (
+      {/* Only for a large layer, once known to be listed in part; it stays
+          put while more is read so the block does not jump. */}
+      {read && !complete && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="flex-1">
-            {loading ? SEARCHING_NOTE : PARTIAL_LIST_NOTE}
-          </span>
-          {!loading && (
-            <Button variant="outline" size="xs" onClick={searchMoreChanges}>
-              {SEARCH_MORE_LABEL}
-            </Button>
-          )}
+          <span className="flex-1">{PARTIAL_LIST_NOTE}</span>
+          <Button
+            variant="outline"
+            size="xs"
+            disabled={loading}
+            onClick={searchMoreChanges}
+          >
+            {SEARCH_MORE_LABEL}
+          </Button>
         </div>
       )}
     </div>

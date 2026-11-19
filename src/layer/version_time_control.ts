@@ -167,6 +167,8 @@ export interface VersionMoments {
   complete: boolean;
   /** A listing page is being read. */
   loading: boolean;
+  /** At least one listing page was read, so `complete` is known. */
+  read: boolean;
 }
 
 const NO_MOMENTS: VersionMoments = {
@@ -174,6 +176,7 @@ const NO_MOMENTS: VersionMoments = {
   latestChange: undefined,
   complete: false,
   loading: false,
+  read: false,
 };
 
 /** Listing pages read per "Search more files" click (1000 versions each). */
@@ -205,6 +208,7 @@ class LayerChangesListing {
   private cursor: string | undefined;
   private hasEarlierVersion = false;
   private complete = false;
+  private read = false;
   private reading = false;
   /** Next read starts the listing over (`refresh`). */
   private restart = false;
@@ -255,6 +259,7 @@ class LayerChangesListing {
         this.hasEarlierVersion ||= result.hasEarlierVersion;
         this.cursor = result.nextCursor;
         this.complete = result.nextCursor === undefined;
+        this.read = true;
         this.historyStatus.value = this.hasEarlierVersion
           ? "available"
           : "none-found";
@@ -279,6 +284,7 @@ class LayerChangesListing {
       latestChange: this.complete ? all[0] : undefined,
       complete: this.complete,
       loading,
+      read: this.read,
     };
   }
 }
