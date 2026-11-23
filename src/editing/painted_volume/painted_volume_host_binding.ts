@@ -42,6 +42,11 @@ export type PaintedVolumeBoundPreview = Pick<
 /** `UserLayer.addRenderLayer`: takes a reference; the disposer releases it. */
 export interface PaintedVolumeUserLayer {
   addRenderLayer(layer: PerspectiveViewRenderLayer): () => void;
+  /**
+   * `RefCounted.wasDisposed`. A disposed `UserLayer` has already released every
+   * render layer it held, and its `addRenderLayer` disposers throw.
+   */
+  readonly wasDisposed: boolean | undefined;
 }
 
 export interface PaintedVolumeHostPort {
@@ -180,9 +185,13 @@ export class PaintedVolumeHostBinding extends RefCounted {
   }
 
   private detach(entry: BoundPreview): void {
-    const { detach } = entry;
+    const { detach, userLayer } = entry;
     entry.detach = undefined;
     entry.userLayer = undefined;
+    // A replaced state (`restoreState` → `layerManager.clear()`) disposes the
+    // user layer first, releasing our reference with its render layers; its
+    // disposer would then throw on a layer it no longer holds.
+    if (userLayer?.wasDisposed) return;
     if (detach !== undefined) this.whileReattaching(detach);
   }
 

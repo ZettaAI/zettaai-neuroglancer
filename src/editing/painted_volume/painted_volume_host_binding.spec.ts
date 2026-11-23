@@ -62,9 +62,15 @@ class FakePreview implements PaintedVolumeBoundPreview {
   }
 }
 
-/** Mirrors `UserLayer.addRenderLayer`: removal disposes, both announce. */
+/**
+ * Mirrors `UserLayer` (`src/layer/index.ts`): `addRenderLayer`'s disposer
+ * removes and disposes, both announce; removing a layer it no longer holds
+ * throws; and disposing the user layer disposes every render layer it holds
+ * and forgets them, without calling the disposers it handed out.
+ */
 class FakeUserLayer implements PaintedVolumeUserLayer {
   readonly attached = new Set<FakeRenderLayer>();
+  wasDisposed = false;
   constructor(private readonly layersChanged: NullarySignal) {}
 
   addRenderLayer(layer: PerspectiveViewRenderLayer): () => void {
@@ -72,10 +78,19 @@ class FakeUserLayer implements PaintedVolumeUserLayer {
     this.attached.add(fake);
     this.layersChanged.dispatch();
     return () => {
-      this.attached.delete(fake);
+      if (!this.attached.delete(fake)) {
+        throw new Error("Attempted to remove invalid RenderLayer");
+      }
       fake.dispose();
       this.layersChanged.dispatch();
     };
+  }
+
+  /** `UserLayer.disposed()`: what `layerManager.clear()` does to every layer. */
+  dispose() {
+    for (const layer of this.attached) layer.dispose();
+    this.attached.clear();
+    this.wasDisposed = true;
   }
 }
 
@@ -192,6 +207,41 @@ describe("PaintedVolumeHostBinding", () => {
     host.userLayers.set(LABELS, returned);
     host.layersChanged.dispatch();
     expect(returned.attached.has(preview.layer)).toBe(true);
+  });
+
+  // TM-490: `viewer.state.restoreState` runs `layerManager.clear()`, which
+  // disposes every user layer (and the render layers they hold) before the
+  // replacement layers announce `layersChanged`.
+  it("moves onto the replacement of a disposed layer without detaching from it again", () => {
+    const host = makeHost();
+    host.binding.sync();
+    const preview = host.created[0];
+    const oldLayer = host.userLayers.get(LABELS)!;
+
+    oldLayer.dispose();
+    const newLayer = new FakeUserLayer(host.layersChanged);
+    host.userLayers.set(LABELS, newLayer);
+    expect(() => host.layersChanged.dispatch()).not.toThrow();
+
+    expect(newLayer.attached.has(preview.layer)).toBe(true);
+    // The preview's own reference plus the new layer's; the old layer
+    // released its reference when it was disposed.
+    expect(preview.layer.references).toBe(2);
+  });
+
+  it("lets go of a disposed layer that has no replacement", () => {
+    const host = makeHost();
+    host.binding.sync();
+    const preview = host.created[0];
+
+    host.userLayers.get(LABELS)!.dispose();
+    host.userLayers.delete(LABELS);
+    expect(() => host.layersChanged.dispatch()).not.toThrow();
+    expect(preview.layer.references).toBe(1);
+
+    expect(() => host.binding.releaseAll()).not.toThrow();
+    expect(preview.disposed).toBe(true);
+    expect(preview.layer.references).toBe(0);
   });
 
   it("release disposes one layer's preview; a later sync builds a new one", () => {
