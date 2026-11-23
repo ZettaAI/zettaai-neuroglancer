@@ -26,6 +26,7 @@ harness/       drivers (no *.spec): e2e_setup, build_ng_state, gcs_route,
 ```bash
 npm test                 # unit + integration (+ browser) — the gate
 npm run e2e[:headed|:ui] # correctness e2e (fixtures + build + run)
+npm run e2e:save[:headed] # save → storage e2e, real web API (needs ZETTA_UTILS_DIR)
 npm run perf[:headed]    # paint benchmark
 npm run test:fixtures    # (re)generate the precomputed fixtures only
 ```
@@ -80,6 +81,90 @@ for manual review (`test-results/correctness/`, attached to the report) → driv
 deterministic stamp → assert painted count, value, absolute region-containment
 (the offset axis end-to-end), determinism, and erase. Scenarios exercise data
 axes the in-memory matrix can't reach (offset, encodings, multi-res).
+
+## save e2e (`e2e/*.save.e2e.ts`)
+
+Paint → save → what storage actually holds. The production save path runs end
+to end; only the storage service and the auth header stand in for prod:
+
+```
+NG HttpSaveBackend ──POST /painting/cutout──▶ harness/backend_route.ts
+  (payload, gzip, retry, 409 replay,              │ forwards; journals every request;
+   stale-baseline scan, read-back verify)         │ one-shot faults (500/409/200-without-write)
+                                                  ▼
+                       REAL web API painting + segmentation routes
+                       (harness/webapi_app.py + webapi_server.mjs, from a
+                       zetta_utils checkout; only the z-extrapolation model
+                       is a stand-in that shifts the mask 3 voxels along x)
+                                                  │ CloudVolume / chunk_cas
+                                                  ▼  STORAGE_EMULATOR_HOST
+                                            fake-gcs (the fixtures)
+```
+
+- **Specs**: `edit_save` — paint → save → reload round-trip per scenario, an
+  unconfirmed save, an outage and recovery (TM-361); `edit_session_lifecycle`
+  — discard/exit, exit after an unconfirmed save, save → exit → re-open →
+  continue, a cancelled save (TM-365); `edit_save_conflict` — two tabs on one
+  region: automerge, Combine, Take mine, Take theirs, Esc, checked voxel for
+  voxel; `edit_save_layers` — 1–2 writable + 0–2 locked layers, target switch
+  through the UI, a `partial` save when one target fails; `edit_save_region` —
+  the stroke clipped at the region boundary, regions smaller than a chunk and
+  unaligned (TM-366); `edit_z_extrapolation` — Run ×3, Reset, an untracked
+  segment, save; `edit_fill_inside` — Fill inside with the real mouse.
+- **Z-extrapolation model**: never runs. `webapi_app.py` replaces
+  `segmentation._run_propagation` (a private zetta_utils function) with a
+  stand-in that shifts the mask 3 voxels along x, so the result is known
+  exactly; everything around it (panel, request, route, write-back, save) is
+  real. Model quality is out of scope. If zetta_utils renames that function,
+  this harness — not the product — breaks.
+- **Expected failures** (`test.fail`, each names its cause; remove the marker
+  when the bug is fixed): `edit_save` › the view shows each stroke only where it
+  was painted (a stroke at a coarser target resolution is shown at the wrong
+  place); `edit_fill_inside` › the fill adds only what the outline encloses (the
+  fill outline is one voxel wider at sharp turns).
+- **Driver** (`harness/save_session.ts`): fresh storage, an editing page wired
+  to the web API, stamps, saves, UI helpers (Save all, Exit, dialogs) and
+  `appValuesAt` — what the page shows, through NG's own value lookup.
+- **Faults** (`backend_route.ts`): one-shot (`failNext`) or standing
+  (`failAlways` / `clearFaults`): `respond` (any status), `acknowledgeWithoutWriting`
+  (200, nothing stored), `hang` (never answers; aborted on `clearFaults`).
+- **Oracle** (`harness/storage_oracle.ts`): storage is read from Node through
+  the web API's `GET /painting/cutout` before and after the save, never through
+  the page. The voxels that changed must equal the voxels the app showed as
+  painted — same count, same value, same signature (`voxelSetSignature`, pinned
+  to the app read-back by `unit/storage_oracle.spec.ts`).
+- **Setup**: `ZETTA_UTILS_DIR` must point at a zetta_utils checkout with its
+  web-api env (`uv sync --locked --extra web-api --python 3.13`). Missing → a
+  hard error with instructions, never a skip. Its own Playwright project
+  (`e2e-save`), so `npm run e2e` does not need zetta_utils. Last verified
+  against zetta_utils `9cf05b017` (`web_api/app/painting.py` and
+  `segmentation.py` unchanged on its `main` since). The env pulls in CPU
+  `torch` (~0.5 GB): `segmentation.py` imports it at load even though the
+  model never runs here; no GPU, weights or cloud access are used.
+- **Local only**: like every Playwright suite here, it does not run in CI. Run
+  it before merging changes to the save path. Two Playwright runs on one
+  machine at once compete for the app port (`EDITING_APP_PORT`, default 9777)
+  and, with software WebGL, for CPU — expect timeouts or a crashed tab.
+- **Isolation**: each scenario gets a fresh fake-gcs + web API (a save mutates
+  storage). The web API runs with an unusable service account and an empty
+  `HOME`, so nothing can reach real GCS.
+- `warmupPaintPath` undoes its own strokes and checks nothing is left
+  (history, unsaved flag, mirror), so a test starts from the freshly opened
+  session. It needs an empty history and throws otherwise.
+
+## mask and stroke e2e (`e2e/edit_paint_mask.e2e.ts`, TM-362 / TM-364)
+
+Masked painting against designed mask images (see `testdata/editing/README.md`):
+threshold band, binary closing, minimum component size, their order
+(`filterComponentsFirst`), an image with a voxel offset, and the coverage
+(majority) rule under a 2× coarser target — each compared with a hand-written
+expected voxel set. Plus a swept stroke's gap-free capsule at a pace the brush
+keeps up with: the default `latestWins` scheduler drops samples during a stall
+by design (TM-317), so that is the contract tested.
+
+Stroke points are aimed at voxel centres from the REAL view centre: NG snaps
+`position` to a voxel centre (64 → 63.5), and the displayed and painted slice
+is the voxel containing it.
 
 ## perf benchmark (`perf/edit_paint.perf.ts`)
 

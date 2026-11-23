@@ -65,7 +65,56 @@ def scale_size(size, factor):
 WHOLE_WRITE_MAX_VOXELS = 1 << 26
 
 
-def content(kind: str, dtype: str, origin, shape):
+# Mask test images (TM-362 / TM-364): designed shapes whose correct mask is
+# known by construction, on an out-of-band background. Defined on ABSOLUTE
+# voxel coords, so the same shapes sit at the same place whatever the
+# fixture's voxel_offset. Coordinates are documented in `edit_paint_mask.e2e.ts`.
+PATTERN_BACKGROUND = 10
+PATTERN_IN_BAND = 200
+
+
+def mask_features_plane(xx, yy):
+    """Threshold band, closing, component size and their order, one quadrant each."""
+    plane = np.full(np.broadcast_shapes(xx.shape, yy.shape), PATTERN_BACKGROUND)
+
+    def box(x0, x1, y0, y1, value):
+        plane[(xx >= x0) & (xx < x1) & (yy >= y0) & (yy < y1)] = value
+
+    # Band: three stripes, only the middle one inside [100, 200].
+    box(24, 28, 28, 36, 50)
+    box(30, 34, 28, 36, 120)
+    box(36, 40, 28, 36, 250)
+    # Closing: a square with a one-voxel slit through its interior.
+    box(90, 102, 26, 38, PATTERN_IN_BAND)
+    box(96, 97, 28, 36, PATTERN_BACKGROUND)
+    # Component size: four isolated 2x2 blobs.
+    for x0, y0 in ((28, 92), (36, 92), (28, 100), (36, 100)):
+        box(x0, x0 + 2, y0, y0 + 2, PATTERN_IN_BAND)
+    # Order: two 3x8 bars one voxel apart.
+    box(90, 93, 92, 100, PATTERN_IN_BAND)
+    box(94, 97, 92, 100, PATTERN_IN_BAND)
+    return plane
+
+
+def coverage_blocks_plane(xx, yy):
+    """Image voxels for a 2x-coarser target: target voxel (tx, ty), tx in
+    10..14 and ty in 10..13, covers a 2x2 block with exactly tx - 10 in-band
+    voxels (filled in the order (0,0), (1,0), (0,1), (1,1))."""
+    plane = np.full(np.broadcast_shapes(xx.shape, yy.shape), PATTERN_BACKGROUND)
+    tx, ty = xx // 2, yy // 2
+    order = (xx % 2) + 2 * (yy % 2)  # 0..3 inside the block
+    inside = (tx >= 10) & (tx <= 14) & (ty >= 10) & (ty <= 13)
+    plane[inside & (order < tx - 10)] = PATTERN_IN_BAND
+    return plane
+
+
+PATTERNS = {
+    "mask_features": mask_features_plane,
+    "coverage_blocks": coverage_blocks_plane,
+}
+
+
+def content(kind: str, dtype: str, origin, shape, pattern=None):
     """Deterministic voxel content as a numpy array of `shape` + channel axis."""
     ox, oy, oz = origin
     sx, sy, sz = shape
@@ -74,7 +123,9 @@ def content(kind: str, dtype: str, origin, shape):
     xx = np.arange(ox, ox + sx).reshape(sx, 1, 1)
     yy = np.arange(oy, oy + sy).reshape(1, sy, 1)
     zz = np.arange(oz, oz + sz).reshape(1, 1, sz)
-    if kind == "image":
+    if pattern is not None:
+        val = PATTERNS[pattern](xx, yy).astype(dtype)
+    elif kind == "image":
         val = ((xx * 2 + yy) % 256).astype(dtype)
     else:
         # Blocky 32-voxel segment IDs, never 0 (0 reads as "empty" in the app).
@@ -116,7 +167,9 @@ def write_scale(store, fixture, meta):
     origin = meta["voxel_offset"]
     size = meta["size"]
     if size[0] * size[1] * size[2] <= WHOLE_WRITE_MAX_VOXELS:
-        store[...] = content(fixture["kind"], fixture["dtype"], origin, size)
+        store[...] = content(
+            fixture["kind"], fixture["dtype"], origin, size, fixture.get("pattern")
+        )
         return
     # TensorStore indexes the volume in global coordinates (its domain starts
     # at `voxel_offset`), which is what `chunk_aligned_blocks` yields.
@@ -125,7 +178,11 @@ def write_scale(store, fixture, meta):
         block_shape = [stop - start for start, stop in block]
         region = tuple(slice(start, stop) for start, stop in block)
         store[region] = content(
-            fixture["kind"], fixture["dtype"], block_origin, block_shape
+            fixture["kind"],
+            fixture["dtype"],
+            block_origin,
+            block_shape,
+            fixture.get("pattern"),
         )
 
 

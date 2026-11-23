@@ -57,6 +57,11 @@ import {
   type FixtureGcs,
 } from "#tests/editing/harness/e2e_setup.js";
 import { installGcsRoute } from "#tests/editing/harness/gcs_route.js";
+import {
+  layerBarDeleteIcon,
+  layerBarItem,
+  SESSION_LAYER_LOCK_REASON,
+} from "#tests/editing/harness/layer_bar.js";
 
 const PORT = Number(process.env.EDITING_APP_PORT ?? 9777);
 
@@ -65,9 +70,6 @@ const TASK_EXIT_LOCK_REASON = "Complete the task to leave the edit session.";
 /** `DEFAULT_EXIT_LOCK_REASON` in `edit_session_host.ts`. */
 const DEFAULT_EXIT_LOCK_REASON =
   "The app embedding this viewer has locked leaving the edit session.";
-/** `SESSION_LAYER_LOCK_REASON` in `session_layer_structure_lock.ts`. */
-const SESSION_LAYER_LOCK_REASON =
-  "Locked while this layer is part of the active edit session.";
 /** `LAYER_GROUP_SESSION_LOCK_REASON` in `session_layer_structure_lock.ts`. */
 const LAYER_GROUP_SESSION_LOCK_REASON =
   "Locked while this group shows the only copy of a layer in the active edit session.";
@@ -321,35 +323,6 @@ async function exitCleanSessionViaTopbar(page: Page): Promise<void> {
 // ---------------------------------------------------------------------------
 // Locators
 // ---------------------------------------------------------------------------
-
-function exactText(name: string): RegExp {
-  return new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
-}
-
-/** The layer bar item of `name` (first layer group that shows it). */
-function layerBarItem(page: Page, name: string): Locator {
-  return page
-    .locator(".neuroglancer-layer-item")
-    .filter({
-      has: page.locator(".neuroglancer-layer-item-label", {
-        hasText: exactText(name),
-      }),
-    })
-    .first();
-}
-
-/**
- * The layer bar trash icon of `name`: second icon of the item's button
- * container (after "Remove layer from this layer group"). Hovers the item
- * first — the container is `visibility: hidden` until the panel is hovered.
- */
-async function layerBarDeleteIcon(page: Page, name: string): Promise<Locator> {
-  const item = layerBarItem(page, name);
-  await item.hover();
-  return item
-    .locator(".neuroglancer-layer-item-button-container > .neuroglancer-icon")
-    .nth(1);
-}
 
 /** Open the side panel of `name` the way a user does: ctrl+click in the bar. */
 async function showSidePanelOf(page: Page, name: string): Promise<void> {

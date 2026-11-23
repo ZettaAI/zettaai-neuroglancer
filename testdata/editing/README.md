@@ -42,11 +42,27 @@ curl "http://localhost:9778/storage/v1/b/zetta-editing-test/o/img_u8_raw%2Finfo?
 | `img_u8_raw` | image | uint8 | raw | 64³₁₆ | 0 | 16 | baseline image |
 | `seg_u64_cseg` | seg | uint64 | compressed_segmentation | 64²×16 | 0 | 16 | cseg encoding |
 | `seg_u32_raw_offset` | seg | uint32 | raw | 64²×16 | **128,128,8** | 16 | voxel offset |
-| `img_u8_jpeg` | image | uint8 | jpeg | 64²×1 | 0 | 16 | jpeg (lossy) |
+| `img_u8_jpeg` | image | uint8 | jpeg | 64²×1 | 0 | 16 | jpeg (lossy): the `mask_features` shapes as decoded JPEG |
 | `seg_u64_multires` | seg | uint64 | compressed_segmentation | 64²×16 | 0 | **16 + 32** | multi-resolution |
 | `seg_u8_bigchunk` | seg | uint8 | raw | **8192×128×1** | 0 | 16 | chunk > 4096 |
 | `load_img_u8_raw` | image | uint8 | raw | 256²×1 | 0 | 16 | session-load benchmark (1024² × 64) |
 | `load_seg_u64_cseg` | seg | uint64 | compressed_segmentation | 128²×16 | 0 | 16 + 32 | session-load benchmark (1024² × 64) |
+| `mask_features_u8` | image | uint8 | raw | 64²×16 | 0 | 16 | mask band / closing / component size (designed shapes) |
+| `mask_features_u8_offset` | image | uint8 | raw | 64²×16 | **-8,-4,0** | 16 | the same shapes under a voxel offset |
+| `coverage_blocks_u8` | image | uint8 | raw | 64²×16 | 0 | 16 | coverage threshold under a 2× coarser target |
+| `seg_u32_raw_32nm` | seg | uint32 | raw | 64²×16 | 0 | **32** | target coarser than the mask image |
+
+### Designed mask images (`"pattern"`)
+
+Most fixtures carry a gradient (images) or blocky IDs (segmentations). The mask
+images instead carry shapes whose correct mask is known by construction
+(`mask_features_plane`, `coverage_blocks_plane` in `generate.py`), drawn on
+ABSOLUTE voxel coordinates so an offset copy puts them at the same place. The
+shapes and the masks they must produce are listed in
+`tests/editing/e2e/edit_paint_mask.e2e.ts`; the expected masks were
+cross-checked against scipy, which the TS morphology is pinned to.
+`img_u8_jpeg` stores the same shapes as JPEG; its expected masks come from the
+stored chunks decoded by the browser, since lossy coding moves the values.
 
 ### Large-chunk set (`manifest_large_chunk.json`, TM-373)
 

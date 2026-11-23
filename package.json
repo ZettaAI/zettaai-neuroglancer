@@ -39,6 +39,8 @@
     "e2e": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project e2e",
     "e2e:headed": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project e2e --headed",
     "e2e:ui": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project e2e --ui",
+    "e2e:save": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project e2e-save",
+    "e2e:save:headed": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project e2e-save --headed",
     "perf": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project perf",
     "perf:headed": "npm run e2e:build && playwright test --config playwright.editing.config.ts --project perf --headed",
     "test:fixtures:large-chunk": "uv run testdata/editing/generate.py --large-chunk",

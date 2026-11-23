@@ -37,7 +37,8 @@
     "chunk": [64, 64, 1],
     "offset": [0, 0, 0],
     "size": [128, 128, 8],
-    "resolutions": [[16, 16, 40]]
+    "resolutions": [[16, 16, 40]],
+    "pattern": "mask_features"
   },
   {
     "id": "seg_u64_multires",
@@ -98,5 +99,48 @@
     "offset": [0, 0, 0],
     "size": [1024, 1024, 64],
     "resolutions": [[16, 16, 40], [32, 32, 40]]
+  },
+  {
+    "id": "mask_features_u8",
+    "kind": "image",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [64, 64, 16],
+    "offset": [0, 0, 0],
+    "size": [128, 128, 16],
+    "resolutions": [[16, 16, 40]],
+    "pattern": "mask_features"
+  },
+  {
+    "id": "mask_features_u8_offset",
+    "kind": "image",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [64, 64, 16],
+    "offset": [-8, -4, 0],
+    "size": [144, 140, 16],
+    "resolutions": [[16, 16, 40]],
+    "pattern": "mask_features"
+  },
+  {
+    "id": "coverage_blocks_u8",
+    "kind": "image",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [64, 64, 16],
+    "offset": [0, 0, 0],
+    "size": [128, 128, 16],
+    "resolutions": [[16, 16, 40]],
+    "pattern": "coverage_blocks"
+  },
+  {
+    "id": "seg_u32_raw_32nm",
+    "kind": "segmentation",
+    "dtype": "uint32",
+    "encoding": "raw",
+    "chunk": [64, 64, 16],
+    "offset": [0, 0, 0],
+    "size": [64, 64, 16],
+    "resolutions": [[32, 32, 40]]
   }
 ]
