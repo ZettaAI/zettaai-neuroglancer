@@ -711,7 +711,12 @@ gl_Position = uModelViewProjectionMatrix * vec4(position, 1.0);
     attachment.state = {
       sources: attachment.registerDisposer(
         registerNested(
-          (context, transform, displayDimensionRenderInfo) => {
+          (
+            context,
+            transform,
+            displayDimensionRenderInfo,
+            _versionTime: number | undefined,
+          ) => {
             const transformedSources = getVolumetricTransformedSources(
               displayDimensionRenderInfo,
               transform,
@@ -739,6 +744,9 @@ gl_Position = uModelViewProjectionMatrix * vec4(position, 1.0);
           },
           this.transform,
           attachment.view.displayDimensionRenderInfo,
+          // Zetta (TM-521): a new version time needs sources at that time
+          // (passed by `getVolumetricTransformedSources`).
+          this.userLayer?.versionTime ?? constantWatchableValue(undefined),
         ),
       ),
     };

@@ -90,6 +90,7 @@ kvstore<root-kvstores>` with zero or more other
    icechunk/index
    gzip/index
    byte_range/index
+   versioned/index
 
 .. _kvstore-capabilities:
 

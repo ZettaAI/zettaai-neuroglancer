@@ -90,13 +90,17 @@ export async function createBucket(
   gcs: Fixture<string>,
   bucket: string,
   project: string = DEFAULT_PROJECT,
+  options: { versioning?: boolean } = {},
 ) {
   await fetchOk(
     bypass(
       `${await gcs()}/storage/v1/b?project=${encodeURIComponent(project)}`,
       {
         method: "POST",
-        body: JSON.stringify({ name: bucket }),
+        body: JSON.stringify({
+          name: bucket,
+          ...(options.versioning ? { versioning: { enabled: true } } : {}),
+        }),
       },
     ),
   );
@@ -107,14 +111,28 @@ export async function writeObject(
   bucket: string,
   path: string,
   body: RequestInit["body"],
-) {
-  await fetchOk(
+): Promise<{ generation: string; timeCreated: string }> {
+  const response = await fetchOk(
     bypass(
       `${await gcs()}/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?name=${encodeURIComponent(path)}&uploadType=media`,
       {
         method: "POST",
         body: body,
       },
+    ),
+  );
+  return await response.json();
+}
+
+export async function deleteObject(
+  gcs: Fixture<string>,
+  bucket: string,
+  path: string,
+) {
+  await fetchOk(
+    bypass(
+      `${await gcs()}/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(path)}`,
+      { method: "DELETE" },
     ),
   );
 }
