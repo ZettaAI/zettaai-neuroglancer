@@ -209,7 +209,7 @@ describe("PaintedVolumeHostBinding", () => {
     expect(returned.attached.has(preview.layer)).toBe(true);
   });
 
-  // TM-331: `viewer.state.restoreState` runs `layerManager.clear()`, which
+  // TM-490: `viewer.state.restoreState` runs `layerManager.clear()`, which
   // disposes every user layer (and the render layers they hold) before the
   // replacement layers announce `layersChanged`.
   it("moves onto the replacement of a disposed layer without detaching from it again", () => {
