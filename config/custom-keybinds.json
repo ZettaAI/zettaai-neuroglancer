@@ -33,6 +33,7 @@
   "keyt": "calcada-toggle-zetta-trace",
   "keyd": "calcada-toggle-debug-mode",
   "shift+slash": "calcada-toggle-split-detection",
+  "keyg": "calcada-list-pair-candidates",
   "keyx": false,
   "control+shift+keyx": "clear-segments",
   "bracketleft": "select-previous",

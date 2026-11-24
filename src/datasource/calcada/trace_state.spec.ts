@@ -4,18 +4,55 @@ import { minCandidateVoxels } from "#src/datasource/calcada/candidate_filter_tre
 import type { ScoreRange } from "#src/datasource/calcada/trace_state.js";
 import {
   stepScoreRangeLow,
+  TRACE_END_RADIUS_DEFAULT_NM,
+  TRACE_END_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_DEFAULT_NM,
+  TRACE_SPHERE_RADIUS_MIN_NM,
   withinScoreRange,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 
 describe("ZettaTraceState", () => {
-  it("starts off with no aiming and the default radius", () => {
+  it("starts off with no aiming and a 500 nm sphere", () => {
+    expect(TRACE_SPHERE_RADIUS_DEFAULT_NM).toBe(500);
     const state = new ZettaTraceState();
     expect(state.active.value).toBe(false);
     expect(state.aiming.value).toBe(false);
     expect(state.sphereRadiusNm.value).toBe(TRACE_SPHERE_RADIUS_DEFAULT_NM);
     expect(state.sphereCenter.value).toBeUndefined();
+    state.dispose();
+  });
+
+  it("endRadiusNm defaults to 500 and is left out of the JSON", () => {
+    const state = new ZettaTraceState();
+    expect(TRACE_END_RADIUS_DEFAULT_NM).toBe(500);
+    expect(state.endRadiusNm.value).toBe(TRACE_END_RADIUS_DEFAULT_NM);
+    expect(JSON.stringify(state.toJSON())).not.toContain("endRadiusNm");
+    state.dispose();
+  });
+
+  it("endRadiusNm round-trips and is clamped on restore to at most its default", () => {
+    const state = new ZettaTraceState();
+    state.endRadiusNm.value = 432;
+    const json = JSON.parse(JSON.stringify(state.toJSON()));
+    expect(json.endRadiusNm).toBe(432);
+    const restored = new ZettaTraceState();
+    restored.restoreState(json);
+    expect(restored.endRadiusNm.value).toBe(432);
+    expect(TRACE_END_RADIUS_MAX_NM).toBe(TRACE_END_RADIUS_DEFAULT_NM);
+    restored.restoreState({ endRadiusNm: 4321 });
+    expect(restored.endRadiusNm.value).toBe(TRACE_END_RADIUS_MAX_NM);
+    restored.restoreState({ endRadiusNm: 1 });
+    expect(restored.endRadiusNm.value).toBe(TRACE_SPHERE_RADIUS_MIN_NM);
+    state.dispose();
+    restored.dispose();
+  });
+
+  it("ignores an old link's zoom setting and never writes one", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ zoomOnCandidate: false });
+    expect(state).not.toHaveProperty("zoomOnCandidate");
+    expect(JSON.stringify(state.toJSON())).not.toContain("zoomOnCandidate");
     state.dispose();
   });
 
@@ -50,16 +87,38 @@ describe("ZettaTraceState", () => {
     restored.dispose();
   });
 
-  it("keeps the radius but drops the placed sphere on reset", () => {
+  it("drops the placed sphere and its radius on reset, keeping the default", () => {
     const state = new ZettaTraceState();
+    state.setSphereRadiusDefaultNm(800);
     state.sphereRadiusNm.value = 999;
     state.sphereCenter.value = Float32Array.of(1, 2, 3);
     state.aiming.value = true;
     state.reset();
     expect(state.sphereCenter.value).toBeUndefined();
     expect(state.aiming.value).toBe(false);
-    expect(state.sphereRadiusNm.value).toBe(999);
+    expect(state.sphereRadiusNm.value).toBe(800);
     state.dispose();
+  });
+
+  it("a link without a placed sphere starts at the default radius", () => {
+    const state = new ZettaTraceState();
+    state.restoreState({ sphereRadiusNm: 2000 });
+    expect(state.sphereRadiusNm.value).toBe(TRACE_SPHERE_RADIUS_DEFAULT_NM);
+    state.sphereRadiusNm.value = 1234;
+    expect(JSON.stringify(state.toJSON())).not.toContain("sphereRadius");
+    state.dispose();
+  });
+
+  it("the default radius round-trips and starts the sphere", () => {
+    const state = new ZettaTraceState();
+    state.setSphereRadiusDefaultNm(800);
+    expect(state.sphereRadiusNm.value).toBe(800);
+    const restored = new ZettaTraceState();
+    restored.restoreState(JSON.parse(JSON.stringify(state.toJSON())));
+    expect(restored.sphereRadiusDefaultNm.value).toBe(800);
+    expect(restored.sphereRadiusNm.value).toBe(800);
+    state.dispose();
+    restored.dispose();
   });
 
   it("cancels only the aim when escaping over a live trace", () => {
@@ -284,6 +343,9 @@ describe("ZettaTraceState.stepPlusMinus", () => {
     state.stepPlusMinus(1);
     expect(state.scoreRange.value).toEqual([0, 1]);
     expect(state.sphereRadiusNm.value).toBeGreaterThan(
+      TRACE_SPHERE_RADIUS_DEFAULT_NM,
+    );
+    expect(state.sphereRadiusDefaultNm.value).toBe(
       TRACE_SPHERE_RADIUS_DEFAULT_NM,
     );
   });
