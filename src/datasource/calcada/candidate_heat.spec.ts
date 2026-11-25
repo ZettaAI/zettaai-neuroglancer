@@ -14,6 +14,7 @@ import {
   flaggedPieceCount,
   heatColor,
   heatColorGlsl,
+  parseClassCounts,
   parsePieceOverviews,
   pieceOverviewSubject,
   rankFlaggedPieces,
@@ -29,6 +30,8 @@ const noClasses: PieceClasses = {
   nucleus: 0,
   ecs: 0,
   other: 0,
+  myelin: 0,
+  synaptic_cleft: 0,
 };
 
 function piece(overrides: Partial<PieceOverview> = {}): PieceOverview {
@@ -69,6 +72,18 @@ describe("heatColorGlsl", () => {
     expect(heatColorGlsl("score")).toBe(
       "mix(vec3(0.16, 0.86, 0.24), vec3(1, 0.24, 0.24), score)",
     );
+  });
+});
+
+describe("parseClassCounts", () => {
+  it("keeps fractional classes and reads myelin and synaptic cleft", () => {
+    expect(
+      parseClassCounts({ axon: 12.5, myelin: 3.25, synaptic_cleft: 0.75 }),
+    ).toEqual({ ...noClasses, axon: 12.5, myelin: 3.25, synaptic_cleft: 0.75 });
+  });
+
+  it("reads a class the server did not send as zero", () => {
+    expect(parseClassCounts({ axon: 4 })).toEqual({ ...noClasses, axon: 4 });
   });
 });
 

@@ -438,7 +438,15 @@ export function printFilter(
 // ------------------------------------------------------------------ lexer
 
 const DOC_FIELDS = ["size", "axon", "dendrite", "perikaryon", "nucleus"];
-const EXTRA_FIELDS = ["glia", "vasculature", "ecs", "other", "score"];
+const EXTRA_FIELDS = [
+  "glia",
+  "vasculature",
+  "ecs",
+  "other",
+  "myelin",
+  "synaptic_cleft",
+  "score",
+];
 const FIELDS = [...DOC_FIELDS, ...EXTRA_FIELDS];
 const TARGET_WORDS = ["seed", "candidate", "both"];
 const LOGIC = ["and", "or", "not"];

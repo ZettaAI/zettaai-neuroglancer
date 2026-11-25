@@ -11,6 +11,8 @@ const classes = {
   nucleus: 0,
   ecs: 0,
   other: 0,
+  myelin: 0,
+  synaptic_cleft: 0,
 };
 
 const piece = (

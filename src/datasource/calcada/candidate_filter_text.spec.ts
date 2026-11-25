@@ -80,6 +80,13 @@ describe("Sergiy's filters", () => {
   });
 });
 
+describe("myelin and synaptic cleft", () => {
+  it("round-trip as measures", () => {
+    const src = "both(myelin > 10% and synaptic_cleft < 5%)";
+    expect(printFilter(parseFilterText(src))).toBe(src);
+  });
+});
+
 describe("targets", () => {
   it("fills Both only for a plain top-level and", () => {
     expect(printFilter(parseFilterText("size > 20k and axon > 10%"))).toBe(

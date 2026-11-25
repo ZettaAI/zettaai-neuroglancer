@@ -34,7 +34,9 @@ export type SemanticClass =
   | "vasculature"
   | "nucleus"
   | "ecs"
-  | "other";
+  | "other"
+  | "myelin"
+  | "synaptic_cleft";
 
 export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   "any",
@@ -46,18 +48,15 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   "nucleus",
   "ecs",
   "other",
+  "myelin",
+  "synaptic_cleft",
 ];
 
-export interface PieceClasses {
-  perikaryon: number;
-  dendrite: number;
-  axon: number;
-  glia: number;
-  vasculature: number;
-  nucleus: number;
-  ecs: number;
-  other: number;
-}
+/**
+ * A piece's semantic breakdown in voxels. A class is the summed class
+ * probability of the piece's voxels, so it may be fractional.
+ */
+export type PieceClasses = Record<Exclude<SemanticClass, "any">, number>;
 
 /** A semantic breakdown as the server sends it; absent classes count zero. */
 export function parseClassCounts(raw: any): PieceClasses {
@@ -70,6 +69,8 @@ export function parseClassCounts(raw: any): PieceClasses {
     nucleus: Number(raw?.nucleus ?? 0),
     ecs: Number(raw?.ecs ?? 0),
     other: Number(raw?.other ?? 0),
+    myelin: Number(raw?.myelin ?? 0),
+    synaptic_cleft: Number(raw?.synaptic_cleft ?? 0),
   };
 }
 
@@ -186,16 +187,7 @@ export function heatColorGlsl(score: string): string {
 }
 
 export function classTotal(classes: PieceClasses): number {
-  return (
-    classes.perikaryon +
-    classes.dendrite +
-    classes.axon +
-    classes.glia +
-    classes.vasculature +
-    classes.nucleus +
-    classes.ecs +
-    classes.other
-  );
+  return Object.values(classes).reduce((total, value) => total + value, 0);
 }
 
 /** A detection row as the filter tree sees it: the piece and its best candidate. */
