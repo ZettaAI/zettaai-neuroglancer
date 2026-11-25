@@ -108,6 +108,29 @@ describe("fetchOk header hedging", () => {
     expect(fetchMock).toHaveBeenCalledTimes(maxConcurrentAttempts);
   });
 
+  it("waits past the hedging deadline for one request when hedge is false", async () => {
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) =>
+          setTimeout(
+            () => resolve(new Response("late")),
+            hedgeDelayMilliseconds * (maxConcurrentAttempts + 1),
+          ),
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = fetchOk("http://example.test/manifest", {
+      retryOptions: { hedge: false, attemptTimeoutMs: 60_000 },
+    });
+    await vi.advanceTimersByTimeAsync(
+      hedgeDelayMilliseconds * (maxConcurrentAttempts + 1) + 10,
+    );
+
+    expect(await (await result).text()).toBe("late");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not hedge when the caller aborts", async () => {
     const fetchMock = vi.fn((_input: RequestInfo, init?: RequestInit) =>
       hangUntilAborted(init),
