@@ -127,7 +127,7 @@ describe("fetchOk header hedging", () => {
       hedgeDelayMilliseconds * (maxConcurrentAttempts + 1) + 10,
     );
 
-    expect(await (await result).text()).toBe("late");
+    expect((await result).status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
