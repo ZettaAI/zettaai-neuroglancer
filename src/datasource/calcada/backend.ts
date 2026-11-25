@@ -441,6 +441,8 @@ export class CalcadaMeshSource extends WithParameters(
     }
   >();
 
+  meshlessFragments = new Set<string>();
+
   // Scores pieces by proximity to the current view so the batch pool and
   // fragment chunk priorities favor near, on-screen pieces first. Piece
   // centers arrive in nm; meshModelResolution converts them into the mesh's
@@ -504,19 +506,7 @@ export class CalcadaMeshSource extends WithParameters(
     void fetchOkImpl(baseUrl + manifestPath, {})
       .then((response) => response.json())
       .then((response) => {
-        const fragLocations = response?.frag_locations;
-        if (fragLocations && typeof fragLocations === "object") {
-          for (const piece of Object.keys(fragLocations)) {
-            const l = fragLocations[piece];
-            this.fragLocations.set(`${piece}:0`, {
-              shard: l.shard,
-              offset: l.offset,
-              dracoLength: l.draco_length,
-              manifestLength: l.manifest_length,
-              url: l.url,
-            });
-          }
-        }
+        this.rememberFragmentLocations(response);
         const fragments = response?.fragments;
         if (Array.isArray(fragments)) {
           this.spatialIndex.setFromManifest(
@@ -541,6 +531,31 @@ export class CalcadaMeshSource extends WithParameters(
       | undefined;
     if (chunk !== undefined) {
       this.chunkManager.queueManager.updateChunkState(chunk, ChunkState.QUEUED);
+    }
+  }
+
+  private rememberFragmentLocations(response: any) {
+    const { fragLocations, meshlessFragments } = this;
+    const fragments = response?.fragments;
+    if (Array.isArray(fragments)) {
+      for (const fragment of fragments) meshlessFragments.delete(fragment);
+    }
+    const missing = response?.frag_missing;
+    if (Array.isArray(missing)) {
+      for (const piece of missing) meshlessFragments.add(`${piece}:0`);
+    }
+    const locations = response?.frag_locations;
+    if (locations && typeof locations === "object") {
+      for (const piece of Object.keys(locations)) {
+        const l = locations[piece];
+        fragLocations.set(`${piece}:0`, {
+          shard: l.shard,
+          offset: l.offset,
+          dracoLength: l.draco_length,
+          manifestLength: l.manifest_length,
+          url: l.url,
+        });
+      }
     }
   }
 
@@ -593,21 +608,7 @@ export class CalcadaMeshSource extends WithParameters(
       throw error;
     }
     this.manifestAttempts.delete(chunk);
-    // Stash calcada's per-piece byte-ranges (if any) so downloadFragment can
-    // read each piece in one direct-from-bucket range request.
-    const fragLocations = response?.frag_locations;
-    if (fragLocations && typeof fragLocations === "object") {
-      for (const piece of Object.keys(fragLocations)) {
-        const l = fragLocations[piece];
-        this.fragLocations.set(`${piece}:0`, {
-          shard: l.shard,
-          offset: l.offset,
-          dracoLength: l.draco_length,
-          manifestLength: l.manifest_length,
-          url: l.url,
-        });
-      }
-    }
+    this.rememberFragmentLocations(response);
     // Link every piece the manifest lists to its root (chunk.objectId), so a 3D
     // mesh pick anywhere on the mesh resolves piece->root even over a part with no
     // loaded 2D chunk (whose LUT trailer would otherwise be the only source of the
@@ -753,6 +754,11 @@ export class CalcadaMeshSource extends WithParameters(
       return;
     }
 
+    if (this.meshlessFragments.has(chunk.fragmentId!)) {
+      assignEmptyMesh(chunk);
+      return;
+    }
+
     const { shardedKvStore } = this;
     if (shardedKvStore === undefined) {
       // Legacy unsharded mesh: fetch the whole per-piece Draco object.
@@ -833,6 +839,7 @@ export class CalcadaMeshSource extends WithParameters(
     // at both the charge and release transitions, and both inputs below can
     // change in between, so an unlatched value would leak queue capacity.
     return this.fragmentAdmission.get(chunk, fragmentId, () => {
+      if (this.meshlessFragments.has(fragmentId)) return 0;
       // Free admission only once batch support is CONFIRMED. While support
       // is still unknown (before the first POST resolves), pieces charge
       // normal slots: if the server turns out to lack the endpoint, the
