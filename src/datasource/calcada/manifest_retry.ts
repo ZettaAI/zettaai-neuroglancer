@@ -19,6 +19,7 @@ import type { RetryOptions } from "#src/util/http_request.js";
 export const MANIFEST_RETRY_OPTIONS: RetryOptions = {
   hedge: false,
   attemptTimeoutMs: 60_000,
+  maxAttempts: 3,
 };
 
 export const MAX_MANIFEST_DOWNLOAD_ATTEMPTS = 3;
