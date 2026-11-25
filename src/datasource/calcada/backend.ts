@@ -541,7 +541,9 @@ export class CalcadaMeshSource extends WithParameters(
     const { fragLocations, meshlessFragments } = this;
     const fragments = response?.fragments;
     if (Array.isArray(fragments)) {
-      for (const fragment of fragments) meshlessFragments.delete(fragment);
+      for (const fragment of fragments) {
+        meshlessFragments.delete(`${String(fragment).split(":", 1)[0]}:0`);
+      }
     }
     const missing = response?.frag_missing;
     if (Array.isArray(missing)) {
