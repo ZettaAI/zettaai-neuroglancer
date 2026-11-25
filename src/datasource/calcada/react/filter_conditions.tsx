@@ -84,6 +84,8 @@ const FIELD_OPTIONS: Options = [
   ["vasculature", "Vasculature"],
   ["ecs", "ECS"],
   ["other", "Other"],
+  ["myelin", "Myelin"],
+  ["synaptic_cleft", "Synaptic cleft"],
   ["score", "Score"],
 ];
 const COMPARE_OPTIONS: Options = [

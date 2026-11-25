@@ -44,6 +44,8 @@ function candidate(
       nucleus: 0,
       ecs: 0,
       other: 0,
+      myelin: 0,
+      synaptic_cleft: 0,
     },
     partnerHasInfo: false,
     selfVoxels: 0,
@@ -56,6 +58,8 @@ function candidate(
       nucleus: 0,
       ecs: 0,
       other: 0,
+      myelin: 0,
+      synaptic_cleft: 0,
     },
     selfHasInfo: false,
   };

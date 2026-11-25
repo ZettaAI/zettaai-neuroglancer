@@ -14,6 +14,8 @@ const classes = {
   nucleus: 0,
   ecs: 0,
   other: 0,
+  myelin: 0,
+  synaptic_cleft: 0,
 };
 
 // A chain 1-2-3 plus 2-4, as the server would answer for piece 1 at 2 hops.
