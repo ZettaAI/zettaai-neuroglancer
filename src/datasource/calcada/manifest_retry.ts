@@ -14,6 +14,13 @@
  * limitations under the License.
  */
 
+import type { RetryOptions } from "#src/util/http_request.js";
+
+export const MANIFEST_RETRY_OPTIONS: RetryOptions = {
+  hedge: false,
+  attemptTimeoutMs: 60_000,
+};
+
 export const MAX_MANIFEST_DOWNLOAD_ATTEMPTS = 3;
 
 export function shouldRetryManifestDownload(

@@ -53,6 +53,7 @@ import { FragmentSpatialIndex } from "#src/datasource/calcada/fragment_spatial.j
 import { fetchUntilAvailable } from "#src/datasource/calcada/lut_retry.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import {
+  MANIFEST_RETRY_OPTIONS,
   shouldRetryManifestDownload,
   nextManifestRetryDelayMs,
 } from "#src/datasource/calcada/manifest_retry.js";
@@ -503,7 +504,9 @@ export class CalcadaMeshSource extends WithParameters(
     const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
     const branchId = this.branchId?.value ?? parameters.branchId;
     const manifestPath = buildManifestPath(segment, parameters.lod, branchId);
-    void fetchOkImpl(baseUrl + manifestPath, {})
+    void fetchOkImpl(baseUrl + manifestPath, {
+      retryOptions: MANIFEST_RETRY_OPTIONS,
+    })
       .then((response) => response.json())
       .then((response) => {
         this.rememberFragmentLocations(response);
@@ -580,7 +583,10 @@ export class CalcadaMeshSource extends WithParameters(
     let response: any;
     try {
       response = await (
-        await fetchOkImpl(baseUrl + manifestPath, { signal })
+        await fetchOkImpl(baseUrl + manifestPath, {
+          signal,
+          retryOptions: MANIFEST_RETRY_OPTIONS,
+        })
       ).json();
     } catch (error) {
       if (
