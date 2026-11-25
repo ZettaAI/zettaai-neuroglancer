@@ -10,7 +10,7 @@
 
 import { useEffect, useReducer } from "react";
 
-import type { NullarySignal } from "#src/util/signal.js";
+import type { ReadonlySignal } from "#src/util/signal.js";
 
 /**
  * For objects that report through a bare signal rather than a watchable —
@@ -19,7 +19,7 @@ import type { NullarySignal } from "#src/util/signal.js";
  * `useSyncExternalStore`, which cannot cache it, so the signal drives a
  * re-render and the fields are read during it.
  */
-export function useSignalRerender(signal: NullarySignal) {
+export function useSignalRerender(signal: ReadonlySignal<() => void>) {
   const [, rerender] = useReducer((tick: number) => tick + 1, 0);
   useEffect(() => {
     const unsubscribe = signal.add(rerender);

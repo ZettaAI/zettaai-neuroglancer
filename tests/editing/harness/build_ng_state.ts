@@ -48,6 +48,8 @@ export interface ScenarioLayer {
   readonly writable: boolean;
   /** NG layer name; defaults to the fixture id. */
   readonly name?: string;
+  /** Selected segment ids of a segmentation layer; defaults to none. */
+  readonly segments?: readonly string[];
 }
 
 export interface Scenario {
@@ -66,6 +68,14 @@ export interface Scenario {
    * the panel centre is visible — the small fixtures would otherwise be a dot.
    */
   readonly crossSectionScale?: number;
+  /** NG `layout`; defaults to `"xy"` (no 3D panel). */
+  readonly layout?: string;
+  /** NG `projectionOrientation` quaternion of the 3D panel. */
+  readonly projectionOrientation?: readonly [number, number, number, number];
+  /** NG `projectionScale` of the 3D panel. */
+  readonly projectionScale?: number;
+  /** NG `showSlices`: cross sections in the 3D panel; NG defaults to shown. */
+  readonly showSlices?: boolean;
 }
 
 export interface BuildOptions {
@@ -157,6 +167,9 @@ export function buildNgState(
       tab: "source",
       name: r.name,
     };
+    if (r.fixture.kind !== "image" && r.scenario.segments !== undefined) {
+      return { ...base, segments: [...r.scenario.segments] };
+    }
     return r.fixture.kind === "image" ? base : { ...base, segments: [] };
   });
 
@@ -177,6 +190,16 @@ export function buildNgState(
     ],
     crossSectionScale,
     layout: "xy",
+    ...(scenario.layout !== undefined && { layout: scenario.layout }),
+    ...(scenario.projectionOrientation !== undefined && {
+      projectionOrientation: [...scenario.projectionOrientation],
+    }),
+    ...(scenario.projectionScale !== undefined && {
+      projectionScale: scenario.projectionScale,
+    }),
+    ...(scenario.showSlices !== undefined && {
+      showSlices: scenario.showSlices,
+    }),
     layers,
     selectedLayer: {
       visible: true,

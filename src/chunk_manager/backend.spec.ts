@@ -236,4 +236,60 @@ describe("ChunkQueueManager.performChunkPriorityUpdate", () => {
     // into the next recompute cycle.
     expect(chunk.newRequestedState).toBe(ChunkState.NEW);
   });
+
+  it("hands a worker-held chunk to the frontend once only SYSTEM_MEMORY is requested", () => {
+    // Regression: a chunk that finished downloading while the renderer wanted
+    // it on the GPU waits in the worker for GPU promotion. When the renderer
+    // drops it, only the fetch RPC's SYSTEM_MEMORY request remains — and no
+    // queue moves a worker chunk to the frontend, so the fetch never resolved
+    // (a session preload hung on its last chunks with a tight memory limit).
+    const { qm } = makePriorityHarness();
+    const moveChunkToFrontend = vi.fn();
+    const updateChunkState = vi.fn();
+    Object.assign(qm as unknown as Record<string, unknown>, {
+      moveChunkToFrontend,
+      updateChunkState,
+    });
+    const chunk = makePriorityChunk({
+      state: ChunkState.SYSTEM_MEMORY_WORKER,
+      priorityTier: ChunkPriorityTier.VISIBLE,
+      priority: Number.POSITIVE_INFINITY,
+      requestedState: ChunkState.GPU_MEMORY,
+      newPriorityTier: ChunkPriorityTier.VISIBLE,
+      newPriority: Number.POSITIVE_INFINITY,
+      newRequestedState: ChunkState.SYSTEM_MEMORY,
+    });
+
+    qm.performChunkPriorityUpdate(chunk);
+
+    expect(moveChunkToFrontend).toHaveBeenCalledExactlyOnceWith(chunk);
+    expect(updateChunkState).toHaveBeenCalledExactlyOnceWith(
+      chunk,
+      ChunkState.SYSTEM_MEMORY,
+    );
+  });
+
+  it("leaves a worker-held chunk in the worker while the GPU still wants it", () => {
+    const { qm } = makePriorityHarness();
+    const moveChunkToFrontend = vi.fn();
+    const updateChunkState = vi.fn();
+    Object.assign(qm as unknown as Record<string, unknown>, {
+      moveChunkToFrontend,
+      updateChunkState,
+    });
+    const chunk = makePriorityChunk({
+      state: ChunkState.SYSTEM_MEMORY_WORKER,
+      priorityTier: ChunkPriorityTier.VISIBLE,
+      priority: 5,
+      requestedState: ChunkState.GPU_MEMORY,
+      newPriorityTier: ChunkPriorityTier.VISIBLE,
+      newPriority: Number.POSITIVE_INFINITY,
+      newRequestedState: ChunkState.GPU_MEMORY,
+    });
+
+    qm.performChunkPriorityUpdate(chunk);
+
+    expect(moveChunkToFrontend).not.toHaveBeenCalled();
+    expect(updateChunkState).not.toHaveBeenCalled();
+  });
 });

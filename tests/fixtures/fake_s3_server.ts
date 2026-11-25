@@ -142,11 +142,39 @@ export async function writeObject(
   bucket: string,
   path: string,
   body: RequestInit["body"],
-) {
-  await fetchOk(
+): Promise<{ versionId: string | null }> {
+  const response = await fetchOk(
     bypass(`${await s3()}/${bucket}/${encodeURIComponent(path)}`, {
       method: "PUT",
       body: body,
+    }),
+  );
+  return { versionId: response.headers.get("x-amz-version-id") };
+}
+
+export async function enableBucketVersioning(
+  s3: Fixture<string>,
+  bucket: string,
+) {
+  await fetchOk(
+    bypass(`${await s3()}/${bucket}?versioning`, {
+      method: "PUT",
+      headers: { "content-type": "application/xml" },
+      body:
+        '<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+        "<Status>Enabled</Status></VersioningConfiguration>",
+    }),
+  );
+}
+
+export async function deleteObject(
+  s3: Fixture<string>,
+  bucket: string,
+  path: string,
+) {
+  await fetchOk(
+    bypass(`${await s3()}/${bucket}/${encodeURIComponent(path)}`, {
+      method: "DELETE",
     }),
   );
 }

@@ -3,6 +3,7 @@ import {
   CalcadaOverviewState,
   SCORING_SEGMENT_STATUS,
   splitDetectionStatus,
+  resumesAfterTrace,
   toggleSplitDetection,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 
@@ -62,8 +63,43 @@ describe("toggleSplitDetection", () => {
   });
 });
 
+describe("resumesAfterTrace", () => {
+  it("brings detection back on a branch with the segment still chosen", () => {
+    expect(
+      resumesAfterTrace({
+        wasActive: true,
+        onMain: false,
+        segmentChosen: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("stays off when the segment was cleared, instead of asking for a new one", () => {
+    expect(
+      resumesAfterTrace({
+        wasActive: true,
+        onMain: false,
+        segmentChosen: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("stays off on main and when it was off before the trace", () => {
+    expect(
+      resumesAfterTrace({ wasActive: true, onMain: true, segmentChosen: true }),
+    ).toBe(false);
+    expect(
+      resumesAfterTrace({
+        wasActive: false,
+        onMain: false,
+        segmentChosen: true,
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("splitDetectionStatus", () => {
-  it("counts flagged pieces once the filter has all it needs", () => {
+  it("counts flagged candidates once the filter has all it needs", () => {
     expect(
       splitDetectionStatus({
         graphPending: false,
@@ -71,7 +107,7 @@ describe("splitDetectionStatus", () => {
         total: 2000,
         withSemantics: 0,
       }),
-    ).toBe("2 of 2,000 pieces flagged · 0 candidates with semantics");
+    ).toBe("2 of 2,000 candidates flagged · 0 with semantics");
   });
 
   it("says it is still scoring while the piece graph loads", () => {

@@ -27,6 +27,7 @@ import type {
   CommitResult,
   EditSessionAdapters,
   EditSessionConfig,
+  HistoryPolicy,
   LayerId,
   LayerMetadata,
   LayerSelection,
@@ -40,6 +41,7 @@ import type {
 import {
   ChunkId as ChunkIdFactory,
   collectDirtyChunks,
+  DEFAULT_HISTORY_POLICY,
   EditSession,
   InvalidSessionConfigError,
   OverlayKey,
@@ -56,6 +58,8 @@ import {
   coordinateSpaceFromJson,
   coordinateSpaceToJson,
 } from "#src/coordinate_transform.js";
+import { deferContentHashing } from "#src/editing/adapters/deferred_content_hash.js";
+import { boundHistoryReplayScans } from "#src/editing/adapters/history_replay_hints.js";
 import { createChunkBufferAllocator } from "#src/editing/adapters/ng_chunk_buffer_allocator.js";
 import { NgChunkSource } from "#src/editing/adapters/ng_chunk_source.js";
 import { NgClock } from "#src/editing/adapters/ng_clock.js";
@@ -73,6 +77,7 @@ import {
   saveBackendRegistryChanged,
 } from "#src/editing/adapters/save_backend.js";
 import { HttpSaveBackend } from "#src/editing/adapters/save_backends/http_save_backend.js";
+import { mountSegmentListWidget } from "#src/editing/adapters/segment_list_widget.js";
 import type { ChunkLoadProgressState } from "#src/editing/adapters/session_chunk_preloader.js";
 import { BackendClient } from "#src/editing/backend/backend_client.js";
 import type { BackendEndpoint } from "#src/editing/backend/backend_endpoint.js";
@@ -103,6 +108,10 @@ import {
 import type { DraftReason, EditDraft } from "#src/editing/draft/edit_draft.js";
 import { draftIdForRegion } from "#src/editing/draft/edit_draft.js";
 import { EditDraftStore } from "#src/editing/draft/edit_draft_store.js";
+import {
+  editHistoryPolicy,
+  maxFillHistoryBytes,
+} from "#src/editing/edit_history_budget.js";
 import { IdleEditHotkeyBinder } from "#src/editing/idle_edit_hotkey_binder.js";
 import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // PatchMirror is created by step 9 of Phase 1; this file's runtime import
@@ -111,6 +120,20 @@ import { LocalPatchStore } from "#src/editing/local_patch_store.js";
 // where the mirror subscribes to `session.dirty` chunk events for `layerId`
 // and writes the resulting overlay bytes into `store.writeFullChunk(...)`.
 import { PatchMirror } from "#src/editing/overlay/patch_mirror.js";
+import { sessionChunkDataSize } from "#src/editing/overlay/session_chunk_data_size.js";
+import { sessionEditBaselineReader } from "#src/editing/overlay/session_edit_baseline.js";
+import {
+  PaintedVolumeGpuLossGuard,
+  reachableSessionStorage,
+} from "#src/editing/painted_volume/painted_volume_gpu_loss_guard.js";
+import type { PaintedVolumeHostPort } from "#src/editing/painted_volume/painted_volume_host_binding.js";
+import { PaintedVolumeHostBinding } from "#src/editing/painted_volume/painted_volume_host_binding.js";
+import type { LockedLayerRegion } from "#src/editing/painted_volume/painted_volume_memory_budget.js";
+import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volume_occupancy.js";
+import type { PaintedVolumePreviewSummary } from "#src/editing/painted_volume/painted_volume_preview_summary.js";
+import type { PaintedVolumeSessionInputs } from "#src/editing/painted_volume/painted_volume_session_preview.js";
+import { createSessionPaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_session_preview.js";
+import type { SegmentColor } from "#src/editing/param_status_overlay.js";
 import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 // Side-effect: attaches `window.__editPaintBench` for the Playwright paint
 // benchmark (a dev tool, like `window.__paintProfiler` — only does work when
@@ -152,7 +175,6 @@ import {
 import { EditSessionHotkeyBinder } from "#src/editing/session_hotkey_binder.js";
 import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
-import { MorphologyClient } from "#src/editing/tool_runtimes/morphology_client.js";
 import { paintProfilerMetrics } from "#src/editing/tool_runtimes/paint_profiler_metrics.js";
 import type { PaintingMaskConfig } from "#src/editing/tool_runtimes/paint_types.js";
 import { DEFAULT_COVERAGE_THRESHOLD } from "#src/editing/tool_runtimes/paint_types.js";
@@ -170,17 +192,25 @@ import {
 import { TrackableEditPreferences } from "#src/editing/tooling/edit_preferences.js";
 import { EditScope } from "#src/editing/tooling/edit_scope.js";
 import type { EditToolContext } from "#src/editing/tooling/edit_tool.js";
+import {
+  readPersonalKeybinds,
+  sameKeybindOverrides,
+  watchPersonalKeybinds,
+  writePersonalKeybinds,
+  type EditKeybindOverrides,
+} from "#src/editing/tooling/personal_keybinds.js";
 import { SessionToolBinder } from "#src/editing/tooling/session_tool_binder.js";
 import { ToolRegistry } from "#src/editing/tooling/tool_registry.js";
 import {
   paintingPatchFromPersist,
   parseTooling,
   serializeTooling,
-  type EditKeybindOverrides,
   type ToolingPersistState,
 } from "#src/editing/tooling/tooling_persist.js";
 import { layerKindOf } from "#src/editing/ui/layer_kind.js";
 import type { SegmentationUserLayer } from "#src/layer/segmentation/index.js";
+import { getSegmentEquivalences } from "#src/segmentation_display_state/base.js";
+import { getBaseObjectColor } from "#src/segmentation_display_state/frontend.js";
 import { SegmentationRenderLayer } from "#src/sliceview/volume/segmentation_renderlayer.js";
 import { StatusMessage } from "#src/status.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
@@ -189,8 +219,9 @@ import {
   DEFAULT_SIDE_PANEL_LOCATION,
   TrackableSidePanelLocation,
 } from "#src/ui/side_panel_location.js";
+import { serializeColor, useWhiteBackground } from "#src/util/color.js";
 import { RefCounted } from "#src/util/disposable.js";
-import { vec3 } from "#src/util/geom.js";
+import { vec3, vec4 } from "#src/util/geom.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import type { Trackable } from "#src/util/trackable.js";
 import type { Viewer } from "#src/viewer.js";
@@ -395,12 +426,6 @@ interface PerLayerMachinery {
    */
   readonly textureCache: PatchTextureCache;
   /**
-   * Reference to the base segmentation render layer for this layer. Used
-   * by host-internal helpers that need to walk visible scales (e.g.
-   * `chunkDataSizeForLayer`); the cache itself is layer-agnostic.
-   */
-  readonly baseRenderLayer: SegmentationRenderLayer;
-  /**
    * Subscription bridging the active library overlay → `patchStore`. Set
    * while a session is active, replaced on each new `openSession`, and
    * cleared by `commitTeardown` (the backing `DirtyTracker` is gone after
@@ -521,6 +546,9 @@ const VERIFY_BACKOFF_MS: readonly number[] = [
  */
 const VERIFY_CONCURRENCY = 5;
 
+const PAINTING_IN_PROGRESS_MESSAGE =
+  "Painting is still in progress. Try again when it finishes.";
+
 /**
  * Stands in for a layer whose committed chunks were painted under more than one
  * edit session, so no single region describes them. Saving such a layer is
@@ -591,10 +619,13 @@ export class EditSessionHost extends RefCounted {
    * Per-user edit-hotkey overrides (TM-315 runtime rebind): friendly action
    * name → key identifier(s). Merged by the session hotkey binder OVER the
    * build-time `custom-keybinds.json` defaults, so a rebind takes effect live.
-   * Persisted into the `editSession` tooling block and restored on reopen.
+   * Kept in this browser, not the viewer state, so a shared link never carries
+   * them (`personal_keybinds.ts`); every tab of the site follows the same set.
    * Empty `{}` means "use the configured defaults". The binder watches this.
    */
-  readonly editKeybindOverrides = new WatchableValue<EditKeybindOverrides>({});
+  readonly editKeybindOverrides = new WatchableValue<EditKeybindOverrides>(
+    readPersonalKeybinds(),
+  );
   /**
    * Consumer-owned painting tools for the active session (TM-315), constructed
    * after `EditSession.open(...)`. Undefined when no session is active. The
@@ -602,6 +633,8 @@ export class EditSessionHost extends RefCounted {
    * read its shared `state`.
    */
   private paintingTools: ConsumerPaintingTools | undefined;
+  /** The active session's edit scope; set alongside `paintingTools`. */
+  private editScope: EditScope | undefined;
   get painting(): ConsumerPaintingTools | undefined {
     return this.paintingTools;
   }
@@ -655,6 +688,12 @@ export class EditSessionHost extends RefCounted {
   readonly requestSessionEntry = new Signal<
     (preselectBboxKey?: string) => void
   >();
+
+  /**
+   * The save-all key was pressed. The topbar subscribes because it owns the save
+   * flow (progress, conflict dialogs, toasts) a key press has to go through too.
+   */
+  readonly requestSaveAll = new NullarySignal();
 
   /** Owns the in-flight quick-region capture; lazily constructed. */
   private quickRegionCapture: QuickRegionCapture | undefined;
@@ -868,15 +907,6 @@ export class EditSessionHost extends RefCounted {
   private readonly clock: NgClock;
 
   /**
-   * Pyodide morphology worker (TM-304), shared by every `PaintingCompute` this
-   * host builds. Lazily boots pyodide on `warmup()`/first masked stroke and is
-   * terminated when the host is disposed.
-   */
-  private readonly morphologyClient = this.registerDisposer(
-    new MorphologyClient(),
-  );
-
-  /**
    * Reactive flag: whether any save backend is registered (so persistence is
    * wired up). Mirrors `hasAnySaveBackend()` from the registry. The Save
    * controls subscribe to this and disable themselves while it is `false`.
@@ -1018,6 +1048,13 @@ export class EditSessionHost extends RefCounted {
 
   // -- Per-session machinery (cleared on session end) -----------------------
   private readonly perLayer = new Map<LayerId, PerLayerMachinery>();
+  /**
+   * Live 3D preview of the painted volume (TM-490): one per writable session
+   * layer, for as long as the session is open.
+   */
+  private readonly paintedVolumeBinding: PaintedVolumeHostBinding;
+  /** Built with the first preview, when the viewer's canvas is in use. */
+  private paintedVolumeGpuLossGuard: PaintedVolumeGpuLossGuard | undefined;
   private readonly _activeRegionByLayer = new Map<
     LayerId,
     WatchableValue<ActiveRegion | undefined>
@@ -1162,6 +1199,22 @@ export class EditSessionHost extends RefCounted {
       }),
     );
     this.registerDisposer(() => clearBackendEndpoint());
+    this.registerDisposer(
+      this.editKeybindOverrides.changed.add(() =>
+        writePersonalKeybinds(this.editKeybindOverrides.value),
+      ),
+    );
+    // Another tab rebound a key: follow it, so every tab has one layout.
+    this.registerDisposer(
+      watchPersonalKeybinds((overrides) => {
+        if (!sameKeybindOverrides(overrides, this.editKeybindOverrides.value)) {
+          this.editKeybindOverrides.value = overrides;
+        }
+      }),
+    );
+    this.paintedVolumeBinding = this.registerDisposer(
+      new PaintedVolumeHostBinding(this.paintedVolumePort()),
+    );
 
     // Standalone / dev fallback (TM-349): if the bundle was built with the
     // `NEUROGLANCER_ZETTA_BACKEND_URL` define, register that endpoint now so
@@ -1242,11 +1295,27 @@ export class EditSessionHost extends RefCounted {
 
     const libraryConfig = this.buildLibraryConfig(config);
     const adapters = this.buildAdapters();
+    this.chunkSource.writableLayerIds = new Set(
+      config.layers
+        .filter((layer) => layer.writable)
+        .map((layer) => layer.layerId),
+    );
 
     let session: EditSession;
     try {
-      session = await EditSession.open(libraryConfig, adapters);
+      const historyPolicy = await this.historyPolicyFor(config);
+      session = await EditSession.open(
+        { ...libraryConfig, historyPolicy },
+        adapters,
+      );
+      // Before the first write: stroke before-images and after-images copy the
+      // chunk but hash it only when a save reads the hash (TM-373).
+      deferContentHashing(session.overlay);
+      // Undo / redo / discard commit whole chunks without a paint hint; give
+      // the mirror the chunk's write envelope instead of a full rescan.
+      boundHistoryReplayScans(session);
     } catch (err) {
+      this.chunkSource.writableLayerIds = new Set();
       this.handleOpenFailure(err);
       throw err;
     }
@@ -1295,8 +1364,11 @@ export class EditSessionHost extends RefCounted {
       );
       this.hotkeyBinder = new EditSessionHotkeyBinder(this, this.viewer);
       this.attachCursorOverlays(config);
+      // `attachPerLayer` runs unawaited, so its mirrors and these tools can
+      // land in either order; whichever comes last builds the 3D preview.
+      this.paintedVolumeBinding.sync();
       // Restore persisted tool parameters (TM-315) now that the tools + UI
-      // are wired: patches the painting family config + keybind overrides,
+      // are wired: patches the painting family config,
       // validated against the session layers (stale bindings dropped). The
       // active tool is deliberately NOT restored (TM-381).
       this.applyRestoredTooling(restoreTooling);
@@ -1470,17 +1542,32 @@ export class EditSessionHost extends RefCounted {
    * name (e.g. `"brush"`, `"undo"`); `keys` are the NG event identifier(s)
    * (e.g. `"control+keyb"`) that should trigger it, replacing the configured
    * default. The session hotkey binder rebuilds its input layer live, and the
-   * override is persisted into the `editSession` block so it survives reload.
+   * override is saved in this browser, so it survives reload and reaches the
+   * site's other tabs, but never travels in a shared link.
    * Passing an empty `keys` array reverts `name` to its configured default.
    */
   setEditKeybind(name: string, keys: readonly string[]): void {
+    this.setEditKeybinds({ [name]: keys });
+  }
+
+  /**
+   * Rebind several edit hotkeys as one change (a swap moves two at once), so
+   * the binder, the other tabs and the saved layout never see a half-done
+   * swap with one key on two actions. Same rules per entry as
+   * {@link setEditKeybind}.
+   */
+  setEditKeybinds(changes: {
+    readonly [name: string]: readonly string[] | undefined;
+  }): void {
     const next: { [n: string]: readonly string[] } = {
       ...this.editKeybindOverrides.value,
     };
-    if (keys.length === 0) {
-      delete next[name];
-    } else {
-      next[name] = keys;
+    for (const [name, keys] of Object.entries(changes)) {
+      if (keys === undefined || keys.length === 0) {
+        delete next[name];
+      } else {
+        next[name] = keys;
+      }
     }
     this.editKeybindOverrides.value = next;
   }
@@ -1584,7 +1671,7 @@ export class EditSessionHost extends RefCounted {
     try {
       await session.discard();
     } finally {
-      this.rollbackDirtyChunks([...dirty, ...unconfirmedKeys]);
+      this.rollbackDirtyChunks(session, [...dirty, ...unconfirmedKeys]);
       // Before the teardown, which is what still knows the session's writable
       // layers. Discarding is the user asking to see what storage holds, and
       // rolling our own patches back only uncovers the datasource chunks this
@@ -1594,7 +1681,10 @@ export class EditSessionHost extends RefCounted {
     }
   }
 
-  private rollbackDirtyChunks(overlayKeys: readonly string[]): void {
+  private rollbackDirtyChunks(
+    session: EditSession,
+    overlayKeys: readonly string[],
+  ): void {
     for (const key of overlayKeys) {
       let coord;
       try {
@@ -1626,7 +1716,8 @@ export class EditSessionHost extends RefCounted {
       const view = committed.bytes.asView();
       const data =
         view instanceof BigUint64Array ? view : widenToBigUint64(view);
-      const chunkDataSize = this.chunkDataSizeForLayer(
+      const chunkDataSize = sessionChunkDataSize(
+        session,
         coord.layerId,
         coord.resolution,
       );
@@ -1635,28 +1726,24 @@ export class EditSessionHost extends RefCounted {
     }
   }
 
-  private chunkDataSizeForLayer(
-    layerId: LayerId,
-    _resolution: ResolutionType,
-  ): readonly [number, number, number] | undefined {
-    // The size is layer-resolution-specific. Pull it from the base
-    // segmentation render layer's first source (the same source the
-    // patch texture cache mirrors voxel-for-voxel).
-    const entry = this.perLayer.get(layerId);
-    if (entry === undefined) return undefined;
-    const sources = entry.baseRenderLayer.visibleSourcesList;
-    for (const v of sources) {
-      const size = v.source.spec.chunkDataSize;
-      if (size.length >= 3) {
-        // We don't strictly check resolution match here — chunk sizes are
-        // typically consistent across scales for a given layer at editing
-        // time and the rollback is best-effort. The library's metadata
-        // source is the authoritative answer but it's async; this path
-        // runs synchronously inside discard.
-        return [size[0], size[1], size[2]];
-      }
-    }
-    return undefined;
+  /**
+   * True while an edit is still writing: a stroke being drawn or a closed
+   * stroke's fill (TM-268).
+   */
+  get hasLiveEdit(): boolean {
+    return this.editScope?.hasLiveEdit ?? false;
+  }
+
+  /**
+   * Guard for undo/redo, which the library gates only on the session phase.
+   * Undo mid-write would restore chunks the edit is still writing, and the edit
+   * would then record its entry on top of the entry it just raced. Tells the
+   * user and returns true when the caller must not proceed.
+   */
+  refuseWhilePainting(): boolean {
+    if (!this.hasLiveEdit) return false;
+    StatusMessage.showTemporaryMessage(PAINTING_IN_PROGRESS_MESSAGE, 3000);
+    return true;
   }
 
   /** Commit the active session. Ends the session regardless of outcome. */
@@ -1664,6 +1751,9 @@ export class EditSessionHost extends RefCounted {
     const session = this.activeSession.value;
     if (session === undefined) {
       throw new Error("No active session to commit");
+    }
+    if (this.hasLiveEdit) {
+      throw new Error(PAINTING_IN_PROGRESS_MESSAGE);
     }
     let result: CommitResult;
     try {
@@ -1728,6 +1818,9 @@ export class EditSessionHost extends RefCounted {
     const session = this.activeSession.value;
     if (session === undefined) {
       throw new Error("No active session to save");
+    }
+    if (this.hasLiveEdit) {
+      throw new Error(PAINTING_IN_PROGRESS_MESSAGE);
     }
     if (this.saveAbortController !== undefined) {
       throw new Error("A save is already in flight");
@@ -2152,6 +2245,9 @@ export class EditSessionHost extends RefCounted {
     // page is reloaded. Re-deriving the mask as "what this session changed"
     // lets everything else render from the chunk that comes back.
     if (evicted > 0) void this.resyncPatchesAfterRefetch(scopes);
+    // The 3D preview composites the same datasource bytes; nothing evicted,
+    // nothing to redraw.
+    if (evicted > 0) this.paintedVolumeBinding.onDatasourceRefetched();
     return evicted;
   }
 
@@ -2634,6 +2730,7 @@ export class EditSessionHost extends RefCounted {
     this.committedRegions.delete(layerId);
     const entry = this.perLayer.get(layerId);
     if (entry === undefined) return;
+    this.paintedVolumeBinding.release(layerId);
     if (entry.mirror !== undefined) {
       try {
         entry.mirror.dispose();
@@ -3083,9 +3180,6 @@ export class EditSessionHost extends RefCounted {
         "EditSessionConfig.layers must be non-empty",
       );
     }
-    // Boot pyodide eagerly as the session opens so the multi-second cold start
-    // is hidden before the user's first masked brush stroke (TM-304).
-    this.morphologyClient.warmup();
     const layers: LayerSelection[] = config.layers.map((l) => ({
       layerId: l.layerId,
       selectedResolutions: [...l.resolutions],
@@ -3101,6 +3195,27 @@ export class EditSessionHost extends RefCounted {
         resolution: regionResolution(config.regionSpace),
       },
     };
+  }
+
+  /**
+   * Undo-history bounds sized to the session's largest writable chunk
+   * (TM-373). The library reads the policy once, in `EditSession.open`, so the
+   * chunk sizes are resolved before it. `resolve` is the adapter `open` reads
+   * metadata through, so the sizes are the ones the library will see; it has
+   * the same precondition as `open` (the layer's source has loaded).
+   */
+  private async historyPolicyFor(
+    config: HostSessionConfig,
+  ): Promise<HistoryPolicy> {
+    const writable = await Promise.all(
+      config.layers
+        .filter((layer) => layer.writable)
+        .map(async (layer) => ({
+          metadata: await this.layerMetadataSource.resolve(layer.layerId),
+          resolutions: layer.resolutions,
+        })),
+    );
+    return editHistoryPolicy(writable);
   }
 
   /**
@@ -3275,9 +3390,15 @@ export class EditSessionHost extends RefCounted {
       // a shape on one slice); the user switches to a 3D flood across sections
       // from the fill panel (TM-269).
       fillMode: "2d",
+      // Painting selects its segment so the stroke shows in 2D and 3D without
+      // a double-click (TM-490); the user turns it off in the brush/fill panel.
+      autoSelectPaintedSegment: true,
+      // On: drawing around an object in one motion fills the inside, which is
+      // what tracers expect; the brush panel switches it off.
+      fillClosedPaths: true,
     };
 
-    const compute = new PaintingCompute(this.morphologyClient);
+    const compute = new PaintingCompute();
     // Cross-layer baseline reader → the chunk-source adapter. Mirrors the
     // library runtime's old `readChunkAt`.
     const readChunkAt: ReadChunkAt = (layerId, resolution, chunkId) =>
@@ -3292,6 +3413,7 @@ export class EditSessionHost extends RefCounted {
     // edits) and the binder's activations (so a tool switch rolls back any
     // in-flight stroke) — the single-live-edit invariant (TM-315).
     const editScope = new EditScope(session);
+    this.editScope = editScope;
     this.paintingTools = new ConsumerPaintingTools({
       scope: editScope,
       compute,
@@ -3299,6 +3421,11 @@ export class EditSessionHost extends RefCounted {
       allowedResolutionsByLayer,
       readChunkAt,
       initialState,
+      // From the policy the session was opened with (TM-373), so the fill
+      // limit grows with the history budget.
+      maxFillHistoryBytes: maxFillHistoryBytes(
+        session.config.historyPolicy ?? DEFAULT_HISTORY_POLICY,
+      ),
       // Drive the cursor-attached fill spinner (TM-269). `start`/`end` bracket
       // every fill (including canceled / failed); `update` fires per flush.
       fillProgress: {
@@ -3314,6 +3441,8 @@ export class EditSessionHost extends RefCounted {
       },
       // Surface a memory-bounded fill that stopped short (TM-269).
       notify: (message) => StatusMessage.showTemporaryMessage(message, 8000),
+      selectSegment: (layerId, value) =>
+        this.selectPaintedSegment(layerId, value),
     });
 
     // Registry + session-scoped binder own active-tool selection + the
@@ -3335,10 +3464,16 @@ export class EditSessionHost extends RefCounted {
       metadataByLayer,
       resolutionFor: (layerId) => allowedResolutionsByLayer.get(layerId)?.[0],
       globalVoxelSizeNm: () => this.globalVoxelSizeNm(),
-      trackedSegmentsFor: (maskLayerId) =>
-        this.trackedSegmentsForLayer(maskLayerId),
-      addTrackedSegments: (maskLayerId, ids) =>
-        this.addTrackedSegmentsForLayer(maskLayerId, ids),
+      listedSegmentsFor: (maskLayerId) =>
+        this.selectedSegmentsForLayer(maskLayerId),
+      isSegmentVisible: (maskLayerId, id) =>
+        this.isSegmentVisibleOnLayer(maskLayerId, id),
+      isMergedSegment: (maskLayerId, id) =>
+        this.isMergedSegmentOnLayer(maskLayerId, id),
+      showSegments: (maskLayerId, ids) =>
+        this.showSegmentsOnLayer(maskLayerId, ids),
+      onListedSegmentsRemoved: (maskLayerId, onRemoved) =>
+        this.onSelectedSegmentsRemoved(maskLayerId, onRemoved),
       getViewportPosition: () => this.viewer.position.value,
       setViewportPosition: (position) => {
         this.viewer.position.value = position;
@@ -3369,7 +3504,6 @@ export class EditSessionHost extends RefCounted {
     this.toolingSubscriptions.push(
       this.paintingTools.state.changed.add(() => persist()),
       this.activeToolId.changed.add(() => persist()),
-      this.editKeybindOverrides.changed.add(() => persist()),
       () => persist.cancel(),
     );
 
@@ -3382,11 +3516,7 @@ export class EditSessionHost extends RefCounted {
   private persistTooling(): void {
     const painting = this.paintingTools?.state.getState();
     if (painting === undefined) return;
-    const tooling = serializeTooling(
-      this.activeToolId.value,
-      painting,
-      this.editKeybindOverrides.value,
-    );
+    const tooling = serializeTooling(this.activeToolId.value, painting);
     const intent = this.state.value.value;
     if (intent !== null) {
       this.state.value.value = { ...intent, tooling };
@@ -3400,7 +3530,8 @@ export class EditSessionHost extends RefCounted {
   /**
    * Apply persisted tool parameters after a session opens (TM-315): patch the
    * painting family config (validated against the session layers; stale
-   * bindings dropped) and restore keybind overrides. The persisted
+   * bindings dropped). Keybind overrides are not here: they are kept per
+   * browser (`personal_keybinds.ts`). The persisted
    * `activeToolId` is deliberately ignored (TM-381) — every session entry,
    * fresh open or reload, lands in navigation mode via the caller's
    * `selectTool(undefined)`.
@@ -3408,7 +3539,7 @@ export class EditSessionHost extends RefCounted {
    * `restoreTooling` is the per-session block from `editSession.tooling`,
    * present only when reloading an already-open session — it wins when set. For
    * a fresh open → close → open it is `undefined`, and we fall back to the
-   * cross-session `editPreferences.tooling` (TM-336) to seed brush / keybind
+   * cross-session `editPreferences.tooling` (TM-336) to seed brush
    * defaults. Either way the painting patch is re-validated against the
    * session layers, so a stale binding is dropped back to the hardcoded
    * defaults.
@@ -3419,10 +3550,6 @@ export class EditSessionHost extends RefCounted {
     const session = this.activeSession.value;
     if (session === undefined) return;
     const tooling = restoreTooling ?? this.editPreferences.value.value?.tooling;
-    // Restore per-user keybind overrides (or clear any left over from a prior
-    // session). Done before the early-return so a fresh session always starts
-    // from the configured defaults. The binder watches this and rebuilds.
-    this.editKeybindOverrides.value = tooling?.keybinds ?? {};
     if (tooling === undefined) return;
     if (this.paintingTools !== undefined && tooling.painting !== undefined) {
       // A stale persisted `mask.imageResolution` (e.g. a finer scale from the
@@ -3503,8 +3630,8 @@ export class EditSessionHost extends RefCounted {
       // user's in-memory commits and must stay visible/editable.
       let entry = this.perLayer.get(layer.layerId);
       if (entry === undefined) {
-        const baseRenderLayer = findBaseSegmentationRenderLayer(userLayer);
-        if (baseRenderLayer === undefined) {
+        // The patch textures only show through the base render layer.
+        if (findBaseSegmentationRenderLayer(userLayer) === undefined) {
           this.logger.warn(
             "session",
             `Layer ${layer.layerId} has no SegmentationRenderLayer yet; skipping patch-overlay attach`,
@@ -3516,7 +3643,6 @@ export class EditSessionHost extends RefCounted {
         entry = {
           patchStore,
           textureCache,
-          baseRenderLayer,
           mirror: undefined,
         };
         this.perLayer.set(layer.layerId, entry);
@@ -3546,29 +3672,34 @@ export class EditSessionHost extends RefCounted {
             coord.chunkId,
             ChunkIdFactory.toCoord(coord.chunkId),
           ),
-        // This session's own baseline, for `resyncAfterRefetch` only.
-        //
-        // Deliberately NOT `readBaselineChunk`: that one falls through to the
-        // datasource when it has no saved or committed copy, and the datasource
-        // is precisely what a refetch is replacing — so for a chunk painted but
-        // never saved it would hand back the colleague's incoming bytes and the
-        // mask would mark everything they moved. The chain here ends at the
-        // session-open baseline and returns undefined rather than guessing.
-        async (coord) => {
-          const committed = this.commitTarget.getChunk(
+        // This session's own baseline, for `resyncAfterRefetch` only — see
+        // `sessionEditBaselineReader` for why it is not `readBaselineChunk`.
+        sessionEditBaselineReader({
+          committed: (coord) =>
+            this.commitTarget.getChunk(
+              coord.layerId,
+              coord.resolution,
+              coord.chunkId,
+            )?.bytes,
+          saved: (coord) =>
+            this.chunkSource.getSavedBytes(
+              coord.layerId,
+              coord.resolution,
+              coord.chunkId,
+            ),
+          sessionOpen: (coord) =>
+            session.overlay.baselineRefOf(coord)?.retain(),
+        }),
+        // The datasource render base of one box, for a bounded pass (TM-373):
+        // a brush move reads its box, not the whole chunk.
+        (coord, box) =>
+          this.chunkSource.readDatasourceBaselineBox(
             coord.layerId,
             coord.resolution,
             coord.chunkId,
-          );
-          if (committed !== undefined) return committed.bytes;
-          const saved = this.chunkSource.getSavedBytes(
-            coord.layerId,
-            coord.resolution,
-            coord.chunkId,
-          );
-          if (saved !== undefined) return saved;
-          return session.overlay.baselineRefOf(coord)?.retain();
-        },
+            ChunkIdFactory.toCoord(coord.chunkId),
+            box,
+          ),
       );
     }
 
@@ -3590,12 +3721,26 @@ export class EditSessionHost extends RefCounted {
     // be recomputed when those change — otherwise chunks visually disappear
     // (TM-298).
     this.activeSessionConfig = config;
-    if (this.detachDisplayDimWatch === undefined) {
-      this.detachDisplayDimWatch =
-        this.viewer.displayDimensionRenderInfo.changed.add(() =>
-          this.recomputeActiveRegions(),
-        );
-    }
+    this.watchDisplayDimensions();
+    this.paintedVolumeBinding.sync();
+  }
+
+  /**
+   * Subscribe once to display-dimension changes; the handler outlives the
+   * session it was made under (it is kept across commit → re-open).
+   *
+   * Its own method on purpose (TM-373): V8 gives every closure made in one
+   * function a shared context, so a handler created inside `attachPerLayer`
+   * kept that call's `session` — and with it every overlay copy and history
+   * entry of the first session (1.5 GB on four 4096² chunks) — alive for as
+   * long as the subscription.
+   */
+  private watchDisplayDimensions(): void {
+    if (this.detachDisplayDimWatch !== undefined) return;
+    this.detachDisplayDimWatch =
+      this.viewer.displayDimensionRenderInfo.changed.add(() =>
+        this.recomputeActiveRegions(),
+      );
   }
 
   /**
@@ -4018,28 +4163,298 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
-   * The mask layer's currently-selected segment IDs — the z-extrapolation
-   * tracked set (TM-326). Reuses the segmentation layer's own selection, so the
-   * user manages it with the normal NG controls (and viewport double-click,
-   * which z-extrapolation is exempted from suppressing).
+   * The mask layer's selected segment IDs — the segments the z-extrapolation
+   * panel lists (TM-326; the tool tracks or untracks each, TM-518). Reuses the
+   * segmentation layer's own selection, so the user manages the list with the
+   * normal NG controls (and viewport double-click, which z-extrapolation is
+   * exempted from suppressing).
    */
-  private trackedSegmentsForLayer(maskLayerId: LayerId): readonly bigint[] {
+  private selectedSegmentsForLayer(maskLayerId: LayerId): readonly bigint[] {
     const layer = this.findSegmentationUserLayer(maskLayerId);
     const selected =
       layer?.displayState.segmentationGroupState.value.selectedSegments;
     return selected === undefined ? [] : [...selected];
   }
 
-  /** Add IDs to the mask layer's selection — z-extrapolation auto-detect (TM-326). */
-  private addTrackedSegmentsForLayer(
+  /** Whether a selected segment is shown in the viewer (its NG checkbox is on). */
+  private isSegmentVisibleOnLayer(maskLayerId: LayerId, id: bigint): boolean {
+    const layer = this.findSegmentationUserLayer(maskLayerId);
+    const visible =
+      layer?.displayState.segmentationGroupState.value.visibleSegments;
+    return visible?.has(id) ?? false;
+  }
+
+  /**
+   * Whether a segment is merged with others through the layer's equivalences
+   * (TM-518). Z-extrapolation matches raw mask voxels, so it cannot track one.
+   */
+  private isMergedSegmentOnLayer(maskLayerId: LayerId, id: bigint): boolean {
+    const group =
+      this.findSegmentationUserLayer(maskLayerId)?.displayState
+        .segmentationGroupState.value;
+    if (group === undefined) return false;
+    let memberCount = 0;
+    for (const _member of getSegmentEquivalences(group).setElements(id)) {
+      if (++memberCount > 1) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Select and show segments, the way a double-click does — z-extrapolation
+   * auto-detect (TM-326). Showing them (TM-518) puts them on screen, so the
+   * panel's swatches match what the user sees; NG adds a shown segment to the
+   * selection itself.
+   */
+  private showSegmentsOnLayer(
     maskLayerId: LayerId,
     ids: readonly bigint[],
   ): void {
-    const layer = this.findSegmentationUserLayer(maskLayerId);
+    const group =
+      this.findSegmentationUserLayer(maskLayerId)?.displayState
+        .segmentationGroupState.value;
+    if (group === undefined) return;
+    for (const id of ids) group.visibleSegments.add(id);
+  }
+
+  /**
+   * Call `onRemoved` with the segments that leave the mask layer's selection
+   * (`"all"` when it is cleared). Returns the unsubscribe (TM-518).
+   */
+  private onSelectedSegmentsRemoved(
+    maskLayerId: LayerId,
+    onRemoved: (ids: readonly bigint[] | "all") => void,
+  ): () => void {
     const selected =
-      layer?.displayState.segmentationGroupState.value.selectedSegments;
-    if (selected === undefined) return;
-    for (const id of ids) selected.add(id);
+      this.findSegmentationUserLayer(maskLayerId)?.displayState
+        .segmentationGroupState.value.selectedSegments;
+    if (selected === undefined) return () => {};
+    return selected.changed.add((ids, add) => {
+      if (add) return;
+      if (ids === null) onRemoved("all");
+      else onRemoved(Array.isArray(ids) ? ids : [ids]);
+    });
+  }
+
+  /**
+   * Mount NG's own segment-list row for segment `id` of a layer into `parent`
+   * — the widget the layer's segment list shows, so its colour, hover and
+   * controls match the viewer (TM-518). Returns the unmount, or `undefined`
+   * while the layer is not resolved.
+   */
+  mountSegmentListWidget(
+    layerId: LayerId,
+    parent: HTMLElement,
+    id: bigint,
+  ): (() => void) | undefined {
+    const displayState = this.findSegmentationUserLayer(layerId)?.displayState;
+    return displayState === undefined
+      ? undefined
+      : mountSegmentListWidget(displayState, parent, id);
+  }
+
+  /**
+   * Call `callback` whenever which of a layer's segments a panel lists may
+   * have changed, or what it says about them: the selection, which are shown,
+   * and which are merged. Follows the layer through removal and re-creation,
+   * and a swap of its segment group. Returns the unsubscribe (TM-518).
+   */
+  onSegmentDisplayChanged(layerId: LayerId, callback: () => void): () => void {
+    let unsubscribeLayer: () => void = () => {};
+    const subscribeLayer = () => {
+      unsubscribeLayer();
+      const displayState =
+        this.findSegmentationUserLayer(layerId)?.displayState;
+      if (displayState === undefined) {
+        unsubscribeLayer = () => {};
+        return;
+      }
+      let unsubscribeGroup: () => void = () => {};
+      const subscribeGroup = () => {
+        unsubscribeGroup();
+        const group = displayState.segmentationGroupState.value;
+        const unsubscribers = [
+          group.selectedSegments.changed.add(callback),
+          group.visibleSegments.changed.add(callback),
+          group.segmentEquivalences.changed.add(callback),
+          group.temporarySegmentEquivalences.changed.add(callback),
+          group.useTemporarySegmentEquivalences.changed.add(callback),
+        ];
+        unsubscribeGroup = () => {
+          for (const unsubscribe of unsubscribers) unsubscribe();
+        };
+      };
+      subscribeGroup();
+      const unsubscribeSwap = displayState.segmentationGroupState.changed.add(
+        () => {
+          subscribeGroup();
+          callback();
+        },
+      );
+      unsubscribeLayer = () => {
+        unsubscribeSwap();
+        unsubscribeGroup();
+      };
+    };
+    subscribeLayer();
+    const unsubscribeLayers = this.viewer.layerManager.layersChanged.add(() => {
+      subscribeLayer();
+      callback();
+    });
+    return () => {
+      unsubscribeLayers();
+      unsubscribeLayer();
+    };
+  }
+
+  /**
+   * The colour neuroglancer draws segment `value` in on `layerId`, as a CSS
+   * colour, with the text colour that reads on it (WCAG luminance, as
+   * neuroglancer's own colour widgets pick it), or `undefined` when the layer
+   * is gone. Uses the same function as
+   * the segment list and the slices (`getBaseObjectColor`), on the segment's
+   * representative, so merges, the colour seed and user-set colours all show.
+   * One hash per call: cheap enough for every key press.
+   */
+  segmentColorFor(
+    layerId: LayerId,
+    value: number | bigint,
+  ): SegmentColor | undefined {
+    const layer = this.findSegmentationUserLayer(layerId);
+    if (layer === undefined) return undefined;
+    const { displayState } = layer;
+    const representative =
+      displayState.segmentationGroupState.value.segmentEquivalences.get(
+        BigInt(value),
+      );
+    const color = vec4.create();
+    getBaseObjectColor(displayState, representative, color);
+    return {
+      background: serializeColor(color),
+      text: useWhiteBackground(color) ? "white" : "black",
+    };
+  }
+
+  /**
+   * Select a painted segment on its layer, the way a double-click does: its
+   * representative joins the visible segments (and so the selected list).
+   */
+  private selectPaintedSegment(layerId: LayerId, value: number | bigint): void {
+    const layer = this.findSegmentationUserLayer(layerId);
+    if (layer === undefined) return;
+    const { visibleSegments, segmentEquivalences } =
+      layer.displayState.segmentationGroupState.value;
+    visibleSegments.add(segmentEquivalences.get(BigInt(value)));
+  }
+
+  /** The host as the painted-volume binding sees it (TM-490). */
+  private paintedVolumePort(): PaintedVolumeHostPort {
+    const layerManager = () => this.viewer.layerManager;
+    return {
+      get layersChanged() {
+        return layerManager().layersChanged;
+      },
+      sessionLayerIds: () => this.paintedVolumeSessionLayerIds(),
+      findUserLayer: (layerId) => this.findSegmentationUserLayer(layerId),
+      createPreview: (layerId) => {
+        const inputs = this.paintedVolumeInputsFor(layerId);
+        if (inputs === undefined) return undefined;
+        if (!this.gpuLossGuard().previewAllowed()) return undefined;
+        return createSessionPaintedVolumePreview(inputs);
+      },
+    };
+  }
+
+  private gpuLossGuard(): PaintedVolumeGpuLossGuard {
+    this.paintedVolumeGpuLossGuard ??= this.registerDisposer(
+      new PaintedVolumeGpuLossGuard({
+        canvas: this.viewer.display.gl.canvas,
+        storage: reachableSessionStorage(),
+        logger: this.logger,
+        previewExists: () => this.paintedVolumeBinding.hasPreviews(),
+      }),
+    );
+    return this.paintedVolumeGpuLossGuard;
+  }
+
+  /** Writable layers with a live mirror, i.e. painted in the open session. */
+  private paintedVolumeSessionLayerIds(): LayerId[] {
+    return [...this.perLayer]
+      .filter(([, entry]) => entry.mirror !== undefined)
+      .map(([layerId]) => layerId);
+  }
+
+  /**
+   * Everything a preview of `layerId` needs, or `undefined` until the session,
+   * its frozen region and the brush cursor all exist.
+   */
+  private paintedVolumeInputsFor(
+    layerId: LayerId,
+  ): PaintedVolumeSessionInputs | undefined {
+    const session = this.activeSession.value;
+    const regions = this.sessionRegions;
+    const entry = this.perLayer.get(layerId);
+    const cursor = this.cursorState;
+    // `R_preview`: the brush's default resolution (plan §3.10).
+    const resolution = this._sessionResolutionsByLayer.get(layerId)?.[0];
+    const userLayer = this.findSegmentationUserLayer(layerId);
+    if (
+      session === undefined ||
+      regions === undefined ||
+      entry?.mirror === undefined ||
+      cursor === undefined ||
+      resolution === undefined ||
+      userLayer === undefined
+    ) {
+      return undefined;
+    }
+    const metadata = session.baseline.perLayer.get(layerId)?.metadata;
+    const regionBounds = regions.boundsFor(layerId, resolution);
+    if (metadata === undefined || regionBounds === undefined) return undefined;
+    return {
+      gl: this.viewer.display.gl,
+      logger: this.logger,
+      frameTimings: this.viewer.display,
+      gpuMemoryLimitBytes:
+        this.viewer.chunkManager.chunkQueueManager.capacities.gpuMemory
+          .sizeLimit.value,
+      lockedRegions: this.paintedVolumeLockedRegions(session, regions),
+      resolution,
+      regionBounds,
+      metadata,
+      store: entry.patchStore,
+      displayState: userLayer.displayState,
+      displayInfo: this.viewer.displayDimensionRenderInfo,
+      readBaseline: async (chunkId, signal) => {
+        const buffer = await this.chunkSource.readDatasourceBaseline(
+          layerId,
+          resolution,
+          chunkId,
+          ChunkIdFactory.toCoord(chunkId),
+          signal,
+        );
+        // Segmentation is integer-typed: the float view never reaches here.
+        return buffer.asView() as BaselineVoxelView;
+      },
+      cursor,
+    };
+  }
+
+  /** Every locked `(layer, resolution)` region, for the preview's GPU budget. */
+  private paintedVolumeLockedRegions(
+    session: EditSession,
+    regions: SessionRegionSnapshot,
+  ): LockedLayerRegion[] {
+    const locked: LockedLayerRegion[] = [];
+    for (const [layerId, resolutions] of this._sessionResolutionsByLayer) {
+      const metadata = session.baseline.perLayer.get(layerId)?.metadata;
+      if (metadata === undefined) continue;
+      for (const resolution of resolutions) {
+        const bounds = regions.boundsFor(layerId, resolution);
+        if (bounds !== undefined) locked.push({ metadata, resolution, bounds });
+      }
+    }
+    return locked;
   }
 
   private findSegmentationUserLayer(
@@ -4125,6 +4540,14 @@ export class EditSessionHost extends RefCounted {
   setAutomerge(enabled: boolean): void {
     const prev = this.editPreferences.value.value ?? {};
     this.editPreferences.value.value = { ...prev, automerge: enabled };
+  }
+
+  /**
+   * The session's 3D previews folded into one status (fill progress, or why
+   * one cannot show); read by the e2e and perf suites.
+   */
+  get paintedVolumePreviewSummary(): WatchableValueInterface<PaintedVolumePreviewSummary> {
+    return this.paintedVolumeBinding.summary;
   }
 
   private handleOpenFailure(err: unknown): void {
@@ -4222,6 +4645,9 @@ export class EditSessionHost extends RefCounted {
    */
   private commitTeardown(): void {
     this.tearDownSessionTools();
+    // The 3D preview lives as long as the mirror: the next open builds a new
+    // one for its own region (TM-490, Q16).
+    this.paintedVolumeBinding.releaseAll();
     for (const entry of this.perLayer.values()) {
       if (entry.mirror !== undefined) {
         try {
@@ -4274,6 +4700,8 @@ export class EditSessionHost extends RefCounted {
     }
     this._toolRegistry = undefined;
     this.paintingTools = undefined;
+    this.editScope = undefined;
+    this.zExtrapolationTool?.dispose();
     this.zExtrapolationTool = undefined;
     this.teardownHotkeyBinder();
     this.teardownCursorOverlays();
@@ -4335,6 +4763,7 @@ export class EditSessionHost extends RefCounted {
     for (const watchable of this.patchOverlayByLayer.values()) {
       watchable.value = undefined;
     }
+    this.paintedVolumeBinding.releaseAll();
     for (const entry of this.perLayer.values()) {
       if (entry.mirror !== undefined) {
         try {

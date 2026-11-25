@@ -9,7 +9,15 @@
  *      http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { Fragment, useCallback } from "react";
+import "#src/ui/annotations.css";
+import "#src/ui/key_chips.css";
+
+import type { ComponentProps } from "react";
+import { Fragment, useCallback, useLayoutEffect, useRef } from "react";
+import {
+  AnnotationType,
+  annotationTypeHandlers,
+} from "#src/annotation/index.js";
 
 import { MAIN_BRANCH_ID } from "#src/datasource/calcada/branch_picker_logic.js";
 import { describePiece } from "#src/datasource/calcada/candidate_heat.js";
@@ -18,22 +26,52 @@ import type {
   SplitDetectionFocus,
 } from "#src/datasource/calcada/candidate_overview_state.js";
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
+import { formatScore } from "#src/datasource/calcada/candidate_ranking.js";
 import type { FilterLibrary } from "#src/datasource/calcada/filter_library.js";
 import { FilterNumberInput } from "#src/datasource/calcada/react/filter_number_input.js";
+import { KeyChips } from "#src/datasource/calcada/react/key_chips.js";
 import { RejectedByPicker } from "#src/datasource/calcada/react/rejected_by_picker.js";
 import { ScoreRangeSlider } from "#src/datasource/calcada/react/score_range_slider.js";
+import type {
+  PairContact,
+  PairListDimension,
+  SegmentPair,
+} from "#src/datasource/calcada/segment_pair_candidates.js";
 import { chooseTraceFilter } from "#src/datasource/calcada/trace_filter_choice.js";
+import {
+  AIM_KEYS_MODE,
+  CALCADA_LIST_PAIR_CANDIDATES_ACTION,
+  CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
+  CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
+  CALCADA_TRACE_TOGGLE_ACTION,
+  TRACE_KEYS_MODE,
+  splitDetectionChords,
+  traceChords,
+} from "#src/datasource/calcada/trace_key_bindings.js";
 import type {
   TraceScope,
   ZettaTraceState,
 } from "#src/datasource/calcada/trace_state.js";
 import {
+  clampTraceEndRadiusNm,
+  TRACE_END_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MAX_NM,
   TRACE_SPHERE_RADIUS_MIN_NM,
 } from "#src/datasource/calcada/trace_state.js";
 import { useSignalRerender } from "#src/editing/ui/interop/react/use_signal_rerender.js";
 import { useWatchable } from "#src/editing/ui/interop/react/use_watchable.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
+import {
+  AnnotationListColumnWidths,
+  annotationListCoordinateColumns,
+} from "#src/ui/annotations.js";
+import { keysForCustomAction } from "#src/ui/custom_keybinds.js";
+import {
+  chordsForAction,
+  formatShortcutKeys,
+  shortcutAttributes,
+} from "#src/ui/key_chord_format.js";
+import { SHORTCUT_SHEET_KEYS } from "#src/ui/mode_shortcuts.js";
 import type { NullarySignal } from "#src/util/signal.js";
 import { Button } from "@/components/ui/button";
 import {
@@ -81,9 +119,21 @@ export interface TracePanelConnection {
     reject(): void;
     canUndo(): boolean;
     skip(): void;
+    markAmbiguous(): void;
     start(): void;
     accept(): Promise<void>;
     undoLast(): Promise<void>;
+  };
+  /** Every candidate between the segments on screen, grouped by pair. */
+  readonly pairCandidates: {
+    readonly changed: NullarySignal;
+    readonly status: string;
+    readonly pairs: readonly SegmentPair[];
+    /** The view's dimensions, the list's coordinate columns. */
+    dimensions(): readonly PairListDimension[];
+    list(): Promise<void>;
+    goTo(contact: PairContact): void;
+    showSegment(root: bigint, parent: HTMLElement): () => void;
   };
   listCandidateReviewers(): Promise<string[]>;
   readonly filterLibrary: FilterLibrary;
@@ -153,7 +203,17 @@ function TraceFilterPicker({
           ))}
         </SelectContent>
       </Select>
-      <ScoreRangeSlider range={state.scoreRange} />
+      <div className="calcada-trace-panel-score">
+        <ScoreRangeSlider range={state.scoreRange} />
+        <span
+          className="neuroglancer-key-chips"
+          data-tooltip="Raise or lower the lowest score"
+        >
+          <KeyChips keys={traceChords(`${TRACE_KEYS_MODE}-minus`)} />
+          <span className="neuroglancer-key-chips-separator">/</span>
+          <KeyChips keys={traceChords(`${TRACE_KEYS_MODE}-plus`)} />
+        </span>
+      </div>
       <div className="calcada-trace-filter-row">
         <Button
           size="xs"
@@ -185,38 +245,105 @@ const SCOPE_LABELS: ReadonlyArray<[TraceScope, string]> = [
 ];
 
 /**
- * The keys the trace owns while it is running. Mirrors
- * ZETTA_TRACE_INPUT_EVENT_MAP and CALCADA_TRACE_AIM_INPUT_EVENT_MAP in
- * frontend.ts; the tab is the only place these are spelled out for a human
- * now, so a binding changed there has to be changed here too.
+ * The keys of the trace and detection, read from the maps in
+ * `trace_key_bindings.ts` and from `custom-keybinds.json`, so a changed binding
+ * shows up here without a second edit.
  */
-// The binding is the physical US "/?" key, so it is named both ways.
-const SPLIT_DETECTION_KEY = "? (Shift+/)";
+const START_TRACE_KEYS = keysForCustomAction(CALCADA_TRACE_TOGGLE_ACTION);
+const SPLIT_DETECTION_KEYS = keysForCustomAction(
+  CALCADA_SPLIT_DETECTION_TOGGLE_ACTION,
+);
+const LIST_PAIR_CANDIDATES_KEYS = keysForCustomAction(
+  CALCADA_LIST_PAIR_CANDIDATES_ACTION,
+);
+const CONTROL_CLICK = ["control+mousedown0", "meta+mousedown0"];
 
-const KEY_HINTS: ReadonlyArray<[string, string]> = [
-  ["T", "start a trace"],
-  ["Ctrl+click in 2D", "select the segment, after Select"],
-  ["Ctrl+click", "place the sphere"],
-  ["+ / −", "resize the sphere while placing"],
-  ["+ / −", "raise / lower the lowest score"],
-  ["→", "accept and merge"],
-  ["←", "reject"],
-  ["↓", "skip for now"],
-  ["Ctrl+Z", "undo the last edit"],
-  ["Esc", "put the seed down, then leave"],
-  [SPLIT_DETECTION_KEY, "split error detection on / off"],
-  ["← / →", "previous / next flagged piece"],
+const aimChords = (action: string) =>
+  chordsForAction(CALCADA_TRACE_AIM_INPUT_EVENT_MAP, action);
+
+/** Every key the tab answers to, generated from the maps that bind them. */
+const KEY_HINTS: ReadonlyArray<readonly [string, string]> = [
+  [formatShortcutKeys(START_TRACE_KEYS), "start a trace"],
+  [
+    `${formatShortcutKeys(CONTROL_CLICK)} in 2D`,
+    "select the segment, after Select",
+  ],
+  [formatShortcutKeys(aimChords("trace-place-sphere")), "place the sphere"],
+  [
+    formatShortcutKeys(
+      aimChords(`${AIM_KEYS_MODE}-plus`),
+      aimChords(`${AIM_KEYS_MODE}-minus`),
+    ),
+    "resize the sphere while placing",
+  ],
+  [
+    formatShortcutKeys(
+      traceChords(`${TRACE_KEYS_MODE}-plus`),
+      traceChords(`${TRACE_KEYS_MODE}-minus`),
+    ),
+    "raise / lower the lowest score",
+  ],
+  [formatShortcutKeys(traceChords("accept-candidate")), "accept and merge"],
+  [formatShortcutKeys(traceChords("reject-candidate")), "reject"],
+  [formatShortcutKeys(traceChords("skip-candidate")), "skip for now"],
+  [formatShortcutKeys(traceChords("trace-undo")), "undo the last edit"],
+  [
+    formatShortcutKeys(traceChords("exit-trace")),
+    "put the seed down, then leave",
+  ],
+  [formatShortcutKeys(SPLIT_DETECTION_KEYS), "split error detection on / off"],
+  [
+    formatShortcutKeys(
+      splitDetectionChords("split-detection-previous"),
+      splitDetectionChords("split-detection-next"),
+    ),
+    "previous / next flagged candidate",
+  ],
+  [
+    formatShortcutKeys(LIST_PAIR_CANDIDATES_KEYS),
+    "list the candidates between the segments on screen",
+  ],
+  [formatShortcutKeys(SHORTCUT_SHEET_KEYS), "all shortcuts"],
 ];
 
-const NO_VALUE = "—";
-const SCORE_DIGITS = 2;
-
-function clampRadius(radiusNm: number): number {
-  return Math.min(
-    TRACE_SPHERE_RADIUS_MAX_NM,
-    Math.max(TRACE_SPHERE_RADIUS_MIN_NM, radiusNm),
+/**
+ * A button with the shared hover tooltip. The tooltip sits on a wrapper because a
+ * disabled button fires no pointer events, and those are the ones that most need
+ * explaining.
+ */
+function HintedButton({
+  hint,
+  keys = [],
+  keysOnButton = "none",
+  children,
+  ...buttonProps
+}: ComponentProps<typeof Button> & {
+  hint: string;
+  keys?: readonly string[];
+  keysOnButton?: "before" | "after" | "none";
+}) {
+  const { "data-shortcut": shortcut, "aria-keyshortcuts": ariaKeys } =
+    shortcutAttributes(keys);
+  return (
+    <span
+      className="calcada-trace-panel-button-hint"
+      data-tooltip={hint}
+      data-shortcut={shortcut === "" ? undefined : shortcut}
+    >
+      <Button
+        size="xs"
+        aria-keyshortcuts={ariaKeys === "" ? undefined : ariaKeys}
+        {...buttonProps}
+      >
+        {keysOnButton === "before" && <KeyChips keys={keys} />}
+        {children}
+        {keysOnButton === "after" && <KeyChips keys={keys} />}
+      </Button>
+    </span>
   );
 }
+
+const NO_VALUE = "—";
 
 /** One line that never wraps: a longer text is cut, and whole in its tooltip. */
 function StatusLine({ text, picking }: { text: string; picking?: boolean }) {
@@ -251,32 +378,30 @@ function SegmentSection({
         picking={picking}
       />
       <div className="calcada-trace-panel-buttons">
-        <Button
-          size="xs"
+        <HintedButton
+          hint={"Select the segment\nThen click it in a 2D view with this key"}
+          keys={CONTROL_CLICK}
           variant="outline"
-          title="Ctrl+click the segment to proofread in a 2D view"
           onClick={() => session.pick()}
         >
           Select
-        </Button>
-        <Button
-          size="xs"
+        </HintedButton>
+        <HintedButton
+          hint="Back to where the segment was selected"
           variant="outline"
           disabled={!chosen}
-          title="Back to where the segment was selected"
           onClick={() => session.goTo()}
         >
           Go to
-        </Button>
-        <Button
-          size="xs"
+        </HintedButton>
+        <HintedButton
+          hint="Forget the segment"
           variant="outline"
           disabled={!chosen}
-          title="Forget the segment"
           onClick={() => session.clear()}
         >
           Clear
-        </Button>
+        </HintedButton>
       </div>
     </fieldset>
   );
@@ -288,9 +413,9 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
   const aiming = useWatchable(traceState.aiming);
   const tracing = useWatchable(traceState.active);
   const scope = useWatchable(traceState.scope);
-  const radiusNm = useWatchable(traceState.sphereRadiusNm);
+  const radiusDefaultNm = useWatchable(traceState.sphereRadiusDefaultNm);
+  const endRadiusNm = useWatchable(traceState.endRadiusNm);
   const centreOnCandidate = useWatchable(traceState.centreOnCandidate);
-  const zoomOnCandidate = useWatchable(traceState.zoomOnCandidate);
   const keepSplitParts = useWatchable(traceState.keepSplitParts);
   const showSplitPoints = useWatchable(traceState.showSplitPoints);
   const busy = traceSession.isBusy;
@@ -302,27 +427,28 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
         <span className="calcada-trace-panel-badge">
           {aiming ? "Aiming" : tracing ? "Tracing" : "Idle"}
         </span>
-        <Button
-          size="xs"
+        <HintedButton
+          hint="Start a trace on the segment"
+          keys={START_TRACE_KEYS}
           variant="outline"
           disabled={tracing || aiming}
-          title="Start a trace on the segment (T)"
           onClick={() => traceSession.start()}
         >
           Start
-        </Button>
-        <Button
-          size="xs"
+        </HintedButton>
+        <HintedButton
+          hint="Leave trace mode"
+          keys={traceChords("exit-trace")}
+          keysOnButton="after"
           variant="ghost"
           disabled={!tracing && !aiming}
-          title="Leave trace mode (Esc)"
           onClick={() => {
             traceState.aiming.value = false;
             traceState.active.value = false;
           }}
         >
           Exit
-        </Button>
+        </HintedButton>
       </div>
       <StatusLine
         text={
@@ -355,16 +481,49 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
         </Select>
       </label>
       <label className="calcada-trace-panel-row">
-        Sphere radius, nm
+        <span className="calcada-trace-panel-radius-label">
+          Default sphere radius, nm
+          <span
+            className="neuroglancer-key-chips"
+            data-tooltip="Resize this trace's sphere while placing it; the default stays"
+          >
+            <KeyChips
+              keys={chordsForAction(
+                CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
+                `${AIM_KEYS_MODE}-minus`,
+              )}
+            />
+            <span className="neuroglancer-key-chips-separator">/</span>
+            <KeyChips
+              keys={chordsForAction(
+                CALCADA_TRACE_AIM_INPUT_EVENT_MAP,
+                `${AIM_KEYS_MODE}-plus`,
+              )}
+            />
+          </span>
+        </span>
         <FilterNumberInput
           min={TRACE_SPHERE_RADIUS_MIN_NM}
           max={TRACE_SPHERE_RADIUS_MAX_NM}
           step={100}
-          title="Radius of the sphere. Changing it after the seed is placed re-picks the candidates."
+          title="Every trace's sphere starts at this radius. Changing it also resizes the current sphere and re-picks the candidates."
           disabled={scope === "segment"}
-          value={Math.round(radiusNm)}
+          value={Math.round(radiusDefaultNm)}
+          onValueChange={(next) => traceState.setSphereRadiusDefaultNm(next)}
+        />
+      </label>
+      <label className="calcada-trace-panel-row">
+        <span className="calcada-trace-panel-radius-label">
+          End check radius, nm
+        </span>
+        <FilterNumberInput
+          min={TRACE_SPHERE_RADIUS_MIN_NM}
+          max={TRACE_END_RADIUS_MAX_NM}
+          step={100}
+          title="After each decision, asks whether the line ends when no passing candidate lies within this radius."
+          value={Math.round(endRadiusNm)}
           onValueChange={(next) => {
-            traceState.sphereRadiusNm.value = clampRadius(next);
+            traceState.endRadiusNm.value = clampTraceEndRadiusNm(next);
           }}
         />
       </label>
@@ -378,16 +537,6 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
           }}
         />
         Centre on each candidate
-      </label>
-      <label className="calcada-trace-panel-check">
-        <input
-          type="checkbox"
-          checked={zoomOnCandidate}
-          onChange={(event) => {
-            traceState.zoomOnCandidate.value = event.target.checked;
-          }}
-        />
-        Zoom the 3D view to each candidate
       </label>
       <label className="calcada-trace-panel-check">
         <input
@@ -411,51 +560,65 @@ function TraceSection({ connection }: { connection: TracePanelConnection }) {
       </label>
 
       <div className="calcada-trace-panel-buttons">
-        <Button
-          size="xs"
+        <HintedButton
+          hint="Reject this candidate"
+          keys={traceChords("reject-candidate")}
+          keysOnButton="before"
           variant="outline"
           disabled={verdictDisabled}
-          title="Reject this candidate (left arrow)"
           onClick={() => traceSession.reject()}
         >
           Reject
-        </Button>
-        <Button
-          size="xs"
+        </HintedButton>
+        <HintedButton
+          hint={"Skip for now\nThis session only"}
+          keys={traceChords("skip-candidate")}
+          keysOnButton="before"
           variant="outline"
           disabled={verdictDisabled}
-          title="Skip for now, this session only (down arrow)"
           onClick={() => traceSession.skip()}
         >
           Skip
-        </Button>
-        <Button
-          size="xs"
+        </HintedButton>
+        <HintedButton
+          hint={"Impossible to tell\nMarks an uncertain end at the contact"}
+          keys={traceChords("ambiguous-candidate")}
+          keysOnButton="before"
+          variant="outline"
           disabled={verdictDisabled}
-          title="Accept and merge (right arrow)"
+          onClick={() => traceSession.markAmbiguous()}
+        >
+          Ambiguous
+        </HintedButton>
+        <HintedButton
+          hint="Accept and merge"
+          keys={traceChords("accept-candidate")}
+          keysOnButton="after"
+          disabled={verdictDisabled}
           onClick={() => void traceSession.accept()}
         >
           Accept
-        </Button>
+        </HintedButton>
         {/* Undo stays live with no candidate on screen: running out of
             candidates is exactly when someone notices the last merge was
             wrong. */}
-        <Button
-          size="xs"
+        <HintedButton
+          hint="Take back the last edit"
+          keys={traceChords("trace-undo")}
+          keysOnButton="after"
           variant="outline"
           disabled={busy || !traceSession.canUndo()}
-          title="Take back the last edit (⌘/ctrl+Z)"
           onClick={() => void traceSession.undoLast()}
         >
           Undo
-        </Button>
+        </HintedButton>
       </div>
     </fieldset>
   );
 }
 
 /**
- * One flagged piece at a time, strongest first, so a proofreader is taken to
+ * One flagged candidate at a time, strongest first, so a proofreader is taken to
  * each likely split instead of hunting for red on a whole segment.
  */
 function SplitDetectionSection({
@@ -477,28 +640,29 @@ function SplitDetectionSection({
     <fieldset className="calcada-trace-panel-section calcada-trace-panel-detection">
       <legend>Split error detection</legend>
       <div className="calcada-trace-panel-buttons">
-        <Button
-          size="xs"
+        <HintedButton
+          hint="Mark likely split errors on the segment"
+          keys={SPLIT_DETECTION_KEYS}
+          keysOnButton="after"
           variant="outline"
           disabled={active || tracing}
-          title={`Mark likely split errors on the segment (${SPLIT_DETECTION_KEY})`}
           onClick={() => {
             state.active.value = true;
           }}
         >
           Detect split errors
-        </Button>
-        <Button
-          size="xs"
+        </HintedButton>
+        <HintedButton
+          hint="Remove the marks"
+          keys={SPLIT_DETECTION_KEYS}
           variant="outline"
           disabled={!active || tracing}
-          title={`Remove the marks (${SPLIT_DETECTION_KEY})`}
           onClick={() => {
             state.active.value = false;
           }}
         >
           Clear
-        </Button>
+        </HintedButton>
       </div>
       <StatusLine text={active ? session.status : ""} />
       <div className="calcada-trace-panel-legend">
@@ -507,44 +671,199 @@ function SplitDetectionSection({
         <span>likely split</span>
       </div>
       <div className="calcada-trace-panel-navigator">
-        <Button
-          size="xs"
+        <HintedButton
+          hint="Previous flagged candidate"
+          keys={splitDetectionChords("split-detection-previous")}
           variant="outline"
           disabled={focus === undefined}
-          title="Previous flagged piece (left arrow)"
           onClick={() => session.previousPiece()}
         >
           ‹
-        </Button>
+        </HintedButton>
         <button
           type="button"
           className="calcada-trace-panel-navigator-position"
-          title="Go back to this piece"
+          title="Go back to this candidate"
           disabled={focus?.index === undefined}
           onClick={() => session.showFocus()}
         >
           {focus?.index === undefined ? NO_VALUE : focus.index + 1} /{" "}
           {focus?.total ?? NO_VALUE}
         </button>
-        <Button
-          size="xs"
+        <HintedButton
+          hint="Next flagged candidate"
+          keys={splitDetectionChords("split-detection-next")}
           variant="outline"
           disabled={focus === undefined}
-          title="Next flagged piece (right arrow)"
           onClick={() => session.nextPiece()}
         >
           ›
-        </Button>
+        </HintedButton>
       </div>
       <div className="calcada-trace-panel-current">
         {piece === undefined
           ? NO_VALUE
-          : `score ${piece.bestScore.toFixed(SCORE_DIGITS)} · ${describePiece({
-              voxels: piece.voxelCount,
-              classes: piece.classes,
-              hasInfo: piece.hasInfo,
-            })}`}
+          : `score ${formatScore(piece.bestScore, piece.bestLabel)} · ${describePiece(
+              {
+                voxels: piece.bestPartnerVoxels,
+                classes: piece.partnerClasses,
+                hasInfo: piece.partnerHasInfo,
+              },
+            )}`}
       </div>
+    </fieldset>
+  );
+}
+
+const HIDING_DECISION_NAMES: Record<string, string> = {
+  reject: "rejected",
+  ambiguous: "ambiguous",
+};
+
+function describeContact(contact: PairContact) {
+  const score = formatScore(contact.score, contact.label);
+  const hiding = HIDING_DECISION_NAMES[contact.hidingDecision];
+  return hiding === undefined ? score : `${score} · ${hiding}`;
+}
+
+const LINE_ICON = annotationTypeHandlers[AnnotationType.LINE].icon;
+// What the annotation list adds around a dimension's name and scale: a space
+// and the scale's parentheses.
+const DIMENSION_DECORATION = 3;
+
+const coordinatesOf = (point: Float32Array) =>
+  Array.from(point, (value) => String(Math.floor(value)));
+
+function ContactEnd({ point }: { point: Float32Array }) {
+  return (
+    <div className="neuroglancer-annotation-position">
+      {coordinatesOf(point).map((text, axis) => (
+        <div
+          key={axis}
+          className="neuroglancer-annotation-coordinate"
+          style={{ gridColumn: `dim ${axis + 1}` }}
+        >
+          {text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PairSegment({
+  root,
+  session,
+}: {
+  root: bigint;
+  session: TracePanelConnection["pairCandidates"];
+}) {
+  const slot = useRef<HTMLDivElement>(null);
+  useLayoutEffect(
+    () => session.showSegment(root, slot.current!),
+    [root, session],
+  );
+  return <div ref={slot} />;
+}
+
+/**
+ * Each contact as an annotation list shows a line: its two ends, then its
+ * score; read-only, so without the list's edit and delete columns.
+ */
+function PairContactList({
+  session,
+}: {
+  session: TracePanelConnection["pairCandidates"];
+}) {
+  const list = useRef<HTMLDivElement>(null);
+  const dimensions = session.dimensions();
+  const gridTemplateColumns = annotationListCoordinateColumns(
+    dimensions.length,
+  );
+  useLayoutEffect(() => {
+    const widths = new AnnotationListColumnWidths(list.current!);
+    dimensions.forEach(({ name, scale }, axis) => {
+      widths.widen(axis, name.length + scale.length + DIMENSION_DECORATION);
+    });
+    for (const { contacts } of session.pairs) {
+      for (const { pointA, pointB } of contacts) {
+        for (const point of [pointA, pointB]) {
+          coordinatesOf(point).forEach((text, axis) =>
+            widths.widen(axis, text.length),
+          );
+        }
+      }
+    }
+  });
+  return (
+    <div ref={list} className="calcada-trace-panel-pairs-list">
+      <div
+        className="neuroglancer-annotation-list-header"
+        style={{ gridTemplateColumns }}
+      >
+        {dimensions.map(({ name, scale }, axis) => (
+          <div
+            key={axis}
+            className="neuroglancer-annotations-view-dimension"
+            style={{ gridColumn: `dim ${axis + 1}` }}
+          >
+            <span className="neuroglancer-annotations-view-dimension-name">
+              {name}
+            </span>
+            <span className="neuroglancer-annotations-view-dimension-scale">
+              {scale}
+            </span>
+          </div>
+        ))}
+      </div>
+      {session.pairs.map((pair) => (
+        <Fragment key={`${pair.rootA}:${pair.rootB}`}>
+          <div className="calcada-trace-panel-pair">
+            <PairSegment root={pair.rootA} session={session} />
+            <PairSegment root={pair.rootB} session={session} />
+          </div>
+          {pair.contacts.map((contact) => (
+            <div
+              key={String(contact.lineId)}
+              className="neuroglancer-annotation-list-entry"
+              style={{ gridTemplateColumns }}
+              title="Go to where the two segments touch"
+              onClick={() => session.goTo(contact)}
+            >
+              <div className="neuroglancer-annotation-icon">{LINE_ICON}</div>
+              <ContactEnd point={contact.pointA} />
+              <ContactEnd point={contact.pointB} />
+              <div className="neuroglancer-annotation-description">
+                {describeContact(contact)}
+              </div>
+            </div>
+          ))}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+function PairCandidatesSection({
+  session,
+}: {
+  session: TracePanelConnection["pairCandidates"];
+}) {
+  useSignalRerender(session.changed);
+  return (
+    <fieldset className="calcada-trace-panel-section calcada-trace-panel-pairs">
+      <legend>Candidates between segments</legend>
+      <div className="calcada-trace-panel-buttons">
+        <HintedButton
+          hint="List every candidate between the segments on screen, hidden ones included"
+          keys={LIST_PAIR_CANDIDATES_KEYS}
+          variant="outline"
+          onClick={() => void session.list()}
+        >
+          List
+        </HintedButton>
+      </div>
+      <StatusLine text={session.status} />
+      {session.pairs.length > 0 && <PairContactList session={session} />}
     </fieldset>
   );
 }
@@ -577,6 +896,7 @@ export function CalcadaTracePanel({
           runs on. Switch to a branch, or create one, with the Branch control —
           the segments you have selected come with you.
         </div>
+        <PairCandidatesSection session={connection.pairCandidates} />
       </div>
     );
   }
@@ -613,11 +933,11 @@ export function CalcadaTracePanel({
         state={connection.state.overviewState}
         traceState={traceState}
       />
-
-      <details className="calcada-trace-panel-keys-section">
-        <summary>Keys</summary>
+      <PairCandidatesSection session={connection.pairCandidates} />
+      <details className="calcada-trace-panel-keys-section" open>
+        <summary>Hotkeys</summary>
         <dl className="calcada-trace-panel-keys">
-          {KEY_HINTS.map(([keys, meaning]) => (
+          {KEY_HINTS.filter(([keys]) => keys !== "").map(([keys, meaning]) => (
             <Fragment key={`${keys} ${meaning}`}>
               <dt>{keys}</dt>
               <dd>{meaning}</dd>

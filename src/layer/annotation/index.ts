@@ -30,6 +30,8 @@ import type { CoordinateTransformSpecification } from "#src/coordinate_transform
 import { makeCoordinateSpace } from "#src/coordinate_transform.js";
 import type { DataSourceSpecification } from "#src/datasource/index.js";
 import { localAnnotationsUrl, LocalDataSource } from "#src/datasource/local.js";
+import { siblingAtVersionTime } from "#src/kvstore/versioned/version_time_source.js";
+
 import {
   registerAnnotationPropertyTools,
   removeInvalidPropertyToolBindings,
@@ -697,11 +699,14 @@ export class AnnotationUserLayer extends Base {
       const { annotation } = subsourceEntry.subsource;
       if (annotation !== undefined) {
         if (!setProperties(annotation.properties)) continue;
+        const versionTime = this.versionTime.value;
         loadedSubsource.activate(() => {
           const state = new AnnotationLayerState({
             localPosition: this.localPosition,
             transform: loadedSubsource.getRenderLayerTransform(),
-            source: annotation,
+            // Zetta (TM-521): read at the layer's chosen version time; the
+            // state owns that source.
+            source: siblingAtVersionTime(annotation, versionTime) ?? annotation,
             displayState: this.annotationDisplayState,
             dataSource: loadedSubsource.loadedDataSource.layerDataSource,
             subsourceIndex: loadedSubsource.subsourceIndex,
@@ -709,7 +714,7 @@ export class AnnotationUserLayer extends Base {
             role: RenderLayerRole.ANNOTATION,
           });
           this.addAnnotationLayerState(state, loadedSubsource);
-        });
+        }, versionTime);
         continue;
       }
       loadedSubsource.deactivate("Not compatible with annotation layer");

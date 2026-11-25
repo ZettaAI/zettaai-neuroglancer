@@ -98,9 +98,25 @@
 
 .neuroglancer-segment-list-entry.neuroglancer-segment-list-header
   .neuroglancer-segment-list-entry-star,
+.neuroglancer-segment-list-entry.neuroglancer-segment-list-header
+  .neuroglancer-segment-list-entry-annotations,
 .neuroglancer-segment-list-entry.neuroglancer-segment-list-header:hover
   .neuroglancer-segment-list-entry-copy {
   visibility: hidden;
+}
+
+.neuroglancer-segment-list-entry-sticky
+  > .neuroglancer-segment-list-entry-annotations {
+  order: 1;
+}
+
+.neuroglancer-segment-list-entry-annotations[hidden] {
+  display: none;
+}
+
+.neuroglancer-segment-list-entry-annotations.neuroglancer-annotations-off
+  > svg {
+  stroke: rgba(255, 255, 255, 0.35);
 }
 
 .neuroglancer-segment-list-entry-extra-property {

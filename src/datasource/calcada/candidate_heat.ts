@@ -23,6 +23,7 @@ import type { FilterSubject } from "#src/datasource/calcada/candidate_filter_tre
 import type { EdgeCandidate } from "#src/datasource/calcada/candidate_ranking.js";
 import { packColor } from "#src/util/color.js";
 import { vec4 } from "#src/util/geom.js";
+import { parseUint64 } from "#src/util/json.js";
 
 export type SemanticClass =
   | "any"
@@ -33,7 +34,9 @@ export type SemanticClass =
   | "vasculature"
   | "nucleus"
   | "ecs"
-  | "other";
+  | "other"
+  | "myelin"
+  | "synaptic_cleft";
 
 export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   "any",
@@ -45,18 +48,15 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   "nucleus",
   "ecs",
   "other",
+  "myelin",
+  "synaptic_cleft",
 ];
 
-export interface PieceClasses {
-  perikaryon: number;
-  dendrite: number;
-  axon: number;
-  glia: number;
-  vasculature: number;
-  nucleus: number;
-  ecs: number;
-  other: number;
-}
+/**
+ * A piece's semantic breakdown in voxels. A class is the summed class
+ * probability of the piece's voxels, so it may be fractional.
+ */
+export type PieceClasses = Record<Exclude<SemanticClass, "any">, number>;
 
 /** A semantic breakdown as the server sends it; absent classes count zero. */
 export function parseClassCounts(raw: any): PieceClasses {
@@ -69,6 +69,8 @@ export function parseClassCounts(raw: any): PieceClasses {
     nucleus: Number(raw?.nucleus ?? 0),
     ecs: Number(raw?.ecs ?? 0),
     other: Number(raw?.other ?? 0),
+    myelin: Number(raw?.myelin ?? 0),
+    synaptic_cleft: Number(raw?.synaptic_cleft ?? 0),
   };
 }
 
@@ -80,9 +82,19 @@ export function parseOverviewPoint(
   return [Number(raw[0]), Number(raw[1]), Number(raw[2])];
 }
 
+/**
+ * One candidate a piece offers, with the piece it is offered from; a piece
+ * offering none is one row of its own. Rows, not pieces, are what is flagged:
+ * a piece touching the segments it should join in several places is several
+ * split errors.
+ */
 export interface PieceOverview {
   pieceId: bigint;
+  /** The candidate this row stands for; absent for a piece offering none. */
+  lineId?: bigint;
   bestScore: number;
+  /** The best candidate's label; empty without one. */
+  bestLabel: string;
   /** The piece its best candidate would merge in; 0 when it offers none. */
   bestPartnerPiece: bigint;
   /** The segment holding that piece — what actually has a mesh to load. */
@@ -102,6 +114,46 @@ export interface PieceOverview {
    */
   contact?: [number, number, number];
   partnerContact?: [number, number, number];
+}
+
+/** The overview as the server sends it, one row per candidate. */
+export function parsePieceOverviews(raw: readonly any[]): PieceOverview[] {
+  return raw.flatMap((piece) => {
+    const row: PieceOverview = {
+      pieceId: parseUint64(piece.piece_id),
+      bestScore: Number(piece.best_score),
+      bestLabel: "",
+      bestPartnerPiece: parseUint64(piece.best_partner_piece ?? "0"),
+      bestPartnerRoot: parseUint64(piece.best_partner_root ?? "0"),
+      bestPartnerVoxels: Number(piece.best_partner_voxels ?? 0),
+      partnerClasses: parseClassCounts(piece.partner_classes),
+      partnerHasInfo: piece.partner_has_info === true,
+      candidateCount: Number(piece.candidate_count ?? 0),
+      voxelCount: Number(piece.voxel_count),
+      classes: parseClassCounts(piece.classes),
+      hasInfo: piece.has_info === true,
+      contact: parseOverviewPoint(piece.point_a),
+      partnerContact: parseOverviewPoint(piece.point_b),
+    };
+    const candidates: any[] = piece.candidates ?? [];
+    if (candidates.length === 0) return [row];
+    return candidates.map(
+      (candidate): PieceOverview => ({
+        ...row,
+        lineId: parseUint64(candidate.line_id),
+        bestScore: Number(candidate.score),
+        bestLabel: String(candidate.label ?? ""),
+        bestPartnerPiece: parseUint64(candidate.partner_piece),
+        bestPartnerRoot: parseUint64(candidate.partner_root),
+        bestPartnerVoxels: Number(candidate.partner_voxels ?? 0),
+        partnerClasses: parseClassCounts(candidate.partner_classes),
+        partnerHasInfo: candidate.partner_has_info === true,
+        candidateCount: 1,
+        contact: parseOverviewPoint(candidate.point_a),
+        partnerContact: parseOverviewPoint(candidate.point_b),
+      }),
+    );
+  });
 }
 
 // The shared packer, not a local one: the mesh reads these as (a<<24)|(b<<16)|
@@ -135,16 +187,7 @@ export function heatColorGlsl(score: string): string {
 }
 
 export function classTotal(classes: PieceClasses): number {
-  return (
-    classes.perikaryon +
-    classes.dendrite +
-    classes.axon +
-    classes.glia +
-    classes.vasculature +
-    classes.nucleus +
-    classes.ecs +
-    classes.other
-  );
+  return Object.values(classes).reduce((total, value) => total + value, 0);
 }
 
 /** A detection row as the filter tree sees it: the piece and its best candidate. */
@@ -184,7 +227,7 @@ export function edgeCandidateSubject(candidate: EdgeCandidate): FilterSubject {
   };
 }
 
-/** The score a piece is painted with: its best candidate's, or zero. */
+/** The score a piece is painted with: its best passing candidate's, or zero. */
 function flaggedScores(
   pieces: readonly PieceOverview[],
   passes: (piece: PieceOverview) => boolean,
@@ -192,7 +235,8 @@ function flaggedScores(
   const scores = new Map<bigint, number>();
   for (const piece of pieces) {
     const counts = piece.candidateCount > 0 && passes(piece);
-    scores.set(piece.pieceId, counts ? piece.bestScore : 0);
+    const score = counts ? piece.bestScore : 0;
+    scores.set(piece.pieceId, Math.max(scores.get(piece.pieceId) ?? 0, score));
   }
   return scores;
 }
@@ -224,9 +268,11 @@ export function rankFlaggedPieces(
   pieces: readonly PieceOverview[],
   passes: (piece: PieceOverview) => boolean,
 ): PieceOverview[] {
-  const scores = flaggedScores(pieces, passes);
   return pieces
-    .filter((piece) => (scores.get(piece.pieceId) ?? 0) > 0)
+    .filter(
+      (piece) =>
+        piece.candidateCount > 0 && piece.bestScore > 0 && passes(piece),
+    )
     .sort((a, b) => b.bestScore - a.bestScore);
 }
 

@@ -146,6 +146,30 @@
   user-select: none;
 }
 
+.calcada-piece-split .piece-split-cut-pricing {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: 12px sans-serif;
+}
+
+.calcada-piece-split .piece-split-cut-pricing .range-slider {
+  justify-content: flex-start;
+  gap: 5px;
+}
+
+.calcada-piece-split
+  .piece-split-cut-pricing
+  .range-slider
+  input[type="range"] {
+  flex: none;
+  width: 120px;
+}
+
+.calcada-piece-split .piece-split-cut-pricing input:disabled {
+  opacity: 0.4;
+}
+
 .calcada-piece-split .neuroglancer-icon.disabled {
   opacity: 0.4;
   pointer-events: none;
@@ -448,9 +472,44 @@
   white-space: nowrap;
 }
 
+/* The prompt's title carries a radius and can outgrow the overlay; a notice's
+   stays on one line. */
+.calcada-trace-notice-prompt .calcada-trace-notice-title {
+  white-space: normal;
+}
+
 .calcada-trace-notice-detail {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+.calcada-trace-notice-highlight {
+  font-weight: 700;
+}
+
+.calcada-trace-notice-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.calcada-trace-notice-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.calcada-trace-notice-prompt {
+  opacity: 1;
+}
+
+.calcada-trace-notice-radius,
+.calcada-trace-notice-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 4px;
+  margin-top: 4px;
 }
 
 .calcada-trace-notice-spinner {
@@ -604,14 +663,58 @@
   margin: 0;
 }
 
-/* The keys the trace owns. Lives here rather than in a status bubble at the
-   bottom of the viewer: the tab is always open, so the bubble only repeated
-   what is already on screen. */
+/* The tooltip sits here because a disabled button fires no pointer events: the
+   button stops catching the pointer and hover falls through to this wrapper. */
+.calcada-trace-panel-button-hint {
+  display: inline-flex;
+}
+
+.calcada-trace-panel-button-hint button:disabled {
+  pointer-events: none;
+}
+
+/* An xs button is barely taller than a key chip; let it grow around one. */
+.calcada-trace-panel-button-hint button,
+.calcada-trace-notice-buttons button {
+  height: auto;
+  padding-block: 4px;
+}
+
+.calcada-trace-panel-button-hint .neuroglancer-key-chip {
+  margin-inline: 1px;
+  font-weight: 400;
+}
+
+.calcada-trace-panel-score {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calcada-trace-panel-score > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.calcada-trace-panel-radius-label {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+/* Every key the tab answers to. Open by default: this list is how they get
+   learned, and it is generated from the maps that handle them. */
+.calcada-trace-panel-keys-section summary {
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .calcada-trace-panel-keys {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 2px 8px;
-  margin: 0;
+  margin: 4px 0 0;
   font-size: 11px;
   opacity: 0.8;
 }
@@ -623,11 +726,6 @@
 
 .calcada-trace-panel-keys dd {
   margin: 0;
-}
-
-.calcada-trace-panel-keys-section summary {
-  font-size: 12px;
-  cursor: pointer;
 }
 
 /* Without a legend "green or red" is a guess. The bar is the scale itself, so
@@ -659,6 +757,15 @@
   font-size: 12px;
 }
 
+.calcada-trace-panel-pairs-list {
+  max-height: 16em;
+  overflow: auto;
+}
+
+.calcada-trace-panel-pair {
+  padding-top: 4px;
+}
+
 .calcada-trace-panel-navigator-position {
   min-width: 4em;
   padding: 0;
@@ -673,8 +780,9 @@
 
 .calcada-trace-panel-buttons {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 8px 4px;
 }
 
 /* The Trace tab's filter box: which saved filter Trace applies. */
@@ -1602,4 +1710,245 @@
   flex: none;
   font-family: monospace;
   white-space: nowrap;
+}
+
+.calcada-annotations-tab {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.calcada-annotations-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 8px;
+  font-size: 12px;
+}
+
+/* Fixed above the list, but never more than half the tab: many selected
+   tables scroll here instead of squeezing the list away. */
+.calcada-annotations-controls {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50%;
+  overflow-y: auto;
+}
+
+.calcada-annotations-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.calcada-annotations-place {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.calcada-annotations-place-tools {
+  display: flex;
+}
+
+.calcada-annotations-place-tools .neuroglancer-icon[aria-pressed="true"] {
+  background-color: #db4437;
+}
+
+.calcada-annotations-limit {
+  color: #f6c344;
+}
+
+.calcada-annotations-payload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.calcada-annotations-payload-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.calcada-annotations-payload-value {
+  width: 7em;
+}
+
+.calcada-annotations-picker {
+  flex: none;
+  min-width: 0;
+}
+
+/* The chip input's intrinsic width is a browser default wider than the panel. */
+.calcada-annotations-picker input {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 3em;
+}
+
+.calcada-annotations-chip {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.calcada-annotations-tables {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  gap: 8px;
+  list-style: none;
+}
+
+.calcada-annotations-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.calcada-annotations-table-header,
+.calcada-annotations-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.calcada-annotations-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border: 1px solid #666;
+  border-radius: 2px;
+}
+
+.calcada-annotations-loading {
+  margin-left: 8px;
+  color: #aaa;
+}
+
+.calcada-annotations-color {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid #666;
+  border-radius: 2px;
+  background: none;
+  cursor: pointer;
+}
+
+.calcada-annotations-color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.calcada-annotations-color::-webkit-color-swatch {
+  border: none;
+}
+
+.calcada-annotations-color::-moz-color-swatch {
+  border: none;
+}
+
+.calcada-annotations-table-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calcada-annotations-table-schema {
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.calcada-annotations-whole-table {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.calcada-annotations-list-holder {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.calcada-annotations-list-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.calcada-annotations-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.calcada-annotations-list .neuroglancer-annotation-list-entry:hover,
+.calcada-trace-panel-pairs-list .neuroglancer-annotation-list-entry:hover {
+  background-color: #333;
+}
+
+.calcada-annotations-error {
+  color: rgb(240 90 90);
+  overflow-wrap: anywhere;
+}
+
+.calcada-annotations-empty {
+  opacity: 0.7;
+}
+
+.calcada-annotations-filtered {
+  opacity: 0.7;
+}
+
+.calcada-annotations-filter {
+  width: 22rem;
+  max-width: calc(100vw - 16px);
+  font-size: 12px;
+}
+
+.calcada-annotations-filter-editor,
+.calcada-annotations-filter-rows,
+.calcada-annotations-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.calcada-annotations-filter-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.calcada-annotations-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calcada-annotations-filter-value {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 4em;
 }

@@ -73,3 +73,17 @@ export function nanometresToGlobal(
   for (let dim = 0; dim < 3; ++dim) out[dim] = pointNm[dim] / nmPerUnit[dim];
   return out;
 }
+
+/** Global coordinates as a point in nanometres. */
+export function globalToNanometres(
+  point: Float32Array,
+  coordinateSpace: CoordinateSpace,
+): [number, number, number] | undefined {
+  const nmPerUnit = nanometresPerGlobalUnit(coordinateSpace);
+  if (nmPerUnit === undefined) return undefined;
+  return [
+    point[0] * nmPerUnit[0],
+    point[1] * nmPerUnit[1],
+    point[2] * nmPerUnit[2],
+  ];
+}

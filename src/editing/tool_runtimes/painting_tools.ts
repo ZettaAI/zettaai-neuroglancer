@@ -35,27 +35,38 @@ import type {
   Resolution,
   WriteTarget,
 } from "@zettaai/edit-session";
-import { ChunkId, scaleFor } from "@zettaai/edit-session";
+import { bytesPerVoxel, ChunkId, scaleFor } from "@zettaai/edit-session";
 
 import {
   brushSizeVoxels,
   brushStampAnchor,
 } from "#src/editing/tool_runtimes/brush_disk_footprint.js";
 
+import { maskKeepsEveryVoxel } from "#src/editing/tool_runtimes/mask_coord.js";
 import { applyPaintBatch } from "#src/editing/tool_runtimes/paint_batch_apply.js";
 import { paintProfiler } from "#src/editing/tool_runtimes/paint_profiler.js";
+import type { Vec3 } from "#src/editing/tool_runtimes/paint_rasterize.js";
 import { paintScheduler } from "#src/editing/tool_runtimes/paint_scheduler_config.js";
+import type { ChunkTile } from "#src/editing/tool_runtimes/paint_stroke_pipeline.js";
 import {
+  chunksForFootprint,
   chunksForStroke,
   PaintStrokePipeline,
 } from "#src/editing/tool_runtimes/paint_stroke_pipeline.js";
 import type {
   FillMode,
   PaintCompute,
+  StrokeFootprintMask,
   PaintingMaskConfig,
   PaintWriteBatch,
 } from "#src/editing/tool_runtimes/paint_types.js";
+import { buildFootprintBatch } from "#src/editing/tool_runtimes/painting_compute.js";
 import { PaintParamCursor } from "#src/editing/tool_runtimes/param_cursor.js";
+import type { StrokeRedoKind } from "#src/editing/tool_runtimes/stroke_enclosure.js";
+import {
+  computeEnclosedFootprint,
+  fillHistoryBytes,
+} from "#src/editing/tool_runtimes/stroke_enclosure.js";
 import { StrokeGeometry } from "#src/editing/tool_runtimes/stroke_geometry.js";
 import type {
   InputHandling,
@@ -108,6 +119,57 @@ export interface PaintingSharedState {
    * and tunable.
    */
   readonly spacingFraction: number;
+  /**
+   * Whether the brush and fill select the segment they paint, so it shows in
+   * 2D and 3D without a double-click (TM-490). On by default; the eraser
+   * never selects.
+   */
+  readonly autoSelectPaintedSegment: boolean;
+  /**
+   * Whether a brush stroke that closes on itself also paints what it encloses
+   * (TM-268). Off by default; the eraser never fills.
+   */
+  readonly fillClosedPaths: boolean;
+}
+
+/** 16M voxels is 128 MB in the masked path's `Float64Array` image slab. */
+const MAX_FILL_IMAGE_VOXELS = 16_000_000;
+
+/** A reference layer outside the session is not preloaded, so reads can stall. */
+const FILL_IMAGE_READ_TIMEOUT_MS = 15_000;
+
+const FILL_TOO_LARGE_MESSAGE =
+  "The stroke was kept, but the area inside it is too large to fill.";
+const FILL_FAILED_MESSAGE =
+  "The stroke was kept, but the area inside it could not be filled.";
+
+/**
+ * A stroke past pointer-up whose fill is still writing. Holds the edit open so
+ * one undo removes stroke and fill together, while the next stroke's events stay
+ * out of it (they wait on `done`).
+ */
+interface FinalizingStroke {
+  readonly handle: InteractionHandle;
+  /** Never rejects: a failed fill still commits the stroke. */
+  done: Promise<void>;
+}
+
+/** Everything a fill needs that was fixed when its stroke started. */
+interface StrokeFillContext {
+  readonly edit: Edit;
+  readonly contour: readonly Vec3[];
+  readonly shared: PaintingSharedState;
+  readonly metadata: LayerMetadata;
+  readonly value: number | bigint;
+  readonly maskFields: StrokeMaskFields;
+  readonly redoKind: StrokeRedoKind;
+  readonly isCurrent: () => boolean;
+}
+
+interface StrokeMaskFields {
+  mask?: PaintingMaskConfig;
+  maskMetadata?: LayerMetadata;
+  maskAllowedResolutions?: readonly Resolution[];
 }
 
 /**
@@ -169,6 +231,13 @@ interface PaintingToolDeps {
   >;
   readonly readChunkAt: ReadChunkAt;
   /**
+   * Most history one fill may record: half the session's undo budget, so a
+   * fill never evicts the user's earlier strokes (`maxFillHistoryBytes` in
+   * `edit_history_budget.ts`). Comes from the session's policy, which is sized
+   * to its chunks (TM-373).
+   */
+  readonly maxFillHistoryBytes: number;
+  /**
    * Worker-pool stroke pipeline (TM-322). Used for the unmasked same-z r>=1 fast
    * path when cross-origin isolation makes it available; otherwise strokes fall
    * back to the synchronous main-thread compute path.
@@ -184,6 +253,24 @@ interface PaintingToolDeps {
    * toast). Used to explain a memory-bounded fill that stopped short (TM-269).
    */
   readonly notify?: (message: string) => void;
+  /**
+   * Selects a painted segment on its layer (host wires it to the layer's
+   * visible segments, TM-490). Absent in tests / headless contexts.
+   */
+  readonly selectSegment?: (layerId: LayerId, value: number | bigint) => void;
+}
+
+/**
+ * Select the segment a brush stroke or fill is about to paint, when the user
+ * keeps auto-select on. Segment 0 is background and never selected.
+ */
+function selectPaintedSegment(
+  deps: PaintingToolDeps,
+  shared: PaintingSharedState,
+): void {
+  if (!shared.autoSelectPaintedSegment) return;
+  if (BigInt(shared.activeValue) === 0n) return;
+  deps.selectSegment?.(shared.targetLayerId, shared.activeValue);
 }
 
 /**
@@ -242,6 +329,12 @@ interface StrokeReplay {
   readonly segments: (readonly (readonly [number, number, number])[])[];
   /** Spacing passed through to `applyBrushStroke` (no effect on output today). */
   spacingVoxels: number;
+  /**
+   * The outline to re-fill on redo. Set only once a fill was really applied, so
+   * a stroke whose fill was skipped does not gain one on redo. The mask is
+   * recomputed from this rather than kept, so no large buffer sits in history.
+   */
+  enclosureContour?: readonly Vec3[];
 }
 
 /**
@@ -275,6 +368,23 @@ export class StrokeTool implements EditTool {
    * reference, so it sees the finalized record after commit.
    */
   private activeReplay: StrokeReplay | null = null;
+  /**
+   * The pointer path of the current stroke, or null unless it may fill (TM-268).
+   * Includes samples the scheduler did not paint, so a fast circle encloses its
+   * true shape rather than a polygon of the few positions that were painted.
+   */
+  private contour: Vec3[] | null = null;
+  /**
+   * Fixed at pointer-down: this stroke treats a mask that rejects nothing as no
+   * mask (TM-268), which is what gives it replay redo. Re-deciding per event
+   * could mix masked segments into a replayed stroke.
+   */
+  private strokeIgnoresMask = false;
+  private finalizing: FinalizingStroke | null = null;
+  /** Released when `finalizing` is canceled, whether or not its op ever settles. */
+  private finalizingWaiters: (() => void)[] = [];
+  /** Lets a pointer-down waiting on a fill notice the tool was switched away. */
+  private deactivationCount = 0;
 
   constructor(
     private readonly deps: PaintingToolDeps,
@@ -307,15 +417,31 @@ export class StrokeTool implements EditTool {
     // in-flight worker tiles FIRST (TM-322/TM-323) so a late tile cannot
     // commitWrites into the just-discarded edit — this is the real race, since
     // onDeactivate is a direct disposer call, not gated by the bridge.
-    if (this.handle !== null) {
-      const handle = this.handle;
-      this.handle = null;
+    this.deactivationCount++;
+    const handle = this.takeCancelableHandle();
+    if (handle !== null) {
       this.deps.pipeline.invalidate();
       void handle.cancel();
     }
+    this.clearStrokeState();
+  }
+
+  /** Detach whichever edit is open, drawn or finalizing, for cancellation. */
+  private takeCancelableHandle(): InteractionHandle | null {
+    const handle = this.handle ?? this.finalizing?.handle ?? null;
+    this.handle = null;
+    this.finalizing = null;
+    for (const release of this.finalizingWaiters.splice(0)) release();
+    return handle;
+  }
+
+  private clearStrokeState(): void {
+    this.handle = null;
     this.lastVoxel = null;
     this.geometry = null;
     this.activeReplay = null;
+    this.contour = null;
+    this.strokeIgnoresMask = false;
   }
 
   /**
@@ -330,14 +456,14 @@ export class StrokeTool implements EditTool {
     shared: PaintingSharedState,
     metadata: LayerMetadata,
     value: number | bigint,
-    maskFields: {
-      mask?: PaintingMaskConfig;
-      maskMetadata?: LayerMetadata;
-      maskAllowedResolutions?: readonly Resolution[];
-    },
+    maskFields: StrokeMaskFields,
     readChunkAt: ReadChunkAt,
     stepVoxels: number,
     useWorker: boolean,
+    // Polled after every await, right before any write: `Edit` does not refuse
+    // writes once finalized, so a stroke canceled during a compute would
+    // otherwise land in the overlay with no undo entry behind it.
+    isCurrent: () => boolean,
   ): Promise<void> {
     if (path.length < 2) return;
     const target: WriteTarget = {
@@ -364,7 +490,7 @@ export class StrokeTool implements EditTool {
     // P1 (TM-317): warm the overlay chunks under the stroke footprint NOW, in
     // parallel, so they are resident by the time the apply (worker OR
     // synchronous) calls `beginWrite` → `materializeForWrite.fetchBaseline`. For
-    // a masked stroke the warm overlaps the pyodide compute (~120 ms), so the
+    // a masked stroke the warm overlaps the mask compute, so the
     // previously-cold per-chunk baseline IO (spiking to ~150 ms) becomes a
     // resident clone. Best-effort: the real read still happens at write time,
     // and the undo pre-image is still captured there — we only relocate the
@@ -378,11 +504,11 @@ export class StrokeTool implements EditTool {
       targetScale.voxelOffset,
     );
 
-    // Worker write path (TM-322 unmasked / TM-317 Phase B masked): single-z,
-    // real-radius live strokes apply off the main thread directly into the SAB
-    // overlay slots — the unmasked rasterize kernel, or the masked footprint
-    // mask stamped where set. This removes `scatter` + `writeRegion` (the
-    // measured ~84% of BLOCKS-UI) from the main thread. On ANY worker failure we
+    // Worker write path (TM-322): single-z, real-radius unmasked live strokes
+    // apply off the main thread directly into the SAB overlay slots with the
+    // rasterize kernel; masked strokes take the synchronous compute below.
+    // This removes `scatter` + `writeRegion` (the measured ~84% of BLOCKS-UI)
+    // from the main thread. On ANY worker failure we
     // latch the path off and fall through to the synchronous compute below, so a
     // broken worker degrades gracefully instead of breaking the stroke. The
     // 1-voxel brush (r === 0), z-varying paths, and replay-redo always take the
@@ -390,58 +516,28 @@ export class StrokeTool implements EditTool {
     const r = Math.floor(shared.radius);
     const z0 = Math.floor(stampPath[0][2]);
     const sameZ = stampPath.every((p) => Math.floor(p[2]) === z0);
-    if (useWorker && this.deps.pipeline.available && r >= 1 && sameZ) {
-      if (maskFields.mask === undefined) {
-        try {
-          await this.deps.pipeline.paintSegment(
-            edit,
-            target,
-            metadata,
-            stampPath,
-            shared.radius,
-            value,
-          );
-          this.deps.pipeline.markSucceeded();
-          return;
-        } catch (e) {
-          this.deps.pipeline.markFailed();
-          warnWorkerFallback(e);
-        }
-      } else if (this.deps.compute.computeMaskedStrokeFootprint !== undefined) {
-        try {
-          const wvia = stampPath.slice(1, -1);
-          const footprint =
-            await this.deps.compute.computeMaskedStrokeFootprint({
-              targetLayerId: shared.targetLayerId,
-              targetResolution: shared.targetResolution,
-              metadata,
-              from: stampPath[0],
-              to: stampPath[stampPath.length - 1],
-              ...(wvia.length > 0 ? { via: wvia } : {}),
-              stepVoxels,
-              radius: shared.radius,
-              value,
-              ...maskFields,
-              readChunk,
-              readChunkAt,
-            });
-          // `null` = not worker-eligible / worker not ready / pyodide failed →
-          // take the synchronous path (which re-runs the proven compute).
-          if (footprint !== null) {
-            await this.deps.pipeline.stampMaskedFootprint(
-              edit,
-              target,
-              metadata,
-              footprint,
-              value,
-            );
-            this.deps.pipeline.markSucceeded();
-            return;
-          }
-        } catch (e) {
-          this.deps.pipeline.markFailed();
-          warnWorkerFallback(e);
-        }
+    if (
+      useWorker &&
+      this.deps.pipeline.available &&
+      r >= 1 &&
+      sameZ &&
+      maskFields.mask === undefined
+    ) {
+      try {
+        await this.deps.pipeline.paintSegment(
+          edit,
+          target,
+          metadata,
+          stampPath,
+          shared.radius,
+          value,
+        );
+        this.deps.pipeline.markSucceeded();
+        return;
+      } catch (e) {
+        this.deps.pipeline.markFailed();
+        warnWorkerFallback(e);
+        if (!isCurrent()) return;
       }
     }
 
@@ -464,8 +560,229 @@ export class StrokeTool implements EditTool {
     // residual wait, which should be ~0 once warming wins the race.
     await paintProfiler.timeAsync("P1.warm(io)", () => warm);
     await paintProfiler.timeAsync("apply.total(cpu)", () =>
-      edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize)),
+      edit.withBatch(() =>
+        applyPaintBatch(edit, batch, targetScale, isCurrent),
+      ),
     );
+  }
+
+  /**
+   * Paint what a closed stroke encloses into its edit (TM-268). Returns whether
+   * a fill was fully applied. Anything short of that leaves the stroke as it was
+   * painted, and tells the user unless the stroke simply was not closed.
+   */
+  private async fillEnclosure(context: StrokeFillContext): Promise<boolean> {
+    const { edit, contour, shared, metadata } = context;
+    const target: WriteTarget = {
+      layerId: shared.targetLayerId,
+      resolution: shared.targetResolution,
+    };
+    const scale = scaleFor(metadata, shared.targetResolution);
+    const bounds = edit.sessionVoxelBoundsFor({
+      ...target,
+      chunkId: ChunkId.fromCoord({ x: 0, y: 0, z: 0 }),
+    });
+    const enclosure = computeEnclosedFootprint(contour, shared.radius, bounds);
+    if (enclosure.kind === "open") return false;
+    if (enclosure.kind === "too-large") {
+      this.deps.notify?.(FILL_TOO_LARGE_MESSAGE);
+      return false;
+    }
+    const { footprint } = enclosure;
+    const tiles = chunksForFootprint(
+      footprint,
+      scale.chunkDataSize,
+      bounds,
+      scale.voxelOffset,
+    );
+    const historyBytes = fillHistoryBytes(
+      tiles.length,
+      scale.chunkDataSize,
+      bytesPerVoxel(metadata.voxelDataType) * metadata.channels,
+      context.redoKind,
+    );
+    if (historyBytes > this.deps.maxFillHistoryBytes) {
+      this.deps.notify?.(FILL_TOO_LARGE_MESSAGE);
+      return false;
+    }
+
+    this.deps.fillProgress?.start();
+    try {
+      return context.maskFields.mask !== undefined
+        ? await this.writeMaskedFill(context, footprint, tiles)
+        : await this.writeUnmaskedFill(context, footprint, tiles);
+    } finally {
+      this.deps.fillProgress?.end();
+    }
+  }
+
+  /**
+   * Materialize every tile BEFORE the first write. This is the step that can
+   * fail on IO, and failing here means nothing was written, so "no partial fill"
+   * holds. `warmStrokeFootprint` would not do: it swallows errors.
+   */
+  private async materializeFillTiles(
+    context: StrokeFillContext,
+    tiles: readonly ChunkTile[],
+  ): Promise<boolean> {
+    const { edit, shared } = context;
+    try {
+      await Promise.all(
+        tiles.map((tile) =>
+          edit.beginWrite({
+            layerId: shared.targetLayerId,
+            resolution: shared.targetResolution,
+            chunkId: ChunkId.fromCoord(tile.coord),
+          }),
+        ),
+      );
+      return true;
+    } catch (e) {
+      console.warn("[painting] fill skipped: chunk read failed.", e);
+      this.deps.notify?.(FILL_FAILED_MESSAGE);
+      return false;
+    }
+  }
+
+  private async writeUnmaskedFill(
+    context: StrokeFillContext,
+    footprint: StrokeFootprintMask,
+    tiles: readonly ChunkTile[],
+  ): Promise<boolean> {
+    const { edit, shared, metadata, value, isCurrent } = context;
+    const target: WriteTarget = {
+      layerId: shared.targetLayerId,
+      resolution: shared.targetResolution,
+    };
+    if (!(await this.materializeFillTiles(context, tiles))) return false;
+    if (!isCurrent()) return false;
+
+    if (this.deps.pipeline.available) {
+      try {
+        await this.deps.pipeline.stampMaskedFootprint(
+          edit,
+          target,
+          metadata,
+          footprint,
+          value,
+          tiles,
+        );
+        this.deps.pipeline.markSucceeded();
+        return isCurrent();
+      } catch (e) {
+        this.deps.pipeline.markFailed();
+        warnWorkerFallback(e);
+        if (!isCurrent()) return false;
+      }
+    }
+    // Retrying over a half-stamped worker result is safe: every write is the
+    // same absolute value at the same voxel.
+    await this.applyFootprintBatch(
+      edit,
+      shared,
+      metadata,
+      footprint,
+      value,
+      isCurrent,
+    );
+    return isCurrent();
+  }
+
+  private applyFootprintBatch(
+    edit: Edit,
+    shared: PaintingSharedState,
+    metadata: LayerMetadata,
+    footprint: StrokeFootprintMask,
+    value: number | bigint,
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    const batch = buildFootprintBatch(
+      metadata,
+      shared.targetLayerId,
+      shared.targetResolution,
+      footprint,
+      value,
+    );
+    const targetScale = scaleFor(metadata, shared.targetResolution);
+    return edit.withBatch(() =>
+      applyPaintBatch(edit, batch, targetScale, isCurrent),
+    );
+  }
+
+  private async writeMaskedFill(
+    context: StrokeFillContext,
+    footprint: StrokeFootprintMask,
+    tiles: readonly ChunkTile[],
+  ): Promise<boolean> {
+    const { edit, shared, metadata, value, maskFields, isCurrent } = context;
+    const compute = this.deps.compute;
+    if (compute.applyMaskedFootprint === undefined) return false;
+    const imageReads = guardFillImageReads(this.deps.readChunkAt);
+    const batch = await compute.applyMaskedFootprint({
+      targetLayerId: shared.targetLayerId,
+      targetResolution: shared.targetResolution,
+      metadata,
+      value,
+      ...maskFields,
+      footprint,
+      maxImageVoxels: MAX_FILL_IMAGE_VOXELS,
+      readChunk: (chunkId) =>
+        edit.readChunk({
+          layerId: shared.targetLayerId,
+          resolution: shared.targetResolution,
+          chunkId,
+        }),
+      readChunkAt: imageReads.readChunkAt,
+    });
+    if (batch === null) {
+      this.deps.notify?.(FILL_TOO_LARGE_MESSAGE);
+      return false;
+    }
+    if (imageReads.failed()) {
+      this.deps.notify?.(FILL_FAILED_MESSAGE);
+      return false;
+    }
+    if (!isCurrent()) return false;
+    // After the image reads, so a fill rejected above adds nothing to history.
+    if (!(await this.materializeFillTiles(context, tiles))) return false;
+    if (!isCurrent()) return false;
+    const targetScale = scaleFor(metadata, shared.targetResolution);
+    await edit.withBatch(() =>
+      applyPaintBatch(edit, batch, targetScale, isCurrent),
+    );
+    return isCurrent();
+  }
+
+  /**
+   * Pointer-up for a stroke that may fill: paint the stroke's tail, then its
+   * fill, then commit them as one undo entry. Whatever the fill does, the stroke
+   * is committed unless it was canceled, in which case `commit` is a no-op.
+   */
+  private async finishStrokeWithFill(
+    finalizing: FinalizingStroke,
+    paintTail: (isCurrent: () => boolean) => Promise<void>,
+    context: Omit<StrokeFillContext, "isCurrent">,
+    replay: StrokeReplay | null,
+  ): Promise<void> {
+    const isCurrent = () => this.finalizing === finalizing;
+    try {
+      await paintTail(isCurrent);
+      if (isCurrent()) {
+        const applied = await this.fillEnclosure({ ...context, isCurrent });
+        if (applied && replay !== null) {
+          replay.enclosureContour = context.contour;
+        }
+      }
+    } catch (e) {
+      console.warn("[painting] closed-stroke fill failed.", e);
+      this.deps.notify?.(FILL_FAILED_MESSAGE);
+    }
+    if (isCurrent()) this.finalizing = null;
+    try {
+      finalizing.handle.commit();
+    } catch (e) {
+      console.warn("[painting] committing a filled stroke failed.", e);
+    }
   }
 
   /**
@@ -495,9 +812,9 @@ export class StrokeTool implements EditTool {
       readChunk,
       readChunkAt: this.deps.readChunkAt,
     });
-    const chunkSize = scaleFor(metadata, shared.targetResolution).chunkDataSize;
+    const targetScale = scaleFor(metadata, shared.targetResolution);
     await paintProfiler.timeAsync("apply.total(cpu)", () =>
-      edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize)),
+      edit.withBatch(() => applyPaintBatch(edit, batch, targetScale)),
     );
     for (const path of segments) {
       await this.paintStrokePath(
@@ -510,6 +827,27 @@ export class StrokeTool implements EditTool {
         this.deps.readChunkAt,
         spacingVoxels,
         false, // replay-redo stays on the deterministic main-thread path
+        () => true, // the library owns a replay's edit; nothing cancels it here
+      );
+    }
+    if (replay.enclosureContour === undefined) return;
+    const enclosure = computeEnclosedFootprint(
+      replay.enclosureContour,
+      shared.radius,
+      edit.sessionVoxelBoundsFor({
+        layerId: shared.targetLayerId,
+        resolution: shared.targetResolution,
+        chunkId: ChunkId.fromCoord({ x: 0, y: 0, z: 0 }),
+      }),
+    );
+    if (enclosure.kind === "enclosed") {
+      await this.applyFootprintBatch(
+        edit,
+        shared,
+        metadata,
+        enclosure.footprint,
+        value,
+        () => true,
       );
     }
   }
@@ -524,6 +862,24 @@ export class StrokeTool implements EditTool {
   }
 
   async handleInput(ev: ToolInputEvent): Promise<InputHandling> {
+    // A new stroke waits out the previous stroke's fill instead of being dropped
+    // by the live-edit guard below; the bridge holds this stroke's moves until
+    // this pointer-down settles, so event order is preserved.
+    if (
+      ev.kind === "pointer-down" &&
+      ev.button === "primary" &&
+      this.finalizing !== null
+    ) {
+      const deactivationCount = this.deactivationCount;
+      await Promise.race([
+        this.finalizing.done,
+        new Promise<void>((resolve) => this.finalizingWaiters.push(resolve)),
+      ]);
+      if (deactivationCount !== this.deactivationCount) {
+        return { consumed: true };
+      }
+      return this.handleInput(ev);
+    }
     const shared = this.deps.state.getState();
     const metadata = this.deps.metadataByLayer.get(shared.targetLayerId);
     if (
@@ -537,8 +893,23 @@ export class StrokeTool implements EditTool {
     // The eraser deliberately ignores the brush's image mask (TM-297): it omits
     // `mask` entirely rather than relying on the compute to suppress it. Only
     // the brush (source 'active') threads the shared mask config.
+    const isStrokeStart = ev.kind === "pointer-down" && ev.button === "primary";
+    const brushMayFill =
+      this.preset.source === "active" && shared.fillClosedPaths;
+    const imageType =
+      shared.mask !== undefined
+        ? this.deps.metadataByLayer.get(shared.mask.imageLayerId)?.voxelDataType
+        : undefined;
+    const ignoresMask = isStrokeStart
+      ? brushMayFill &&
+        shared.mask !== undefined &&
+        imageType !== undefined &&
+        maskKeepsEveryVoxel(shared.mask, imageType)
+      : this.strokeIgnoresMask;
     const useMask =
-      this.preset.source === "active" && shared.mask !== undefined;
+      this.preset.source === "active" &&
+      shared.mask !== undefined &&
+      !ignoresMask;
     const maskMetadata = useMask
       ? this.deps.metadataByLayer.get(shared.mask!.imageLayerId)
       : undefined;
@@ -608,6 +979,12 @@ export class StrokeTool implements EditTool {
       });
       this.handle = handle;
       this.activeReplay = replay;
+      this.strokeIgnoresMask = ignoresMask;
+      this.contour = brushMayFill ? [pos] : null;
+      const isCurrent = () => this.handle === handle;
+      if (this.preset.source === "active") {
+        selectPaintedSegment(this.deps, shared);
+      }
       const edit = handle.edit;
       this.lastVoxel = pos;
       this.geometry =
@@ -638,12 +1015,11 @@ export class StrokeTool implements EditTool {
         readChunk,
         readChunkAt,
       });
-      const chunkSize = scaleFor(
-        metadata,
-        shared.targetResolution,
-      ).chunkDataSize;
+      const targetScale = scaleFor(metadata, shared.targetResolution);
       await paintProfiler.timeAsync("apply.total(cpu)", () =>
-        edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize)),
+        edit.withBatch(() =>
+          applyPaintBatch(edit, batch, targetScale, isCurrent),
+        ),
       );
       return { consumed: true };
     }
@@ -653,19 +1029,26 @@ export class StrokeTool implements EditTool {
       this.handle !== null &&
       this.lastVoxel !== null
     ) {
-      const edit = this.handle.edit;
+      const handle = this.handle;
+      const edit = handle.edit;
+      const isCurrent = () => this.handle === handle;
       const cursor: readonly [number, number, number] = [
         ev.voxelPosition[0],
         ev.voxelPosition[1],
         ev.voxelPosition[2],
       ];
+      this.contour?.push(
+        ...(ev.contourVoxelPositions ?? []),
+        ...(ev.viaVoxelPositions ?? []),
+        cursor,
+      );
       if (this.geometry !== null) {
         // latestWins scheduling (TM-317): bound the per-call painted span. Once
         // the cursor outran the cap (a fast drag while the worker was busy),
         // DROP the connecting capsule and stamp a single disk at the latest
         // cursor — the old voxel-editor model — then restart the geometry from
         // there so the next capsule is bounded too. This is true drop-to-latest
-        // (skip + one disk), NOT serialize-the-backlog. Compute (pyodide /
+        // (skip + one disk), NOT serialize-the-backlog. Compute (mask /
         // morphology) and commit are reached exactly as for any other segment,
         // just with a bounded footprint.
         if (paintScheduler.mode === "latestWins") {
@@ -692,6 +1075,7 @@ export class StrokeTool implements EditTool {
               readChunkAt,
               this.geometry.spacingVoxels,
               true,
+              isCurrent,
             );
             return { consumed: true };
           }
@@ -719,6 +1103,7 @@ export class StrokeTool implements EditTool {
           readChunkAt,
           this.geometry.spacingVoxels,
           true,
+          isCurrent,
         );
       } else {
         // Legacy 1-voxel brush: rasterize the raw delivered polyline as-is.
@@ -734,46 +1119,83 @@ export class StrokeTool implements EditTool {
           readChunkAt,
           1,
           true,
+          isCurrent,
         );
       }
       return { consumed: true };
     }
 
     if (ev.kind === "pointer-up" && this.handle !== null) {
+      const handle = this.handle;
+      const { geometry, lastVoxel, contour } = this;
+      const replay = this.activeReplay;
       // Finalize the trailing geometry the head stamp had only provisionally
       // shown, so the committed stroke reaches the exact stroke end.
-      if (this.geometry !== null && this.lastVoxel !== null) {
-        const stamps = this.geometry.finish();
-        if (stamps.length > 0) {
-          const path = [this.lastVoxel, ...stamps];
-          this.recordReplaySegment(path);
-          await this.paintStrokePath(
-            this.handle.edit,
-            path,
-            shared,
+      const paintTail = async (isCurrent: () => boolean) => {
+        if (geometry === null || lastVoxel === null) return;
+        const stamps = geometry.finish();
+        if (stamps.length === 0) return;
+        const path = [lastVoxel, ...stamps];
+        replay?.segments.push(path);
+        await this.paintStrokePath(
+          handle.edit,
+          path,
+          shared,
+          metadata,
+          value,
+          maskFields,
+          readChunkAt,
+          geometry.spacingVoxels,
+          true,
+          isCurrent,
+        );
+      };
+      if (contour !== null) {
+        // Leave the drawing state now: the next stroke's moves must not reach
+        // this edit while the fill runs.
+        this.clearStrokeState();
+        const finalizing: FinalizingStroke = {
+          handle,
+          done: Promise.resolve(),
+        };
+        this.finalizing = finalizing;
+        finalizing.done = this.finishStrokeWithFill(
+          finalizing,
+          paintTail,
+          {
+            edit: handle.edit,
+            contour,
+            // The snapshot redo will use, so redo fills exactly the same shape
+            // even if a brush setting changed mid-drag.
+            shared: replay?.shared ?? shared,
             metadata,
-            value,
+            value: replay?.value ?? value,
             maskFields,
-            readChunkAt,
-            this.geometry.spacingVoxels,
-            true,
-          );
-        }
+            redoKind: replay !== null ? "replay" : "image",
+          },
+          replay,
+        );
+        await finalizing.done;
+        return { consumed: true };
       }
-      this.handle.commit();
-      this.handle = null;
-      this.lastVoxel = null;
-      this.geometry = null;
-      this.activeReplay = null;
+      // `finally`: a failed tail must still commit. Otherwise the edit stays
+      // live and the live-edit guard silently drops every later stroke.
+      try {
+        await paintTail(() => this.handle === handle);
+      } finally {
+        if (this.handle === handle) this.clearStrokeState();
+        handle.commit();
+      }
       return { consumed: true };
     }
 
-    if (ev.kind === "pointer-cancel" && this.handle !== null) {
-      const handle = this.handle;
-      this.handle = null;
-      this.lastVoxel = null;
-      this.geometry = null;
-      this.activeReplay = null;
+    if (
+      ev.kind === "pointer-cancel" &&
+      (this.handle !== null || this.finalizing !== null)
+    ) {
+      const handle = this.takeCancelableHandle();
+      this.clearStrokeState();
+      if (handle === null) return { consumed: false };
       // Supersede in-flight worker tiles before discarding (TM-322/TM-323).
       this.deps.pipeline.invalidate();
       await handle.cancel();
@@ -857,6 +1279,7 @@ export class FillTool implements EditTool {
       ev.voxelPosition[1],
       ev.voxelPosition[2],
     ];
+    selectPaintedSegment(this.deps, shared);
     const controller = new AbortController();
     this.activeFill = controller;
     this.deps.fillProgress?.start();
@@ -880,13 +1303,10 @@ export class FillTool implements EditTool {
             chunkId: ChunkId.fromCoord({ x: 0, y: 0, z: 0 }),
           });
           if (bounds === undefined) return;
-          const chunkSize = scaleFor(
-            metadata,
-            shared.targetResolution,
-          ).chunkDataSize;
+          const targetScale = scaleFor(metadata, shared.targetResolution);
           const applyBatch = (batch: PaintWriteBatch) =>
             paintProfiler.timeAsync("apply.total(cpu)", () =>
-              edit.withBatch(() => applyPaintBatch(edit, batch, chunkSize)),
+              edit.withBatch(() => applyPaintBatch(edit, batch, targetScale)),
             );
           const finalBatch = await this.deps.compute.fill({
             targetLayerId: shared.targetLayerId,
@@ -954,10 +1374,14 @@ export class ConsumerPaintingTools {
     allowedResolutionsByLayer: ReadonlyMap<LayerId, readonly Resolution[]>;
     readChunkAt: ReadChunkAt;
     initialState: PaintingSharedState;
+    /** See {@link PaintingToolDeps.maxFillHistoryBytes}. */
+    maxFillHistoryBytes: number;
     /** Host sink for fill progress → cursor loader UI (TM-269). */
     fillProgress?: FillProgressSink;
     /** Host transient-notification sink (TM-269). */
     notify?: (message: string) => void;
+    /** Host segment selection for auto-select (TM-490). */
+    selectSegment?: (layerId: LayerId, value: number | bigint) => void;
   }) {
     this.state = new PaintingState(opts.initialState);
     const deps: PaintingToolDeps = {
@@ -967,9 +1391,11 @@ export class ConsumerPaintingTools {
       metadataByLayer: opts.metadataByLayer,
       allowedResolutionsByLayer: opts.allowedResolutionsByLayer,
       readChunkAt: opts.readChunkAt,
+      maxFillHistoryBytes: opts.maxFillHistoryBytes,
       pipeline: new PaintStrokePipeline(),
       fillProgress: opts.fillProgress,
       notify: opts.notify,
+      selectSegment: opts.selectSegment,
     };
     this.brush = new StrokeTool(deps, {
       toolId: PAINTING_BRUSH_TOOL_ID,
@@ -1036,6 +1462,60 @@ export class ConsumerPaintingTools {
 }
 
 /**
+ * The image reader for a masked fill. The masked path treats a failed read as a
+ * missing chunk (all zeros), which is fine for one dab but would silently cut a
+ * hole in a fill, so failures are remembered for the caller to act on. A stalled
+ * read times out, and after one failure the rest fail at once instead of each
+ * waiting out their own timeout.
+ */
+function guardFillImageReads(readChunkAt: ReadChunkAt): {
+  readonly readChunkAt: ReadChunkAt;
+  readonly failed: () => boolean;
+} {
+  let failed = false;
+  const guarded: ReadChunkAt = async (layerId, resolution, chunkId) => {
+    if (failed) throw new Error("an earlier image read already failed");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("image read timed out")),
+        FILL_IMAGE_READ_TIMEOUT_MS,
+      );
+    });
+    try {
+      return await Promise.race([
+        readChunkAt(layerId, resolution, chunkId),
+        timeout,
+      ]);
+    } catch (e) {
+      failed = true;
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return { readChunkAt: guarded, failed: () => failed };
+}
+
+let workerFallbackWarned = false;
+/**
+ * Warn once per session when the brush worker path fails and we fall back to the
+ * synchronous main-thread apply. The stroke still paints correctly (the
+ * synchronous path is the byte-identical reference) — this just makes it visible
+ * that the off-thread acceleration is not in effect.
+ */
+function warnWorkerFallback(e: unknown): void {
+  if (workerFallbackWarned) return;
+  workerFallbackWarned = true;
+  console.warn(
+    "[painting] brush worker write path failed — falling back to the " +
+      "synchronous main-thread apply for the rest of this session. Painting " +
+      "stays correct but is not accelerated off-thread. First failure:",
+    e,
+  );
+}
+
+/**
  * Warm (make resident) the overlay chunks the stroke footprint will write into,
  * so the subsequent `writeRegion` → `beginWrite` → `materializeForWrite`
  * baseline fetch is a resident clone instead of a cold IO await (P1, TM-317).
@@ -1055,24 +1535,6 @@ export class ConsumerPaintingTools {
  * `writeRegion` surfaces any genuine failure), and warming NEVER mutates or
  * captures the undo pre-image — that still happens at `beginWrite`.
  */
-let workerFallbackWarned = false;
-/**
- * Warn once per session when the brush worker path fails and we fall back to the
- * synchronous main-thread apply. The stroke still paints correctly (the
- * synchronous path is the byte-identical reference) — this just makes it visible
- * that the off-thread acceleration is not in effect.
- */
-function warnWorkerFallback(e: unknown): void {
-  if (workerFallbackWarned) return;
-  workerFallbackWarned = true;
-  console.warn(
-    "[painting] brush worker write path failed — falling back to the " +
-      "synchronous main-thread apply for the rest of this session. Painting " +
-      "stays correct but is not accelerated off-thread. First failure:",
-    e,
-  );
-}
-
 function warmStrokeFootprint(
   edit: Edit,
   target: WriteTarget,

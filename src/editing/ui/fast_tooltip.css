@@ -40,6 +40,19 @@
   opacity: 1;
 }
 
+.neuroglancer-fast-tooltip-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nge-space-5);
+  font-weight: 600;
+}
+
+.neuroglancer-fast-tooltip-detail {
+  margin-top: var(--nge-space-1);
+  color: var(--nge-text-subtle);
+}
+
 /* Inline help marker placed next to a parameter label. The bubble itself is
    driven by the shared `data-tooltip` mechanism above. */
 .neuroglancer-param-hint {

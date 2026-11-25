@@ -21,7 +21,11 @@ import { radiusToSize, sizeToRadius } from "#src/editing/brush_size_presets.js";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
 import type { PaintingMaskConfig } from "#src/editing/tool_runtimes/paint_types.js";
-import { DEFAULT_COVERAGE_THRESHOLD } from "#src/editing/tool_runtimes/paint_types.js";
+import {
+  clampBinaryClosing,
+  DEFAULT_COVERAGE_THRESHOLD,
+  MAX_BINARY_CLOSING,
+} from "#src/editing/tool_runtimes/paint_types.js";
 import type { PaintingState } from "#src/editing/tool_runtimes/painting_tools.js";
 import {
   booleanDescriptor,
@@ -33,6 +37,8 @@ import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { ToggleSwitch } from "#src/editing/ui/toggle_switch.js";
 import { BrushSizeField } from "#src/editing/ui/tool_settings/brush_size_field.js";
+import { FillClosedPathsRow } from "#src/editing/ui/tool_settings/fill_closed_paths_row.js";
+import { PaintedSegmentAutoSelectRow } from "#src/editing/ui/tool_settings/painted_segment_auto_select_row.js";
 import { PaintingTargetPicker } from "#src/editing/ui/tool_settings/painting_target_picker.js";
 import { PaintingThreshold } from "#src/editing/ui/tool_settings/painting_threshold.js";
 import {
@@ -57,6 +63,11 @@ import {
   UINT64_REFERENCE_DISABLED,
 } from "#src/editing/ui/tool_settings/reference_layer_options.js";
 import { TargetValueField } from "#src/editing/ui/tool_settings/target_value_field.js";
+import {
+  EditKeybindsContext,
+  ToolPanelKeys,
+  useEditKeybinds,
+} from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 import { useLayerVoxelType } from "#src/editing/ui/tool_settings/use_layer_voxel_type.js";
 import "#src/editing/ui/tool_settings/painting_brush.css";
 
@@ -66,6 +77,12 @@ function parseCount(raw: string): number | null {
   return raw.trim() !== "" && Number.isFinite(n)
     ? Math.max(0, Math.floor(n))
     : null;
+}
+
+/** Parse a binary-closing count, capped at {@link MAX_BINARY_CLOSING}, or null. */
+function parseClosing(raw: string): number | null {
+  const count = parseCount(raw);
+  return count === null ? null : clampBinaryClosing(count);
 }
 
 export function PaintingBrush({
@@ -98,6 +115,7 @@ export function PaintingBrush({
   // size, value. The mask section appends its own descriptors and publishes the
   // combined list (single publisher per tool — see `BrushMask`).
   const targetDescriptors = useTargetParamDescriptors(host);
+  const editKeys = useEditKeybinds(host);
   const leadingDescriptors: ParamDescriptor[] = [
     ...targetDescriptors,
     sizeDescriptor(painting),
@@ -105,29 +123,46 @@ export function PaintingBrush({
   ];
 
   return (
-    <div class="neuroglancer-tool-panel neuroglancer-painting-brush-panel">
-      <PaintingTargetPicker host={host} />
-      <BrushSizeField
-        size={size}
-        hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
-        onCommit={commitSize}
-        highlighted={selectedId === PARAM_IDS.size}
-        onSelect={() => selectParam(PARAM_IDS.size)}
-      />
-      <TargetValueField
-        value={state.activeValue}
-        voxelDataType={targetVoxelType}
-        onCommit={(activeValue) => painting.patchState({ activeValue })}
-        hint="The segment ID painted into the target layer — every voxel the stroke covers is set to this value."
-        highlighted={selectedId === PARAM_IDS.value}
-        onSelect={() => selectParam(PARAM_IDS.value)}
-      />
-      <BrushMask
-        host={host}
-        painting={painting}
-        leadingDescriptors={leadingDescriptors}
-      />
-    </div>
+    <EditKeybindsContext.Provider value={editKeys}>
+      <div class="neuroglancer-tool-panel neuroglancer-painting-brush-panel">
+        <PaintingTargetPicker host={host} />
+        <BrushSizeField
+          host={host}
+          size={size}
+          hint="Brush diameter in voxels at the target resolution. Larger sizes paint a wider stroke."
+          onCommit={commitSize}
+          highlighted={selectedId === PARAM_IDS.size}
+          onSelect={() => selectParam(PARAM_IDS.size)}
+        />
+        <TargetValueField
+          shortcut={{
+            keys: editKeys.targetValueDecrease,
+            pairKeys: editKeys.targetValueIncrease,
+            label: "Target value",
+          }}
+          value={state.activeValue}
+          voxelDataType={targetVoxelType}
+          onCommit={(activeValue) => painting.patchState({ activeValue })}
+          hint="The segment ID painted into the target layer — every voxel the stroke covers is set to this value."
+          highlighted={selectedId === PARAM_IDS.value}
+          onSelect={() => selectParam(PARAM_IDS.value)}
+        />
+        <PaintedSegmentAutoSelectRow painting={painting} />
+        <FillClosedPathsRow
+          painting={painting}
+          shortcut={{
+            keys: editKeys.fillClosedPaths,
+            label: "Fill inside",
+          }}
+        />
+        <BrushMask
+          host={host}
+          painting={painting}
+          leadingDescriptors={leadingDescriptors}
+        />
+        <ToolPanelKeys host={host} toolId="painting.brush" />
+      </div>
+    </EditKeybindsContext.Provider>
   );
 }
 
@@ -444,7 +479,7 @@ function BrushMask({
           apply: (steps) => {
             const m = painting.getState().mask;
             if (m === undefined) return;
-            const v = Math.max(0, m.binaryClosing + steps);
+            const v = clampBinaryClosing(m.binaryClosing + steps);
             if (v !== m.binaryClosing) {
               painting.patchState({ mask: { ...m, binaryClosing: v } });
             }
@@ -492,6 +527,7 @@ function BrushMask({
       >
         <ParamLabel
           text="Reference layer"
+          setting
           hint="The image layer the mask samples to decide which voxels a stroke may paint. Session image layers plus any other loaded image layer can be used; non-session layers are read on demand."
         />
         <span class="neuroglancer-painting-brush-mask-reference">
@@ -542,6 +578,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Reference resolution"
+            setting
             hint="The voxel scale the reference image is sampled at. Coarser scales are faster but mask less precisely."
           />
           {resolutions.length <= 1 ? (
@@ -565,6 +602,7 @@ function BrushMask({
         <div class="neuroglancer-painting-brush-threshold-row">
           <ParamLabel
             text="Threshold"
+            setting
             hint="Limits painting to voxels whose reference-image intensity falls within the low–high range. Voxels outside it are left untouched."
           />
           <PaintingThreshold
@@ -601,6 +639,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Min component"
+            setting
             hint="Drops connected blobs smaller than this many voxels from the mask, removing speckle. 0 keeps every component."
           />
           <ParamInput<number>
@@ -623,14 +662,16 @@ function BrushMask({
         >
           <ParamLabel
             text="Binary closing"
-            hint="Closes gaps and small holes in the mask by this many voxels (morphological closing). 0 disables it."
+            setting
+            hint={`Closes gaps and small holes in the mask by this many voxels (morphological closing), up to ${MAX_BINARY_CLOSING}. Keep it below half the brush size, or the stroke erodes away. 0 disables it.`}
           />
           <ParamInput<number>
             type="number"
             min={0}
+            max={MAX_BINARY_CLOSING}
             step={1}
             value={mask?.binaryClosing ?? 0}
-            parse={parseCount}
+            parse={parseClosing}
             disabled={paramsDisabled}
             onCommit={(binaryClosing) => patchMask({ binaryClosing })}
           />
@@ -645,6 +686,7 @@ function BrushMask({
         >
           <ParamLabel
             text="Filter components first"
+            setting
             hint="When on, min-component filtering runs before binary closing; when off, closing runs first. Changes whether holes are filled before or after small blobs are removed."
           />
           <ToggleSwitch

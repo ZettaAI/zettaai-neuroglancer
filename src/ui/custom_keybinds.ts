@@ -50,3 +50,36 @@ export function getEditSessionKeybinds(): EditSessionKeybinds | undefined {
     ? (section as EditSessionKeybinds)
     : undefined;
 }
+
+/**
+ * The keys `custom-keybinds.json` gives to a global action
+ * (`"keyt": "calcada-toggle-zetta-trace"`). Empty in unconfigured builds, where
+ * those keys are not bound, so nothing is shown for them either.
+ */
+export function keysForCustomAction(action: string): string[] {
+  if (typeof CUSTOM_BINDINGS === "undefined" || CUSTOM_BINDINGS === null) {
+    return [];
+  }
+  return Object.entries(CUSTOM_BINDINGS)
+    .filter(([, value]) => value === action)
+    .map(([key]) => key);
+}
+
+/** The keys `custom-keybinds.json` gives to a tool, by its tool id. */
+export function keysForCustomTool(toolId: string): string[] {
+  if (typeof CUSTOM_BINDINGS === "undefined" || CUSTOM_BINDINGS === null) {
+    return [];
+  }
+  return Object.entries(CUSTOM_BINDINGS)
+    .filter(([key, value]) => {
+      if (key === EDIT_SESSION_BINDINGS_KEY) return false;
+      const tool = (value as { tool?: unknown } | null | undefined)?.tool;
+      if (tool === toolId) return true;
+      return (
+        typeof tool === "object" &&
+        tool !== null &&
+        Object.values(tool).includes(toolId)
+      );
+    })
+    .map(([key]) => key);
+}

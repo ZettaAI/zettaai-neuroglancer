@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import svg_table from "ikonate/icons/table-horizontal.svg?raw";
 import type { LayerChunkProgressInfo } from "#src/chunk_manager/base.js";
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { ChunkRenderLayerFrontend } from "#src/chunk_manager/frontend.js";
@@ -46,6 +47,7 @@ import type {
 import { observeWatchable, registerNestedSync } from "#src/trackable_value.js";
 import { isWithinSelectionPanel } from "#src/ui/selection_details.js";
 import type { Uint64Map } from "#src/uint64_map.js";
+import type { Uint64Set } from "#src/uint64_set.js";
 import { wrapSigned32BitIntegerToUint64 } from "#src/util/bigint.js";
 import { setClipboard } from "#src/util/clipboard.js";
 import {
@@ -64,6 +66,8 @@ import { ColorWidget } from "#src/widget/color.js";
 import { makeCopyButton } from "#src/widget/copy_button.js";
 import { makeEyeButton } from "#src/widget/eye_button.js";
 import { makeFilterButton } from "#src/widget/filter_button.js";
+import type { MakeIconOptions } from "#src/widget/icon.js";
+import { makeIcon } from "#src/widget/icon.js";
 import { makeStarButton } from "#src/widget/star_button.js";
 
 export class Uint64MapEntry {
@@ -227,6 +231,10 @@ export interface SegmentationDisplayState {
   segmentDefaultColor: WatchableValueInterface<vec3 | undefined>;
   tempSegmentDefaultColor2d: WatchableValueInterface<vec3 | vec4 | undefined>;
   highlightColor: WatchableValueInterface<vec4 | undefined>;
+  // Opt-in for layers that load annotations per segment (calcada): adds a
+  // per-row toggle that adds/removes the segment in this set. Left undefined,
+  // the button stays hidden.
+  annotationExcludedSegments?: WatchableValueInterface<Uint64Set | undefined>;
 }
 
 export function resetTemporaryVisibleSegmentsState(
@@ -336,6 +344,12 @@ const segmentWidgetTemplate = (() => {
   });
   visibleIcon.classList.add("neuroglancer-segment-list-entry-visible-checkbox");
   stickyContainer.appendChild(visibleIcon);
+  const annotationsIndex = stickyContainer.childElementCount;
+  stickyContainer.appendChild(
+    makeSegmentAnnotationsButton({
+      title: "Toggle annotation tables for this segment",
+    }),
+  );
   const idContainer = document.createElement("div");
   idContainer.classList.add("neuroglancer-segment-list-entry-id-container");
   const idContainerIndex = stickyContainer.childElementCount;
@@ -373,6 +387,7 @@ const segmentWidgetTemplate = (() => {
     labelIndex,
     filterIndex,
     starIndex,
+    annotationsIndex,
     colorWidgetIndex,
     unmappedIdIndex: -1,
     unmappedCopyIndex: -1,
@@ -528,6 +543,15 @@ function makeRegisterSegmentWidgetEventHandlers(
     displayState.moveToSegment(id);
   };
 
+  const annotationsHandler = (event: Event) => {
+    const entryElement = getEntryElement(event);
+    const id = BigInt(entryElement.dataset.id!);
+    const excluded = displayState.annotationExcludedSegments?.value;
+    if (excluded === undefined) return;
+    excluded.set(id, !excluded.has(id));
+    event.stopPropagation();
+  };
+
   return (element: HTMLElement, template: SegmentWidgetTemplate) => {
     const { children } = element;
     const stickyChildren = children[0].children;
@@ -563,6 +587,11 @@ function makeRegisterSegmentWidgetEventHandlers(
       const { selectedSegments } = displayState.segmentationGroupState.value;
       selectedSegments.set(id, !selectedSegments.has(id));
     });
+
+    stickyChildren[template.annotationsIndex].addEventListener(
+      "click",
+      annotationsHandler,
+    );
 
     const trackableRGB = new TrackableRGB(vec3.fromValues(0, 0, 0));
     trackableRGB.changed.add(() => {
@@ -707,6 +736,15 @@ export class SegmentWidgetFactory<Template extends SegmentWidgetTemplate> {
       "neuroglancer-starred",
       selectedSegments.has(mapped),
     );
+    const excludedSegments = displayState!.annotationExcludedSegments?.value;
+    const annotationsButton = stickyChildren[
+      template.annotationsIndex
+    ] as HTMLElement;
+    updateAnnotationsButtonHidden(annotationsButton, displayState);
+    annotationsButton.classList.toggle(
+      "neuroglancer-annotations-off",
+      excludedSegments?.has(mapped) ?? false,
+    );
     const idContainer = stickyChildren[
       template.idContainerIndex
     ] as HTMLElement;
@@ -757,6 +795,21 @@ function setSegmentIdElementStyle(
   element.style.backgroundColor = getCssColor(color);
   element.style.color = useWhiteBackground(color) ? "white" : "black";
   element.classList.toggle("stated-color", stated);
+}
+
+export function makeSegmentAnnotationsButton(
+  options: Pick<MakeIconOptions, "title" | "onClick">,
+) {
+  const button = makeIcon({ svg: svg_table, ...options });
+  button.classList.add("neuroglancer-segment-list-entry-annotations");
+  return button;
+}
+
+function updateAnnotationsButtonHidden(
+  button: HTMLElement,
+  displayState: SegmentationDisplayState | undefined,
+) {
+  button.hidden = displayState?.annotationExcludedSegments?.value === undefined;
 }
 
 function setColorWidgetColor(
@@ -849,6 +902,14 @@ export class SegmentWidgetWithExtraColumnsFactory extends SegmentWidgetFactory<S
     return { id, label, sortIcon };
   }
 
+  updateHeader(header: Element) {
+    const stickyChildren = header.children[0].children;
+    updateAnnotationsButtonHidden(
+      stickyChildren[this.template.annotationsIndex] as HTMLElement,
+      this.displayState,
+    );
+  }
+
   getHeader() {
     const { template } = this;
     const container = template.template.cloneNode(
@@ -893,6 +954,7 @@ export class SegmentWidgetWithExtraColumnsFactory extends SegmentWidgetFactory<S
       }
       propertyLabels.push(headerLabel);
     }
+    this.updateHeader(container);
     return { container, propertyLabels };
   }
 }

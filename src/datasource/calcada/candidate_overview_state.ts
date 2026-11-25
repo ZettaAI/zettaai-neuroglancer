@@ -106,6 +106,22 @@ export function toggleSplitDetection({
   return !active;
 }
 
+/**
+ * Detection that a trace put aside comes back when it ends, but not on main
+ * and not without a segment: with none it would ask for one unprompted.
+ */
+export function resumesAfterTrace({
+  wasActive,
+  onMain,
+  segmentChosen,
+}: {
+  wasActive: boolean;
+  onMain: boolean;
+  segmentChosen: boolean;
+}): boolean {
+  return wasActive && !onMain && segmentChosen;
+}
+
 export const SCORING_SEGMENT_STATUS = "Scoring the segment…";
 
 /**
@@ -126,7 +142,7 @@ export function splitDetectionStatus({
 }): string {
   if (graphPending) return SCORING_SEGMENT_STATUS;
   return (
-    `${flagged.toLocaleString()} of ${total.toLocaleString()} pieces flagged · ` +
-    `${withSemantics} candidates with semantics`
+    `${flagged.toLocaleString()} of ${total.toLocaleString()} candidates flagged · ` +
+    `${withSemantics} with semantics`
   );
 }

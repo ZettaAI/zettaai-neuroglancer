@@ -64,10 +64,12 @@ export class RangeWidget extends RefCounted {
     initInputElement(numericInputElement);
     element.appendChild(inputElement);
     element.appendChild(numericInputElement);
-    value.changed.add(() => {
-      this.inputElement.valueAsNumber = this.value.value;
-      this.numericInputElement.valueAsNumber = this.value.value;
-    });
+    this.registerDisposer(
+      value.changed.add(() => {
+        this.inputElement.valueAsNumber = this.value.value;
+        this.numericInputElement.valueAsNumber = this.value.value;
+      }),
+    );
   }
 
   private inputValueChanged(element: HTMLInputElement) {

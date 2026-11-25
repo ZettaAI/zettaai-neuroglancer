@@ -36,6 +36,8 @@ const none: PieceClasses = {
   nucleus: 0,
   ecs: 0,
   other: 0,
+  myelin: 0,
+  synaptic_cleft: 0,
 };
 const axonHeavy: PieceClasses = { ...none, axon: 9, dendrite: 1 };
 const dendriteHeavy: PieceClasses = { ...none, dendrite: 9, axon: 1 };

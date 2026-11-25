@@ -103,6 +103,7 @@ export function PaintingTargetPicker({ host }: { host: EditSessionHost }) {
       >
         <ParamLabel
           text="Target layer"
+          setting
           hint="The segmentation layer your paint strokes are written to. Only writable (Editable) layers from the session appear here."
         />
         <select
@@ -137,6 +138,7 @@ export function PaintingTargetPicker({ host }: { host: EditSessionHost }) {
       >
         <ParamLabel
           text="Target resolution"
+          setting
           hint="The voxel scale strokes are applied at. Coarser scales cover more area per stroke but paint larger, blockier voxels."
         />
         {layerResolutions.length <= 1 ? (

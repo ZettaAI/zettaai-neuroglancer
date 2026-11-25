@@ -11,6 +11,8 @@ const classes = {
   nucleus: 0,
   ecs: 0,
   other: 0,
+  myelin: 0,
+  synaptic_cleft: 0,
 };
 
 const piece = (
@@ -20,6 +22,7 @@ const piece = (
 ): PieceOverview => ({
   pieceId,
   bestScore,
+  bestLabel: "",
   bestPartnerPiece: 0n,
   bestPartnerRoot: 0n,
   bestPartnerVoxels: 0,
@@ -33,10 +36,11 @@ const piece = (
 });
 
 describe("splitErrorPoints", () => {
-  it("puts a point where each flagged piece touches its best candidate", () => {
+  it("puts a point where each flagged candidate touches the segment", () => {
+    const focused = piece(2n, 0.5, [20, 0, 0]);
     const points = splitErrorPoints(
-      [piece(1n, 0.9, [10, 0, 0]), piece(2n, 0.5, [20, 0, 0]), piece(3n, 0.4)],
-      2n,
+      [piece(1n, 0.9, [10, 0, 0]), focused, piece(3n, 0.4)],
+      focused,
     );
     expect(points).toEqual([
       {
@@ -52,5 +56,12 @@ describe("splitErrorPoints", () => {
         focused: true,
       },
     ]);
+  });
+
+  it("marks only the focused candidate of a piece that offers several", () => {
+    const first = piece(1n, 0.9, [10, 0, 0]);
+    const second = piece(1n, 0.4, [30, 0, 0]);
+    const points = splitErrorPoints([first, second], second);
+    expect(points.map((point) => point.focused)).toEqual([false, true]);
   });
 });

@@ -15,11 +15,14 @@ const classes = {
   nucleus: 0,
   ecs: 0,
   other: 0,
+  myelin: 0,
+  synaptic_cleft: 0,
 };
 
 const piece = (pieceId: bigint, bestScore: number): PieceOverview => ({
   pieceId,
   bestScore,
+  bestLabel: "",
   bestPartnerPiece: 0n,
   bestPartnerRoot: 0n,
   bestPartnerVoxels: 0,
@@ -104,6 +107,12 @@ describe("TraceSplitPoints", () => {
   it("leaves the points alone when clearing what it never drew", () => {
     const { points, ids } = harness(overviews);
     points.clear();
+    expect(ids()).toBeUndefined();
+  });
+
+  it("leaves the points alone when the filter changes before it drew any", async () => {
+    const { points, ids } = harness(overviews);
+    await points.refresh();
     expect(ids()).toBeUndefined();
   });
 

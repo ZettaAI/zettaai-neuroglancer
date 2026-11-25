@@ -26,8 +26,15 @@ fixture) that the harness / `buildNgState` consume.
 
 Run:  uv run testdata/editing/generate.py
       (CI / the harness can invoke it before the e2e run; output is gitignored.)
+
+      uv run testdata/editing/generate.py --large-chunk
+      (TM-373: the 4096² large-chunk perf fixtures from `manifest_large_chunk.json`
+      into `fixtures_large_chunk.json` — ~1.4 GB of raw chunks, so they stay out
+      of the default manifest that every e2e/perf run regenerates.)
 """
 
+import argparse
+import itertools
 import json
 import os
 import shutil
@@ -52,21 +59,28 @@ def scale_size(size, factor):
     return [-(-s // f) for s, f in zip(size, factor)]  # ceil-div
 
 
+# Above this many voxels a scale is written one chunk-aligned block at a time,
+# so the 8192² large-chunk fixture never holds a whole volume in memory. Every
+# fixture in `manifest.json` is at or under it and still writes in one go.
+WHOLE_WRITE_MAX_VOXELS = 1 << 26
+
+
 def content(kind: str, dtype: str, origin, shape):
     """Deterministic voxel content as a numpy array of `shape` + channel axis."""
     ox, oy, oz = origin
     sx, sy, sz = shape
-    xx, yy, zz = np.meshgrid(
-        np.arange(ox, ox + sx),
-        np.arange(oy, oy + sy),
-        np.arange(oz, oz + sz),
-        indexing="ij",
-    )
+    # Broadcast index grids (same values as a full `meshgrid`, without
+    # materializing three volume-sized arrays).
+    xx = np.arange(ox, ox + sx).reshape(sx, 1, 1)
+    yy = np.arange(oy, oy + sy).reshape(1, sy, 1)
+    zz = np.arange(oz, oz + sz).reshape(1, 1, sz)
     if kind == "image":
         val = ((xx * 2 + yy) % 256).astype(dtype)
     else:
         # Blocky 32-voxel segment IDs, never 0 (0 reads as "empty" in the app).
         val = (((xx // 32) + (yy // 32) + zz) % 7 + 1).astype(dtype)
+    # The image gradient ignores z; give every fixture its full block shape.
+    val = np.broadcast_to(val, (sx, sy, sz))
     return val[..., np.newaxis]  # trailing channel axis
 
 
@@ -81,6 +95,38 @@ def scale_metadata(fixture, res, factor):
     if fixture["encoding"] == "compressed_segmentation":
         meta["compressed_segmentation_block_size"] = CSEG_BLOCK
     return meta
+
+
+def chunk_aligned_blocks(meta):
+    """Per-axis global `(start, stop)` ranges, one chunk per block."""
+    axes = []
+    for origin, size, chunk in zip(
+        meta["voxel_offset"], meta["size"], meta["chunk_size"]
+    ):
+        axes.append(
+            [
+                (origin + lo, origin + min(lo + chunk, size))
+                for lo in range(0, size, chunk)
+            ]
+        )
+    return itertools.product(*axes)
+
+
+def write_scale(store, fixture, meta):
+    origin = meta["voxel_offset"]
+    size = meta["size"]
+    if size[0] * size[1] * size[2] <= WHOLE_WRITE_MAX_VOXELS:
+        store[...] = content(fixture["kind"], fixture["dtype"], origin, size)
+        return
+    # TensorStore indexes the volume in global coordinates (its domain starts
+    # at `voxel_offset`), which is what `chunk_aligned_blocks` yields.
+    for block in chunk_aligned_blocks(meta):
+        block_origin = [start for start, _ in block]
+        block_shape = [stop - start for start, stop in block]
+        region = tuple(slice(start, stop) for start, stop in block)
+        store[region] = content(
+            fixture["kind"], fixture["dtype"], block_origin, block_shape
+        )
 
 
 def write_fixture(fixture):
@@ -105,8 +151,7 @@ def write_fixture(fixture):
             open=True,
             dtype=getattr(ts, fixture["dtype"]),
         ).result()
-        origin = [o for o in meta["voxel_offset"]]
-        store[...] = content(fixture["kind"], fixture["dtype"], origin, meta["size"])
+        write_scale(store, fixture, meta)
     return {
         "id": fixture["id"],
         "kind": fixture["kind"],
@@ -121,11 +166,23 @@ def write_fixture(fixture):
 
 
 def main():
-    with open(os.path.join(HERE, "manifest.json")) as f:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--large-chunk",
+        action="store_true",
+        help="generate the TM-373 large-chunk perf fixtures instead",
+    )
+    args = parser.parse_args()
+    manifest_name, index_name = (
+        ("manifest_large_chunk.json", "fixtures_large_chunk.json")
+        if args.large_chunk
+        else ("manifest.json", "fixtures.json")
+    )
+    with open(os.path.join(HERE, manifest_name)) as f:
         manifest = json.load(f)
     resolved = [write_fixture(fx) for fx in manifest]
     index = {"bucket": BUCKET, "fixtures": resolved}
-    with open(os.path.join(HERE, "fixtures.json"), "w") as f:
+    with open(os.path.join(HERE, index_name), "w") as f:
         json.dump(index, f, indent=2)
         f.write("\n")
     print(f"Wrote {len(resolved)} fixtures to {os.path.join(BUCKETS_ROOT, BUCKET)}")

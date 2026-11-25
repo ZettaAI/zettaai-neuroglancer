@@ -98,7 +98,7 @@ function isInFrustum(
   const cz = sphere.cz / resolution[2];
   // Dividing by the smallest axis resolution over-estimates the model-space
   // radius on the other axes, so an edge piece stays classified in-frustum
-  // rather than incorrectly deferred.
+  // rather than incorrectly scored as out-of-view.
   const r = sphere.r / Math.min(resolution[0], resolution[1], resolution[2]);
   for (let i = 0; i < 6; ++i) {
     const a = normalizedPlanes[4 * i];
@@ -169,7 +169,6 @@ export class FragmentSpatialIndex {
   private resolution: Resolution;
   private scoreCache: Map<string, number> | null = null;
   private biasCache: Map<string, number> | null = null;
-  private outOfViewCache = new Set<string>();
   private dMax = 1;
 
   // resolution is the mesh's own voxel model-space resolution (nm/voxel per
@@ -206,8 +205,8 @@ export class FragmentSpatialIndex {
 
   // Returns whether the hint actually changed. A non-finite hint (degenerate
   // camera during a navigation transient) is ignored — it can't reject
-  // anything, so accepting it would flush the deferred pool for one broken
-  // frame.
+  // anything, so accepting it would misclassify every piece as in-view and
+  // scramble the download order for one broken frame.
   updateHint(hint: FragmentSpatialHint | null): boolean {
     if (hint !== null && !hintIsFinite(hint)) return false;
     if (hintEquals(this.hint, hint)) return false;
@@ -230,14 +229,6 @@ export class FragmentSpatialIndex {
     return this.score(a) - this.score(b);
   }
 
-  // True only for a known-bounds piece fully outside the frustum;
-  // unknown-bounds, never-seen, and no-hint cases report false so a piece
-  // that might be visible is never culled.
-  isOutOfView(fragmentId: string): boolean {
-    this.ensureCache();
-    return this.outOfViewCache.has(fragmentId);
-  }
-
   private invalidate() {
     this.scoreCache = null;
     this.biasCache = null;
@@ -249,7 +240,6 @@ export class FragmentSpatialIndex {
     const biasCache = new Map<string, number>();
     this.scoreCache = scoreCache;
     this.biasCache = biasCache;
-    this.outOfViewCache = new Set();
     const { hint } = this;
     if (hint === null) {
       for (const id of this.spheres.keys()) {
@@ -274,7 +264,6 @@ export class FragmentSpatialIndex {
     for (const [id, result] of classified) {
       scoreCache.set(id, this.scoreFor(result));
       biasCache.set(id, this.biasFor(result));
-      if (result.category === "out") this.outOfViewCache.add(id);
     }
   }
 

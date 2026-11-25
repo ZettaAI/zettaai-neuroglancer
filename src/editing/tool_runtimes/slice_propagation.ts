@@ -40,23 +40,23 @@ import type {
   WriteTarget,
 } from "@zettaai/edit-session";
 
-import { readBaselineImageSlice } from "#src/editing/raster/region_slice_reader.js";
 import {
   resampleNearestXY,
   type Grid2D,
 } from "#src/editing/raster/resample_slice.js";
-import { imageScalarToUint8 } from "#src/editing/tool_runtimes/image_scalar_to_uint8.js";
 import { clampToVoxelDataType } from "#src/editing/tool_runtimes/mask_coord.js";
 import {
   buildLabelMap,
   delabelizeMaskSlice,
   labelizeMaskSlice,
+  protectSegmentVoxels,
 } from "#src/editing/tool_runtimes/mask_label_codec.js";
 import type { ReadChunkAt } from "#src/editing/tool_runtimes/painting_tools.js";
 import {
   propagateMask,
   type MultipartPoster,
 } from "#src/editing/tool_runtimes/propagate_mask_client.js";
+import { PropagationImageSlices } from "#src/editing/tool_runtimes/propagation_image_slices.js";
 
 /** The read-only image layer feeding the propagation. */
 export interface ImageReadSpec {
@@ -94,6 +94,12 @@ export interface PropagateSliceContext {
   readonly edit: Edit;
   /** Baseline chunk reader for the (read-only) image layer. */
   readonly readChunkAt: ReadChunkAt;
+  /**
+   * Image slices kept across runs (TM-518): the tool passes its own so the
+   * previous run's next slice and a prefetched slice are reused. Without one,
+   * the slices are read fresh through `readChunkAt`.
+   */
+  readonly imageSlices?: PropagationImageSlices;
   /** Backend poster (the shared `BackendClient`). */
   readonly client: MultipartPoster;
   readonly image: ImageReadSpec;
@@ -104,7 +110,27 @@ export interface PropagateSliceContext {
   readonly maskWindow: PropagateWindow;
   /** Real segment IDs to propagate; labelized 1..N for transport. */
   readonly trackedIds: readonly bigint[];
+  /**
+   * Segments whose voxels on the next slice must survive the write (TM-518:
+   * the ones the user untracked). The prediction never overwrites them.
+   */
+  readonly protectedIds?: readonly bigint[];
   readonly signal?: AbortSignal;
+}
+
+/**
+ * None of the tracked segments has a voxel on the slice the run starts from,
+ * so there is nothing to propagate. Usually the current Z is not the slice the
+ * user painted on.
+ */
+export class NoTrackedVoxelsError extends Error {
+  constructor(readonly z: number) {
+    super(
+      `None of the tracked segments is painted on Z=${z}. Paint them on ` +
+        `this slice, or set Current Z to the slice you painted.`,
+    );
+    this.name = "NoTrackedVoxelsError";
+  }
 }
 
 export interface PropagateSliceResult {
@@ -126,40 +152,41 @@ export async function propagateSlice(
   // Encode the tracked IDs → labels once; both directions of the codec share it.
   const { idToLabel, labelToId } = buildLabelMap(ctx.trackedIds);
 
-  // Current mask through the overlay (includes live paint), at the mask grid,
-  // then labelized and resampled onto the image grid the model runs on.
-  const maskRegion = await edit.readRegion(
-    maskTarget,
-    sliceBox(maskWindow, maskWindow.currentZ),
-  );
-  const maskLabels = resampleNearestXY(
-    labelizeMaskSlice(maskRegion.data, idToLabel),
-    maskGrid,
-    imageGrid,
-  );
+  const protectedIds = ctx.protectedIds ?? [];
+  let phaseStart = performance.now();
 
-  // Current + next image slices, read natively at the image grid.
-  const currentImage = imageScalarToUint8(
-    await readBaselineImageSlice(
-      ctx.readChunkAt,
-      image.layerId,
-      image.resolution,
-      image.scale,
-      imageSlice(imageWindow, imageWindow.currentZ),
-    ),
-    image.dataType,
-  );
-  const nextImage = imageScalarToUint8(
-    await readBaselineImageSlice(
-      ctx.readChunkAt,
-      image.layerId,
-      image.resolution,
-      image.scale,
-      imageSlice(imageWindow, imageWindow.nextZ),
-    ),
-    image.dataType,
-  );
+  // The current mask (through the overlay, so live paint counts), the next
+  // slice's mask when some segments must be protected there, and the current +
+  // next image slices are independent: read them all at once. Shared image
+  // reads are never cancelled (a prefetch may be waiting on the same one), so
+  // an abort is honoured once they settle, before the backend is called.
+  const imageSlices =
+    ctx.imageSlices ?? new PropagationImageSlices(ctx.readChunkAt);
+  const [maskRegion, nextMaskRegion, [currentImage, nextImage]] =
+    await Promise.all([
+      edit.readRegion(maskTarget, sliceBox(maskWindow, maskWindow.currentZ)),
+      protectedIds.length === 0
+        ? undefined
+        : edit.readRegion(maskTarget, sliceBox(maskWindow, maskWindow.nextZ)),
+      imageSlices.read(image, imageWindow, [
+        imageWindow.currentZ,
+        imageWindow.nextZ,
+      ]),
+    ]);
+  ctx.signal?.throwIfAborted();
+  phaseStart = measurePhase("read", phaseStart);
 
+  // Labelize the mask at its own grid, then resample onto the image grid the
+  // model runs on. With no tracked voxels on the current slice there is
+  // nothing to continue: say so instead of sending the model an empty mask and
+  // silently writing nothing (TM-518).
+  const currentLabels = labelizeMaskSlice(maskRegion.data, idToLabel);
+  if (!currentLabels.some((label) => label !== 0)) {
+    throw new NoTrackedVoxelsError(maskWindow.currentZ);
+  }
+  const maskLabels = resampleNearestXY(currentLabels, maskGrid, imageGrid);
+
+  phaseStart = measurePhase("encode", phaseStart);
   const { predictedLabels } = await propagateMask(
     ctx.client,
     {
@@ -171,6 +198,7 @@ export async function propagateSlice(
     },
     ctx.signal,
   );
+  phaseStart = measurePhase("backend", phaseStart);
   assertSliceLength(
     predictedLabels.length,
     imageWindow.width * imageWindow.height,
@@ -184,14 +212,37 @@ export async function propagateSlice(
     maskGrid,
   );
   const { ids, valueMask } = delabelizeMaskSlice(predictedOnMask, labelToId);
+  if (nextMaskRegion !== undefined) {
+    protectSegmentVoxels(valueMask, nextMaskRegion.data, protectedIds);
+  }
+  phaseStart = measurePhase("decode", phaseStart);
   await edit.writeRegion(
     maskTarget,
     denseMaskBuffer(ids, mask.dataType),
     sliceBox(maskWindow, maskWindow.nextZ),
     { valueMask },
   );
+  measurePhase("write", phaseStart);
 
   return { voxelsWritten: countSet(valueMask) };
+}
+
+/** Prefix of the step's timing entries (DevTools Performance → Timings). */
+export const PROPAGATION_TIMING_PREFIX = "z-extrapolation:";
+
+/**
+ * Record one phase of a step as a `performance.measure` entry (TM-518), so the
+ * real end-to-end split — reads, encoding, backend, decoding, write — can be
+ * read off a live session: `performance.getEntriesByType("measure")`.
+ * Returns the phase's end, the next phase's start.
+ */
+function measurePhase(phase: string, startedAt: number): number {
+  const endedAt = performance.now();
+  performance.measure(PROPAGATION_TIMING_PREFIX + phase, {
+    start: startedAt,
+    end: endedAt,
+  });
+  return endedAt;
 }
 
 /** The XY grid a window addresses, at its layer's voxel size. */
@@ -211,17 +262,6 @@ function sliceBox(window: PropagateWindow, z: number): VoxelBox {
   return {
     origin: [window.originX, window.originY, z],
     size: [window.width, window.height, 1],
-  };
-}
-
-/** The `SliceWindow` the image reader consumes for slice `z` of `window`. */
-function imageSlice(window: PropagateWindow, z: number) {
-  return {
-    originX: window.originX,
-    originY: window.originY,
-    z,
-    width: window.width,
-    height: window.height,
   };
 }
 
@@ -255,8 +295,17 @@ function denseMaskBuffer(
 ): ChunkVoxelBuffer {
   if (dataType === "uint64") return ids;
   const dense = new NUMERIC_VOXEL_ARRAY[dataType](ids.length);
+  // Only the ≤255 tracked IDs occur: clamp each once, not once per voxel.
+  const clampedById = new Map<bigint, number>();
   for (let i = 0; i < ids.length; i++) {
-    dense[i] = clampToVoxelDataType(dataType, ids[i]) as number;
+    const id = ids[i];
+    if (id === 0n) continue;
+    let clamped = clampedById.get(id);
+    if (clamped === undefined) {
+      clamped = clampToVoxelDataType(dataType, id) as number;
+      clampedById.set(id, clamped);
+    }
+    dense[i] = clamped;
   }
   return dense;
 }

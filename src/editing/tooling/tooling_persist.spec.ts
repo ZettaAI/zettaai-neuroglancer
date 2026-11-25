@@ -50,6 +50,8 @@ function state(over: Partial<PaintingSharedState> = {}): PaintingSharedState {
     mask: undefined,
     fillMode: "3d",
     spacingFraction: 0.1,
+    autoSelectPaintedSegment: true,
+    fillClosedPaths: false,
     ...over,
   };
 }
@@ -103,6 +105,87 @@ describe("tooling_persist", () => {
     expect(patch!.fillMode).toBe("2d");
   });
 
+  it("round-trips fill-inside turned off (TM-268)", () => {
+    const serialized = serializeTooling(
+      "painting.brush",
+      state({ fillClosedPaths: false }),
+    );
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.fillClosedPaths).toBe(false);
+  });
+
+  // On by default: only an explicit `fillInside: false` turns it off. The old
+  // `fillClosedPaths` key held the old off-default, so it is ignored.
+  it("defaults fill-inside on for configs lacking the field, holding junk, or only the old key (TM-268)", () => {
+    for (const persisted of [
+      {},
+      { fillInside: "true" },
+      { fillClosedPaths: false },
+    ]) {
+      const parsed = parseTooling({
+        activeToolId: "painting.brush",
+        painting: {
+          targetLayerId: "target",
+          targetResolution: RES.toString(),
+          radius: 9,
+          activeValue: { t: "b", v: "42" },
+          eraseValue: { t: "n", v: 0 },
+          mask: null,
+          ...persisted,
+        },
+      });
+      const patch = paintingPatchFromPersist(
+        parsed!.painting!,
+        allowed(TARGET),
+      );
+      expect(patch!.fillClosedPaths).toBe(true);
+    }
+  });
+
+  it("keeps fill-inside off when it was saved off under its own key (TM-268)", () => {
+    const parsed = parseTooling({
+      activeToolId: "painting.brush",
+      painting: {
+        targetLayerId: "target",
+        targetResolution: RES.toString(),
+        radius: 9,
+        activeValue: { t: "b", v: "42" },
+        eraseValue: { t: "n", v: 0 },
+        mask: null,
+        fillInside: false,
+      },
+    });
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.fillClosedPaths).toBe(false);
+  });
+
+  it("round-trips auto-select turned off (TM-490)", () => {
+    const serialized = serializeTooling(
+      "painting.brush",
+      state({ autoSelectPaintedSegment: false }),
+    );
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.autoSelectPaintedSegment).toBe(false);
+  });
+
+  it("defaults auto-select on for configs lacking the field (TM-490)", () => {
+    const parsed = parseTooling({
+      activeToolId: "painting.brush",
+      painting: {
+        targetLayerId: "target",
+        targetResolution: RES.toString(),
+        radius: 9,
+        activeValue: { t: "b", v: "42" },
+        eraseValue: { t: "n", v: 0 },
+        mask: null,
+      },
+    });
+    const patch = paintingPatchFromPersist(parsed!.painting!, allowed(TARGET));
+    expect(patch!.autoSelectPaintedSegment).toBe(true);
+  });
+
   it("preserves a number activeValue as a number (uint8 layer)", () => {
     const serialized = serializeTooling(
       "painting.brush",
@@ -132,6 +215,28 @@ describe("tooling_persist", () => {
       allowed(TARGET, IMAGE),
     );
     expect(patch!.mask).toEqual(mask);
+  });
+
+  it("caps a restored binary closing at the portal's 32 voxels", () => {
+    // A URL or older state can carry any closing; above the cap a stroke
+    // erodes away to nothing, so restoring clamps it like the panel does.
+    const mask = {
+      imageLayerId: IMAGE,
+      imageResolution: RES,
+      thresholdLow: 10,
+      thresholdHigh: 200,
+      coverageThreshold: 0.5,
+      minComponentSize: 0,
+      binaryClosing: 50,
+      filterComponentsFirst: false,
+    };
+    const serialized = serializeTooling("painting.brush", state({ mask }));
+    const parsed = parseTooling(roundTrip(serialized));
+    const patch = paintingPatchFromPersist(
+      parsed!.painting!,
+      allowed(TARGET, IMAGE),
+    );
+    expect(patch!.mask).toEqual({ ...mask, binaryClosing: 32 });
   });
 
   it("repairs a stale mask resolution to a resolution the session opened", () => {
@@ -218,53 +323,19 @@ describe("tooling_persist", () => {
     expect(patch!.mask).toBeUndefined();
   });
 
-  it("round-trips per-user keybind overrides", () => {
-    const serialized = serializeTooling("painting.brush", state(), {
-      brush: ["control+keyq"],
-      undo: ["control+keyu", "keyz"],
-    });
-    const parsed = parseTooling(roundTrip(serialized));
-    expect(parsed?.keybinds).toEqual({
-      brush: ["control+keyq"],
-      undo: ["control+keyu", "keyz"],
-    });
-  });
-
-  it("omits keybinds when there are no overrides", () => {
-    const serialized = serializeTooling("painting.brush", state(), {});
-    expect("keybinds" in serialized).toBe(false);
-    const parsed = parseTooling(roundTrip(serialized));
-    expect(parsed?.keybinds).toBeUndefined();
-  });
-
-  it("coerces a single-string keybind value to a one-element array", () => {
-    // Hand-authored / legacy state may store a bare string instead of a list.
+  it("ignores keybinds in a block saved before they moved to the browser", () => {
+    // Older links still carry `keybinds`; another person's layout must not
+    // come in with them.
     const parsed = parseTooling({
       activeToolId: null,
-      keybinds: { brush: "control+keyq" },
+      keybinds: { brush: ["control+keyq"] },
     });
-    expect(parsed?.keybinds).toEqual({ brush: ["control+keyq"] });
-  });
-
-  it("skips malformed keybind entries but keeps the valid ones", () => {
-    const parsed = parseTooling({
-      activeToolId: null,
-      keybinds: {
-        brush: ["control+keyq"],
-        bad: 42,
-        empty: [],
-        mixed: ["keya", 7, "keyb"],
-      },
-    });
-    expect(parsed?.keybinds).toEqual({
-      brush: ["control+keyq"],
-      mixed: ["keya", "keyb"],
-    });
-  });
-
-  it("ignores a non-object keybinds field without dropping the block", () => {
-    const parsed = parseTooling({ activeToolId: null, keybinds: 42 });
     expect(parsed).toEqual({ activeToolId: null });
+  });
+
+  it("does not write keybinds into the block", () => {
+    const serialized = serializeTooling("painting.brush", state());
+    expect("keybinds" in serialized).toBe(false);
   });
 
   it("is tolerant of malformed input", () => {

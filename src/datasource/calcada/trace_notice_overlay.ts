@@ -38,16 +38,17 @@ export class TraceNoticeOverlay extends RefCounted {
     super();
     this.element.className = "calcada-trace-notice-overlay";
     this.registerDisposer(source.active.changed.add(() => this.update()));
-    this.registerDisposer(source.sphereCenter.changed.add(() => this.update()));
+    this.registerDisposer(source.seedRoot.changed.add(() => this.update()));
     this.registerDisposer(display.updateFinished.add(() => this.place()));
     this.registerDisposer(() => this.hide());
     this.update();
   }
 
-  // Before the sphere is down there is no queue to report on.
+  // Before there is a seed there is no queue to report on. A trace over the
+  // whole segment has a seed but never a sphere.
   private update() {
-    const { active, sphereCenter } = this.source;
-    if (active.value && sphereCenter.value !== undefined) {
+    const { active, seedRoot } = this.source;
+    if (active.value && seedRoot.value !== undefined) {
       this.show();
     } else {
       this.hide();

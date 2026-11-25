@@ -24,6 +24,7 @@ import type {
 } from "#src/layer/segmentation/index.js";
 import type { SegmentationDisplayState } from "#src/segmentation_display_state/frontend.js";
 import {
+  makeSegmentAnnotationsButton,
   registerCallbackWhenSegmentationDisplayStateChanged,
   SegmentWidgetWithExtraColumnsFactory,
 } from "#src/segmentation_display_state/frontend.js";
@@ -48,7 +49,11 @@ import {
   updatePropertyHistograms,
 } from "#src/segmentation_display_state/property_map.js";
 import type { WatchableValueInterface } from "#src/trackable_value.js";
-import { observeWatchable, WatchableValue } from "#src/trackable_value.js";
+import {
+  observeWatchable,
+  registerNestedSync,
+  WatchableValue,
+} from "#src/trackable_value.js";
 import { getDefaultSelectBindings } from "#src/ui/default_input_event_bindings.js";
 import { SELECT_SEGMENTS_TOOLS_ID } from "#src/ui/segment_select_tools.js";
 import {
@@ -56,6 +61,7 @@ import {
   ANNOTATE_SPLIT_SEGMENTS_TOOL_ID,
 } from "#src/ui/segment_split_merge_tools.js";
 import { makeToolButton } from "#src/ui/tool.js";
+import type { Uint64Set } from "#src/uint64_set.js";
 import { animationFrameDebounce } from "#src/util/animation_frame_debounce.js";
 import type { ArraySpliceOp } from "#src/util/array.js";
 import { getFixedOrderMergeSplices } from "#src/util/array.js";
@@ -1067,6 +1073,7 @@ abstract class SegmentListGroupBase extends RefCounted {
   copyAllSegmentsButton: HTMLElement;
   copyVisibleSegmentsButton: HTMLElement;
   visibilityToggleAllButton: HTMLElement;
+  annotationsToggleAllButton: HTMLElement;
 
   statusChanged = new NullarySignal();
 
@@ -1104,6 +1111,16 @@ abstract class SegmentListGroupBase extends RefCounted {
     }
   }
 
+  /** Turns the tables off for every listed segment unless all are off already. */
+  toggleAnnotationsOfAll() {
+    const excluded = this.annotationExcludedSegments.value;
+    if (excluded === undefined) return;
+    excluded.set(
+      Array.from(this.listSegments()),
+      !this.allListedExcluded(excluded),
+    );
+  }
+
   copySegments(onlyVisible = false) {
     let ids = [...this.listSegments()];
     if (onlyVisible) {
@@ -1116,6 +1133,9 @@ abstract class SegmentListGroupBase extends RefCounted {
   constructor(
     protected listSource: SegmentListSource,
     protected group: SegmentationUserLayerGroupState,
+    private annotationExcludedSegments: WatchableValueInterface<
+      Uint64Set | undefined
+    >,
   ) {
     super();
 
@@ -1166,6 +1186,9 @@ abstract class SegmentListGroupBase extends RefCounted {
         );
       },
     });
+    this.annotationsToggleAllButton = makeSegmentAnnotationsButton({
+      onClick: () => this.toggleAnnotationsOfAll(),
+    });
     const { selectionStatusContainer } = this;
     this.selectionStatusMessage.classList.add(
       "neuroglancer-segment-list-status-message",
@@ -1174,6 +1197,7 @@ abstract class SegmentListGroupBase extends RefCounted {
     selectionStatusContainer.appendChild(this.copyAllSegmentsButton);
     selectionStatusContainer.appendChild(this.starAllButton);
     selectionStatusContainer.appendChild(this.visibilityToggleAllButton);
+    selectionStatusContainer.appendChild(this.annotationsToggleAllButton);
     selectionStatusContainer.appendChild(this.copyVisibleSegmentsButton);
     selectionStatusContainer.appendChild(this.selectionStatusMessage);
     this.element.appendChild(selectionStatusContainer);
@@ -1184,9 +1208,39 @@ abstract class SegmentListGroupBase extends RefCounted {
       group.selectedSegments.changed.add(this.debouncedUpdateStatus),
     );
     this.registerDisposer(listSource.changed.add(this.debouncedUpdateStatus));
+    this.registerDisposer(
+      registerNestedSync((nested, excluded) => {
+        this.debouncedUpdateStatus();
+        if (excluded !== undefined) {
+          nested.registerDisposer(
+            excluded.changed.add(this.debouncedUpdateStatus),
+          );
+        }
+      }, annotationExcludedSegments),
+    );
   }
 
   *listSegments(): IterableIterator<bigint> {}
+
+  private allListedExcluded(excluded: Uint64Set) {
+    for (const segment of this.listSegments()) {
+      if (!excluded.has(segment)) return false;
+    }
+    return true;
+  }
+
+  private updateAnnotationsToggleAll(totalDisplayed: number) {
+    const { annotationsToggleAllButton: button } = this;
+    const excluded = this.annotationExcludedSegments.value;
+    button.hidden = excluded === undefined;
+    if (excluded === undefined) return;
+    const allOff = totalDisplayed > 0 && this.allListedExcluded(excluded);
+    button.style.visibility = totalDisplayed ? "visible" : "hidden";
+    button.classList.toggle("neuroglancer-annotations-off", allOff);
+    button.title = allOff
+      ? `Click to show annotation tables for ${totalDisplayed} segment ID(s).`
+      : `Click to hide annotation tables for ${totalDisplayed} segment ID(s).`;
+  }
 
   updateStatus() {
     const {
@@ -1267,18 +1321,12 @@ abstract class SegmentListGroupBase extends RefCounted {
       visibleToggleTitle += "  Shift+click to invert visibility.";
     }
     visibilityToggleAllButton.title = visibleToggleTitle;
+    this.updateAnnotationsToggleAll(totalDisplayed);
     this.statusChanged.dispatch();
   }
 }
 
 class SegmentListGroupSelected extends SegmentListGroupBase {
-  constructor(
-    protected listSource: SegmentListSource,
-    protected group: SegmentationUserLayerGroupState,
-  ) {
-    super(listSource, group);
-  }
-
   listSegments() {
     return this.group.selectedSegments[Symbol.iterator](); // TODO, better way to call the iterator?
   }
@@ -1306,12 +1354,13 @@ class SegmentListGroupQuery extends SegmentListGroupBase {
     list: VirtualList,
     protected listSource: SegmentQueryListSource,
     group: SegmentationUserLayerGroupState,
+    annotationExcludedSegments: WatchableValueInterface<Uint64Set | undefined>,
     private segmentPropertyMap: PreprocessedSegmentPropertyMap | undefined,
     segmentQuery: WatchableValueInterface<string>,
     queryElement: HTMLInputElement,
     private debouncedUpdateQueryModel: DebouncedFunc<() => void>,
   ) {
-    super(listSource, group);
+    super(listSource, group, annotationExcludedSegments);
     const setQuery = (newQuery: ExplicitIdQuery | FilterQuery) => {
       queryElement.focus();
       queryElement.select();
@@ -1570,6 +1619,7 @@ export class SegmentDisplayTab extends Tab {
                 list,
                 listSource,
                 group,
+                layer.displayState.annotationExcludedSegments,
                 segmentPropertyMap,
                 segmentQuery,
                 queryElement,
@@ -1579,7 +1629,11 @@ export class SegmentDisplayTab extends Tab {
             segList.element.appendChild(list.element);
             parent.appendChild(segList.element);
             const segList2 = context.registerDisposer(
-              new SegmentListGroupSelected(selectedSegmentsListSource, group),
+              new SegmentListGroupSelected(
+                selectedSegmentsListSource,
+                group,
+                layer.displayState.annotationExcludedSegments,
+              ),
             );
             segList2.element.appendChild(selectedSegmentsList.element);
             parent.appendChild(segList2.element);
@@ -1623,6 +1677,19 @@ export class SegmentDisplayTab extends Tab {
               displayState.segmentationGroupState.value.selectedSegments.changed.add(
                 updateListItems,
               ),
+            );
+            context.registerDisposer(
+              registerNestedSync((nested, excludedSegments) => {
+                const header = list.header.firstElementChild;
+                if (header !== null) {
+                  listSource.segmentWidgetFactory.updateHeader(header);
+                }
+                if (excludedSegments !== undefined) {
+                  nested.registerDisposer(
+                    excludedSegments.changed.add(updateListItems),
+                  );
+                }
+              }, displayState.annotationExcludedSegments),
             );
             list.element.classList.add("neuroglancer-segment-list");
             list.element.classList.add("neuroglancer-preview-list");

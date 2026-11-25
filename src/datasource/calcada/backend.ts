@@ -37,6 +37,8 @@ import {
   VolumeChunkSourceParameters as CalcadaVolumeChunkSourceParameters,
   VolumeChunkEncoding,
   MeshSourceParameters,
+  SkeletonSourceParameters,
+  CALCADA_SKELETON_VERTEX_ATTRIBUTES,
   CHUNKED_GRAPH_LAYER_RPC_ID,
   CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
   RENDER_RATIO_LIMIT,
@@ -76,6 +78,9 @@ import { RenderLayerBackend } from "#src/render_layer_backend.js";
 import { withSegmentationLayerBackendState } from "#src/segmentation_display_state/backend.js";
 import { getObjectKey } from "#src/segmentation_display_state/base.js";
 import type { SharedWatchableValue } from "#src/shared_watchable_value.js";
+import type { SkeletonChunk } from "#src/skeleton/backend.js";
+import { SkeletonSource } from "#src/skeleton/backend.js";
+import { decodeSkeletonChunk } from "#src/skeleton/decode_precomputed_skeleton.js";
 import type { SliceViewChunkSourceBackend } from "#src/sliceview/backend.js";
 import { deserializeTransformedSources } from "#src/sliceview/backend.js";
 import { decodeCompressedSegmentationChunk } from "#src/sliceview/backend_chunk_decoders/compressed_segmentation.js";
@@ -349,6 +354,42 @@ export class CalcadaVolumeChunkSource extends WithParameters(
 }
 
 @registerSharedObject()
+export class CalcadaSkeletonSource extends WithParameters(
+  WithSharedKvStoreContextCounterpart(SkeletonSource),
+  SkeletonSourceParameters,
+) {
+  // Follows the layer's branch like CalcadaMeshSource: a branch-only root has
+  // no pieces on main.
+  branchId: SharedWatchableValue<number> | undefined;
+  httpSource = getHttpSource(
+    this.sharedKvStoreContext.kvStoreContext,
+    this.parameters.url,
+  );
+
+  constructor(rpc: RPC, options: any) {
+    super(rpc, options);
+    if (options.branchId !== undefined) {
+      this.branchId = rpc.get(options.branchId);
+    }
+  }
+
+  async download(chunk: SkeletonChunk, signal: AbortSignal) {
+    const { fetchOkImpl, baseUrl } = this.httpSource;
+    const branchId = this.branchId?.value ?? this.parameters.branchId;
+    const query = branchId > 0 ? `?branch_id=${branchId}` : "";
+    const response = await fetchOkImpl(
+      `${baseUrl}/skeleton/${chunk.objectId}${query}`,
+      { signal },
+    );
+    decodeSkeletonChunk(
+      chunk,
+      await response.arrayBuffer(),
+      CALCADA_SKELETON_VERTEX_ATTRIBUTES,
+    );
+  }
+}
+
+@registerSharedObject()
 export class CalcadaMeshSource extends WithParameters(
   WithSharedKvStoreContextCounterpart(MeshSource),
   MeshSourceParameters,
@@ -410,9 +451,7 @@ export class CalcadaMeshSource extends WithParameters(
   // Streaming batch reader for fragments the manifest resolved into a shard
   // (no split-piece `url`); coalesces many piece reads issued in the same
   // tick into a single POST instead of one range request per piece.
-  // Out-of-frustum pieces are parked in the reader's pool and never download
-  // while off-screen; a camera move re-classifies the pool (see
-  // updateFragmentSpatialHint).
+  // Out-of-frustum pieces stay in the pool but sort after every in-view piece.
   fragmentBatch = new FragmentBatchReader(
     async (pieceIds, signal) => {
       const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
@@ -424,7 +463,6 @@ export class CalcadaMeshSource extends WithParameters(
     },
     isUnsupportedFragmentBatchError,
     (a, b) => this.spatialIndex.compare(a, b),
-    (pieceId) => this.spatialIndex.isOutOfView(pieceId),
   );
 
   constructor(rpc: RPC, options: any) {
@@ -817,9 +855,7 @@ export class CalcadaMeshSource extends WithParameters(
   }
 
   updateFragmentSpatialHint(hint: FragmentSpatialHint | null) {
-    if (this.spatialIndex.updateHint(hint)) {
-      this.fragmentBatch.reconsiderDeferred();
-    }
+    this.spatialIndex.updateHint(hint);
   }
 
   getFragmentPriorityBias(fragmentId: string): number {

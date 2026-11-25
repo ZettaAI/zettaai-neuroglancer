@@ -16,6 +16,8 @@
  * IndexedDB persistence are deferred to a later iteration.
  */
 
+import type { ChunkVoxelBox } from "#src/editing/local_patch_chunk.js";
+import type { ChunkKey } from "#src/editing/local_patch_source.js";
 import {
   chunkGridKey,
   LocalPatchSource,
@@ -23,11 +25,27 @@ import {
 import type { DebouncedFunction } from "#src/util/animation_frame_debounce.js";
 import { animationFrameDebounce } from "#src/util/animation_frame_debounce.js";
 import { RefCounted } from "#src/util/disposable.js";
-import { NullarySignal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
+
+/**
+ * One change to the store's patches, reported by `chunkChanged`. `box` is the
+ * chunk-local inclusive box whose voxels may have changed; `null` means the
+ * whole chunk.
+ */
+export type PatchChunkChange =
+  | { kind: "chunk"; key: ChunkKey; box: ChunkVoxelBox | null }
+  | { kind: "all-cleared" };
 
 export class LocalPatchStore extends RefCounted {
   readonly source: LocalPatchSource;
   readonly changed = new NullarySignal();
+  /**
+   * Fired synchronously on every patch change, before the (possibly
+   * frame-debounced) `changed`. A separate channel so a second consumer never
+   * competes for the 2D texture cache's one-shot `pendingUpload`, nor relies on
+   * `source.dirtyKeys`, which nothing drains.
+   */
+  readonly chunkChanged = new Signal<(change: PatchChunkChange) => void>();
   private readonly flushDebounced: DebouncedFunction;
 
   constructor() {
@@ -69,22 +87,30 @@ export class LocalPatchStore extends RefCounted {
     patched?: Uint8Array,
   ): void {
     this.source.writeFullChunk(chunkGridPosition, chunkDataSize, data, patched);
+    this.dispatchChunkChanged(chunkGridPosition, null);
     this.scheduleGPUFlush();
   }
 
   /**
    * Record that `PatchMirror` mutated a chunk's buffers in place (fused
    * diff/widen path) and schedule the coalesced GPU flush. The chunk's own
-   * `pendingUpload` carries the stale sub-box for the texture cache.
+   * `pendingUpload` carries the stale sub-box for the texture cache; `box`, when
+   * given, is the same chunk-local box for `chunkChanged` listeners (omitted →
+   * whole chunk).
    */
-  noteChunkMutated(chunkGridPosition: ArrayLike<number>): void {
+  noteChunkMutated(
+    chunkGridPosition: ArrayLike<number>,
+    box?: ChunkVoxelBox,
+  ): void {
     this.source.dirtyKeys.add(chunkGridKey(chunkGridPosition));
+    this.dispatchChunkChanged(chunkGridPosition, box ?? null);
     this.scheduleGPUFlush();
   }
 
   /** Drop every patch in this store. */
   clearAll(): void {
     this.source.clearAll();
+    this.chunkChanged.dispatch({ kind: "all-cleared" });
     this.flushImmediately();
   }
 
@@ -96,8 +122,20 @@ export class LocalPatchStore extends RefCounted {
    */
   clearChunk(chunkGridPosition: ArrayLike<number>): void {
     if (this.source.clearChunk(chunkGridKey(chunkGridPosition))) {
+      this.dispatchChunkChanged(chunkGridPosition, null);
       this.scheduleGPUFlush();
     }
+  }
+
+  private dispatchChunkChanged(
+    chunkGridPosition: ArrayLike<number>,
+    box: ChunkVoxelBox | null,
+  ): void {
+    this.chunkChanged.dispatch({
+      kind: "chunk",
+      key: chunkGridKey(chunkGridPosition),
+      box,
+    });
   }
 
   /** Convenience: count total patches across all chunks. Used by tests/UI. */

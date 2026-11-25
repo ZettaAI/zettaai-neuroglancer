@@ -24,6 +24,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   readBaselineImageSlice,
+  readBaselineImageSlices,
   type SliceWindow,
 } from "#src/editing/raster/region_slice_reader.js";
 import type { ReadChunkAt } from "#src/editing/tool_runtimes/painting_tools.js";
@@ -199,5 +200,95 @@ describe("readBaselineImageSlice", () => {
       window,
     );
     expect([...result]).toEqual(expectedSlice(window));
+  });
+});
+
+describe("readBaselineImageSlices (TM-518)", () => {
+  const chunkSize: Vec3 = [4, 4, 4];
+  const offset: Vec3 = [0, 0, 0];
+  const area = { originX: 2, originY: 1, width: 4, height: 3 };
+
+  /** Wraps a reader, recording each chunk read and holding it until released. */
+  function recordingReader(inner: ReadChunkAt) {
+    const readKeys: string[] = [];
+    const pending: (() => void)[] = [];
+    const reader: ReadChunkAt = (layer, resolution, chunkId) => {
+      const coord = ChunkIdCodec.toCoord(chunkId);
+      readKeys.push(`${coord.x},${coord.y},${coord.z}`);
+      return new Promise((resolve) => {
+        pending.push(() => resolve(inner(layer, resolution, chunkId)));
+      });
+    };
+    const releaseAll = () => {
+      for (const release of pending.splice(0)) release();
+    };
+    return { reader, readKeys, releaseAll };
+  }
+
+  it("returns one slice per requested Z, in order", async () => {
+    const zs = [6, 1, 2];
+    const slices = await readBaselineImageSlices(
+      fakeReader(chunkSize, offset),
+      IMAGE,
+      RES,
+      scaleOf(chunkSize, offset),
+      area,
+      zs,
+    );
+    expect(slices.map((slice) => [...slice])).toEqual(
+      zs.map((z) => expectedSlice({ ...area, z })),
+    );
+  });
+
+  it("reads a chunk once when it holds several requested slices", async () => {
+    const { reader, readKeys, releaseAll } = recordingReader(
+      fakeReader(chunkSize, offset),
+    );
+    // Z 1 and 2 share chunk z=0; X 2..5 spans chunks x=0,1; Y 1..3 is chunk y=0.
+    const read = readBaselineImageSlices(
+      reader,
+      IMAGE,
+      RES,
+      scaleOf(chunkSize, offset),
+      area,
+      [1, 2],
+    );
+    await Promise.resolve();
+    releaseAll();
+    await read;
+    expect(readKeys.sort()).toEqual(["0,0,0", "1,0,0"]);
+  });
+
+  it("starts every chunk read before any of them resolves", async () => {
+    const { reader, readKeys, releaseAll } = recordingReader(
+      fakeReader(chunkSize, offset),
+    );
+    // Z 1 and 6 lie in different chunks: four chunks in total.
+    const read = readBaselineImageSlices(
+      reader,
+      IMAGE,
+      RES,
+      scaleOf(chunkSize, offset),
+      area,
+      [1, 6],
+    );
+    await Promise.resolve();
+    expect(readKeys).toHaveLength(4);
+    releaseAll();
+    await read;
+  });
+
+  it("rejects when a chunk read rejects", async () => {
+    const failing: ReadChunkAt = () => Promise.reject(new Error("offline"));
+    await expect(
+      readBaselineImageSlices(
+        failing,
+        IMAGE,
+        RES,
+        scaleOf(chunkSize, offset),
+        area,
+        [1],
+      ),
+    ).rejects.toThrow("offline");
   });
 });

@@ -16,7 +16,7 @@
  *
  * Sets the same cross-origin-isolation headers the dev-server does
  * (`COOP: same-origin` + `COEP: require-corp`) so `crossOriginIsolated` is true
- * → SharedArrayBuffer + self-hosted pyodide work. Same-origin subresources also
+ * → SharedArrayBuffer works. Same-origin subresources also
  * get `Cross-Origin-Resource-Policy: cross-origin` so COEP lets them load.
  *
  * Run (the bench config's webServer does this):  node tests/editing/harness/serve_dist.mjs

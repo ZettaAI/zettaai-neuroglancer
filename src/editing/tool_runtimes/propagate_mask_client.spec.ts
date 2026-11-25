@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import type { BackendTarget } from "#src/editing/backend/backend_endpoint.js";
 import {
   propagateMask,
   PROPAGATE_MASK_PATH,
@@ -21,6 +22,7 @@ interface CapturedRequest {
   path: string;
   form: FormData;
   init: RequestInit | undefined;
+  target: BackendTarget | undefined;
 }
 
 /** A fake poster that records the request and replays a canned response body. */
@@ -30,8 +32,8 @@ function fakePoster(responseBody: ArrayBuffer): {
 } {
   const captured: CapturedRequest[] = [];
   const poster: MultipartPoster = {
-    postMultipart(path, form, init) {
-      captured.push({ path, form, init });
+    postMultipart(path, form, init, target) {
+      captured.push({ path, form, init, target });
       return Promise.resolve(new Response(responseBody));
     },
   };
@@ -96,6 +98,15 @@ describe("propagateMask request", () => {
     const headers = new Headers(captured[0].init?.headers);
     expect(headers.get("Accept")).toBe("application/octet-stream");
     expect(captured[0].init?.signal).toBe(signal);
+  });
+
+  it("sends the inference to the GPU backend target", async () => {
+    const { poster, captured } = fakePoster(
+      encodeResponse(2, 2, Uint8Array.from([1, 1, 1, 1])),
+    );
+    await propagateMask(poster, INPUT);
+
+    expect(captured[0].target).toBe("gpu");
   });
 
   it("sends metadata plus the three slice parts", async () => {

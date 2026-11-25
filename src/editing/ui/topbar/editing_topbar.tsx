@@ -18,6 +18,7 @@ import {
   GitMerge,
   Layers,
   Loader2,
+  CircleHelp,
   LocateFixed,
   MousePointer2,
   PaintBucket,
@@ -44,6 +45,8 @@ import type { SaveConflictError } from "#src/editing/reconcile/save_conflict_ref
 import { canCombine } from "#src/editing/reconcile/save_conflict_refusal.js";
 import {
   effectiveEditKeybinds,
+  findShadowedViewerAction,
+  planEditKeybindChange,
   type EditKeybindName,
 } from "#src/editing/session_hotkey_binder.js";
 import { automergeEnabled } from "#src/editing/tooling/edit_preferences.js";
@@ -54,6 +57,13 @@ import { SaveTracker } from "#src/editing/ui/session_controls/save_tracker.js";
 import { ChunkLoadProgress } from "#src/editing/ui/topbar/chunk_load_progress.js";
 import { TopbarEditButton } from "#src/editing/ui/topbar/topbar_edit_button.js";
 import { StatusMessage } from "#src/status.js";
+import {
+  formatChord,
+  preferredChord,
+  shortcutAttributes,
+} from "#src/ui/key_chord_format.js";
+import { SHORTCUT_SHEET_KEYS } from "#src/ui/mode_shortcuts.js";
+import { rebindOutcomeMessage } from "#src/ui/shortcut_catalog.js";
 
 // Synthetic tool id used for the "Cursor" row. Selecting it clears the active
 // tool (no real library tool corresponds to it). Mirrors the legacy
@@ -67,6 +77,8 @@ const TOOL_ICON_SIZE = 17;
 interface ToolEntry {
   readonly toolId: string;
   readonly label: string;
+  /** One line on what the tool does, shown under its name in the tooltip. */
+  readonly hint: string;
   /** The configurable keybind action this tool's button rebinds. */
   readonly keybind: EditKeybindName;
   /**
@@ -83,25 +95,35 @@ const TOOL_ENTRIES: readonly ToolEntry[] = [
   {
     toolId: CURSOR_TOOL_ID,
     label: "Cursor",
+    hint: "Pan and select without painting · Esc also returns here",
     keybind: "cursor",
     Icon: MousePointer2,
   },
   {
     toolId: "painting.brush",
     label: "Brush",
+    hint: "Paint voxels with the selected segment",
     keybind: "brush",
     Icon: Paintbrush,
   },
-  { toolId: "painting.erase", label: "Eraser", keybind: "erase", Icon: Eraser },
+  {
+    toolId: "painting.erase",
+    label: "Eraser",
+    hint: "Remove painted voxels",
+    keybind: "erase",
+    Icon: Eraser,
+  },
   {
     toolId: "painting.fill",
     label: "Fill",
+    hint: "Flood the clicked region with the selected segment",
     keybind: "fill",
     Icon: PaintBucket,
   },
   {
     toolId: "z-extrapolation",
     label: "Z-extrapolation",
+    hint: "Carry a drawn shape across sections",
     keybind: "zextrap",
     Icon: Layers,
   },
@@ -385,8 +407,8 @@ function ActiveTopbarControls({
   );
   const hotkeyLabel = useCallback(
     (name: EditKeybindName): string => {
-      const keys = effective[name];
-      return keys.length > 0 ? formatKeyIdentifier(keys[0]) : "unbound";
+      const chord = preferredChord(effective[name]);
+      return chord !== undefined ? formatChord(chord) : "unbound";
     },
     [effective],
   );
@@ -407,18 +429,41 @@ function ActiveTopbarControls({
       }
       const identifier = keyboardEventToIdentifier(event);
       if (identifier === undefined) return; // lone modifier — keep waiting
-      host.setEditKeybind(capturing, [identifier]);
+      const change = planEditKeybindChange(capturing, identifier, effective);
+      if ("refused" in change) {
+        StatusMessage.showTemporaryMessage(
+          `${formatKeyIdentifier(identifier)} already does "${change.refused}". Press another key, or Esc to cancel`,
+          4000,
+        );
+        return;
+      }
+      const { inputEventBindings } = host.viewer;
+      const shadowed = findShadowedViewerAction(identifier, [
+        inputEventBindings.global,
+        inputEventBindings.sliceView,
+        inputEventBindings.perspectiveView,
+      ]);
+      host.setEditKeybinds(change.overrides);
       setCapturing(null);
+      const outcome = rebindOutcomeMessage(
+        capturing,
+        identifier,
+        change.displaced,
+        shadowed,
+        formatKeyIdentifier,
+      );
       StatusMessage.showTemporaryMessage(
-        `Bound "${capturing}" to ${formatKeyIdentifier(identifier)}`,
-        2500,
+        outcome === ""
+          ? `Bound "${capturing}" to ${formatKeyIdentifier(identifier)}`
+          : outcome,
+        outcome === "" ? 2500 : 6000,
       );
     };
     // Capture phase so we intercept before the session-scoped action map.
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [capturing, host]);
+  }, [capturing, host, effective]);
 
   const startRebind = useCallback((name: EditKeybindName, event: Event) => {
     // Right-click (or the dedicated affordance) — never open the browser
@@ -432,6 +477,7 @@ function ActiveTopbarControls({
   }, []);
 
   const runUndo = useCallback(async () => {
+    if (host.refuseWhilePainting()) return;
     try {
       await session.undo();
     } catch (err) {
@@ -443,6 +489,7 @@ function ActiveTopbarControls({
   }, [session]);
 
   const runRedo = useCallback(async () => {
+    if (host.refuseWhilePainting()) return;
     try {
       await session.redo();
     } catch (err) {
@@ -474,6 +521,14 @@ function ActiveTopbarControls({
   const cancelSave = useCallback(() => {
     saveTracker.cancel(host);
   }, [saveTracker, host]);
+
+  // The save key does what clicking the button would do right now. A ref, so the
+  // subscription below need not be redone for every render's new closure.
+  const saveKeyAction = useRef<() => void>(() => {});
+  useEffect(
+    () => host.requestSaveAll.add(() => saveKeyAction.current()),
+    [host],
+  );
 
   // Re-save the chunks a previous save couldn't confirm (TM-352). Routes through
   // the same SaveTracker state machine as a normal save, so the button shows the
@@ -518,6 +573,13 @@ function ActiveTopbarControls({
     );
   }, [reverifyAttempt]);
 
+  saveKeyAction.current = () => {
+    // Unlike the button, the key never cancels a running save.
+    if (isSaving || !saveAvailable) return;
+    if (hasDirty) runSaveAll();
+    else if (hasUnconfirmed) runRetry();
+  };
+
   return (
     <>
       <div
@@ -545,9 +607,12 @@ function ActiveTopbarControls({
             isSaving
               ? "Saving changes… click to cancel"
               : saveAvailable
-                ? "Save all dirty layers to the backend"
+                ? "Save all\nSave all dirty layers to the backend"
                 : "Saving is unavailable — no save backend is registered."
           }
+          {...(!isSaving && saveAvailable
+            ? shortcutAttributes(effective.saveAll)
+            : {})}
           aria-label={isSaving ? "Saving changes — click to cancel" : undefined}
           onClick={isSaving ? cancelSave : hasDirty ? runSaveAll : runRetry}
         >
@@ -627,8 +692,11 @@ function ActiveTopbarControls({
               data-tooltip={
                 isCapturing
                   ? `Press a key for ${entry.label} · Esc to cancel`
-                  : `${entry.label} · ${keyLabel}\nRight-click to rebind`
+                  : `${entry.label}\n${entry.hint}\nRight-click to rebind`
               }
+              {...(isCapturing
+                ? {}
+                : shortcutAttributes(effective[entry.keybind]))}
               aria-label={`${entry.label} (${keyLabel})`}
               onClick={() => handleToolClick(entry.toolId)}
               onContextMenu={(e) => startRebind(entry.keybind, e)}
@@ -646,6 +714,19 @@ function ActiveTopbarControls({
         role="toolbar"
         aria-label="View"
       >
+        <button
+          type="button"
+          class="neuroglancer-editing-topbar-icon-button"
+          aria-label="Keyboard shortcuts"
+          data-tooltip="Keyboard shortcuts"
+          {...shortcutAttributes(SHORTCUT_SHEET_KEYS)}
+          onClick={() => {
+            const { shortcutSheetOpen } = host.viewer;
+            shortcutSheetOpen.value = !shortcutSheetOpen.value;
+          }}
+        >
+          <CircleHelp size={TOOL_ICON_SIZE} aria-hidden="true" />
+        </button>
         <button
           type="button"
           class="neuroglancer-editing-topbar-icon-button"
@@ -675,8 +756,9 @@ function ActiveTopbarControls({
           data-tooltip={
             capturing === "undo"
               ? "Press a key for Undo · Esc to cancel"
-              : `Undo · ${hotkeyLabel("undo")}\nRight-click to rebind${snapshot.undoDescription ? `\n${snapshot.undoDescription}` : ""}`
+              : `Undo\nRight-click to rebind${snapshot.undoDescription ? `\n${snapshot.undoDescription}` : ""}`
           }
+          {...(capturing === "undo" ? {} : shortcutAttributes(effective.undo))}
           onClick={() => void runUndo()}
           onContextMenu={(e) => startRebind("undo", e)}
         >
@@ -693,8 +775,9 @@ function ActiveTopbarControls({
           data-tooltip={
             capturing === "redo"
               ? "Press a key for Redo · Esc to cancel"
-              : `Redo · ${hotkeyLabel("redo")}\nRight-click to rebind${snapshot.redoDescription ? `\n${snapshot.redoDescription}` : ""}`
+              : `Redo\nRight-click to rebind${snapshot.redoDescription ? `\n${snapshot.redoDescription}` : ""}`
           }
+          {...(capturing === "redo" ? {} : shortcutAttributes(effective.redo))}
           onClick={() => void runRedo()}
           onContextMenu={(e) => startRebind("redo", e)}
         >

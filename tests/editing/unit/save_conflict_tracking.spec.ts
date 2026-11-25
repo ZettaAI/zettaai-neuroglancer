@@ -77,6 +77,7 @@ function fakeHost(behaviour: {
     state: { value: { value: { layers: [{ layerId: layerId("L1") }] } } },
     hasUnconfirmedSaves: () => false,
     cancelActiveSave: () => {},
+    refuseWhilePainting: () => false,
     reloadConflictedChunks: vi.fn(async () => ({
       reloadedChunks: 1,
       unreadableChunks: 0,
@@ -110,6 +111,21 @@ function fakeSession(): EditSession {
 }
 
 describe("SaveTracker — refused saves", () => {
+  it("a save during painting attempts nothing and is not a failure (TM-268)", async () => {
+    const host = fakeHost({});
+    (
+      host as unknown as { refuseWhilePainting: () => boolean }
+    ).refuseWhilePainting = () => true;
+    const session = fakeSession();
+    const tracker = new SaveTracker(host, session);
+
+    await tracker.startSave(host, session);
+
+    expect(host.saveActive).not.toHaveBeenCalled();
+    expect(tracker.state.kind).toBe("idle");
+    expect(tracker.lastFailureMessage()).toBeUndefined();
+  });
+
   it("records the conflict instead of reporting a failure", async () => {
     const host = fakeHost({ failFirstWithConflict: true, automerge: false });
     const session = fakeSession();

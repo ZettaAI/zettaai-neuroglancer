@@ -13,6 +13,7 @@ import { Resolution } from "@zettaai/edit-session";
 import { describe, it, expect } from "vitest";
 
 import {
+  maskKeepsEveryVoxel,
   targetToImageVoxel,
   imageChunksCovering,
   voxelDataTypeRange,
@@ -156,5 +157,47 @@ describe("voxelDataTypeRange", () => {
 
   it("uint64 is unsupported (returns null)", () => {
     expect(voxelDataTypeRange("uint64")).toBeNull();
+  });
+});
+
+describe("maskKeepsEveryVoxel", () => {
+  const fullUint8 = {
+    thresholdLow: 0,
+    thresholdHigh: 255,
+    minComponentSize: 0,
+    binaryClosing: 0,
+  };
+
+  it("holds for the full band of an integer type with morphology off", () => {
+    expect(maskKeepsEveryVoxel(fullUint8, "uint8")).toBe(true);
+  });
+  it("fails when the band cuts into the type's range", () => {
+    expect(
+      maskKeepsEveryVoxel({ ...fullUint8, thresholdLow: 1 }, "uint8"),
+    ).toBe(false);
+    expect(maskKeepsEveryVoxel(fullUint8, "uint16")).toBe(false);
+  });
+  it("fails when morphology can remove or add voxels", () => {
+    expect(
+      maskKeepsEveryVoxel({ ...fullUint8, minComponentSize: 1 }, "uint8"),
+    ).toBe(false);
+    expect(
+      maskKeepsEveryVoxel({ ...fullUint8, binaryClosing: 1 }, "uint8"),
+    ).toBe(false);
+  });
+  it("never holds for float32, whose NaN fails every threshold", () => {
+    expect(
+      maskKeepsEveryVoxel(
+        {
+          ...fullUint8,
+          thresholdLow: -Number.MAX_VALUE,
+          thresholdHigh: Number.MAX_VALUE,
+        },
+        "float32",
+      ),
+    ).toBe(false);
+  });
+  it("never holds for uint64, which has no number range", () => {
+    expect(maskKeepsEveryVoxel(fullUint8, "uint64")).toBe(false);
   });
 });

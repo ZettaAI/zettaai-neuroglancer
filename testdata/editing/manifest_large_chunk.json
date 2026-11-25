@@ -1,0 +1,170 @@
+[
+  {
+    "id": "large_seg_u64_4096_edge",
+    "kind": "segmentation",
+    "dtype": "uint64",
+    "encoding": "raw",
+    "chunk": [
+      4096,
+      4096,
+      1
+    ],
+    "offset": [
+      28943,
+      8913,
+      3404
+    ],
+    "size": [
+      1238,
+      1065,
+      11
+    ],
+    "resolutions": [
+      [
+        16,
+        16,
+        40
+      ]
+    ]
+  },
+  {
+    "id": "large_seg_u8_4096_edge",
+    "kind": "segmentation",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [
+      4096,
+      4096,
+      1
+    ],
+    "offset": [
+      28943,
+      8913,
+      3404
+    ],
+    "size": [
+      1238,
+      1065,
+      11
+    ],
+    "resolutions": [
+      [
+        16,
+        16,
+        40
+      ]
+    ]
+  },
+  {
+    "id": "large_seg_u64_256_edge",
+    "kind": "segmentation",
+    "dtype": "uint64",
+    "encoding": "raw",
+    "chunk": [
+      256,
+      256,
+      1
+    ],
+    "offset": [
+      28943,
+      8913,
+      3404
+    ],
+    "size": [
+      1238,
+      1065,
+      11
+    ],
+    "resolutions": [
+      [
+        16,
+        16,
+        40
+      ]
+    ]
+  },
+  {
+    "id": "large_img_u8_edge",
+    "kind": "image",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [
+      256,
+      256,
+      1
+    ],
+    "offset": [
+      28943,
+      8913,
+      3404
+    ],
+    "size": [
+      1238,
+      1065,
+      11
+    ],
+    "resolutions": [
+      [
+        16,
+        16,
+        40
+      ]
+    ]
+  },
+  {
+    "id": "large_seg_u64_4096_interior",
+    "kind": "segmentation",
+    "dtype": "uint64",
+    "encoding": "raw",
+    "chunk": [
+      4096,
+      4096,
+      1
+    ],
+    "offset": [
+      0,
+      0,
+      0
+    ],
+    "size": [
+      8192,
+      8192,
+      2
+    ],
+    "resolutions": [
+      [
+        16,
+        16,
+        40
+      ]
+    ]
+  },
+  {
+    "id": "large_img_u8_interior",
+    "kind": "image",
+    "dtype": "uint8",
+    "encoding": "raw",
+    "chunk": [
+      512,
+      512,
+      1
+    ],
+    "offset": [
+      0,
+      0,
+      0
+    ],
+    "size": [
+      8192,
+      8192,
+      2
+    ],
+    "resolutions": [
+      [
+        16,
+        16,
+        40
+      ]
+    ]
+  }
+]

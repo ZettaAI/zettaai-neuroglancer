@@ -98,6 +98,8 @@ topbar and dialog can no longer drift off on hardcoded values:
 - `--nge-control-h-compact` `24px` — dense topbar row controls.
 - `--nge-control-h` `28px` — panel inputs, selects, buttons (the default).
 - `--nge-control-h-lg` `32px` — prominent modal/dialog action buttons.
+- `--nge-key-cap-size` `20px` — one key cap in tooltips, Hotkeys lists, the key
+  strip and the shortcut sheet.
 - `--nge-slider-thumb` `16px` — slider thumb diameter, and the inset its travel
   keeps from each end of the rail (what the Size slider's ticks align to).
 

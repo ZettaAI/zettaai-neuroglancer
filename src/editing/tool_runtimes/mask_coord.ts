@@ -119,6 +119,32 @@ export function voxelDataTypeRange(
 }
 
 /**
+ * True when a mask cannot reject any voxel: its band spans the image type's
+ * whole range and morphology is off, as with `defaultBrushMask`. Such a stroke
+ * can skip reading the image without changing what it paints. Integer types
+ * only: float32 has a "full" range too, but NaN fails every threshold test.
+ */
+export function maskKeepsEveryVoxel(
+  mask: {
+    readonly thresholdLow: number;
+    readonly thresholdHigh: number;
+    readonly minComponentSize: number;
+    readonly binaryClosing: number;
+  },
+  imageType: VoxelDataType,
+): boolean {
+  if (imageType === "float32") return false;
+  const range = voxelDataTypeRange(imageType);
+  return (
+    range !== null &&
+    mask.thresholdLow <= range.min &&
+    mask.thresholdHigh >= range.max &&
+    mask.minComponentSize <= 0 &&
+    mask.binaryClosing <= 0
+  );
+}
+
+/**
  * Clamp a value to the representable range of `type`, so an out-of-range
  * value is pinned to the nearest bound rather than silently wrapping when
  * assigned into a typed array (e.g. `300` into `uint8` becomes `255`, not

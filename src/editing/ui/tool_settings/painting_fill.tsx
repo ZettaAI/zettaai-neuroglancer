@@ -14,6 +14,7 @@ import { useCallback } from "preact/hooks";
 import type { EditSessionHost } from "#src/editing/edit_session_host.js";
 import { useEvent } from "#src/editing/ui/interop/use_event.js";
 import { SegmentedControl } from "#src/editing/ui/segmented_control.js";
+import { PaintedSegmentAutoSelectRow } from "#src/editing/ui/tool_settings/painted_segment_auto_select_row.js";
 import { PaintingTargetPicker } from "#src/editing/ui/tool_settings/painting_target_picker.js";
 import {
   PARAM_IDS,
@@ -24,6 +25,11 @@ import {
   valueDescriptor,
 } from "#src/editing/ui/tool_settings/param_descriptors.js";
 import { TargetValueField } from "#src/editing/ui/tool_settings/target_value_field.js";
+import {
+  EditKeybindsContext,
+  ToolPanelKeys,
+  useEditKeybinds,
+} from "#src/editing/ui/tool_settings/tool_panel_keys.js";
 import { useLayerVoxelType } from "#src/editing/ui/tool_settings/use_layer_voxel_type.js";
 
 /**
@@ -48,37 +54,47 @@ export function PaintingFill({
   const selectedId = useParamSelection(host);
   const selectParam = useParamFocus(host);
   const targetDescriptors = useTargetParamDescriptors(host);
+  const editKeys = useEditKeybinds(host);
   usePublishParams(host, [
     ...targetDescriptors,
     valueDescriptor(painting, targetVoxelType),
   ]);
 
   return (
-    <div class="neuroglancer-tool-panel neuroglancer-painting-fill-panel">
-      <PaintingTargetPicker host={host} />
-      <TargetValueField
-        value={state.activeValue}
-        voxelDataType={targetVoxelType}
-        onCommit={(activeValue) => painting.patchState({ activeValue })}
-        hint="The segment ID written into the filled region — every voxel the fill reaches is set to this value."
-        highlighted={selectedId === PARAM_IDS.value}
-        onSelect={() => selectParam(PARAM_IDS.value)}
-      />
-      <div
-        class="neuroglancer-tool-panel-row neuroglancer-painting-fill-mode-row"
-        data-tooltip="2D fills only the clicked section (Z fixed) — e.g. the interior of a shape drawn on one slice. 3D floods across sections."
-      >
-        <label>Fill mode</label>
-        <SegmentedControl
-          ariaLabel="Fill mode"
-          value={state.fillMode}
-          options={[
-            { value: "2d", label: "2D" },
-            { value: "3d", label: "3D" },
-          ]}
-          onChange={(fillMode) => painting.patchState({ fillMode })}
+    <EditKeybindsContext.Provider value={editKeys}>
+      <div class="neuroglancer-tool-panel neuroglancer-painting-fill-panel">
+        <PaintingTargetPicker host={host} />
+        <TargetValueField
+          shortcut={{
+            keys: editKeys.targetValueDecrease,
+            pairKeys: editKeys.targetValueIncrease,
+            label: "Target value",
+          }}
+          value={state.activeValue}
+          voxelDataType={targetVoxelType}
+          onCommit={(activeValue) => painting.patchState({ activeValue })}
+          hint="The segment ID written into the filled region — every voxel the fill reaches is set to this value."
+          highlighted={selectedId === PARAM_IDS.value}
+          onSelect={() => selectParam(PARAM_IDS.value)}
         />
+        <PaintedSegmentAutoSelectRow painting={painting} />
+        <div
+          class="neuroglancer-tool-panel-row neuroglancer-painting-fill-mode-row"
+          data-tooltip="2D fills only the clicked section (Z fixed) — e.g. the interior of a shape drawn on one slice. 3D floods across sections."
+        >
+          <label>Fill mode</label>
+          <SegmentedControl
+            ariaLabel="Fill mode"
+            value={state.fillMode}
+            options={[
+              { value: "2d", label: "2D" },
+              { value: "3d", label: "3D" },
+            ]}
+            onChange={(fillMode) => painting.patchState({ fillMode })}
+          />
+        </div>
+        <ToolPanelKeys host={host} toolId="painting.fill" />
       </div>
-    </div>
+    </EditKeybindsContext.Provider>
   );
 }

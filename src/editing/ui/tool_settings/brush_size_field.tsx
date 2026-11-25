@@ -16,6 +16,9 @@ import {
   MAX_BRUSH_SIZE_STEP,
   MIN_BRUSH_SIZE,
 } from "#src/editing/brush_size_presets.js";
+import type { EditSessionHost } from "#src/editing/edit_session_host.js";
+import { effectiveEditKeybinds } from "#src/editing/session_hotkey_binder.js";
+import { useWatchable } from "#src/editing/ui/interop/use_watchable.js";
 import { ParamInput } from "#src/editing/ui/tool_settings/param_input.js";
 import { ParamLabel } from "#src/editing/ui/tool_settings/param_label.js";
 import "#src/editing/ui/tool_settings/brush_size_field.css";
@@ -44,12 +47,14 @@ function parseSize(raw: string): number | null {
  * it snaps, matching the hotkeys.
  */
 export function BrushSizeField({
+  host,
   size,
   hint,
   onCommit,
   highlighted = false,
   onSelect,
 }: {
+  host: EditSessionHost;
   /** Committed brush diameter in voxels. */
   size: number;
   hint: string;
@@ -59,6 +64,7 @@ export function BrushSizeField({
   /** Focus this row's parameter for the Ctrl+Arrow scheme (TM-345). */
   onSelect?: () => void;
 }) {
+  const keys = effectiveEditKeybinds(useWatchable(host.editKeybindOverrides));
   // The slider commits live as it's dragged (direct manipulation); the number
   // box uses the draft pattern and commits on blur / Enter / spinner step.
   const onSlide = (e: Event) =>
@@ -75,7 +81,16 @@ export function BrushSizeField({
       onPointerDownCapture={onSelect}
       onFocusCapture={onSelect}
     >
-      <ParamLabel text="Size" hint={hint} />
+      <ParamLabel
+        text="Size"
+        hint={hint}
+        setting
+        shortcut={{
+          keys: keys.sizeDecrease,
+          pairKeys: keys.sizeIncrease,
+          label: "Size",
+        }}
+      />
       <span class="neuroglancer-brush-size-scale">
         <input
           type="range"

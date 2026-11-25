@@ -77,7 +77,7 @@ export interface AnnotationGeometryChunkSourceOptions
 }
 
 export function computeNumPickIds(
-  serializedAnnotations: SerializedAnnotations,
+  serializedAnnotations: Pick<SerializedAnnotations, "typeToSize">,
 ) {
   let numPickIds = 0;
   const { typeToSize } = serializedAnnotations;
