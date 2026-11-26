@@ -25,14 +25,8 @@ import type {
   StatResponse,
 } from "#src/kvstore/index.js";
 import { encodePathForUrl } from "#src/kvstore/url.js";
-import type {
-  ObjectChangesPage,
-  ObjectVersionStore,
-} from "#src/kvstore/versioned/object_version_store.js";
-import {
-  CHANGES_PAGE_SIZE,
-  parseListingTime,
-} from "#src/kvstore/versioned/object_version_store.js";
+import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
+import { parseListingTime } from "#src/kvstore/versioned/object_version_store.js";
 import type {
   GcsObjectGeneration,
   ObjectVersionLifetime,
@@ -205,69 +199,6 @@ export class GcsKvStore implements KvStore, ObjectVersionStore {
       );
     } while (pageToken !== undefined);
     return gcsGenerationLifetimes(generations);
-  }
-
-  async listChangesUnder(
-    prefix: string,
-    cursor: string | undefined,
-    options: Partial<ProgressOptions>,
-  ): Promise<ObjectChangesPage> {
-    const response = await this.fetchOkImpl(
-      `https://storage.googleapis.com/storage/v1/b/${this.bucket}/o?` +
-        `versions=true&prefix=${encodeURIComponent(prefix)}` +
-        `&maxResults=${CHANGES_PAGE_SIZE}` +
-        `&fields=${encodeURIComponent("items(name,timeCreated,timeDeleted),nextPageToken")}` +
-        (cursor === undefined
-          ? ""
-          : `&pageToken=${encodeURIComponent(cursor)}`) +
-        `&neuroglancerOrigin=${encodeURIComponent(location.origin)}`,
-      { signal: options.signal, progressListener: options.progressListener },
-    );
-    const responseJson = await response.json();
-    verifyObject(responseJson);
-    const items = verifyOptionalObjectProperty(
-      responseJson,
-      "items",
-      (items) =>
-        parseArray(items, (item) => {
-          verifyObject(item);
-          return {
-            name: verifyObjectProperty(item, "name", verifyString),
-            timeCreated: verifyObjectProperty(item, "timeCreated", (value) =>
-              parseListingTime(verifyString(value)),
-            ),
-            timeDeleted: verifyOptionalObjectProperty(
-              item,
-              "timeDeleted",
-              (value) => parseListingTime(verifyString(value)),
-            ),
-          };
-        }),
-      [],
-    );
-    const changeTimes: number[] = [];
-    // A generation stops being current at its `timeDeleted`; a name listed
-    // twice also has an earlier generation (emulators omit `timeDeleted`).
-    let hasEarlierVersion = false;
-    const names = new Set<string>();
-    for (const { name, timeCreated, timeDeleted } of items) {
-      changeTimes.push(timeCreated);
-      if (timeDeleted !== undefined) {
-        changeTimes.push(timeDeleted);
-        hasEarlierVersion = true;
-      }
-      if (names.has(name)) hasEarlierVersion = true;
-      names.add(name);
-    }
-    return {
-      changeTimes,
-      hasEarlierVersion,
-      nextCursor: verifyOptionalObjectProperty(
-        responseJson,
-        "nextPageToken",
-        verifyString,
-      ),
-    };
   }
 
   readObjectVersion(

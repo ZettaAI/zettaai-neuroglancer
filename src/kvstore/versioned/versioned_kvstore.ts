@@ -25,10 +25,7 @@ import type {
 } from "#src/kvstore/index.js";
 import { KvStoreFileHandle, NotFoundError } from "#src/kvstore/index.js";
 import type { ObjectVersionHistoryCache } from "#src/kvstore/versioned/object_version_history_cache.js";
-import type {
-  ObjectChangesPage,
-  ObjectVersionStore,
-} from "#src/kvstore/versioned/object_version_store.js";
+import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
 import { getVersionedUrl } from "#src/kvstore/versioned/url.js";
 import type { ObjectVersionLifetime } from "#src/kvstore/versioned/version_at_time.js";
 import {
@@ -37,6 +34,17 @@ import {
 } from "#src/kvstore/versioned/version_at_time.js";
 import { HttpError } from "#src/util/http_request.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
+
+function isRefusal(error: unknown): boolean {
+  return (
+    error instanceof HttpError && (error.status === 401 || error.status === 403)
+  );
+}
+
+/** The bucket refused to list versions (directly or as the cause). */
+function isListingRefused(error: unknown): boolean {
+  return isRefusal(error) || (error instanceof Error && isRefusal(error.cause));
+}
 
 /**
  * Reads a bucket with object versioning as it was at `time`.
@@ -127,29 +135,18 @@ export class VersionedKvStore implements KvStore {
     return this.base.supportsSuffixReads;
   }
 
-  /** Earliest time any version of `key` was live, or `undefined` without history. */
+  /**
+   * Earliest time any version of `key` was live (`undefined` without
+   * history), or `"no-permission"` when version listing is refused.
+   */
   async earliestVersionTime(
     key: string,
     options: Partial<ProgressOptions>,
-  ): Promise<number | undefined> {
-    return earliestLiveTime(await this.getHistory(key, undefined, options));
-  }
-
-  /**
-   * One page of changes under this layer (see
-   * `ObjectVersionStore.listChangesUnder`), or `"no-permission"` when version
-   * listing is refused.
-   */
-  async listChanges(
-    cursor: string | undefined,
-    options: Partial<ProgressOptions>,
-  ): Promise<ObjectChangesPage | "no-permission"> {
+  ): Promise<number | undefined | "no-permission"> {
     try {
-      return await this.base.listChangesUnder(this.root, cursor, options);
+      return earliestLiveTime(await this.getHistory(key, undefined, options));
     } catch (e) {
-      if (e instanceof HttpError && (e.status === 401 || e.status === 403)) {
-        return "no-permission";
-      }
+      if (isListingRefused(e)) return "no-permission";
       throw e;
     }
   }
@@ -182,7 +179,7 @@ export class VersionedKvStore implements KvStore {
     try {
       return await this.base.listObjectVersions(this.root + key, options);
     } catch (e) {
-      if (e instanceof HttpError && (e.status === 401 || e.status === 403)) {
+      if (isRefusal(e)) {
         throw new Error(
           `No permission to list object versions of ${this.base.getUrl(this.root + key)}; ` +
             "viewing a past time needs list access to the bucket",

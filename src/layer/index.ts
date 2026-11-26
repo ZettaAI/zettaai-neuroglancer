@@ -48,6 +48,7 @@ import {
   TrackableVersionTime,
   VERSION_TIME_JSON_KEY,
 } from "#src/layer/layer_version_time.js";
+import { keepMetadataAtVersionTime } from "#src/layer/metadata_at_version_time.js";
 import { createImageLayerAsMultiChannel } from "#src/layer/multi_channel_setup.js";
 import type {
   DisplayDimensions,
@@ -446,6 +447,9 @@ export class UserLayer extends RefCounted {
       // time (their activation is keyed on the time).
       this.updateDataSubsourceActivations();
     });
+    // Metadata (`info`) that changed since that time: data sources loaded
+    // again at the time (TM-523).
+    this.registerDisposer(keepMetadataAtVersionTime(this));
     this.messages.changed.add(this.layersChanged.dispatch);
     for (const tab of USER_LAYER_TABS) {
       this.tabs.add(tab.id, {

@@ -271,13 +271,14 @@ describe("picker state", () => {
     const layer = new FakeLayer([CURRENT]);
     const context = new RefCounted();
     makeVersionTimeState(layer.asUserLayer(), context);
-    // One lookup = two kvstore requests: history check + earliest time.
-    expect(layer.earliestTimeLookups).toBe(2);
+    // One lookup = one kvstore request: the history check and the earliest
+    // time both come from the versions of the layer's `info`.
+    expect(layer.earliestTimeLookups).toBe(1);
     // Choosing a time reads the same layer: no new lookup.
     setLayerVersionTime(layer.asUserLayer(), TIME);
-    expect(layer.earliestTimeLookups).toBe(2);
+    expect(layer.earliestTimeLookups).toBe(1);
     layer.dataSources[0].spec = { url: "precomputed://gs://b/other" };
-    expect(layer.earliestTimeLookups).toBe(4);
+    expect(layer.earliestTimeLookups).toBe(2);
     context.dispose();
   });
 });

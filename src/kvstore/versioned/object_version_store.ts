@@ -44,33 +44,7 @@ export interface ObjectVersionStore {
     versionId: string,
     options: StatOptions,
   ): Promise<StatResponse | undefined>;
-  /**
-   * One page of the version listing of every object under `prefix`: when
-   * objects there were written or deleted. Pass the previous page's
-   * `nextCursor` to continue. Listings are sorted by name, so a partial
-   * listing covers the first objects by name, not the latest changes.
-   */
-  listChangesUnder(
-    prefix: string,
-    cursor: string | undefined,
-    options: Partial<ProgressOptions>,
-  ): Promise<ObjectChangesPage>;
 }
-
-export interface ObjectChangesPage {
-  /** Milliseconds since the epoch of each write or delete in this page. */
-  changeTimes: number[];
-  /**
-   * The page holds an overwritten or deleted version, so the bucket keeps
-   * history (object versioning is on and something changed).
-   */
-  hasEarlierVersion: boolean;
-  /** Continues the listing; `undefined` once every object was listed. */
-  nextCursor: string | undefined;
-}
-
-/** Versions per `listChangesUnder` page (the GCS and S3 maximum). */
-export const CHANGES_PAGE_SIZE = 1000;
 
 export function isObjectVersionStore(
   store: KvStore,
@@ -79,8 +53,7 @@ export function isObjectVersionStore(
   return (
     typeof candidate.listObjectVersions === "function" &&
     typeof candidate.readObjectVersion === "function" &&
-    typeof candidate.statObjectVersion === "function" &&
-    typeof candidate.listChangesUnder === "function"
+    typeof candidate.statObjectVersion === "function"
   );
 }
 

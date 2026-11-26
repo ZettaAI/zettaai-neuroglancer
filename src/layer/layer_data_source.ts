@@ -33,6 +33,7 @@ import type {
   DataSubsourceSpecification,
 } from "#src/datasource/index.js";
 import { makeEmptyDataSourceSpecification } from "#src/datasource/index.js";
+import { dataSourceUrlAtVersionTime } from "#src/kvstore/versioned/url.js";
 import type { UserLayer } from "#src/layer/index.js";
 import { getWatchableRenderLayerTransform } from "#src/render_coordinate_transform.js";
 import type { RenderLayer } from "#src/renderlayer.js";
@@ -316,6 +317,12 @@ export class LayerDataSource extends RefCounted {
   private spec_: DataSourceSpecification;
   private specGeneration = -1;
   private refCounted_: RefCounted | undefined = undefined;
+  /**
+   * Zetta (TM-523): time the source was loaded at, metadata (`info`)
+   * included; `undefined` = current data. Not part of `spec`: the URL and the
+   * layer state stay the same, the layer's own `versionTime` holds the time.
+   */
+  private loadedAtVersionTime_: number | undefined = undefined;
 
   constructor(
     public layer: Borrowed<UserLayer>,
@@ -368,6 +375,25 @@ export class LayerDataSource extends RefCounted {
     return this.loadState_;
   }
 
+  get loadedAtVersionTime() {
+    return this.loadedAtVersionTime_;
+  }
+
+  /**
+   * Zetta (TM-523): loads the source again with its metadata read at `time`
+   * (`undefined` = current data), keeping the URL, transform and subsources.
+   * Used when the layer's `info` at its chosen time differs from the current
+   * one; otherwise the loaded source just reads its chunks at that time.
+   */
+  loadAtVersionTime(time: number | undefined) {
+    if (time === this.loadedAtVersionTime_) return;
+    this.loadedAtVersionTime_ = time;
+    const { spec } = this;
+    if (spec.url.length === 0) return;
+    // The setter loads the source again (keeping transform and subsources).
+    this.spec = spec;
+  }
+
   set spec(spec: DataSourceSpecification) {
     const { layer } = this;
     this.messages.clearMessages();
@@ -402,9 +428,10 @@ export class LayerDataSource extends RefCounted {
     this.spec_ = spec;
     const registry = layer.manager.dataSourceProviderRegistry;
     const abortController = new AbortController();
+    const loadedAtVersionTime = this.loadedAtVersionTime_;
     registry
       .get({
-        url: spec.url,
+        url: dataSourceUrlAtVersionTime(spec.url, loadedAtVersionTime),
         signal: abortController.signal,
         globalCoordinateSpace: layer.manager.root.coordinateSpace,
         transform: spec.transform,
@@ -440,6 +467,9 @@ export class LayerDataSource extends RefCounted {
         const layerType = this.layer.type;
         if (
           (layerType === "auto" || layerType === "new" || spec.setManually) &&
+          // Loaded at a past time: the canonical URL carries that time, the
+          // layer keeps its own URL.
+          loadedAtVersionTime === undefined &&
           originalCanonicalUrl !== undefined &&
           originalCanonicalUrl !== spec.url
         ) {

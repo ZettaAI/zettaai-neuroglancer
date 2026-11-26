@@ -206,10 +206,9 @@ describe("computeLayerAvailability — tier-2 constraints", () => {
     );
     // Product restriction — the wording must not imply a technical fault.
     expect(UNSUPPORTED_IN_SESSION_DETAIL).not.toMatch(/broken|error|fault/i);
-    // Names every blocked kind, so a past-version layer's hint is not about
-    // some other kind of layer.
+    // Also covers a layer shown at a past time, and says how to clear it.
     expect(UNSUPPORTED_IN_SESSION_DETAIL).toContain(
-      "past version (Version history)",
+      "A layer shown at a past time (Version history): clear the time first.",
     );
   });
 

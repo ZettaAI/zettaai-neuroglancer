@@ -14,19 +14,12 @@
  * limitations under the License.
  */
 
-import type { ObjectChangesPage } from "#src/kvstore/versioned/object_version_store.js";
-import {
-  CHANGES_PAGE_SIZE,
-  parseListingTime,
-} from "#src/kvstore/versioned/object_version_store.js";
+import { parseListingTime } from "#src/kvstore/versioned/object_version_store.js";
 import type {
   ObjectVersionLifetime,
   S3ObjectVersionEntry,
 } from "#src/kvstore/versioned/version_at_time.js";
-import {
-  s3EffectiveWriteTime,
-  s3VersionLifetimes,
-} from "#src/kvstore/versioned/version_at_time.js";
+import { s3VersionLifetimes } from "#src/kvstore/versioned/version_at_time.js";
 import type { FetchOk } from "#src/util/http_request.js";
 import type { ProgressOptions } from "#src/util/progress_listener.js";
 
@@ -202,57 +195,6 @@ export async function listS3ObjectVersions(
   } while (markers !== undefined);
   versions.sort(compareNewestFirst);
   return s3VersionLifetimes(versions);
-}
-
-/**
- * One `ListObjectVersions` page under `prefix`: when each version and delete
- * marker was written. `bucketUrl` as for `listS3ObjectVersions`; `cursor` is
- * the previous page's `nextCursor`.
- */
-export async function listS3ChangesUnder(
-  bucketUrl: string,
-  prefix: string,
-  cursor: string | undefined,
-  fetchOkImpl: FetchOk,
-  options: Partial<ProgressOptions>,
-): Promise<ObjectChangesPage> {
-  const markers =
-    cursor === undefined ? undefined : (JSON.parse(cursor) as ListingMarkers);
-  const response = await fetchOkImpl(
-    `${bucketUrl}?versions&prefix=${encodeURIComponent(prefix)}` +
-      `&max-keys=${CHANGES_PAGE_SIZE}&encoding-type=url` +
-      markersQuery(markers),
-    {
-      headers: { accept: "application/xml,text/xml" },
-      signal: options.signal,
-      progressListener: options.progressListener,
-    },
-  );
-  const text = await response.text();
-  verifyListVersionsResult(text);
-  const entryPattern = /<(Version|DeleteMarker)>([\s\S]*?)<\/\1>/g;
-  const changeTimes: number[] = [];
-  let hasEarlierVersion = false;
-  for (const [, elementName, entry] of text.matchAll(entryPattern)) {
-    changeTimes.push(
-      s3EffectiveWriteTime(
-        parseListingTime(requiredChildText(entry, elementName, "LastModified")),
-      ),
-    );
-    if (
-      elementName === "DeleteMarker" ||
-      childText(entry, "IsLatest") === "false"
-    ) {
-      hasEarlierVersion = true;
-    }
-  }
-  const nextMarkers = parseNextMarkers(text.replace(entryPattern, ""));
-  return {
-    changeTimes,
-    hasEarlierVersion,
-    nextCursor:
-      nextMarkers === undefined ? undefined : JSON.stringify(nextMarkers),
-  };
 }
 
 export function getS3ObjectVersionUrl(objectUrl: string, versionId: string) {
