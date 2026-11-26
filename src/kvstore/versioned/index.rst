@@ -37,8 +37,10 @@ Time control
 Any precomputed layer (image, segmentation, annotation) in a ``gs://`` or
 ``s3://`` bucket shows a :guilabel:`Version history` block in its
 :guilabel:`Source` tab, right under its URL, with a :guilabel:`Time` picker
-and a list of the layer's saved versions (the same picker as the
-Calcada/graphene time control):
+(the same picker as the Calcada/graphene time control). The layer's files
+are never listed up front: only the versions of its ``info`` file, to find
+when the layer first had data and whether the bucket allows listing
+versions. A large layer can hold millions of file versions.
 
 - Picking a time sets the layer's own ``versionTime`` (saved in the layer
   state and share links, e.g. ``"versionTime": "2026-11-10T12:00:00Z"``).
@@ -52,9 +54,14 @@ The time is per layer, also when several layers show the same data source.
 Image and segmentation volumes, segmentation meshes and skeletons, and
 annotations (by id, relationships and spatial index) are all read at the
 layer's time; each time is cached separately, so versions are never mixed
-and returning to a version already viewed reuses its cached chunks. The
-layer's ``info`` files (scales, bounds, segment properties) are read once,
-from the current data.
+and returning to a version already viewed reuses its cached chunks.
+
+The layer's ``info`` (scales, bounds, segment properties) is also the one of
+the chosen time. For each chosen time the layer reads its ``info`` at that
+time and compares it with the current one: when it is the same (the usual
+case), the loaded data source stays and only its chunks are read again;
+when it differs, the data source is loaded again with everything read at
+that time. Its URL and the layer state stay the same.
 
 A URL that contains ``|versioned:`` itself (written by hand) works as well:
 its timestamp applies to the whole data source, including its ``info``. A

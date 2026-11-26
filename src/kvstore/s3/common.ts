@@ -38,14 +38,10 @@ import {
 } from "#src/kvstore/s3/list.js";
 import {
   getS3ObjectVersionUrl,
-  listS3ChangesUnder,
   listS3ObjectVersions,
 } from "#src/kvstore/s3/list_versions.js";
 import { joinBaseUrlAndPath } from "#src/kvstore/url.js";
-import type {
-  ObjectChangesPage,
-  ObjectVersionStore,
-} from "#src/kvstore/versioned/object_version_store.js";
+import type { ObjectVersionStore } from "#src/kvstore/versioned/object_version_store.js";
 import type { ObjectVersionLifetime } from "#src/kvstore/versioned/version_at_time.js";
 import type { FetchOk } from "#src/util/http_request.js";
 import { fetchOk, HttpError } from "#src/util/http_request.js";
@@ -241,52 +237,6 @@ export class ReadableS3KvStore<
       this.fetchOkImpl,
       options,
     );
-  }
-
-  async listChangesUnder(
-    prefix: string,
-    cursor: string | undefined,
-    options: Partial<ProgressOptions>,
-  ): Promise<ObjectChangesPage> {
-    let urlKind: S3UrlKind | undefined = this.knownToBeVirtualHostedStyle
-      ? "virtual"
-      : this.knownVersionListingUrlKind();
-    if (urlKind === undefined) {
-      // Detect the URL style the same way version listings do.
-      await this.listObjectVersions(prefix, options);
-      urlKind = this.knownVersionListingUrlKind() ?? "virtual";
-    }
-    if (urlKind === "virtual") {
-      return listS3ChangesUnder(
-        this.baseUrl,
-        prefix,
-        cursor,
-        this.fetchOkImpl,
-        options,
-      );
-    }
-    // Path style: the first key component is the bucket.
-    const separator = prefix.indexOf("/");
-    if (separator === -1) {
-      throw new Error(
-        `Path-style S3 URL ${this.getUrl(prefix)} must specify bucket`,
-      );
-    }
-    return listS3ChangesUnder(
-      joinBaseUrlAndPath(this.baseUrl, prefix.substring(0, separator + 1)),
-      prefix.substring(separator + 1),
-      cursor,
-      this.fetchOkImpl,
-      options,
-    );
-  }
-
-  private knownVersionListingUrlKind(): S3UrlKind | undefined {
-    const urlKind = getS3UrlKind(
-      this.sharedKvStoreContext.chunkManager.memoize,
-      this.baseUrlForDisplay,
-    );
-    return urlKind === "virtual" || urlKind === "path" ? urlKind : undefined;
   }
 
   readObjectVersion(

@@ -20,6 +20,7 @@ import {
   formatVersionTime,
   canChooseVersionTime,
   chunkUrlAtVersionTime,
+  dataSourceUrlAtVersionTime,
   getVersionedKvStoreUrl,
   isVersionedUrl,
   parseVersionTime,
@@ -197,5 +198,35 @@ describe("chunkUrlAtVersionTime", () => {
     expect(chunkUrlAtVersionTime("gs://b/layer/8_8_40/", undefined)).toBe(
       "gs://b/layer/8_8_40/",
     );
+  });
+});
+
+describe("dataSourceUrlAtVersionTime", () => {
+  const time = Date.UTC(2026, 10, 10, 12, 0, 0);
+  test.for([
+    [
+      "precomputed://gs://b/layer",
+      "gs://b/layer/|versioned:@2026-11-10T12:00:00Z/|neuroglancer-precomputed:",
+    ],
+    [
+      "s3://b/layer/|neuroglancer-precomputed:",
+      "s3://b/layer/|versioned:@2026-11-10T12:00:00Z/|neuroglancer-precomputed:",
+    ],
+    [
+      "gs://b/layer/|versioned:|neuroglancer-precomputed:",
+      "gs://b/layer/|versioned:@2026-11-10T12:00:00Z/|neuroglancer-precomputed:",
+    ],
+    [
+      "precomputed://https://example.com/layer",
+      "precomputed://https://example.com/layer",
+    ],
+  ] as const)("%s", ([url, expected]) => {
+    expect(dataSourceUrlAtVersionTime(url, time)).toBe(expected);
+  });
+
+  test("no time: unchanged", () => {
+    expect(
+      dataSourceUrlAtVersionTime("precomputed://gs://b/layer", undefined),
+    ).toBe("precomputed://gs://b/layer");
   });
 });

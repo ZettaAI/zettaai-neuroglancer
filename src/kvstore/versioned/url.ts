@@ -186,3 +186,24 @@ export function chunkUrlAtVersionTime(
   if (time === undefined || !BUCKET_URL_PATTERN.test(url)) return url;
   return url + "|" + formatVersionedUrlPart(time);
 }
+
+/**
+ * URL to load a data source with all of its files, metadata (`info`)
+ * included, read as they were at `time`, e.g.
+ * `gs://b/layer/|versioned:@<time>/|neuroglancer-precomputed:` for
+ * `precomputed://gs://b/layer`. Used when the layer's metadata at that time
+ * differs from the current one. Returned unchanged without a time or when a
+ * time cannot be chosen for the source.
+ */
+export function dataSourceUrlAtVersionTime(
+  url: string,
+  time: number | undefined,
+): string {
+  if (time === undefined) return url;
+  if (isVersionedUrl(url)) return setVersionTimeInUrl(url, time);
+  const bucketUrl = plainPrecomputedBucketUrl(url);
+  if (bucketUrl === undefined) return url;
+  return (
+    bucketUrl + "|" + formatVersionedUrlPart(time) + PRECOMPUTED_PIPELINE_SUFFIX
+  );
+}

@@ -20,8 +20,12 @@ import "#src/kvstore/versioned/register.js";
 import "#src/datasource/precomputed/register_default.js";
 import { http, HttpResponse } from "msw";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { formatVersionTime } from "#src/kvstore/versioned/url.js";
+import {
+  dataSourceUrlAtVersionTime,
+  formatVersionTime,
+} from "#src/kvstore/versioned/url.js";
 import type { VersionedKvStore } from "#src/kvstore/versioned/versioned_kvstore.js";
+import { metadataLoadTimeFor } from "#src/layer/metadata_at_version_time.js";
 import { dataSourceProviderFixture } from "#tests/fixtures/datasource_provider.js";
 import {
   createBucket,
@@ -338,6 +342,35 @@ describe("precomputed datasource", () => {
     expect(await modelUpperBound("image", undefined)).toBe(128);
   });
 
+  test("a layer is loaded again at a time only when its info changed since", async () => {
+    const { kvStoreContext } = await sharedKvStoreContext();
+    const url = `precomputed://gs://${BUCKET}/image`;
+    // `info` was rewritten after the first write: load at that time.
+    expect(
+      await metadataLoadTimeFor(kvStoreContext, url, timeAfterFirstWrite),
+    ).toBe(timeAfterFirstWrite);
+    // Same `info` as now: keep the current data source.
+    expect(
+      await metadataLoadTimeFor(kvStoreContext, url, timeAfterSecondWrite),
+    ).toBeUndefined();
+    expect(
+      await metadataLoadTimeFor(kvStoreContext, url, undefined),
+    ).toBeUndefined();
+  });
+
+  test("a data source loaded at a time reads its info at that time", async () => {
+    const provider = await dataSourceProvider();
+    const dataSource = await provider.get({
+      url: dataSourceUrlAtVersionTime(
+        `precomputed://gs://${BUCKET}/image`,
+        timeAfterFirstWrite,
+      ),
+      globalCoordinateSpace: undefined as any,
+      transform: undefined,
+    });
+    expect(dataSource.modelTransform.inputSpace.bounds.upperBounds[0]).toBe(64);
+  });
+
   test("annotation metadata at each time", async () => {
     expect(await modelUpperBound("annotation", timeAfterFirstWrite)).toBe(100);
     expect(await modelUpperBound("annotation", timeAfterSecondWrite)).toBe(200);
@@ -384,13 +417,22 @@ test("paths relative to a layer read at a time stay at that time (segmentation m
   ).toBe(`gs://${BUCKET}/|versioned:@${time}/dataset/other_layer/skeletons`);
 });
 
-test("changes of a layer: with history, or no permission", async () => {
+test("history check of a layer: only its info is listed, or no permission", async () => {
   const { kvStoreContext } = await sharedKvStoreContext();
   const versioned = kvStoreContext.getKvStore(
-    `gs://${BUCKET}/image/|versioned:`,
+    `gs://${BUCKET}/annotation/|versioned:`,
   ).store as VersionedKvStore;
-  const page = await versioned.listChanges(undefined, {});
-  expect(page !== "no-permission" && page.hasEarlierVersion).toBe(true);
+  expect(typeof (await versioned.earliestVersionTime("info", {}))).toBe(
+    "number",
+  );
+  // A layer not looked at yet (so nothing cached): one listing of exactly its
+  // `info`, never of everything under the layer.
+  listRequests.length = 0;
+  const unseen = kvStoreContext.getKvStore(
+    `gs://${BUCKET}/unseen-layer/|versioned:`,
+  ).store as VersionedKvStore;
+  expect(await unseen.earliestVersionTime("info", {})).toBeUndefined();
+  expect(listRequests).toEqual(["unseen-layer/info"]);
   (await msw()).use(
     http.get(
       "https://storage.googleapis.com/storage/v1/b/privatebucket/o",
@@ -400,5 +442,5 @@ test("changes of a layer: with history, or no permission", async () => {
   const forbidden = kvStoreContext.getKvStore(
     "gs://privatebucket/layer/|versioned:",
   ).store as VersionedKvStore;
-  expect(await forbidden.listChanges(undefined, {})).toBe("no-permission");
+  expect(await forbidden.earliestVersionTime("info", {})).toBe("no-permission");
 });
