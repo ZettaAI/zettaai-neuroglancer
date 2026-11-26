@@ -161,8 +161,8 @@ describe("EditSessionHost (no active session)", () => {
     expect(host.getPatchStoreForLayer(layerId("L1"))).toBeUndefined();
   });
 
-  it("attachedPatchTextureCaches is empty when no session is active", () => {
-    expect(host.attachedPatchTextureCaches.size).toBe(0);
+  it("attachedPatchOverlays is empty when no session is active", () => {
+    expect(host.attachedPatchOverlays.size).toBe(0);
   });
 
   it("ensureMaskReference is a no-op (no metadata fetch) with no active session", async () => {

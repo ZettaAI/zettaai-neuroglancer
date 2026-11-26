@@ -44,6 +44,8 @@ curl "http://localhost:9778/storage/v1/b/zetta-editing-test/o/img_u8_raw%2Finfo?
 | `seg_u32_raw_offset` | seg | uint32 | raw | 64²×16 | **128,128,8** | 16 | voxel offset |
 | `img_u8_jpeg` | image | uint8 | jpeg | 64²×1 | 0 | 16 | jpeg (lossy): the `mask_features` shapes as decoded JPEG |
 | `seg_u64_multires` | seg | uint64 | compressed_segmentation | 64²×16 | 0 | **16 + 32** | multi-resolution |
+| `seg_u64_multires_clipped` | seg | uint64 | compressed_segmentation | **256²×16** | 0 | **16 + 32** | volume (150×130) inside one chunk: clipped edge chunks (TM-524) |
+| `perf_seg_u64_multires` | seg | uint64 | compressed_segmentation | **2048²×1** | 0 | **16 + 32** | frame cost of showing edits on another level (TM-524) |
 | `seg_u8_bigchunk` | seg | uint8 | raw | **8192×128×1** | 0 | 16 | chunk > 4096 |
 | `load_img_u8_raw` | image | uint8 | raw | 256²×1 | 0 | 16 | session-load benchmark (1024² × 64) |
 | `load_seg_u64_cseg` | seg | uint64 | compressed_segmentation | 128²×16 | 0 | 16 + 32 | session-load benchmark (1024² × 64) |

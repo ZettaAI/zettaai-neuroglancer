@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
+import type { PyramidPatchOverlay } from "#src/editing/overlay/pyramid_patch_overlay.js";
 import type { BboxAlphaShaderHook } from "#src/editing/shaders/bbox_alpha_chunk.js";
 import { createBboxAlphaShaderHook } from "#src/editing/shaders/bbox_alpha_chunk.js";
-import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import type { HashTableSnapshot } from "#src/gpu_hash/hash_table.js";
 import { HashMapUint64 } from "#src/gpu_hash/hash_table.js";
 import {
@@ -215,8 +215,11 @@ export interface SliceViewSegmentationDisplayState
    * Wired by the segmentation user layer from
    * `viewer.editSessionHost.getPatchOverlayWatchableForLayer(this.name)`.
    * Same wiring pattern as `editBboxLoHi`.
+   *
+   * Zetta (TM-524): the overlay covers every pyramid level; each drawn chunk
+   * binds the provider of its own level, so edits show at any zoom.
    */
-  editPatchOverlay?: WatchableValueInterface<PatchedMaskProvider | undefined>;
+  editPatchOverlay?: WatchableValueInterface<PyramidPatchOverlay | undefined>;
 }
 
 interface ShaderParameters {
@@ -236,8 +239,8 @@ interface ShaderParameters {
   editBboxActive: boolean;
   /**
    * Voxel-edit patch-overlay shader path gate. Defaults to `false`; flips
-   * to `true` only when an active session's `PatchedSegmentationRenderLayer`
-   * has registered a `PatchedMaskProvider` on `displayState.editPatchOverlay`.
+   * to `true` only when an active session has registered its edit overlay on
+   * `displayState.editPatchOverlay`.
    * When `false`, no patched-mask sampler is added and the shader is
    * byte-identical to the pre-hook implementation.
    */
@@ -371,7 +374,7 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
                 ),
               ),
         // Same compile-out pattern as `editBboxActive`: flips true only
-        // when an active session has registered a `PatchedMaskProvider`.
+        // when an active session has registered its edit overlay.
         editPatchOverlayActive:
           displayState.editPatchOverlay === undefined
             ? constantWatchableValue(false)
@@ -438,17 +441,14 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
     }
     // Patch-overlay redraw plumbing.
     //
-    // When the user paints / erases, the provider's underlying
-    // `LocalPatchStore` mutates and dispatches its own `changed` signal,
-    // which the provider re-dispatches via its `changed` member. Without
-    // an explicit subscription here, the base render layer would never
-    // know to redraw and the stroke would only appear at the next
-    // incidental redraw (camera move, etc.). The old
-    // `PatchedSegmentationRenderLayer` carried this subscription
-    // implicitly; collapsing it into this layer requires we wire the
-    // signal ourselves.
+    // When the user paints / erases, the overlay's `LocalPatchStore`s mutate
+    // and the overlay dispatches its `changed` signal (also to finish a
+    // rebuild of a resampled level, TM-524). Without an explicit
+    // subscription here, the base render layer would never know to redraw
+    // and the stroke would only appear at the next incidental redraw
+    // (camera move, etc.).
     //
-    // The provider reference can swap (session open / close / commit), so
+    // The overlay reference can swap (session open / close / commit), so
     // we re-subscribe whenever `displayState.editPatchOverlay.value`
     // changes. The detacher closure is captured at subscribe time and
     // called before the new subscription is wired.
@@ -462,6 +462,8 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
         }
         const provider = editPatchOverlay.value;
         if (provider !== undefined) {
+          // Zetta (TM-524): levels listed before the overlay arrived.
+          provider.observeLevels(this.listedLevels);
           unsubscribeProvider = provider.changed.add(
             this.redrawNeeded.dispatch,
           );
@@ -489,11 +491,20 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
   getSources(
     options: SliceViewSourceOptions,
   ): SliceViewSingleResolutionSource<VolumeChunkSource>[][] {
-    return this.multiscaleSource.getSources({
+    const sources = this.multiscaleSource.getSources({
       ...options,
       discreteValues: true,
     });
+    // Zetta (TM-524): the edit overlay places edits on whichever level a
+    // chunk is drawn from, so it learns the levels.
+    this.listedLevels = sources.flat();
+    this.displayState.editPatchOverlay?.value?.observeLevels(this.listedLevels);
+    return sources;
   }
+
+  /** Levels from the last `getSources` (TM-524). */
+  private listedLevels: SliceViewSingleResolutionSource<VolumeChunkSource>[] =
+    [];
 
   /**
    * Patch-aware CPU value lookup for hover / pick / status-bar consumers.
@@ -511,8 +522,8 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
    * `getValueAt` return contract.
    */
   override getValueAt(globalPosition: Float32Array): any {
-    const provider = this.displayState.editPatchOverlay?.value;
-    if (provider === undefined) {
+    const overlay = this.displayState.editPatchOverlay?.value;
+    if (overlay === undefined) {
       return super.getValueAt(globalPosition);
     }
     const scratch = this.patchedValueAtScratch;
@@ -550,7 +561,10 @@ export class SegmentationRenderLayer extends SliceViewVolumeRenderLayer<ShaderPa
       if (lx < 0 || ly < 0 || lz < 0 || lx >= sx || ly >= sy || lz >= sz) {
         continue;
       }
-      const patched = provider.getPatchedValueAt([gx, gy, gz], [lx, ly, lz]);
+      // Zetta (TM-524): the provider of this source's pyramid level.
+      const patched = overlay
+        .forChunkSource(source, undefined)
+        .getPatchedValueAt([gx, gy, gz], [lx, ly, lz]);
       if (patched !== undefined) {
         return patched;
       }
@@ -979,8 +993,14 @@ uint64_t getMappedObjectId(uint64_t value) {
     ) {
       return;
     }
-    const provider = this.displayState.editPatchOverlay?.value;
-    if (provider === undefined) return;
+    const overlay = this.displayState.editPatchOverlay?.value;
+    if (overlay === undefined) return;
+    // Zetta (TM-524): the provider of this chunk's pyramid level; the frame
+    // number paces its rebuilding and keeps it alive.
+    const provider = overlay.forChunkSource(
+      chunk.source,
+      this.chunkManager.chunkQueueManager.frameNumberCounter.frameNumber,
+    );
     const prevActive = gl.getParameter(
       WebGL2RenderingContext.ACTIVE_TEXTURE,
     ) as number;

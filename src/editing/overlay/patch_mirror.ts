@@ -22,6 +22,7 @@ import type {
   ChunkVoxelBox,
   LocalPatchChunk,
 } from "#src/editing/local_patch_chunk.js";
+import { unionOfBoxes } from "#src/editing/local_patch_chunk.js";
 import type { LocalPatchStore } from "#src/editing/local_patch_store.js";
 import { takePaintedSubBox } from "#src/editing/overlay/painted_subbox_registry.js";
 import { sessionChunkDataSize } from "#src/editing/overlay/session_chunk_data_size.js";
@@ -156,21 +157,6 @@ function queueBox(state: ChunkSyncState, box: ChunkVoxelBox): void {
   }
 }
 
-/** The smallest box containing every box in `boxes` (non-empty). */
-export function unionOfBoxes(boxes: readonly ChunkVoxelBox[]): ChunkVoxelBox {
-  const [first, ...rest] = boxes;
-  const union = { ...first };
-  for (const box of rest) {
-    union.x0 = Math.min(union.x0, box.x0);
-    union.y0 = Math.min(union.y0, box.y0);
-    union.z0 = Math.min(union.z0, box.z0);
-    union.x1 = Math.max(union.x1, box.x1);
-    union.y1 = Math.max(union.y1, box.y1);
-    union.z1 = Math.max(union.z1, box.z1);
-  }
-  return union;
-}
-
 function isIdle(state: ChunkSyncState): boolean {
   return (
     !state.inFlight &&
@@ -218,7 +204,11 @@ export class PatchMirror extends RefCounted {
   constructor(
     private readonly session: EditSession,
     private readonly layerId: LayerId,
-    private readonly store: LocalPatchStore,
+    /**
+     * The store of each session resolution (TM-524): a chunk's edits go to
+     * the store of its own resolution, never another's grid.
+     */
+    private readonly storeFor: (resolution: Resolution) => LocalPatchStore,
     private readonly logger: NgLogger,
     private readonly readBaseline: BaselineChunkReader,
     /**
@@ -480,7 +470,8 @@ export class PatchMirror extends RefCounted {
       if (this.wasDisposed) return true;
       const { x, y, z } = ChunkId.toCoord(coord.chunkId);
       const chunkGridPosition = new Float32Array([x, y, z]);
-      const chunk = this.store.source.getOrCreateChunk(
+      const store = this.storeFor(coord.resolution);
+      const chunk = store.source.getOrCreateChunk(
         chunkGridPosition,
         chunkDataSize,
       );
@@ -533,7 +524,7 @@ export class PatchMirror extends RefCounted {
         chunk.mergePendingUpload(change);
         // No change reports nothing, so the empty chunk `getOrCreateChunk`
         // may have just created stays silent — harmless, it holds no patch.
-        this.store.noteChunkMutated(chunkGridPosition, change);
+        store.noteChunkMutated(chunkGridPosition, change);
       }
       return true;
     } catch (err) {

@@ -19,33 +19,36 @@ import type { Page } from "@playwright/test";
 import type { Vec3 } from "#tests/editing/harness/build_ng_state.js";
 
 /**
- * Every voxel the page's session shows as painted on the target, from its
- * render mirror, in absolute coordinates: `"x,y,z"` → value.
+ * Every voxel the page's session shows as painted on the target, in absolute
+ * coordinates of the level of `resolution` (default: the Target resolution):
+ * `"x,y,z"` → value. With edits at several resolutions (TM-524) each level
+ * shows all of them, resampled to its grid; this reads what that level shows.
  */
 export async function paintedVoxelMap(
   page: Page,
   originOffset: Vec3,
+  resolution?: string,
 ): Promise<Map<string, string>> {
   const entries = (await page.evaluate(
-    (offset) => {
+    ({ offset, level }) => {
       const host = (window as any).viewer.editSessionHost;
-      const layerId = host.painting.state.getState().targetLayerId;
-      const chunks = host.perLayer.get(layerId).patchStore.source.chunks;
+      const state = host.painting.state.getState();
+      const overlay = host.perLayer.get(state.targetLayerId).overlay;
+      const shown = overlay.shownChunksAt(level ?? state.targetResolution);
       const out: Array<[string, string]> = [];
-      for (const [key, chunk] of chunks) {
-        const [gridX, gridY, gridZ] = String(key).split(",").map(Number);
-        const [sizeX, sizeY, sizeZ] = chunk.chunkDataSize;
+      for (const { origin, chunk } of shown) {
+        const [sizeX, sizeY] = chunk.chunkDataSize;
         for (let i = 0; i < chunk.patched.length; i++) {
           if (chunk.patched[i] === 0) continue;
-          const x = gridX * sizeX + (i % sizeX) + offset[0];
-          const y = gridY * sizeY + (Math.floor(i / sizeX) % sizeY) + offset[1];
-          const z = gridZ * sizeZ + Math.floor(i / (sizeX * sizeY)) + offset[2];
+          const x = origin[0] + (i % sizeX) + offset[0];
+          const y = origin[1] + (Math.floor(i / sizeX) % sizeY) + offset[1];
+          const z = origin[2] + Math.floor(i / (sizeX * sizeY)) + offset[2];
           out.push([`${x},${y},${z}`, chunk.data[i].toString()]);
         }
       }
       return out;
     },
-    [...originOffset],
+    { offset: [...originOffset], level: resolution },
   )) as Array<[string, string]>;
   return new Map(entries);
 }

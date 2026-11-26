@@ -190,6 +190,7 @@ test.describe("save: one layer painted at two resolutions", () => {
   const scenario = SCENARIOS.find(
     (candidate) => candidate.name === "multires-seg-target",
   )!;
+  const FINE_RESOLUTION = "16x16x40";
   const COARSE_RESOLUTION = "32x32x40";
   const FINE_STAMP = { fracX: 0.3, fracY: 0.3 };
   const COARSE_STAMP = { fracX: 0.7, fracY: 0.7 };
@@ -239,7 +240,11 @@ test.describe("save: one layer painted at two resolutions", () => {
     const painted = await stamp(page, coarseRegion().lo, COARSE_STAMP);
     expect(painted.strokeFired).toBe(true);
     expect(painted.paintedVoxels).toBeGreaterThan(0);
-    const voxels = await paintedVoxelMap(page, coarseRegion().lo);
+    const voxels = await paintedVoxelMap(
+      page,
+      coarseRegion().lo,
+      COARSE_RESOLUTION,
+    );
     await page.context().close();
     return { painted, voxels };
   }
@@ -290,26 +295,21 @@ test.describe("save: one layer painted at two resolutions", () => {
   });
 
   /**
-   * The view is at 16 nm. Whether a 32 nm stroke shows there at all is open,
-   * but if it does, it must cover the 16 nm voxels under the 32 nm voxels it
-   * painted — never voxels no stroke touched.
+   * The view is at 16 nm. A 32 nm stroke shows there over the 16 nm voxels
+   * under the 32 nm voxels it painted (TM-524) — never voxels no stroke
+   * touched — and the 16 nm stroke stays shown.
    */
   test("the view shows each stroke only where it was painted", async ({
     browser,
   }) => {
-    test.fail(
-      true,
-      "The overlay keeps one patch store per layer keyed by chunk grid " +
-        "position only, so a 32 nm stroke lands in the 16 nm chunk with the " +
-        "same index and is drawn at half its coordinates.",
-    );
     const coarse = await coarseStampAlone(browser);
     const { page } = await openEditingPage(browser, scenario, storage);
     await stamp(page, fineRegion().lo, FINE_STAMP);
-    const fine = await paintedVoxelMap(page, fineRegion().lo);
+    const fine = await paintedVoxelMap(page, fineRegion().lo, FINE_RESOLUTION);
     await switchToCoarse(page);
     await stamp(page, coarseRegion().lo, COARSE_STAMP);
-    const shown = await paintedVoxelMap(page, fineRegion().lo);
+    // What the 16 nm level shows: both strokes (TM-524).
+    const shown = await paintedVoxelMap(page, fineRegion().lo, FINE_RESOLUTION);
     await page.context().close();
 
     const underCoarse = new Set<string>();
@@ -330,6 +330,13 @@ test.describe("save: one layer painted at two resolutions", () => {
     expect(nowhere, "painted voxels no stroke touched").toEqual([]);
     const lost = [...fine.keys()].filter((key) => !shown.has(key));
     expect(lost, "16 nm voxels no longer shown").toEqual([]);
+    // TM-524: the 32 nm stroke shows on the 16 nm level, over every 16 nm
+    // voxel under the 32 nm voxels it painted (nearest upsampling).
+    const coarseMissing = [...underCoarse].filter((key) => !shown.has(key));
+    expect(
+      coarseMissing,
+      "16 nm voxels under the 32 nm stroke not shown",
+    ).toEqual([]);
   });
 });
 

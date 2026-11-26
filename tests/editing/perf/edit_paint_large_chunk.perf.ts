@@ -241,7 +241,7 @@ interface MemorySnapshot {
  * should have let go.
  */
 const MEMORY_OWNER_RULES: readonly BufferOwnerRule[] = [
-  { label: "ng.mirror", match: ["editSessionHost", "perLayer", "patchStore"] },
+  { label: "ng.mirror", match: ["editSessionHost", "perLayer", "overlay"] },
   {
     label: "lib.slots",
     match: ["editSessionHost", "activeSession", "overlay", "slotMap", "data"],

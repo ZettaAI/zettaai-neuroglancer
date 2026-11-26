@@ -12,8 +12,9 @@
  * @file Phase-1 host wrapper around the `@zettaai/edit-session` library.
  *
  * Owns: the active `EditSession` instance, per-session adapter wiring, the
- * per-layer `LocalPatchStore` + `PatchedSegmentationRenderLayer` +
- * `PatchMirror` lifecycle, and the URL-restored session intent.
+ * per-layer edit overlay (`LayerPatchOverlay`: a `LocalPatchStore` per session
+ * resolution, shown on every pyramid level) + `PatchMirror` lifecycle, and the
+ * URL-restored session intent.
  *
  * Per `docs/edit-session-integration/architecture/02-module-layout.md`, this is
  * the single integration point — every other neuroglancer module that touches
@@ -113,13 +114,12 @@ import {
   maxFillHistoryBytes,
 } from "#src/editing/edit_history_budget.js";
 import { IdleEditHotkeyBinder } from "#src/editing/idle_edit_hotkey_binder.js";
-import { LocalPatchStore } from "#src/editing/local_patch_store.js";
-// PatchMirror is created by step 9 of Phase 1; this file's runtime import
-// resolves once that step lands. Assumed constructor signature:
-//   new PatchMirror(session, layerId, store, logger)
-// where the mirror subscribes to `session.dirty` chunk events for `layerId`
-// and writes the resulting overlay bytes into `store.writeFullChunk(...)`.
+import { gridOfChunkKey } from "#src/editing/local_patch_source.js";
+import type { LocalPatchStore } from "#src/editing/local_patch_store.js";
+import { LayerPatchOverlay } from "#src/editing/overlay/layer_patch_overlay.js";
+import { NamedLayerLevelResolutions } from "#src/editing/overlay/level_resolutions.js";
 import { PatchMirror } from "#src/editing/overlay/patch_mirror.js";
+import type { PyramidPatchOverlay } from "#src/editing/overlay/pyramid_patch_overlay.js";
 import { sessionChunkDataSize } from "#src/editing/overlay/session_chunk_data_size.js";
 import { sessionEditBaselineReader } from "#src/editing/overlay/session_edit_baseline.js";
 import {
@@ -134,7 +134,6 @@ import type { PaintedVolumePreviewSummary } from "#src/editing/painted_volume/pa
 import type { PaintedVolumeSessionInputs } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import { createSessionPaintedVolumePreview } from "#src/editing/painted_volume/painted_volume_session_preview.js";
 import type { SegmentColor } from "#src/editing/param_status_overlay.js";
-import { PatchTextureCache } from "#src/editing/patch_texture_cache.js";
 // Side-effect: attaches `window.__editPaintBench` for the Playwright paint
 // benchmark (a dev tool, like `window.__paintProfiler` — only does work when
 // invoked). Tree-shake-safe: no value import.
@@ -173,7 +172,6 @@ import {
   writableScopes,
 } from "#src/editing/region/session_region_snapshot.js";
 import { EditSessionHotkeyBinder } from "#src/editing/session_hotkey_binder.js";
-import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
 import { voxelDataTypeRange } from "#src/editing/tool_runtimes/mask_coord.js";
 import { paintProfilerMetrics } from "#src/editing/tool_runtimes/paint_profiler_metrics.js";
 import type { PaintingMaskConfig } from "#src/editing/tool_runtimes/paint_types.js";
@@ -416,21 +414,21 @@ function parseRegionDimensions(raw: unknown): RegionDimensionsJson {
 // ---------------------------------------------------------------------------
 
 interface PerLayerMachinery {
-  readonly patchStore: LocalPatchStore;
   /**
-   * The GPU texture cache. Implements `PatchedMaskProvider` and is
-   * published into the layer's `editPatchOverlay` watchable so the base
-   * `SegmentationRenderLayer` samples patch values directly — no
-   * separate render layer is involved. Persists across commit/discard
-   * teardown so committed patches stay visible.
+   * The layer's unsaved edits, one `LocalPatchStore` per session resolution,
+   * shown on every pyramid level the layer is drawn at (TM-524). Published
+   * into the layer's `editPatchOverlay` watchable so the base
+   * `SegmentationRenderLayer` samples patch values directly — no separate
+   * render layer is involved. Persists across commit/discard teardown so
+   * committed patches stay visible.
    */
-  readonly textureCache: PatchTextureCache;
+  readonly overlay: LayerPatchOverlay;
   /**
-   * Subscription bridging the active library overlay → `patchStore`. Set
-   * while a session is active, replaced on each new `openSession`, and
+   * Subscription bridging the active library overlay → the overlay's stores.
+   * Set while a session is active, replaced on each new `openSession`, and
    * cleared by `commitTeardown` (the backing `DirtyTracker` is gone after
-   * commit so the mirror has nothing to listen to). `patchStore` and
-   * `textureCache` persist across the gap so committed patches stay visible.
+   * commit so the mirror has nothing to listen to). `overlay` persists
+   * across the gap so committed patches stay visible.
    */
   mirror: PatchMirror | undefined;
 }
@@ -1004,7 +1002,7 @@ export class EditSessionHost extends RefCounted {
   // value when a session opens / closes.
   private readonly patchOverlayByLayer = new Map<
     string,
-    WatchableValue<PatchedMaskProvider | undefined>
+    WatchableValue<PyramidPatchOverlay | undefined>
   >();
 
   // Per-layer persistent watchables for the resolution-display lock. Same
@@ -1136,14 +1134,17 @@ export class EditSessionHost extends RefCounted {
   > = this._activeRegionByLayer;
 
   /**
-   * Per-layer patch texture caches that are currently attached. The
-   * cache is what implements `PatchedMaskProvider` and feeds the base
-   * `SegmentationRenderLayer`'s patch-overlay shader path.
+   * Per-layer edit overlays that are currently attached (TM-524). Each holds
+   * the layer's unsaved edits per session resolution and feeds the base
+   * `SegmentationRenderLayer`'s patch-overlay shader path for every pyramid
+   * level it draws.
    */
-  get attachedPatchTextureCaches(): ReadonlyMap<LayerId, PatchTextureCache> {
-    const m = new Map<LayerId, PatchTextureCache>();
-    for (const [id, e] of this.perLayer) m.set(id, e.textureCache);
-    return m;
+  get attachedPatchOverlays(): ReadonlyMap<LayerId, LayerPatchOverlay> {
+    const overlays = new Map<LayerId, LayerPatchOverlay>();
+    for (const [layerId, entry] of this.perLayer) {
+      overlays.set(layerId, entry.overlay);
+    }
+    return overlays;
   }
 
   constructor(readonly viewer: Viewer) {
@@ -1286,7 +1287,7 @@ export class EditSessionHost extends RefCounted {
     // NOTE: previously we tore down all per-layer machinery here so each
     // session started fresh. That broke the cross-session "in-memory
     // commits stay visible and editable" workflow — we now preserve any
-    // leftover LocalPatchStore + PatchedSegmentationRenderLayer per layer
+    // leftover edit overlay (LayerPatchOverlay) per layer
     // and just attach a fresh PatchMirror to the new session's overlay in
     // `attachPerLayer`. Layers that aren't in the new config but still
     // have a perLayer entry from a previous commit stay attached and
@@ -1708,7 +1709,7 @@ export class EditSessionHost extends RefCounted {
       if (committed === undefined) {
         // No committed snapshot — drop the patch entirely so the base
         // layer renders through.
-        entry.patchStore.clearChunk(chunkGridPosition);
+        entry.overlay.storeFor(coord.resolution).clearChunk(chunkGridPosition);
         continue;
       }
       // Revert to the committed bytes. Mirror the conversion that
@@ -1722,7 +1723,9 @@ export class EditSessionHost extends RefCounted {
         coord.resolution,
       );
       if (chunkDataSize === undefined) continue;
-      entry.patchStore.writeFullChunk(chunkGridPosition, chunkDataSize, data);
+      entry.overlay
+        .storeFor(coord.resolution)
+        .writeFullChunk(chunkGridPosition, chunkDataSize, data);
     }
   }
 
@@ -1794,8 +1797,8 @@ export class EditSessionHost extends RefCounted {
       }
     } finally {
       // Commit = client-side in-memory persist. Keep the painted patches
-      // visible on the canvas (they live in the per-layer LocalPatchStore /
-      // PatchedSegmentationRenderLayer) so the user sees their work after
+      // visible on the canvas (they live in the per-layer edit overlay) so
+      // the user sees their work after
       // committing. Discarding or starting a new session clears them.
       this.commitTeardown();
     }
@@ -2262,9 +2265,9 @@ export class EditSessionHost extends RefCounted {
       const entry = this.perLayer.get(layerId);
       if (entry?.mirror === undefined) continue;
       const coords = Array.from(
-        entry.patchStore.source.chunks.keys(),
+        entry.overlay.existingStoreFor(resolution)?.source.chunks.keys() ?? [],
         (key) => {
-          const [x, y, z] = key.split(",").map(Number);
+          const [x, y, z] = gridOfChunkKey(key);
           return {
             layerId,
             resolution,
@@ -2719,8 +2722,8 @@ export class EditSessionHost extends RefCounted {
   /**
    * Drop the in-memory committed patches for `layerId` without persisting
    * them. Clears the corresponding `NgCommitTarget` entries and tears
-   * down the layer's `LocalPatchStore` + `PatchedSegmentationRenderLayer`
-   * so the base layer renders cleanly again. Safe to call any time.
+   * down the layer's edit overlay (`LayerPatchOverlay`) so the base layer
+   * renders cleanly again. Safe to call any time.
    */
   resetLayer(layerId: LayerId): void {
     this.commitTarget.clearLayer(layerId);
@@ -2747,12 +2750,7 @@ export class EditSessionHost extends RefCounted {
       patchOverlayWatchable.value = undefined;
     }
     try {
-      entry.textureCache.dispose();
-    } catch {
-      // ignore
-    }
-    try {
-      entry.patchStore.dispose();
+      entry.overlay.dispose();
     } catch {
       // ignore
     }
@@ -2775,8 +2773,8 @@ export class EditSessionHost extends RefCounted {
    * Persist the in-memory committed patches for the given layers (or all
    * layers with pending changes if `layerIds` is omitted) via the host's
    * save backends. On per-layer success the corresponding committed
-   * entries are cleared from `NgCommitTarget` and the layer's
-   * `LocalPatchStore` + `PatchedSegmentationRenderLayer` are torn down.
+   * entries are cleared from `NgCommitTarget` and the layer's edit overlay
+   * (`LayerPatchOverlay`) is torn down.
    *
    * Distinct from `saveActive()`, which only writes the live session's
    * dirty chunks via the library's pipeline. This path is for committed
@@ -2879,8 +2877,19 @@ export class EditSessionHost extends RefCounted {
 
   // -- Per-layer accessors --------------------------------------------------
 
-  getPatchStoreForLayer(layerId: LayerId): LocalPatchStore | undefined {
-    return this.perLayer.get(layerId)?.patchStore;
+  /**
+   * The store of the layer's edits at `resolution` (if it exists), or without
+   * a resolution the store of the first resolution holding edits; `undefined`
+   * when there is none.
+   */
+  getPatchStoreForLayer(
+    layerId: LayerId,
+    resolution?: Resolution,
+  ): LocalPatchStore | undefined {
+    const overlay = this.perLayer.get(layerId)?.overlay;
+    if (overlay === undefined) return undefined;
+    if (resolution !== undefined) return overlay.existingStoreFor(resolution);
+    return overlay.firstEditedStore();
   }
 
   /**
@@ -2973,21 +2982,20 @@ export class EditSessionHost extends RefCounted {
   }
 
   /**
-   * Returns the persistent per-layer watchable for the patched-mask
-   * provider hook the base `SegmentationRenderLayer` consumes via
-   * `editPatchOverlay`. The watchable's current value is the active
-   * session's `PatchedSegmentationRenderLayer` (which implements
-   * `PatchedMaskProvider`) for this layer, or `undefined` if no session
-   * has attached a provider yet. Lazily allocated — same wiring pattern
-   * as `getActiveRegionWatchableForLayer`.
+   * Returns the persistent per-layer watchable for the edit overlay the
+   * base `SegmentationRenderLayer` consumes via `editPatchOverlay`. Its
+   * value is the layer's `LayerPatchOverlay` (TM-524: one provider per
+   * pyramid level), or `undefined` if no session has attached one yet.
+   * Lazily allocated — same wiring pattern as
+   * `getActiveRegionWatchableForLayer`.
    */
   getPatchOverlayWatchableForLayer(
     layerName: string,
-  ): WatchableValue<PatchedMaskProvider | undefined> {
+  ): WatchableValue<PyramidPatchOverlay | undefined> {
     let w = this.patchOverlayByLayer.get(layerName);
     if (w === undefined) {
-      const existing = this.perLayer.get(layerName as LayerId)?.textureCache;
-      w = new WatchableValue<PatchedMaskProvider | undefined>(existing);
+      const existing = this.perLayer.get(layerName as LayerId)?.overlay;
+      w = new WatchableValue<PyramidPatchOverlay | undefined>(existing);
       this.patchOverlayByLayer.set(layerName, w);
     }
     return w;
@@ -3638,11 +3646,14 @@ export class EditSessionHost extends RefCounted {
           );
           continue;
         }
-        const patchStore = new LocalPatchStore();
-        const textureCache = new PatchTextureCache(patchStore);
+        const overlay = new LayerPatchOverlay(
+          new NamedLayerLevelResolutions(
+            this.viewer.layerManager,
+            layer.layerId,
+          ),
+        );
         entry = {
-          patchStore,
-          textureCache,
+          overlay,
           mirror: undefined,
         };
         this.perLayer.set(layer.layerId, entry);
@@ -3651,13 +3662,13 @@ export class EditSessionHost extends RefCounted {
         // sampling patched values uniformly with baseline values. The base
         // shader recompiles to the editPatchOverlayActive variant on this
         // watchable's first non-undefined dispatch.
-        this.getPatchOverlayWatchableForLayer(layer.layerId).value =
-          textureCache;
+        this.getPatchOverlayWatchableForLayer(layer.layerId).value = overlay;
       }
+      const { overlay } = entry;
       entry.mirror = new PatchMirror(
         session,
         layer.layerId,
-        entry.patchStore,
+        (resolution) => overlay.storeFor(resolution),
         this.logger,
         // The patched mask is `overlay !== baseline`, and the render falls back
         // to the datasource chunk where the mask is 0 — so PatchMirror MUST diff
@@ -4422,7 +4433,7 @@ export class EditSessionHost extends RefCounted {
       resolution,
       regionBounds,
       metadata,
-      store: entry.patchStore,
+      store: entry.overlay.storeFor(resolution),
       displayState: userLayer.displayState,
       displayInfo: this.viewer.displayDimensionRenderInfo,
       readBaseline: async (chunkId, signal) => {
@@ -4607,7 +4618,7 @@ export class EditSessionHost extends RefCounted {
   /**
    * Full teardown. Used by `discardActive` and the disposed path:
    *   - tools (pointer bridge, hotkey binder, cursor),
-   *   - per-layer rendering (LocalPatchStore, PatchedSegmentationRenderLayer,
+   *   - per-layer rendering (the edit overlay `LayerPatchOverlay`,
    *     PatchMirror),
    *   - session lock + state.
    */
@@ -4623,8 +4634,8 @@ export class EditSessionHost extends RefCounted {
    * commit pipeline has already stashed the dirty chunks in
    * `NgCommitTarget` (the host-side in-memory committed buffer). We need
    * the painted result to stay VISIBLE on the canvas — it's the user's
-   * client-side persistence — so keep the per-layer `LocalPatchStore` +
-   * `PatchedSegmentationRenderLayer` alive. Everything else (session
+   * client-side persistence — so keep the per-layer edit overlay
+   * (`LayerPatchOverlay`) alive. Everything else (session
    * tools, library lock, sidebar state, the per-layer active region) is
    * torn down so the editing UI exits cleanly and the bbox-clip shader
    * path deactivates on every render layer.
@@ -4773,12 +4784,7 @@ export class EditSessionHost extends RefCounted {
         }
       }
       try {
-        entry.textureCache.dispose();
-      } catch {
-        // ignore
-      }
-      try {
-        entry.patchStore.dispose();
+        entry.overlay.dispose();
       } catch {
         // ignore
       }

@@ -51,6 +51,26 @@
     "resolutions": [[16, 16, 40], [32, 32, 40]]
   },
   {
+    "id": "seg_u64_multires_clipped",
+    "kind": "segmentation",
+    "dtype": "uint64",
+    "encoding": "compressed_segmentation",
+    "chunk": [256, 256, 16],
+    "offset": [0, 0, 0],
+    "size": [150, 130, 16],
+    "resolutions": [[16, 16, 40], [32, 32, 40]]
+  },
+  {
+    "id": "perf_seg_u64_multires",
+    "kind": "segmentation",
+    "dtype": "uint64",
+    "encoding": "compressed_segmentation",
+    "chunk": [2048, 2048, 1],
+    "offset": [0, 0, 0],
+    "size": [2048, 2048, 2],
+    "resolutions": [[16, 16, 40], [32, 32, 40]]
+  },
+  {
     "id": "seg_u8_bigchunk",
     "kind": "segmentation",
     "dtype": "uint8",

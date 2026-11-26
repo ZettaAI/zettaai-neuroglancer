@@ -100,6 +100,26 @@ describe("buildNgState", () => {
     expect(state.selectedLayer.layer).toBe("seg_u64_multires");
   });
 
+  it("limits a layer's session resolutions when the scenario names them", () => {
+    const state = buildNgState(
+      {
+        ...twoLayer,
+        layers: [
+          twoLayer.layers[0],
+          { ...twoLayer.layers[1], sessionResolutions: [[32, 32, 40]] },
+        ],
+      },
+      INDEX,
+    ) as any;
+    expect(state.editSession.layers[1].resolutions).toEqual(["32x32x40"]);
+    // The brush paints in the session's resolution; the view stays in the
+    // fixture's finest one.
+    expect(state.editSession.tooling.painting.targetResolution).toBe(
+      "32x32x40",
+    );
+    expect(state.dimensions.x[0]).toBeCloseTo(16e-9);
+  });
+
   it("derives the region from the TARGET fixture offset + size", () => {
     // Target offset [0,0,0], size [128,128,16].
     const state = buildNgState(twoLayer, INDEX) as any;

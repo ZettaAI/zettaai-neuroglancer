@@ -199,7 +199,7 @@ function makeHarness(
   const mirror = new PatchMirror(
     session,
     LAYER,
-    store,
+    () => store,
     logger,
     readBaseline,
     readEditBaseline,

@@ -112,7 +112,7 @@ function makeHarness(): Harness {
   const mirror = new PatchMirror(
     session,
     LAYER,
-    store,
+    () => store,
     logger,
     async () => buffer(baseline),
     async () => buffer(baseline),
