@@ -10,11 +10,12 @@
 
 /**
  * Playwright config for the edit-session e2e + perf suites (TM-331). ONE config,
- * three projects:
+ * four projects:
  *
  *   --project e2e    tests/editing/e2e/*.e2e.ts     (correctness)
  *   --project perf   tests/editing/perf/*.perf.ts   (paint benchmark)
  *   --project perf-large-chunk                      (TM-373 4096² benchmark)
+ *   --project e2e-save  tests/editing/e2e/*.save.e2e.ts (save → storage; real web API)
  *
  * All serve the BUILT prod bundle via `serve_dist.mjs` (COOP/COEP → cross-origin
  * isolation → SAB) and load `buildNgState` scenarios against the LOCAL
@@ -31,6 +32,10 @@ import { defineConfig } from "@playwright/test";
 const PORT = Number(process.env.EDITING_APP_PORT ?? 9777);
 
 const LARGE_CHUNK_PERF = /edit_paint_large_chunk\.perf\.ts$/;
+
+// Save e2e: needs the real web API (ZETTA_UTILS_DIR), so it is its own project
+// and `npm run e2e` does not depend on a zetta_utils checkout.
+const SAVE_E2E = /\.save\.e2e\.ts$/;
 
 // One id per `playwright test` run, inherited by every worker: the large-chunk
 // benchmark writes a report per scenario and merges only this run's files.
@@ -68,7 +73,14 @@ export default defineConfig({
     stderr: "pipe",
   },
   projects: [
-    { name: "e2e", testDir: "tests/editing/e2e", testMatch: /\.e2e\.ts$/ },
+    {
+      name: "e2e",
+      testDir: "tests/editing/e2e",
+      testMatch: /\.e2e\.ts$/,
+      testIgnore: SAVE_E2E,
+    },
+    // TM-331: paint → save → storage, against the real web API painting routes.
+    { name: "e2e-save", testDir: "tests/editing/e2e", testMatch: SAVE_E2E },
     {
       name: "perf",
       testDir: "tests/editing/perf",

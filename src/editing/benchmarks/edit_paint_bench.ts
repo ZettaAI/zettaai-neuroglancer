@@ -889,6 +889,11 @@ export interface VoxelStrokeInput {
    * (`image` redo); an unmasked one replays instead (TM-319). Default false.
    */
   readonly masked?: boolean;
+  /**
+   * Mask fields to apply over the loaded preset (threshold band, morphology,
+   * coverage) — a masked stroke with test-chosen settings. Implies `masked`.
+   */
+  readonly mask?: Readonly<Record<string, unknown>>;
   /** ms between pointer moves (default 80 — about one worker round-trip). */
   readonly stepMs?: number;
   readonly settleTimeoutMs?: number;
@@ -1054,7 +1059,12 @@ export async function strokeVoxelPath(
   if (presetMask === undefined) presetMask = state.getState().mask;
   state.patchState({
     radius: input.radius,
-    mask: input.masked === true ? presetMask : undefined,
+    mask:
+      input.mask !== undefined
+        ? { ...(presetMask as object), ...input.mask }
+        : input.masked === true
+          ? presetMask
+          : undefined,
     // A fill stamp leaves this on, and with it a keep-every-voxel mask is
     // skipped altogether (`maskKeepsEveryVoxel`).
     fillClosedPaths: false,

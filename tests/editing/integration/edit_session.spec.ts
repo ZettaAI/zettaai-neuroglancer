@@ -120,10 +120,10 @@ describe("EditSessionHost — integration (state surface)", () => {
 });
 
 /**
- * End-to-end open/discard testing is deferred to manual QA.
+ * The full open/discard cycle is not tested here; it is covered end to end.
  *
- * Why: `EditSessionHost.openSession()` constructs a real `EditSession` via
- * the library's `EditSession.open`, which in turn requires:
+ * Why not here: `EditSessionHost.openSession()` constructs a real `EditSession`
+ * via the library's `EditSession.open`, which in turn requires:
  *   - `NgChunkSource.pinChunks` to resolve a real `VolumeChunkSource` on
  *     each selected layer (depends on neuroglancer's chunk pipeline);
  *   - `NgLayerMetadataSource.resolve` to walk a real `UserLayer.dataSources`
@@ -131,16 +131,16 @@ describe("EditSessionHost — integration (state surface)", () => {
  *   - `viewer.inputEventMap`, `viewer.element`, `viewer.display.gl` for the
  *     hotkey binder, pointer-event bridge, and cursor overlays.
  *
- * Fabricating these is on the order of constructing a real `Viewer` —
- * which the slice-view tests already exercise but at a different layer of
- * the system. See `docs/edit-session-integration/10-implementation-roadmap.md`
- * Step 27 (manual QA) for the smoke-test coverage that compensates.
+ * Fabricating these is on the order of constructing a real `Viewer`.
  *
- * Scope of this deferral: OPENING a session. It does not extend to everything
- * that needs one. `save_active_owned_region.spec.ts` drives `saveActive`
- * end-to-end over a fake session and the real save target, because the members
- * `saveActive` touches are a small subset of what `EditSession.open` builds.
+ * Where it is covered (Playwright, the built app on generated fixtures):
+ *   - discard / exit, incl. after an unconfirmed save, and save → exit →
+ *     re-open → continue: `tests/editing/e2e/edit_session_lifecycle.save.e2e.ts`;
+ *   - commit → re-open: `tests/editing/e2e/edit_session_release.e2e.ts`;
+ *   - the exit confirmation, exit lock and unload guard:
+ *     `tests/editing/e2e/edit_session_guards.e2e.ts`.
+ *
+ * `save_active_owned_region.spec.ts` drives `saveActive` over a fake session
+ * and the real save target, because the members `saveActive` touches are a
+ * small subset of what `EditSession.open` builds.
  */
-describe.todo(
-  "EditSessionHost — full open/discard cycle (deferred to manual QA)",
-);

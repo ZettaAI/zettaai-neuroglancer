@@ -129,16 +129,55 @@ export async function openScenarioPage(
   return page;
 }
 
+interface SessionPaintState {
+  readonly canUndo: boolean;
+  readonly unsaved: boolean;
+  readonly paintedVoxels: number;
+}
+
+async function sessionPaintState(page: Page): Promise<SessionPaintState> {
+  return page.evaluate(() => {
+    const win = window as unknown as {
+      viewer: { editSessionHost: any };
+      __editPaintBenchReadback: () => { paintedVoxels: number };
+    };
+    const host = win.viewer.editSessionHost;
+    return {
+      canUndo: host.activeSession.value.getHistory().canUndo as boolean,
+      unsaved: host.hasUnsavedEdits() as boolean,
+      paintedVoxels: win.__editPaintBenchReadback().paintedVoxels,
+    };
+  });
+}
+
 /**
- * Warm the paint path with a few discarded read-back stamps: the first stamps on
- * a cold page often don't register (slice transform not laid out, params not
- * propagated). Bounded — each gives up fast if nothing paints.
+ * Warm the paint path with a few read-back stamps, then undo them: the first
+ * stamps on a cold page often don't register (slice transform not laid out,
+ * params not propagated). Bounded — each gives up fast if nothing paints.
+ *
+ * The warm-up leaves NOTHING behind. Its strokes are undone through the
+ * session, so the session, the unsaved flag and the render mirror are all back
+ * to the freshly opened state. The segments its strokes added to a layer's
+ * selection ("Auto-select segment") are removed again too: undo does not touch
+ * the selection, and z-extrapolation tracks the selected segments. (It used to only empty the render mirror, which
+ * hid real warm-up paint that a later save, undo or count still saw.) Needs a
+ * session with an empty history — a fresh page — so the undo can only reach
+ * the warm-up's own strokes; it throws otherwise, and if anything is left.
  */
 export async function warmupPaintPath(
   page: Page,
   opts: { label: string; stamps?: number } = { label: "scenario" },
 ): Promise<void> {
   const stamps = opts.stamps ?? 4;
+  const before = await sessionPaintState(page);
+  if (before.canUndo || before.unsaved) {
+    throw new Error(
+      `warmupPaintPath(${opts.label}) needs a fresh session: it undoes its ` +
+        `own strokes and must not reach earlier ones ` +
+        `(canUndo=${before.canUndo}, unsaved=${before.unsaved})`,
+    );
+  }
+  const selectionBefore = await segmentSelections(page);
   await page.waitForTimeout(1000);
   for (let i = 0; i < stamps; i++) {
     const w = (await page.evaluate(async () => {
@@ -158,9 +197,70 @@ export async function warmupPaintPath(
     );
     if (w.paintedVoxels > 0 && i >= 1) break; // warm once it reliably paints
   }
-  await page.evaluate(() => {
-    (
-      window as unknown as { __editPaintBenchClearTarget: () => void }
-    ).__editPaintBenchClearTarget();
+  await page.evaluate(async () => {
+    const session = (window as unknown as { viewer: { editSessionHost: any } })
+      .viewer.editSessionHost.activeSession.value;
+    while (session.getHistory().canUndo) await session.undo();
   });
+  // The mirror settles after the undo resolves; wait for it rather than
+  // reading once.
+  const deadline = Date.now() + 10_000;
+  let after = await sessionPaintState(page);
+  while (after.paintedVoxels !== 0 && Date.now() < deadline) {
+    await page.waitForTimeout(80);
+    after = await sessionPaintState(page);
+  }
+  if (after.canUndo || after.unsaved || after.paintedVoxels !== 0) {
+    throw new Error(
+      `warmupPaintPath(${opts.label}) left paint behind: ` +
+        `canUndo=${after.canUndo}, unsaved=${after.unsaved}, ` +
+        `painted=${after.paintedVoxels}`,
+    );
+  }
+  await deselectSegmentsAddedSince(page, selectionBefore);
+  const selectionAfter = await segmentSelections(page);
+  if (JSON.stringify(selectionAfter) !== JSON.stringify(selectionBefore)) {
+    throw new Error(
+      `warmupPaintPath(${opts.label}) left the segment selection changed: ` +
+        `${JSON.stringify(selectionBefore)} → ${JSON.stringify(selectionAfter)}`,
+    );
+  }
+}
+
+/** Selected segment IDs per segmentation layer name, sorted. */
+type SegmentSelections = Record<string, string[]>;
+
+function segmentSelections(page: Page): Promise<SegmentSelections> {
+  return page.evaluate(() => {
+    const selections: Record<string, string[]> = {};
+    const managedLayers = (window as any).viewer.layerManager
+      .managedLayers as any[];
+    for (const managed of managedLayers) {
+      const group = managed.layer?.displayState?.segmentationGroupState?.value;
+      if (group === undefined) continue;
+      selections[managed.name] = Array.from(
+        group.selectedSegments as Iterable<bigint>,
+        String,
+      ).sort();
+    }
+    return selections;
+  });
+}
+
+async function deselectSegmentsAddedSince(
+  page: Page,
+  before: SegmentSelections,
+): Promise<void> {
+  await page.evaluate((selectedBefore) => {
+    const managedLayers = (window as any).viewer.layerManager
+      .managedLayers as any[];
+    for (const managed of managedLayers) {
+      const group = managed.layer?.displayState?.segmentationGroupState?.value;
+      if (group === undefined) continue;
+      const kept = new Set(selectedBefore[managed.name] ?? []);
+      for (const id of Array.from(group.selectedSegments as Iterable<bigint>)) {
+        if (!kept.has(String(id))) group.selectedSegments.delete(id);
+      }
+    }
+  }, before);
 }

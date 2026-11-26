@@ -97,6 +97,33 @@ async function paintedVoxels(page: Page, timeoutMs = 8000): Promise<number> {
   }, timeoutMs)) as number;
 }
 
+/** Count and voxel-set signature of the target's painted voxels, once settled. */
+async function settledReadback(
+  page: Page,
+): Promise<{ paintedVoxels: number; signature: string }> {
+  await paintedVoxels(page);
+  return (await page.evaluate(() => {
+    const { paintedVoxels: count, signature } = (
+      window as unknown as {
+        __editPaintBenchReadback: () => {
+          paintedVoxels: number;
+          signature: string;
+        };
+      }
+    ).__editPaintBenchReadback();
+    return { paintedVoxels: count, signature };
+  })) as { paintedVoxels: number; signature: string };
+}
+
+/** The read-back of a target with nothing painted (FNV-1a offset basis). */
+const EMPTY_READBACK = { paintedVoxels: 0, signature: "811c9dc5" };
+
+async function hasUnsavedEdits(page: Page): Promise<boolean> {
+  return page.evaluate(
+    () => (window as any).viewer.editSessionHost.hasUnsavedEdits() as boolean,
+  );
+}
+
 async function undo(page: Page): Promise<void> {
   await page.evaluate(async () => {
     await (globalThis as any).viewer.editSessionHost.activeSession.value.undo();
@@ -122,10 +149,8 @@ async function history(
  * Paint one stamp at a position the warm-up never touched, and report the
  * settled counts either side of it.
  *
- * Counts are RELATIVE on purpose. The warm-up paints the panel centre, and the
- * harness's `clearFirst` empties the render patch store without touching the
- * journal — so an undo restores the warm-up's paint and an absolute "expect 0"
- * measures the warm-up rather than the stroke under test.
+ * `warmupPaintPath` leaves nothing behind (its strokes are undone), so `before`
+ * is the painted count of whatever the test drew itself.
  */
 async function stampAside(
   page: Page,
@@ -179,8 +204,7 @@ test.describe("undo / redo of a painted stroke", () => {
   test("redo replays a stroke that undo rolled back", async () => {
     test.skip(setupError !== undefined, setupError);
 
-    // `canUndo` stays true throughout — the warm-up leaves its own strokes on
-    // the stack — so the redo side is what carries the assertion.
+    // The warm-up is undone, so `canUndo` is this stroke's alone.
     await stampAside(page);
     expect(await history(page)).toEqual({ canUndo: true, canRedo: false });
 
@@ -204,53 +228,37 @@ test.describe("undo / redo of a painted stroke", () => {
   });
 
   /**
-   * OPEN DEFECT, and it is REDO only — the undo half of this test passes.
+   * Undo removes exactly the stroke's voxels and redo restores exactly them —
+   * the same SET (signature), not just the same count.
    *
-   * Measured here: after one throwaway cycle settles the mirror, a stroke takes
-   * the painted count to 214, undo returns it exactly to the settled count
-   * (correct), and redo then reports 263 — 49 too many, which is precisely the
-   * settled count counted a second time. The journal is right throughout (see
-   * the test above), so what is wrong is the picture after a redo: a tracer
-   * gets back more paint than they drew.
-   *
-   * Not yet root-caused. `replayStroke` re-applies a brush stamp at
-   * `initialPoint` and then replays the recorded segments, so a double
-   * application is expected and should be harmless (painting a value twice is
-   * idempotent) — which means the inflation is more likely in how the mirror
-   * bounds its fuse for the replayed write than in the replay itself. Needs a
-   * pass with the sub-box hint and the per-step counts instrumented.
-   *
-   * The mirror has to be settled first, and that is worth spelling out because
-   * it looks like an undo bug until you do: `warmupPaintPath` ends by clearing
-   * the render patch store WITHOUT clearing the session overlay, so the mirror
-   * starts out hiding the warm-up's paint. A paint commit leaves a sub-box hint
-   * and is fused only within it, preserving the illusion; an undo leaves no
-   * hint, so the mirror rescans the whole chunk and the hidden paint correctly
-   * reappears. Measuring across that transition reads the rediscovery as an
-   * undo that failed to revert — it is not one.
+   * Starts from a clean session (`warmupPaintPath` undoes its strokes), so the
+   * counts are absolute. This test was `fixme` for a "redo over-count of 49"
+   * that was the warm-up's own paint: the warm-up used to empty only the render
+   * mirror, hiding paint the session still held, and before TM-373 (#279) an
+   * undo rescanned the whole chunk and rediscovered it.
    */
-  test.fixme(
-    "undo clears the voxels it rolled back, and redo brings them back",
-    async () => {
-      test.skip(setupError !== undefined, setupError);
+  test("undo clears the voxels it rolled back, and redo brings them back", async () => {
+    test.skip(setupError !== undefined, setupError);
 
-      // One throwaway cycle, purely to force the whole-chunk rescan.
-      await stampAside(page);
-      await undo(page);
-      const settled = await paintedVoxels(page);
+    expect(await hasUnsavedEdits(page)).toBe(false);
+    expect(await settledReadback(page)).toEqual(EMPTY_READBACK);
 
-      const { after } = await stampAside(page);
-      await undo(page);
-      expect(await paintedVoxels(page)).toBe(settled);
+    await stampAside(page);
+    const stamped = await settledReadback(page);
+    expect(stamped.paintedVoxels).toBeGreaterThan(0);
 
-      await page.evaluate(async () => {
-        await (
-          globalThis as any
-        ).viewer.editSessionHost.activeSession.value.redo();
-      });
-      expect(await paintedVoxels(page)).toBe(after);
-    },
-  );
+    await undo(page);
+    expect(await settledReadback(page)).toEqual(EMPTY_READBACK);
+    expect(await hasUnsavedEdits(page)).toBe(false);
+
+    await page.evaluate(async () => {
+      await (
+        globalThis as any
+      ).viewer.editSessionHost.activeSession.value.redo();
+    });
+    expect(await settledReadback(page)).toEqual(stamped);
+    expect(await hasUnsavedEdits(page)).toBe(true);
+  });
 
   /**
    * The journal is only half the story: this is the half that exercises the
