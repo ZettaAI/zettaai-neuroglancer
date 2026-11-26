@@ -57,6 +57,7 @@ import {
   shouldRetryManifestDownload,
   nextManifestRetryDelayMs,
 } from "#src/datasource/calcada/manifest_retry.js";
+import { updateMeshlessFragments } from "#src/datasource/calcada/meshless.js";
 import { parseMultilodManifest } from "#src/datasource/calcada/multilod_mesh.js";
 import { decodeManifestChunk } from "#src/datasource/precomputed/backend.js";
 import type { ShardedKvStore } from "#src/datasource/precomputed/sharded.js";
@@ -509,7 +510,7 @@ export class CalcadaMeshSource extends WithParameters(
     })
       .then((response) => response.json())
       .then((response) => {
-        this.rememberFragmentLocations(response);
+        this.applyFragmentManifest(response);
         const fragments = response?.fragments;
         if (Array.isArray(fragments)) {
           this.spatialIndex.setFromManifest(
@@ -537,18 +538,13 @@ export class CalcadaMeshSource extends WithParameters(
     }
   }
 
-  private rememberFragmentLocations(response: any) {
-    const { fragLocations, meshlessFragments } = this;
-    const fragments = response?.fragments;
-    if (Array.isArray(fragments)) {
-      for (const fragment of fragments) {
-        meshlessFragments.delete(`${String(fragment).split(":", 1)[0]}:0`);
-      }
-    }
-    const missing = response?.frag_missing;
-    if (Array.isArray(missing)) {
-      for (const piece of missing) meshlessFragments.add(`${piece}:0`);
-    }
+  private applyFragmentManifest(response: any) {
+    const { fragLocations } = this;
+    updateMeshlessFragments(
+      this.meshlessFragments,
+      response?.fragments,
+      response?.frag_missing,
+    );
     const locations = response?.frag_locations;
     if (locations && typeof locations === "object") {
       for (const piece of Object.keys(locations)) {
@@ -616,7 +612,7 @@ export class CalcadaMeshSource extends WithParameters(
       throw error;
     }
     this.manifestAttempts.delete(chunk);
-    this.rememberFragmentLocations(response);
+    this.applyFragmentManifest(response);
     // Link every piece the manifest lists to its root (chunk.objectId), so a 3D
     // mesh pick anywhere on the mesh resolves piece->root even over a part with no
     // loaded 2D chunk (whose LUT trailer would otherwise be the only source of the
