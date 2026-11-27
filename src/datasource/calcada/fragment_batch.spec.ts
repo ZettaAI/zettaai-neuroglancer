@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FRAGMENT_BATCH_MAX_CONCURRENT,
   FRAGMENT_BATCH_MAX_PIECES,
+  FRAGMENT_BATCH_MIN_SPLIT,
   FragmentBatchReader,
   FragmentBatchUnsupportedError,
   FragmentRecordParser,
@@ -232,12 +233,11 @@ describe("FragmentBatchReader", () => {
     expect(fetchBatch).toHaveBeenCalledWith(["piece-kept"], expect.anything());
   });
 
-  it("produces two fetches for more than FRAGMENT_BATCH_MAX_PIECES pending entries", async () => {
-    const fetchBatch = vi.fn(async (pieceIds: string[]) => {
-      const parts: Uint8Array[] = [];
-      for (const _ of pieceIds) {
-        parts.push(encodeRecord(0, new Uint8Array([1]), new Uint8Array([])));
-      }
+  const answeringFetch = () =>
+    vi.fn(async (pieceIds: string[]) => {
+      const parts = pieceIds.map(() =>
+        encodeRecord(0, new Uint8Array([1]), new Uint8Array([])),
+      );
       const body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
       let offset = 0;
       for (const p of parts) {
@@ -246,17 +246,57 @@ describe("FragmentBatchReader", () => {
       }
       return new Response(streamOf([body]), { status: 200 });
     });
+
+  it("deals pooled entries round-robin across every free slot", async () => {
+    const fetchBatch = answeringFetch();
     const reader = new FragmentBatchReader(fetchBatch);
     const signal = new AbortController().signal;
-    const total = FRAGMENT_BATCH_MAX_PIECES + 1;
+    const total = FRAGMENT_BATCH_MIN_SPLIT * FRAGMENT_BATCH_MAX_CONCURRENT + 1;
+    const promises = [];
+    for (let i = 0; i < total; i++) {
+      promises.push(reader.read(`piece-${i}`, signal));
+    }
+    await Promise.all(promises);
+    expect(fetchBatch).toHaveBeenCalledTimes(FRAGMENT_BATCH_MAX_CONCURRENT);
+    const posts = fetchBatch.mock.calls.map((call) => call[0]);
+    expect(posts[0].slice(0, 2)).toEqual([
+      "piece-0",
+      `piece-${FRAGMENT_BATCH_MAX_CONCURRENT}`,
+    ]);
+    expect(posts[1][0]).toBe("piece-1");
+    expect(posts.map((post) => post.length).reduce((a, b) => a + b)).toBe(
+      total,
+    );
+  });
+
+  it("splits a small pool into fewer POSTs of at least FRAGMENT_BATCH_MIN_SPLIT entries", async () => {
+    const fetchBatch = answeringFetch();
+    const reader = new FragmentBatchReader(fetchBatch);
+    const signal = new AbortController().signal;
+    const total = FRAGMENT_BATCH_MIN_SPLIT + 1;
     const promises = [];
     for (let i = 0; i < total; i++) {
       promises.push(reader.read(`piece-${i}`, signal));
     }
     await Promise.all(promises);
     expect(fetchBatch).toHaveBeenCalledTimes(2);
-    expect(fetchBatch.mock.calls[0][0].length).toBe(FRAGMENT_BATCH_MAX_PIECES);
-    expect(fetchBatch.mock.calls[1][0].length).toBe(1);
+  });
+
+  it("caps each POST at FRAGMENT_BATCH_MAX_PIECES and keeps the rest pooled", async () => {
+    const fetchBatch = vi.fn(() => new Promise<Response>(() => {}));
+    const reader = new FragmentBatchReader(fetchBatch);
+    const total = FRAGMENT_BATCH_MAX_PIECES * FRAGMENT_BATCH_MAX_CONCURRENT + 1;
+    for (let i = 0; i < total; i++) {
+      reader.read(`piece-${i}`, new AbortController().signal).catch(() => {});
+    }
+    await tick();
+    expect(
+      fetchBatch.mock.calls.map(
+        (call) => (call as unknown as [string[]])[0].length,
+      ),
+    ).toEqual(
+      Array(FRAGMENT_BATCH_MAX_CONCURRENT).fill(FRAGMENT_BATCH_MAX_PIECES),
+    );
   });
 
   it("merges entries from a later tick with earlier undispatched entries into one POST once a slot frees", async () => {
@@ -313,24 +353,12 @@ describe("FragmentBatchReader", () => {
     }
   });
 
-  it("dispatches pieces in comparator order when more than FRAGMENT_BATCH_MAX_PIECES are pooled in one tick", async () => {
-    const fetchBatch = vi.fn(async (pieceIds: string[]) => {
-      const parts: Uint8Array[] = [];
-      for (const _ of pieceIds) {
-        parts.push(encodeRecord(0, new Uint8Array([1]), new Uint8Array([])));
-      }
-      const body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-      let offset = 0;
-      for (const p of parts) {
-        body.set(p, offset);
-        offset += p.length;
-      }
-      return new Response(streamOf([body]), { status: 200 });
-    });
+  it("deals pieces in comparator order, nearest first in every POST", async () => {
+    const fetchBatch = answeringFetch();
     const descending = (a: string, b: string) => (a < b ? 1 : a > b ? -1 : 0);
     const reader = new FragmentBatchReader(fetchBatch, () => false, descending);
     const signal = new AbortController().signal;
-    const total = FRAGMENT_BATCH_MAX_PIECES + 1;
+    const total = FRAGMENT_BATCH_MIN_SPLIT * 2;
     const pieceId = (i: number) => `piece-${i.toString().padStart(4, "0")}`;
     const promises = [];
     for (let i = 0; i < total; i++) {
@@ -338,12 +366,15 @@ describe("FragmentBatchReader", () => {
     }
     await Promise.all(promises);
     expect(fetchBatch).toHaveBeenCalledTimes(2);
-    const expectedFirst = [];
-    for (let i = FRAGMENT_BATCH_MAX_PIECES; i >= 1; i--) {
-      expectedFirst.push(pieceId(i));
-    }
-    expect(fetchBatch.mock.calls[0][0]).toEqual(expectedFirst);
-    expect(fetchBatch.mock.calls[1][0]).toEqual([pieceId(0)]);
+    const sorted = Array.from({ length: total }, (_, i) =>
+      pieceId(total - 1 - i),
+    );
+    expect(fetchBatch.mock.calls[0][0]).toEqual(
+      sorted.filter((_, i) => i % 2 === 0),
+    );
+    expect(fetchBatch.mock.calls[1][0]).toEqual(
+      sorted.filter((_, i) => i % 2 === 1),
+    );
   });
 
   it("re-sorts pieces from an earlier pooled wave together with a newly enqueued wave at dispatch time", async () => {
