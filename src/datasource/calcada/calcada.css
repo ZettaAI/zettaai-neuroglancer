@@ -577,6 +577,41 @@
   flex: 0 0 auto;
 }
 
+/* Correspondence rows follow the annotation list: type glyph, text, a bin
+   that shows on hover. */
+.calcada-realign-arrow {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.calcada-realign-arrow:hover {
+  background-color: #333;
+}
+
+.calcada-realign-arrow-icon {
+  padding-right: 5px;
+}
+
+.calcada-realign-arrow-text {
+  flex: 1 1 auto;
+}
+
+.calcada-realign-arrow-remove {
+  border: none;
+  background: none;
+  visibility: hidden;
+}
+
+.calcada-realign-arrow-remove svg {
+  fill: white;
+}
+
+.calcada-realign-arrow:hover > .calcada-realign-arrow-remove {
+  visibility: visible;
+}
+
 /* The reviewer picker takes a row's control slot as a whole. The rule above
    would otherwise reach inside it and make each chip's remove button and the
    search input 10em wide, which is what pushed the input onto its own line. */
