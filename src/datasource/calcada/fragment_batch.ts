@@ -71,8 +71,11 @@ export type FragmentBatchFetch = (
   signal: AbortSignal,
 ) => Promise<Response>;
 
-export const FRAGMENT_BATCH_MAX_PIECES = 2000;
+// Calcada's request cap. Large POSTs keep its read slots busy: a small one idles them while it waits on its slowest read.
+export const FRAGMENT_BATCH_MAX_PIECES = 10000;
+// More POSTs would exceed calcada's per-instance request limit.
 export const FRAGMENT_BATCH_MAX_CONCURRENT = 4;
+export const FRAGMENT_BATCH_MIN_SPLIT = 500;
 
 interface PendingEntry {
   pieceId: string;
@@ -97,8 +100,9 @@ function unsupportedError(): FragmentBatchUnsupportedError {
  *
  * Entries accumulate in a shared, order-preserving pool: each tick's
  * setTimeout(0) flush moves that tick's live entries into the pool, then
- * drains up to FRAGMENT_BATCH_MAX_PIECES of them into a POST for every free
- * concurrency slot. Entries that arrive while all slots are busy simply wait
+ * deals up to FRAGMENT_BATCH_MAX_PIECES of them per free concurrency slot
+ * round-robin across that many POSTs, each with at least
+ * FRAGMENT_BATCH_MIN_SPLIT entries. Entries that arrive while all slots are busy simply wait
  * in the pool and get swept into the next POST alongside whatever else is
  * still undispatched when a slot frees up — so a steady stream of read()
  * calls coalesces into large POSTs instead of one tiny POST per tick.
@@ -194,12 +198,9 @@ export class FragmentBatchReader {
       const cmp = this.sortPool;
       this.pool.sort((x, y) => cmp(x.pieceId, y.pieceId));
     }
-    while (
-      this.inFlightCount < FRAGMENT_BATCH_MAX_CONCURRENT &&
-      this.pool.length > 0
-    ) {
-      const batch = this.takeNextBatch();
-      if (batch.length === 0) break;
+    const free = FRAGMENT_BATCH_MAX_CONCURRENT - this.inFlightCount;
+    if (free <= 0 || this.pool.length === 0) return;
+    for (const batch of this.takeInterleavedBatches(free)) {
       this.inFlightCount++;
       void this.runBatch(batch).finally(() => {
         this.inFlightCount--;
@@ -208,8 +209,17 @@ export class FragmentBatchReader {
     }
   }
 
-  private takeNextBatch(): PendingEntry[] {
-    return this.pool.splice(0, FRAGMENT_BATCH_MAX_PIECES);
+  // Dealing the sorted pool round-robin gives every POST a share of the nearest pieces,
+  // so the closest ones arrive first on all streams at once.
+  private takeInterleavedBatches(free: number): PendingEntry[][] {
+    const head = this.pool.splice(0, free * FRAGMENT_BATCH_MAX_PIECES);
+    const count = Math.min(
+      free,
+      Math.ceil(head.length / FRAGMENT_BATCH_MIN_SPLIT),
+    );
+    const batches: PendingEntry[][] = Array.from({ length: count }, () => []);
+    head.forEach((entry, i) => batches[i % count].push(entry));
+    return batches;
   }
 
   // Pooled entries can abort while they wait (e.g. their chunk got evicted).

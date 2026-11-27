@@ -53,6 +53,7 @@ import { FragmentSpatialIndex } from "#src/datasource/calcada/fragment_spatial.j
 import { fetchUntilAvailable } from "#src/datasource/calcada/lut_retry.js";
 import { buildManifestPath } from "#src/datasource/calcada/manifest_path.js";
 import {
+  MANIFEST_RETRY_OPTIONS,
   shouldRetryManifestDownload,
   nextManifestRetryDelayMs,
 } from "#src/datasource/calcada/manifest_retry.js";
@@ -501,22 +502,12 @@ export class CalcadaMeshSource extends WithParameters(
     const { fetchOkImpl, baseUrl } = this.manifestHttpSource;
     const branchId = this.branchId?.value ?? parameters.branchId;
     const manifestPath = buildManifestPath(segment, parameters.lod, branchId);
-    void fetchOkImpl(baseUrl + manifestPath, {})
+    void fetchOkImpl(baseUrl + manifestPath, {
+      retryOptions: MANIFEST_RETRY_OPTIONS,
+    })
       .then((response) => response.json())
       .then((response) => {
-        const fragLocations = response?.frag_locations;
-        if (fragLocations && typeof fragLocations === "object") {
-          for (const piece of Object.keys(fragLocations)) {
-            const l = fragLocations[piece];
-            this.fragLocations.set(`${piece}:0`, {
-              shard: l.shard,
-              offset: l.offset,
-              dracoLength: l.draco_length,
-              manifestLength: l.manifest_length,
-              url: l.url,
-            });
-          }
-        }
+        this.rememberFragmentLocations(response);
         const fragments = response?.fragments;
         if (Array.isArray(fragments)) {
           this.spatialIndex.setFromManifest(
@@ -544,6 +535,23 @@ export class CalcadaMeshSource extends WithParameters(
     }
   }
 
+  private rememberFragmentLocations(response: any) {
+    const { fragLocations } = this;
+    const locations = response?.frag_locations;
+    if (locations && typeof locations === "object") {
+      for (const piece of Object.keys(locations)) {
+        const l = locations[piece];
+        fragLocations.set(`${piece}:0`, {
+          shard: l.shard,
+          offset: l.offset,
+          dracoLength: l.draco_length,
+          manifestLength: l.manifest_length,
+          url: l.url,
+        });
+      }
+    }
+  }
+
   disposed() {
     for (const timer of this.retryTimers) clearTimeout(timer);
     this.retryTimers.clear();
@@ -565,7 +573,10 @@ export class CalcadaMeshSource extends WithParameters(
     let response: any;
     try {
       response = await (
-        await fetchOkImpl(baseUrl + manifestPath, { signal })
+        await fetchOkImpl(baseUrl + manifestPath, {
+          signal,
+          retryOptions: MANIFEST_RETRY_OPTIONS,
+        })
       ).json();
     } catch (error) {
       if (
@@ -593,21 +604,7 @@ export class CalcadaMeshSource extends WithParameters(
       throw error;
     }
     this.manifestAttempts.delete(chunk);
-    // Stash calcada's per-piece byte-ranges (if any) so downloadFragment can
-    // read each piece in one direct-from-bucket range request.
-    const fragLocations = response?.frag_locations;
-    if (fragLocations && typeof fragLocations === "object") {
-      for (const piece of Object.keys(fragLocations)) {
-        const l = fragLocations[piece];
-        this.fragLocations.set(`${piece}:0`, {
-          shard: l.shard,
-          offset: l.offset,
-          dracoLength: l.draco_length,
-          manifestLength: l.manifest_length,
-          url: l.url,
-        });
-      }
-    }
+    this.rememberFragmentLocations(response);
     // Link every piece the manifest lists to its root (chunk.objectId), so a 3D
     // mesh pick anywhere on the mesh resolves piece->root even over a part with no
     // loaded 2D chunk (whose LUT trailer would otherwise be the only source of the
@@ -675,38 +672,36 @@ export class CalcadaMeshSource extends WithParameters(
   }
 
   async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {
-    // Fast path: calcada resolved this piece's byte-range, so read the combined
-    // [Draco][manifest] blob in one range request straight from the bucket — no
-    // client-side shard/minishard resolution.
+    // Calcada sends a location only for split pieces, which its proxy serves;
+    // it resolves every other piece itself in fragments_batch.
     const loc = this.fragLocations.get(chunk.fragmentId!);
-    if (loc !== undefined) {
-      if (this.fragmentBatch.supported !== false && loc.url === undefined) {
-        try {
-          const { draco, manifest } = await this.fragmentBatch.read(
-            chunk.fragmentId!,
-            signal,
-          );
-          const { data: rawMesh } = await requestAsyncComputation(
-            decodeCalcadaMultilodMesh,
-            signal,
-            [manifest.buffer, draco.buffer],
-            manifest,
-            draco,
-            this.parameters.vertexQuantizationBits,
-            this.parameters.lod,
-          );
-          if (rawMesh && rawMesh.vertexPositions.length > 0) {
-            assignMeshFragmentData(chunk, rawMesh);
-          } else {
-            assignEmptyMesh(chunk);
-          }
-          return;
-        } catch (error) {
-          if (signal.aborted) throw error;
-          // Endpoint missing or this piece failed in the batch: fall through
-          // to the per-piece direct read below.
+    if (this.fragmentBatch.supported !== false && loc?.url === undefined) {
+      try {
+        const { draco, manifest } = await this.fragmentBatch.read(
+          chunk.fragmentId!,
+          signal,
+        );
+        const { data: rawMesh } = await requestAsyncComputation(
+          decodeCalcadaMultilodMesh,
+          signal,
+          [manifest.buffer, draco.buffer],
+          manifest,
+          draco,
+          this.parameters.vertexQuantizationBits,
+          this.parameters.lod,
+        );
+        if (rawMesh && rawMesh.vertexPositions.length > 0) {
+          assignMeshFragmentData(chunk, rawMesh);
+        } else {
+          assignEmptyMesh(chunk);
         }
+        return;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        // Endpoint missing or this piece failed in the batch: read it directly below.
       }
+    }
+    if (loc !== undefined) {
       let combined: Uint8Array;
       if (loc.url) {
         // Split-piece mesh lives in mesh_write_dir (a different bucket than the
@@ -840,11 +835,11 @@ export class CalcadaMeshSource extends WithParameters(
       // slot-throttled — admission-free chunks would stampede GCS with the
       // whole neuron at once.
       if (this.fragmentBatch.supported !== true) return undefined;
-      const loc = this.fragLocations.get(fragmentId);
-      if (loc === undefined || loc.url !== undefined) return undefined;
+      if (this.fragLocations.get(fragmentId)?.url !== undefined)
+        return undefined;
       // Batchable pieces are admission-free so the whole neuron enqueues in
       // one promotion pass and lands in the same batch tick; the batch
-      // reader (2000/POST, 4 POSTs in flight) is the effective throttle.
+      // reader is the effective throttle.
       return 0;
     });
   }

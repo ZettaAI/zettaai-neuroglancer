@@ -90,9 +90,15 @@ export interface RetryOptions {
    * Deadline for a single attempt.  When it expires the attempt is aborted and
    * retried under the same attempt budget, so a request that is stuck (rather
    * than slow) does not hang forever.  Only applies to non-idempotent requests:
-   * idempotent ones get their deadline from hedging instead.
+   * idempotent ones get their deadline from hedging instead, unless
+   * {@link RetryOptions.hedge} is `false`.
    */
   attemptTimeoutMs?: number;
+  /**
+   * `false` sends an idempotent request once, without the hedged duplicates or
+   * their overall deadline.  For responses that legitimately take long to start.
+   */
+  hedge?: boolean;
 }
 
 export function pickDelay(attemptNumber: number): number {
@@ -342,14 +348,16 @@ export async function fetchOk(
   init?: RequestInitWithProgress,
 ): Promise<Response> {
   const callerSignal = init?.signal;
-  const { maxAttempts: attemptLimit = maxAttempts, attemptTimeoutMs } =
-    init?.retryOptions ?? {};
+  const {
+    maxAttempts: attemptLimit = maxAttempts,
+    attemptTimeoutMs,
+    hedge = true,
+  } = init?.retryOptions ?? {};
+  const hedged = hedge && isIdempotentRequest(init);
   // Idempotent requests take their deadline from hedging, so a per-attempt timeout applies only to
   // the non-hedged path.
-  const perAttemptTimeoutMs = isIdempotentRequest(init)
-    ? undefined
-    : attemptTimeoutMs;
-  const sendRequest = isIdempotentRequest(init)
+  const perAttemptTimeoutMs = hedged ? undefined : attemptTimeoutMs;
+  const sendRequest = hedged
     ? () => hedgeResponseHeaders(input, init, callerSignal)
     : perAttemptTimeoutMs !== undefined
       ? () =>
