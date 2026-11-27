@@ -33,6 +33,12 @@ export function chunkGridKey(chunkGridPosition: ArrayLike<number>): ChunkKey {
   return Array.prototype.join.call(chunkGridPosition, ",");
 }
 
+/** The chunk grid position a `chunkGridKey` names. */
+export function gridOfChunkKey(key: ChunkKey): [number, number, number] {
+  const [x, y, z] = key.split(",").map(Number);
+  return [x, y, z];
+}
+
 export class LocalPatchSource extends RefCounted {
   readonly chunks = new Map<ChunkKey, LocalPatchChunk>();
   readonly changed = new NullarySignal();

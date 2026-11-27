@@ -22,8 +22,11 @@
  */
 
 import type { Resolution } from "@zettaai/edit-session";
-import { Resolution as ResolutionFactory } from "@zettaai/edit-session";
 
+import {
+  modelResolutionNmOf,
+  resolutionOfLevel,
+} from "#src/editing/overlay/level_resolutions.js";
 import type { TopLevelLayerListSpecification } from "#src/layer/index.js";
 import type { LoadedLayerDataSource } from "#src/layer/layer_data_source.js";
 import type {
@@ -62,41 +65,13 @@ export function getAllowedSourcePredicateForLayer(
   const host = (root as { editSessionHost?: AllowedHost }).editSessionHost;
   if (host === undefined) return undefined;
   const watchable = host.getAllowedResolutionsWatchableForLayer(layerName);
-  const modelResolutionNm = extractModelResolutionNm(loadedDataSource);
+  const modelResolutionNm = modelResolutionNmOf(loadedDataSource);
   return makeCachedDerivedWatchableValue(
     (allowed) => {
       if (allowed === undefined) return undefined;
       return (source) =>
-        allowed.has(resolutionForSource(source, modelResolutionNm));
+        allowed.has(resolutionOfLevel(source, modelResolutionNm));
     },
     [watchable],
   );
-}
-
-function resolutionForSource(
-  source: SliceViewSingleResolutionSource<SliceViewChunkSource>,
-  modelResolutionNm: readonly [number, number, number],
-): Resolution {
-  const transform = source.chunkToMultiscaleTransform;
-  const rank = source.chunkSource.spec.rank;
-  const stride = rank + 1;
-  const voxelSizeNm: [number, number, number] = [0, 0, 0];
-  for (let i = 0; i < 3; ++i) {
-    const relativeScale = transform[stride * i + i] || 1;
-    voxelSizeNm[i] = modelResolutionNm[i] * relativeScale;
-  }
-  return ResolutionFactory.from(voxelSizeNm);
-}
-
-function extractModelResolutionNm(
-  loadState: LoadedLayerDataSource,
-): readonly [number, number, number] {
-  const { scales, units } = loadState.dataSource.modelTransform.outputSpace;
-  const result: [number, number, number] = [0, 0, 0];
-  for (let i = 0; i < 3 && i < scales.length; ++i) {
-    const scale = scales[i];
-    const unit = units[i];
-    result[i] = unit === "m" ? scale * 1e9 : scale;
-  }
-  return result;
 }

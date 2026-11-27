@@ -33,6 +33,47 @@ export interface ChunkVoxelBox {
   z1: number;
 }
 
+/** Index of voxel (`x`, `y`, `z`) in a chunk of `chunkDataSize`, x fastest. */
+export function chunkVoxelIndex(
+  chunkDataSize: ArrayLike<number>,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  return x + chunkDataSize[0] * (y + chunkDataSize[1] * z);
+}
+
+/** The smallest box containing every box in `boxes` (non-empty). */
+export function unionOfBoxes(boxes: readonly ChunkVoxelBox[]): ChunkVoxelBox {
+  const [first, ...rest] = boxes;
+  const union = { ...first };
+  for (const box of rest) {
+    union.x0 = Math.min(union.x0, box.x0);
+    union.y0 = Math.min(union.y0, box.y0);
+    union.z0 = Math.min(union.z0, box.z0);
+    union.x1 = Math.max(union.x1, box.x1);
+    union.y1 = Math.max(union.y1, box.y1);
+    union.z1 = Math.max(union.z1, box.z1);
+  }
+  return union;
+}
+
+/** The voxels both boxes hold, or `null` when they do not meet. */
+export function intersectionOfBoxes(
+  first: ChunkVoxelBox,
+  second: ChunkVoxelBox,
+): ChunkVoxelBox | null {
+  const box = {
+    x0: Math.max(first.x0, second.x0),
+    y0: Math.max(first.y0, second.y0),
+    z0: Math.max(first.z0, second.z0),
+    x1: Math.min(first.x1, second.x1),
+    y1: Math.min(first.y1, second.y1),
+    z1: Math.min(first.z1, second.z1),
+  };
+  return box.x0 > box.x1 || box.y0 > box.y1 || box.z0 > box.z1 ? null : box;
+}
+
 /**
  * GPU upload obligation for a chunk. `box === null` means the WHOLE chunk
  * must be (re)uploaded; otherwise only `box` is stale. `valueDone` /

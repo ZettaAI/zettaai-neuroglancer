@@ -25,7 +25,7 @@ import {
 } from "#src/datasource/local.js";
 import { getAllowedSourcePredicateForLayer } from "#src/editing/adapters/allowed_source_predicate.js";
 import { isSegmentSelectionLockedByActiveTool } from "#src/editing/adapters/segment_selection_lock.js";
-import type { PatchedMaskProvider } from "#src/editing/shaders/patched_mask_provider.js";
+import type { PyramidPatchOverlay } from "#src/editing/overlay/pyramid_patch_overlay.js";
 import type {
   LayerActionContext,
   ManagedUserLayer,
@@ -168,19 +168,19 @@ function getEditBboxLoHiForLayer(
 
 /**
  * Same pattern as `getEditBboxLoHiForLayer`: returns the host's persistent
- * per-layer `PatchedMaskProvider` watchable for use as the segmentation
+ * per-layer `PyramidPatchOverlay` watchable for use as the segmentation
  * render layer's `editPatchOverlay` hook. When no host is wired, returns
  * undefined and the render layer compiles the no-hook shader.
  */
 function getEditPatchOverlayForLayer(
   root: TopLevelLayerListSpecification,
   layerName: string,
-): WatchableValueInterface<PatchedMaskProvider | undefined> | undefined {
+): WatchableValueInterface<PyramidPatchOverlay | undefined> | undefined {
   const host = root.editSessionHost as
     | {
         getPatchOverlayWatchableForLayer(
           layerName: string,
-        ): WatchableValueInterface<PatchedMaskProvider | undefined>;
+        ): WatchableValueInterface<PyramidPatchOverlay | undefined>;
       }
     | undefined;
   return host?.getPatchOverlayWatchableForLayer(layerName);

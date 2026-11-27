@@ -168,7 +168,7 @@ describe("PatchMirror", () => {
     mirror = new PatchMirror(
       session,
       TARGET_LAYER,
-      store,
+      () => store,
       logger.asNgLogger(),
       readBaseline,
       readBaseline,
@@ -189,7 +189,7 @@ describe("PatchMirror", () => {
     mirror = new PatchMirror(
       session,
       TARGET_LAYER,
-      store,
+      () => store,
       logger.asNgLogger(),
       readBaseline,
       readBaseline,
@@ -228,7 +228,7 @@ describe("PatchMirror", () => {
     mirror = new PatchMirror(
       session,
       TARGET_LAYER,
-      store,
+      () => store,
       logger.asNgLogger(),
       readBaseline,
       readBaseline,
@@ -263,7 +263,7 @@ describe("PatchMirror", () => {
     mirror = new PatchMirror(
       session,
       TARGET_LAYER,
-      store,
+      () => store,
       logger.asNgLogger(),
       readBaseline,
       readBaseline,
@@ -289,7 +289,7 @@ describe("PatchMirror", () => {
     mirror = new PatchMirror(
       session,
       TARGET_LAYER,
-      store,
+      () => store,
       logger.asNgLogger(),
       readBaseline,
       readBaseline,

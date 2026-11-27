@@ -27,7 +27,12 @@
  * the existing `hideSegmentZero` path) and paint-over composes at the
  * user's segmentation alpha (same uniform branch as a baseline voxel).
  *
- * The interface is intentionally minimal so the base layer doesn't depend
+ * The watchable holds a `PyramidPatchOverlay` (TM-524,
+ * `#src/editing/overlay/pyramid_patch_overlay.js`): one provider per pyramid
+ * level the layer draws, so each chunk samples the edits placed on its own
+ * level's grid.
+ *
+ * The interfaces are intentionally minimal so the base layer doesn't depend
  * on any types from `#src/editing/...`.
  */
 

@@ -50,6 +50,12 @@ export interface ScenarioLayer {
   readonly name?: string;
   /** Selected segment ids of a segmentation layer; defaults to none. */
   readonly segments?: readonly string[];
+  /**
+   * Resolutions the session uses for this layer (as the portal sends one per
+   * layer); defaults to all of the fixture's resolutions. The first is the
+   * target's default Target resolution.
+   */
+  readonly sessionResolutions?: readonly Vec3[];
 }
 
 export interface Scenario {
@@ -152,6 +158,9 @@ export function buildNgState(
     );
   }
   const targetRes = target.fixture.resolutions[0];
+  const sessionResolutionsOf = (resolvedLayer: (typeof resolved)[number]) =>
+    resolvedLayer.scenario.sessionResolutions ??
+    resolvedLayer.fixture.resolutions;
   const regionLo = target.fixture.offset;
   const regionSize = scenario.regionSize ?? target.fixture.size;
   const regionHi = add(regionLo, regionSize);
@@ -174,7 +183,8 @@ export function buildNgState(
   });
 
   const tooling =
-    scenario.tooling ?? defaultTooling(target.name, targetRes, imageLayer);
+    scenario.tooling ??
+    defaultTooling(target.name, sessionResolutionsOf(target)[0], imageLayer);
 
   // Frame the in-plane region across ~the viewport so a centre stamp is visible.
   const crossSectionScale =
@@ -208,7 +218,7 @@ export function buildNgState(
     editSession: {
       layers: resolved.map((r) => ({
         layerId: r.name,
-        resolutions: r.fixture.resolutions.map(formatResolution),
+        resolutions: sessionResolutionsOf(r).map(formatResolution),
         writable: r.scenario.writable,
       })),
       region: { lo: regionLo, hi: regionHi, dimensions },

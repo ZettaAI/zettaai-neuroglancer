@@ -118,10 +118,8 @@ NG HttpSaveBackend ──POST /painting/cutout──▶ harness/backend_route.ts
   real. Model quality is out of scope. If zetta_utils renames that function,
   this harness — not the product — breaks.
 - **Expected failures** (`test.fail`, each names its cause; remove the marker
-  when the bug is fixed): `edit_save` › the view shows each stroke only where it
-  was painted (a stroke at a coarser target resolution is shown at the wrong
-  place); `edit_fill_inside` › the fill adds only what the outline encloses (the
-  fill outline is one voxel wider at sharp turns).
+  when the bug is fixed): `edit_fill_inside` › the fill adds only what the
+  outline encloses (the fill outline is one voxel wider at sharp turns).
 - **Driver** (`harness/save_session.ts`): fresh storage, an editing page wired
   to the web API, stamps, saves, UI helpers (Save all, Exit, dialogs) and
   `appValuesAt` — what the page shows, through NG's own value lookup.
@@ -180,6 +178,29 @@ Sweeps brush sizes × {masked, unmasked, eraser} on the large `perf_*` fixture
 - Output: a table in stdout + `test-results/edit_paint_bench.json`.
 - Perf-regression **baseline comparison** (committed baselines + tolerance) is a
   follow-up (TM-331 Phase 3).
+
+## pyramid levels (`e2e/edit_session_resolution.e2e.ts`, `perf/edit_session_resolution.perf.ts`, TM-524)
+
+Unsaved edits are stored at the session's resolutions and shown, resampled,
+on whichever pyramid level the viewer draws.
+
+- **e2e**: a stamp at a known panel point; the pixels that change sit around it
+  and the viewer's own value lookup reads the painted value under it. Cases:
+  the session's level drawn, a coarser session than the level drawn, a finer
+  one zoomed out, two session resolutions, and the same on a volume smaller
+  than one chunk (`seg_u64_multires_clipped`, the session's chunks clipped to
+  it, TM-373). Auto-select segment is off so only the stroke changes pixels.
+- **perf, loading**: per session resolution (16 / 32 nm) and zoom (1–64×), the
+  target's chunk requests and bytes per level, view-ready and region-preload
+  times, median of 3, at 100 ms per GCS request. Must stay as on `main`: the
+  pyramid is not filtered.
+- **perf, frames**: the longest frame and summed long tasks while a radius-300
+  stroke and its undo show on another level (`perf_seg_u64_multires`, 2048²
+  chunks): zoomed out with a 16 nm session, and a 32 nm session drawn at
+  16 nm. Compare against `main` on the same machine.
+- **micro-benchmark**: `npx vitest bench --run
+src/editing/overlay/patch_resampling.benchmark.ts` — one stroke box
+  resampled down (zoomed out) and up (finer level).
 
 ## large-chunk benchmark (`perf/edit_paint_large_chunk.perf.ts`, TM-373)
 

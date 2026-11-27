@@ -26,7 +26,10 @@ import type { ChunkId, Logger } from "@zettaai/edit-session";
 import { ChunkId as ChunkIdFactory } from "@zettaai/edit-session";
 
 import type { ChunkKey } from "#src/editing/local_patch_source.js";
-import { chunkGridKey } from "#src/editing/local_patch_source.js";
+import {
+  chunkGridKey,
+  gridOfChunkKey,
+} from "#src/editing/local_patch_source.js";
 import type { PaintedVolumeBaselineReader } from "#src/editing/painted_volume/painted_volume_baseline_cache.js";
 import type { BaselineVoxelView } from "#src/editing/painted_volume/painted_volume_occupancy.js";
 import { WatchableValue } from "#src/trackable_value.js";
@@ -38,7 +41,7 @@ export function chunkKeyOf(chunkId: ChunkId): ChunkKey {
 }
 
 export function chunkIdOfKey(key: ChunkKey): ChunkId {
-  const [x, y, z] = key.split(",").map(Number);
+  const [x, y, z] = gridOfChunkKey(key);
   return ChunkIdFactory.fromCoord({ x, y, z });
 }
 

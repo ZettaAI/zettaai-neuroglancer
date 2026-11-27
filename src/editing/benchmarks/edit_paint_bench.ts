@@ -554,9 +554,16 @@ function targetPatchStore(
   host: Any,
   explicitLayerId?: string,
 ): { layerId: unknown; store: Any } {
-  const layerId =
-    explicitLayerId ?? host?.painting?.state?.getState?.()?.targetLayerId;
-  const store = host?.perLayer?.get?.(layerId)?.patchStore;
+  const paintingState = host?.painting?.state?.getState?.();
+  const layerId = explicitLayerId ?? paintingState?.targetLayerId;
+  // The store of the Target resolution (TM-524: one store per resolution).
+  // The Target resolution is the target layer's: another layer's store is its
+  // first edited resolution.
+  const resolution =
+    layerId === paintingState?.targetLayerId
+      ? paintingState?.targetResolution
+      : undefined;
+  const store = host?.getPatchStoreForLayer?.(layerId, resolution);
   return { layerId, store };
 }
 
