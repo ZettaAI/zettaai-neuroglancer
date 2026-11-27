@@ -71,7 +71,8 @@ export type FragmentBatchFetch = (
   signal: AbortSignal,
 ) => Promise<Response>;
 
-export const FRAGMENT_BATCH_MAX_PIECES = 2000;
+// Small batches re-sort the pool nearest-first more often; more POSTs would exceed calcada's per-instance request limit.
+export const FRAGMENT_BATCH_MAX_PIECES = 500;
 export const FRAGMENT_BATCH_MAX_CONCURRENT = 4;
 
 interface PendingEntry {
