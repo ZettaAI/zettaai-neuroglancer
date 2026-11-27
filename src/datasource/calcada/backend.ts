@@ -672,38 +672,36 @@ export class CalcadaMeshSource extends WithParameters(
   }
 
   async downloadFragment(chunk: FragmentChunk, signal: AbortSignal) {
-    // Fast path: calcada resolved this piece's byte-range, so read the combined
-    // [Draco][manifest] blob in one range request straight from the bucket — no
-    // client-side shard/minishard resolution.
+    // Calcada sends a location only for split pieces, which its proxy serves;
+    // it resolves every other piece itself in fragments_batch.
     const loc = this.fragLocations.get(chunk.fragmentId!);
-    if (loc !== undefined) {
-      if (this.fragmentBatch.supported !== false && loc.url === undefined) {
-        try {
-          const { draco, manifest } = await this.fragmentBatch.read(
-            chunk.fragmentId!,
-            signal,
-          );
-          const { data: rawMesh } = await requestAsyncComputation(
-            decodeCalcadaMultilodMesh,
-            signal,
-            [manifest.buffer, draco.buffer],
-            manifest,
-            draco,
-            this.parameters.vertexQuantizationBits,
-            this.parameters.lod,
-          );
-          if (rawMesh && rawMesh.vertexPositions.length > 0) {
-            assignMeshFragmentData(chunk, rawMesh);
-          } else {
-            assignEmptyMesh(chunk);
-          }
-          return;
-        } catch (error) {
-          if (signal.aborted) throw error;
-          // Endpoint missing or this piece failed in the batch: fall through
-          // to the per-piece direct read below.
+    if (this.fragmentBatch.supported !== false && loc?.url === undefined) {
+      try {
+        const { draco, manifest } = await this.fragmentBatch.read(
+          chunk.fragmentId!,
+          signal,
+        );
+        const { data: rawMesh } = await requestAsyncComputation(
+          decodeCalcadaMultilodMesh,
+          signal,
+          [manifest.buffer, draco.buffer],
+          manifest,
+          draco,
+          this.parameters.vertexQuantizationBits,
+          this.parameters.lod,
+        );
+        if (rawMesh && rawMesh.vertexPositions.length > 0) {
+          assignMeshFragmentData(chunk, rawMesh);
+        } else {
+          assignEmptyMesh(chunk);
         }
+        return;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        // Endpoint missing or this piece failed in the batch: read it directly below.
       }
+    }
+    if (loc !== undefined) {
       let combined: Uint8Array;
       if (loc.url) {
         // Split-piece mesh lives in mesh_write_dir (a different bucket than the
@@ -837,11 +835,11 @@ export class CalcadaMeshSource extends WithParameters(
       // slot-throttled — admission-free chunks would stampede GCS with the
       // whole neuron at once.
       if (this.fragmentBatch.supported !== true) return undefined;
-      const loc = this.fragLocations.get(fragmentId);
-      if (loc === undefined || loc.url !== undefined) return undefined;
+      if (this.fragLocations.get(fragmentId)?.url !== undefined)
+        return undefined;
       // Batchable pieces are admission-free so the whole neuron enqueues in
       // one promotion pass and lands in the same batch tick; the batch
-      // reader (2000/POST, 4 POSTs in flight) is the effective throttle.
+      // reader is the effective throttle.
       return 0;
     });
   }
